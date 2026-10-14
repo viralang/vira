@@ -10,9 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vexlang/vex/internal/ast"
 	"github.com/vexlang/vex/internal/autofree"
 	"github.com/vexlang/vex/internal/cgen"
 	"github.com/vexlang/vex/internal/checker"
+	"github.com/vexlang/vex/internal/formatter"
+	"github.com/vexlang/vex/internal/lsp"
+	"github.com/vexlang/vex/internal/mod"
 	"github.com/vexlang/vex/internal/parser"
 	"github.com/vexlang/vex/internal/source"
 )
@@ -20,13 +24,17 @@ import (
 const usageBanner = `Vex Programming Language Compiler (Stage-0 Toolchain)
 
 Usage:
-  vex <command> [flags] <file.vex>
+  vex <command> [flags] [target]
 
 Commands:
-  run     Compile and execute a .vex source file immediately
-  build   Compile a .vex file into a native standalone binary
-  cgen    Emit the lowered C99 code (SIMD + Work-Stealing Actors)
+  run     Compile and execute a .vex file or directory immediately
+  build   Compile a .vex file or directory into a standalone native binary
+  cgen    Emit lowered C99 code (SIMD + Work-Stealing Actors)
   check   Run syntax, 4-quadrant mutability, and autofree escape analysis
+  test    Discover and run test functions/files with leak checks
+  fmt     Format .vex source files according to official style rules
+  lsp     Start the Vex Language Server (LSP) over stdin/stdout
+  init    Initialize a new Vex project scaffold with vex.mod and src/
   demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
 
 Flags for 'vex build':
@@ -62,6 +70,14 @@ func main() {
 		cgenCmd(os.Args[2:])
 	case "check":
 		checkCmd(os.Args[2:])
+	case "test":
+		testCmd(os.Args[2:])
+	case "fmt":
+		fmtCmd(os.Args[2:])
+	case "lsp":
+		lspCmd()
+	case "init":
+		initCmd(os.Args[2:])
 	case "demo":
 		demoCmd()
 	case "-h", "--help", "help":
@@ -81,12 +97,12 @@ func runCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex run [-prod] [-cc compiler] <file.vex>")
+		fmt.Fprintln(os.Stderr, "usage: vex run [-prod] [-cc compiler] <file.vex | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
 
-	cCode, _, _ := compileVexToC99(vexPath)
+	cCode, _, _ := compileVexToC99(vexPath, false)
 
 	tmpDir, err := os.MkdirTemp("", "vex_run_*")
 	if err != nil {
@@ -136,36 +152,25 @@ func buildCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex build [-prod] [-sanitize] [-o out] <file.vex>")
+		fmt.Fprintln(os.Stderr, "usage: vex build [-prod] [-sanitize] [-o out] <file.vex | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
 	start := time.Now()
 
-	cCode, _, _ := compileVexToC99(vexPath)
+	cCode, _, _ := compileVexToC99(vexPath, false)
 
 	baseName := strings.TrimSuffix(filepath.Base(vexPath), filepath.Ext(vexPath))
 	targetBin := *outPath
 	if targetBin == "" {
 		targetBin = baseName
-		if os.PathSeparator == '\\' && !strings.HasSuffix(targetBin, ".exe") {
+		if os.PathSeparator == '\\' && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
 			targetBin += ".exe"
 		}
 	}
 
-	var cFile string
-	if *keepC {
-		_ = os.MkdirAll("build", 0755)
-		cFile = filepath.Join("build", baseName+".c")
-	} else {
-		tmpDir, err := os.MkdirTemp("", "vex_build_*")
-		if err != nil {
-			fatalIO(err)
-		}
-		defer os.RemoveAll(tmpDir)
-		cFile = filepath.Join(tmpDir, baseName+".c")
-	}
-
+	_ = os.MkdirAll("build", 0755)
+	cFile := filepath.Join("build", baseName+".c")
 	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
 		fatalIO(err)
 	}
@@ -177,13 +182,16 @@ func buildCmd(args []string) {
 		outPath:  targetBin,
 		keepC:    *keepC,
 	}
-	usedCC, modeDesc := invokeCBackend(cFile, targetBin, opts)
 
-	elapsed := time.Since(start).Milliseconds()
-	fmt.Printf("✓ Built '%s' [%s via %s] in %d ms\n", targetBin, modeDesc, usedCC, elapsed)
-	if *keepC {
-		fmt.Printf("  └── Kept C99 translation unit: %s\n", cFile)
+	compiler, modeDesc := invokeCBackend(cFile, targetBin, opts)
+	elapsed := time.Since(start)
+
+	if !*keepC {
+		_ = os.Remove(cFile)
 	}
+
+	fmt.Printf("✓ Built standalone binary %s in %s (backend: %s [%s])\n",
+		targetBin, elapsed.Round(time.Millisecond), compiler, modeDesc)
 }
 
 // --- SUBCOMMAND 3: `vex cgen` ---
@@ -194,11 +202,11 @@ func cgenCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex cgen [-o out.c] <file.vex>")
+		fmt.Fprintln(os.Stderr, "usage: vex cgen [-o out.c] <file.vex | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
-	cCode, _, _ := compileVexToC99(vexPath)
+	cCode, _, _ := compileVexToC99(vexPath, false)
 
 	if *outPath != "" {
 		if err := os.WriteFile(*outPath, []byte(cCode), 0644); err != nil {
@@ -218,11 +226,11 @@ func checkCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex check [-autofree] <file.vex>")
+		fmt.Fprintln(os.Stderr, "usage: vex check [-autofree] <file.vex | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
-	_, chk, af := compileVexToC99(vexPath)
+	_, chk, af := compileVexToC99(vexPath, false)
 
 	fmt.Printf("✓ %s passed syntax, 4-quadrant mutability, and type checks (0 errors)\n", vexPath)
 	if *showAutofree {
@@ -231,7 +239,214 @@ func checkCmd(args []string) {
 	_ = chk
 }
 
-// --- SUBCOMMAND 5: `vex demo` ---
+// --- SUBCOMMAND 5: `vex test` ---
+
+func testCmd(args []string) {
+	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	target := "."
+	if fs.NArg() > 0 {
+		target = fs.Arg(0)
+	}
+
+	var testFiles []string
+	fi, err := os.Stat(target)
+	if err != nil {
+		fatalIO(err)
+	}
+
+	if fi.IsDir() {
+		_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vex") {
+				if strings.HasSuffix(path, "_test.vex") {
+					testFiles = append(testFiles, path)
+				} else if raw, rErr := os.ReadFile(path); rErr == nil && strings.Contains(string(raw), "fn test_") {
+					testFiles = append(testFiles, path)
+				}
+			}
+			return nil
+		})
+	} else {
+		testFiles = append(testFiles, target)
+	}
+
+	if len(testFiles) == 0 {
+		fmt.Println("No tests found (searching for *_test.vex or files containing 'fn test_')")
+		return
+	}
+
+	passCount := 0
+	failCount := 0
+	startTotal := time.Now()
+
+	for _, tFile := range testFiles {
+		fmt.Printf("=== RUN   %s\n", tFile)
+		start := time.Now()
+		cCode, _, _ := compileVexToC99(tFile, true)
+
+		tmpDir, err := os.MkdirTemp("", "vex_test_*")
+		if err != nil {
+			fatalIO(err)
+		}
+		cFile := filepath.Join(tmpDir, "out.c")
+		binExt := ""
+		if os.PathSeparator == '\\' {
+			binExt = ".exe"
+		}
+		binFile := filepath.Join(tmpDir, "test_bin"+binExt)
+		_ = os.WriteFile(cFile, []byte(cCode), 0644)
+
+		opts := compileOptions{prod: false}
+		compiler, _ := invokeCBackend(cFile, binFile, opts)
+
+		cmd := exec.Command(binFile)
+		compilerDir := filepath.Dir(compiler)
+		cmd.Env = append(os.Environ(), "PATH="+compilerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, runErr := cmd.CombinedOutput()
+		dur := time.Since(start)
+
+		if runErr != nil {
+			fmt.Printf("--- FAIL: %s (%.2fs)\n%s\n", tFile, dur.Seconds(), string(out))
+			failCount++
+		} else {
+			fmt.Printf("--- PASS: %s (%.2fs)\n", tFile, dur.Seconds())
+			if strings.Contains(string(out), "active_leaks=0") {
+				fmt.Printf("    active_leaks=0 [Zero Memory Leaks Verified]\n")
+			}
+			passCount++
+		}
+		_ = os.RemoveAll(tmpDir)
+	}
+
+	fmt.Printf("\nTest Summary: %d passed, %d failed in %.2fs\n", passCount, failCount, time.Since(startTotal).Seconds())
+	if failCount > 0 {
+		os.Exit(1)
+	}
+}
+
+// --- SUBCOMMAND 6: `vex fmt` ---
+
+func fmtCmd(args []string) {
+	fs := flag.NewFlagSet("fmt", flag.ExitOnError)
+	writeBack := fs.Bool("w", false, "Write result back to file instead of stdout")
+	_ = fs.Parse(args)
+
+	targets := fs.Args()
+	if len(targets) == 0 {
+		targets = []string{"."}
+	}
+
+	for _, target := range targets {
+		fi, err := os.Stat(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vex fmt error: %v\n", err)
+			continue
+		}
+		if fi.IsDir() {
+			_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vex") {
+					formatSingleFile(path, *writeBack)
+				}
+				return nil
+			})
+		} else {
+			formatSingleFile(target, *writeBack)
+		}
+	}
+}
+
+func formatSingleFile(path string, writeBack bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vex fmt read error (%s): %v\n", path, err)
+		return
+	}
+	src := string(raw)
+	formatted := formatter.Format(src)
+	if writeBack {
+		if src != formatted {
+			if err := os.WriteFile(path, []byte(formatted), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "vex fmt write error (%s): %v\n", path, err)
+				return
+			}
+			fmt.Printf("reformatted %s\n", path)
+		}
+	} else {
+		fmt.Print(formatted)
+	}
+}
+
+// --- SUBCOMMAND 7: `vex lsp` ---
+
+func lspCmd() {
+	server := lsp.NewServer(os.Stdin, os.Stdout)
+	if err := server.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "vex lsp error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// --- SUBCOMMAND 8: `vex init` ---
+
+func initCmd(args []string) {
+	name := "my_vex_app"
+	if len(args) > 0 {
+		name = args[0]
+	}
+	targetDir := name
+	if name == "." {
+		targetDir = "."
+		curr, _ := os.Getwd()
+		name = filepath.Base(curr)
+	}
+
+	modName := filepath.Base(targetDir)
+	if modName == "." || modName == "/" || modName == "\\" {
+		curr, _ := os.Getwd()
+		modName = filepath.Base(curr)
+	}
+	modName = strings.ReplaceAll(modName, "-", "_")
+	modName = strings.ReplaceAll(modName, " ", "_")
+
+	_ = os.MkdirAll(filepath.Join(targetDir, "src"), 0755)
+	_ = os.MkdirAll(filepath.Join(targetDir, "tests"), 0755)
+
+	modContent := fmt.Sprintf(`module %s
+version 0.1.0
+license MIT
+description High-performance Vex application
+`, modName)
+	_ = os.WriteFile(filepath.Join(targetDir, "vex.mod"), []byte(modContent), 0644)
+
+	mainContent := fmt.Sprintf(`module main
+
+fn main() {
+	println('Welcome to %s powered by Vex!')
+}
+`, modName)
+	_ = os.WriteFile(filepath.Join(targetDir, "src", "main.vex"), []byte(mainContent), 0644)
+
+	gitIgnore := `build/
+bin/
+*.exe
+*.o
+out.c
+`
+	_ = os.WriteFile(filepath.Join(targetDir, ".gitignore"), []byte(gitIgnore), 0644)
+
+	fmt.Printf("✓ Initialized new Vex project %q in %s/\n", name, targetDir)
+	fmt.Printf("  • vex.mod (package manifest)\n")
+	fmt.Printf("  • src/main.vex (entry point)\n")
+	fmt.Printf("  • .gitignore\n\n")
+	fmt.Printf("Next steps:\n")
+	if targetDir != "." {
+		fmt.Printf("  cd %s\n", targetDir)
+	}
+	fmt.Printf("  vex run src/main.vex\n")
+}
+
+// --- SUBCOMMAND 9: `vex demo` ---
 
 func demoCmd() {
 	_ = os.MkdirAll("examples", 0755)
@@ -245,33 +460,121 @@ func demoCmd() {
 	runCmd([]string{"-prod", demoFile})
 }
 
-// --- CORE FRONTEND + MIDDLEEND PIPELINE WITH SOURCE-SPAN DIAGNOSTICS ---
+// --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
-func compileVexToC99(vexPath string) (string, *checker.Checker, *autofree.Analyzer) {
-	rawBytes, err := os.ReadFile(vexPath)
+func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer) {
+	fi, err := os.Stat(targetPath)
 	if err != nil {
 		fatalIO(err)
 	}
-	srcText := string(rawBytes)
-	srcFile := source.New(vexPath, srcText)
 
-	// Phase 1: Parse into AST
-	p := parser.New(srcText)
-	astFile := p.ParseFile()
-	if parseErrs := p.Errors(); len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			fmt.Fprintln(os.Stderr, srcFile.FormatDiagnostic("SYNTAX", pe.Msg, pe.Span))
+	var vexFiles []string
+	if fi.IsDir() {
+		entries, err := os.ReadDir(targetPath)
+		if err != nil {
+			fatalIO(err)
 		}
-		fmt.Fprintf(os.Stderr, "compilation aborted due to %d syntax error(s)\n", len(parseErrs))
-		os.Exit(1)
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".vex") && !strings.HasSuffix(e.Name(), "_test.vex") {
+				vexFiles = append(vexFiles, filepath.Join(targetPath, e.Name()))
+			}
+		}
+		if len(vexFiles) == 0 {
+			srcDir := filepath.Join(targetPath, "src")
+			if sfi, sErr := os.Stat(srcDir); sErr == nil && sfi.IsDir() {
+				sEntries, _ := os.ReadDir(srcDir)
+				for _, se := range sEntries {
+					if !se.IsDir() && strings.HasSuffix(se.Name(), ".vex") {
+						vexFiles = append(vexFiles, filepath.Join(srcDir, se.Name()))
+					}
+				}
+			}
+		}
+		if len(vexFiles) == 0 {
+			fmt.Fprintf(os.Stderr, "no .vex source files found in %s\n", targetPath)
+			os.Exit(1)
+		}
+	} else {
+		vexFiles = []string{targetPath}
+	}
+
+	var mergedDecls []ast.Decl
+	var firstMod ast.Ident
+	var srcFiles []*source.File
+	var testFnNames []string
+	hasMain := false
+
+	for _, vFile := range vexFiles {
+		rawBytes, err := os.ReadFile(vFile)
+		if err != nil {
+			fatalIO(err)
+		}
+		srcText := string(rawBytes)
+		srcFile := source.New(vFile, srcText)
+		srcFiles = append(srcFiles, srcFile)
+
+		p := parser.New(srcText)
+		astFile := p.ParseFile()
+		if parseErrs := p.Errors(); len(parseErrs) > 0 {
+			for _, pe := range parseErrs {
+				fmt.Fprintln(os.Stderr, srcFile.FormatDiagnostic("SYNTAX", pe.Msg, pe.Span))
+			}
+			fmt.Fprintf(os.Stderr, "compilation aborted due to %d syntax error(s) in %s\n", len(parseErrs), vFile)
+			os.Exit(1)
+		}
+
+		if firstMod.Name == "" && astFile.Module.Name != "" {
+			firstMod = astFile.Module
+		}
+
+		for _, decl := range astFile.Decls {
+			if fn, ok := decl.(*ast.FnDecl); ok {
+				if fn.Name.Name == "main" {
+					hasMain = true
+				} else if strings.HasPrefix(fn.Name.Name, "test_") {
+					testFnNames = append(testFnNames, fn.Name.Name)
+				}
+			}
+			mergedDecls = append(mergedDecls, decl)
+		}
+	}
+
+	if root, manifest, err := mod.FindProjectRoot(targetPath); err == nil && manifest != nil {
+		_ = root
+		if manifest.Module != "" {
+			firstMod.Name = manifest.Module
+		}
+	}
+	if firstMod.Name == "" {
+		firstMod.Name = "main"
+	}
+
+	// In test mode: synthesize a test runner main() if none is defined
+	if isTestMode && !hasMain && len(testFnNames) > 0 {
+		var runnerSrc strings.Builder
+		runnerSrc.WriteString("fn main() {\n")
+		for _, tName := range testFnNames {
+			runnerSrc.WriteString(fmt.Sprintf("\t%s()\n", tName))
+		}
+		runnerSrc.WriteString("}\n")
+
+		pRunner := parser.New(runnerSrc.String())
+		runnerAst := pRunner.ParseFile()
+		mergedDecls = append(mergedDecls, runnerAst.Decls...)
+	}
+
+	mergedAst := &ast.File{
+		Module: firstMod,
+		Decls:  mergedDecls,
 	}
 
 	// Phase 2: 3-Pass Type, Mutability, Tensor & Actor Checker
 	chk := checker.New()
-	chk.CheckFile(astFile)
+	chk.CheckFile(mergedAst)
 	if semErrs := chk.Errors(); len(semErrs) > 0 {
 		for _, se := range semErrs {
-			fmt.Fprintln(os.Stderr, srcFile.FormatDiagnostic("SEMANTIC", se.Msg, se.Span))
+			sFile := srcFiles[0]
+			fmt.Fprintln(os.Stderr, sFile.FormatDiagnostic("SEMANTIC", se.Msg, se.Span))
 		}
 		fmt.Fprintf(os.Stderr, "compilation aborted due to %d semantic error(s)\n", len(semErrs))
 		os.Exit(1)
@@ -279,11 +582,11 @@ func compileVexToC99(vexPath string) (string, *checker.Checker, *autofree.Analyz
 
 	// Phase 3: Static Escape Analysis & Deterministic LIFO Destructor Injection
 	af := autofree.New(chk)
-	af.AnalyzeFile(astFile)
+	af.AnalyzeFile(mergedAst)
 
 	// Phase 4: C99 Code Emission
 	gen := cgen.New(chk, af)
-	cCode := gen.EmitFile(astFile)
+	cCode := gen.EmitFile(mergedAst)
 
 	return cCode, chk, af
 }
@@ -332,18 +635,23 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		archFlag = "-march=x86-64-v3"
 	}
 
+	netLibs := []string{}
+	if goRuntime.GOOS == "windows" {
+		netLibs = append(netLibs, "-lws2_32")
+	}
+
 	if opts.prod {
 		modeDesc = "prod (-O3 " + archFlag + ")"
-		cFlags = []string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
-		cFlags = []string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
 	} else if compiler == "tcc" {
 		modeDesc = "dev (TinyCC instant build)"
-		cFlags = []string{"-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+		cFlags = append([]string{"-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
 	} else {
 		modeDesc = "dev (-O2 " + archFlag + ")"
-		cFlags = []string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
 	}
 
 	cmd := exec.Command(compiler, cFlags...)

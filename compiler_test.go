@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vexlang/vex/internal/ast"
 	"github.com/vexlang/vex/internal/autofree"
 	"github.com/vexlang/vex/internal/cgen"
 	"github.com/vexlang/vex/internal/checker"
@@ -568,3 +569,68 @@ fn main() {
 `), 0644)
 	}
 }
+
+func TestMultiFileCompilation(t *testing.T) {
+	file1Src := `module main
+
+pub struct Vector3 {
+pub:
+	x f32
+	y f32
+	z f32
+}
+
+pub fn Vector3.new(x f32, y f32, z f32) Vector3 {
+	return Vector3{ x: x, y: y, z: z }
+}
+
+pub fn (v Vector3) dot(other Vector3) f32 {
+	return v.x * other.x + v.y * other.y + v.z * other.z
+}
+`
+	file2Src := `module main
+
+fn main() {
+	v1 := Vector3.new(1.0, 2.0, 3.0)
+	v2 := Vector3.new(4.0, 5.0, 6.0)
+	d := v1.dot(v2)
+	println('dot=${d}')
+}
+`
+	p1 := parser.New(file1Src)
+	ast1 := p1.ParseFile()
+	if len(p1.Errors()) > 0 {
+		t.Fatalf("p1 errors: %v", p1.Errors())
+	}
+
+	p2 := parser.New(file2Src)
+	ast2 := p2.ParseFile()
+	if len(p2.Errors()) > 0 {
+		t.Fatalf("p2 errors: %v", p2.Errors())
+	}
+
+	merged := &ast.File{
+		Module: ast2.Module,
+		Decls:  append(ast1.Decls, ast2.Decls...),
+	}
+
+	chk := checker.New()
+	chk.CheckFile(merged)
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("checker errors: %v", chk.Errors())
+	}
+
+	af := autofree.New(chk)
+	af.AnalyzeFile(merged)
+
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(merged)
+
+	if !strings.Contains(cCode, "Vector3_dot") {
+		t.Errorf("expected Vector3_dot in emitted C code")
+	}
+	if !strings.Contains(cCode, "int main(") {
+		t.Errorf("expected int main( in emitted C code")
+	}
+}
+

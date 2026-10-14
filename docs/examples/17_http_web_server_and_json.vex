@@ -1,0 +1,60 @@
+module main
+
+// OUT: === 1. JSON PAYLOAD EXTRACTION ===
+// OUT: Extracted model: deepseek-coder-v2
+// OUT: Extracted batch size: 16
+// OUT: Extracted temperature: 0.70
+// OUT: === 2. ASYNC ACTOR REQUEST DISPATCH ===
+// OUT: Processed inference request for prompt: predict_turnover
+// OUT: === 3. HTTP RESPONSE SERIALIZATION ===
+// OUT: HTTP Response Code: 200
+// OUT: Content-Type: application/json
+// OUT: [vex_rt] active_leaks=0
+
+pub actor InferenceWorker {
+pub:
+	worker_id int
+mut:
+	requests_handled int = 0
+}
+
+pub fn (mut w InferenceWorker) process_request(route string, prompt string) string {
+	w.requests_handled += 1
+	println('Processed inference request for prompt: ${prompt}')
+	return '{"route": "${route}", "prompt": "${prompt}", "status": "completed", "latency_ms": 1.45}'
+}
+
+fn handle_incoming_http(raw_request_json string) string {
+	// Parse fields directly from JSON
+	model := json_get_str(raw_request_json, 'model')
+	prompt := json_get_str(raw_request_json, 'prompt')
+	batch_size := json_get_int(raw_request_json, 'batch_size')
+	temp := json_get_f32(raw_request_json, 'temperature')
+
+	println('=== 1. JSON PAYLOAD EXTRACTION ===')
+	println('Extracted model: ${model}')
+	println('Extracted batch size: ${batch_size}')
+	println('Extracted temperature: ${temp}')
+
+	println('=== 2. ASYNC ACTOR REQUEST DISPATCH ===')
+	mut worker := InferenceWorker{ worker_id: 1, requests_handled: 0 }
+	fut := worker <- process_request('/v1/completions', prompt)
+	json_res := fut.await() or {
+		'{"error": "worker faulted"}'
+	}
+
+	println('=== 3. HTTP RESPONSE SERIALIZATION ===')
+	resp := http_response(200, 'application/json', json_res)
+	return resp
+}
+
+fn main() {
+	sample_request := '{"model": "deepseek-coder-v2", "prompt": "predict_turnover", "batch_size": 16, "temperature": 0.7}'
+
+	http_out := handle_incoming_http(sample_request)
+
+	if http_out != '' {
+		println('HTTP Response Code: 200')
+		println('Content-Type: application/json')
+	}
+}

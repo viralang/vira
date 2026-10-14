@@ -35,10 +35,18 @@ type actorMethodDispatchSpec struct {
 }
 
 func New(chk *checker.Checker, af *autofree.Analyzer) *Generator {
+	cleanMod := chk.ModuleName()
+	cleanMod = strings.ReplaceAll(cleanMod, "/", "_")
+	cleanMod = strings.ReplaceAll(cleanMod, "\\", "_")
+	cleanMod = strings.ReplaceAll(cleanMod, "-", "_")
+	cleanMod = strings.ReplaceAll(cleanMod, ".", "_")
+	if cleanMod == "" {
+		cleanMod = "main"
+	}
 	return &Generator{
 		chk:          chk,
 		af:           af,
-		mod:          chk.ModuleName(),
+		mod:          cleanMod,
 		resultTypes:  make(map[string]checker.Type),
 		vtablePairs:  make(map[string]vtablePair),
 		actorSenders: make(map[string]actorMethodDispatchSpec),
@@ -810,14 +818,36 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		return g.emitRawCall(e)
 
 	case *ast.BinaryExpr:
-		// Native @ Matrix Multiplication (tensor[f32] @ tensor[f32])
-		if e.Op == token.TokAt {
-			arenaArg := "NULL"
-			if g.activeArena != "" {
-				arenaArg = g.activeArena
+		// Tensor Arithmetic (+, -, @)
+		if e.Op == token.TokAt || e.Op == token.TokPlus || e.Op == token.TokMinus {
+			leftType := g.chk.ExprTypes[e.Left]
+			if _, isTensor := leftType.(*checker.TensorType); isTensor {
+				arenaArg := "NULL"
+				if g.activeArena != "" {
+					arenaArg = g.activeArena
+				}
+				if e.Op == token.TokAt {
+					return fmt.Sprintf("vex_tensor_matmul_f32(%s, %s, %s)",
+						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+				} else if e.Op == token.TokPlus {
+					return fmt.Sprintf("vex_tensor_add(%s, %s, %s)",
+						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+				} else if e.Op == token.TokMinus {
+					return fmt.Sprintf("vex_tensor_sub(%s, %s, %s)",
+						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+				}
 			}
-			return fmt.Sprintf("vex_tensor_matmul_f32(%s, %s, %s)",
-				arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+		}
+		// String equality comparisons
+		if e.Op == token.TokEq || e.Op == token.TokNeq {
+			leftType := g.chk.ExprTypes[e.Left]
+			if leftType != nil && leftType.Equals(checker.TypeString) {
+				if e.Op == token.TokEq {
+					return fmt.Sprintf("vex_str_eq(%s, %s)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+				} else {
+					return fmt.Sprintf("(!vex_str_eq(%s, %s))", g.emitExpr(e.Left), g.emitExpr(e.Right))
+				}
+			}
 		}
 		return fmt.Sprintf("(%s %s %s)", g.emitExpr(e.Left), e.Op.String(), g.emitExpr(e.Right))
 
@@ -933,6 +963,40 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vex_append_file(%s)", strings.Join(argStrs, ", "))
 		case "remove_file":
 			return fmt.Sprintf("vex_remove_file(%s)", strings.Join(argStrs, ", "))
+		case "net_listen":
+			return fmt.Sprintf("vex_net_listen(%s)", strings.Join(argStrs, ", "))
+		case "net_accept":
+			return fmt.Sprintf("vex_net_accept(%s)", strings.Join(argStrs, ", "))
+		case "net_read":
+			return fmt.Sprintf("vex_net_read(%s)", strings.Join(argStrs, ", "))
+		case "net_write":
+			return fmt.Sprintf("vex_net_write(%s)", strings.Join(argStrs, ", "))
+		case "net_close":
+			return fmt.Sprintf("vex_net_close(%s)", strings.Join(argStrs, ", "))
+		case "http_response":
+			return fmt.Sprintf("vex_http_response(%s)", strings.Join(argStrs, ", "))
+		case "json_get_str":
+			return fmt.Sprintf("vex_json_get_str(%s)", strings.Join(argStrs, ", "))
+		case "json_get_int":
+			return fmt.Sprintf("vex_json_get_int(%s)", strings.Join(argStrs, ", "))
+		case "json_get_f32":
+			return fmt.Sprintf("vex_json_get_f32(%s)", strings.Join(argStrs, ", "))
+		case "safetensors_load":
+			return fmt.Sprintf("vex_safetensors_load(%s)", strings.Join(argStrs, ", "))
+		case "tensor_transpose":
+			return fmt.Sprintf("vex_tensor_transpose(%s)", strings.Join(argStrs, ", "))
+		case "tensor_matmul_grad_a":
+			return fmt.Sprintf("vex_tensor_matmul_grad_a(%s)", strings.Join(argStrs, ", "))
+		case "tensor_matmul_grad_b":
+			return fmt.Sprintf("vex_tensor_matmul_grad_b(%s)", strings.Join(argStrs, ", "))
+		case "tensor_relu_backward":
+			return fmt.Sprintf("vex_tensor_relu_backward(%s)", strings.Join(argStrs, ", "))
+		case "tensor_sgd_step":
+			paramArg := argStrs[0]
+			if !strings.HasPrefix(paramArg, "&") {
+				paramArg = "&" + paramArg
+			}
+			return fmt.Sprintf("vex_tensor_sgd_step(%s, %s, %s)", paramArg, argStrs[1], argStrs[2])
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

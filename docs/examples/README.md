@@ -35,6 +35,8 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`14_neural_network_cpu_gpu.vex`](./14_neural_network_cpu_gpu.vex)** | Neural Network CPU SIMD vs. GPU Streams | 3-layer MLP classifier forward pass (Dense + Bias + ReLU + Softmax Scaling), AVX2/NEON SIMD execution, GPU device stream actors, numerical parity verification, and CPU fallback on GPU OOM. |
 | **[`15_pretrained_weights_loader.vex`](./15_pretrained_weights_loader.vex)** | Loading Pretrained PyTorch & SafeTensors Weights | Zero-copy binary tensor ingestion (`tensor_load_bin`), bit-exact forward pass matching PyTorch reference output, asynchronous actor serving, and bidirectional export (`tensor_save_bin`). |
 | **[`16_compilation_and_build_modes.vex`](./16_compilation_and_build_modes.vex)** | Compilation, Build Modes & Production Deployment | Demonstrates build modes (dev `-O2`, prod `-O3`, sanitizer `-sanitize`), static linking, standalone binary deployment, and compiler telemetry. |
+| **[`17_http_web_server_and_json.vex`](./17_http_web_server_and_json.vex)** | High-Performance HTTP 1.1 Web Engine & JSON Microservices | Fast JSON field parsing (`json_get_str`, `json_get_int`, `json_get_f32`), HTTP 1.1 response generation (`http_response`), actor-based request processing, and zero memory leaks. |
+| **[`18_autograd_and_safetensors.vex`](./18_autograd_and_safetensors.vex)** | Pure Vex Autograd Engine & Native SafeTensors Loader | Native zero-copy loading of Hugging Face `.safetensors` files (`safetensors_load`), SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), and hardware in-place SGD optimization (`tensor_sgd_step`). |
 
 ---
 
@@ -59,4 +61,6 @@ You can run each example in sequence from your shell:
 .\vex.exe run docs/examples/14_neural_network_cpu_gpu.vex
 .\vex.exe run docs/examples/15_pretrained_weights_loader.vex
 .\vex.exe run docs/examples/16_compilation_and_build_modes.vex
+.\vex.exe run docs/examples/17_http_web_server_and_json.vex
+.\vex.exe run docs/examples/18_autograd_and_safetensors.vex
 ```

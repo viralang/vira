@@ -16,6 +16,26 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET vex_socket_t;
+#define VEX_INVALID_SOCKET INVALID_SOCKET
+#define VEX_SOCKET_ERROR SOCKET_ERROR
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+typedef int vex_socket_t;
+#define VEX_INVALID_SOCKET -1
+#define VEX_SOCKET_ERROR -1
+#define closesocket close
+#endif
+
 // --- HARDWARE SIMD INTRINSIC HEADERS ---
 #if defined(__AVX2__) || defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -52,6 +72,14 @@ typedef struct {
 
 static inline vex_string vex_str_lit(const char* cstr, int32_t len) {
     return (vex_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };
+}
+
+static inline bool vex_str_eq(vex_string a, vex_string b) {
+    if (a.len != b.len) return false;
+    if (a.len == 0) return true;
+    if (a.data == b.data) return true;
+    if (a.data == NULL || b.data == NULL) return false;
+    return memcmp(a.data, b.data, (size_t)a.len) == 0;
 }
 
 static inline vex_string vex_str_format(const char* fmt, ...) {
@@ -402,6 +430,44 @@ static inline vex_tensor_f32 vex_tensor_add(vex_arena* opt_arena, vex_tensor_f32
 #endif
     for (; i < total; i++) {
         out.data[i] = a.data[i] + b.data[i];
+    }
+    return out;
+}
+
+// SIMD-accelerated tensor subtraction: out = a - b
+static inline vex_tensor_f32 vex_tensor_sub(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {
+    if (a.rows != b.rows || a.cols != b.cols) {
+        fprintf(stderr, "vex tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
+                a.rows, a.cols, b.rows, b.cols);
+        exit(1);
+    }
+    vex_tensor_f32 out = opt_arena
+        ? vex_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
+        : vex_tensor_f32_alloc(a.rows, a.cols);
+    int32_t total = a.rows * a.cols;
+    int32_t i     = 0;
+
+#if defined(__AVX2__)
+    for (; i + 8 <= total; i += 8) {
+        __m256 va = _mm256_loadu_ps(&a.data[i]);
+        __m256 vb = _mm256_loadu_ps(&b.data[i]);
+        _mm256_storeu_ps(&out.data[i], _mm256_sub_ps(va, vb));
+    }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= total; i += 4) {
+        float32x4_t va = vld1q_f32(&a.data[i]);
+        float32x4_t vb = vld1q_f32(&b.data[i]);
+        vst1q_f32(&out.data[i], vsubq_f32(va, vb));
+    }
+#elif defined(__SSE2__)
+    for (; i + 4 <= total; i += 4) {
+        __m128 va = _mm_loadu_ps(&a.data[i]);
+        __m128 vb = _mm_loadu_ps(&b.data[i]);
+        _mm_storeu_ps(&out.data[i], _mm_sub_ps(va, vb));
+    }
+#endif
+    for (; i < total; i++) {
+        out.data[i] = a.data[i] - b.data[i];
     }
     return out;
 }
@@ -945,6 +1011,398 @@ static inline Result_bool vex_tensor_save_bin(vex_tensor_f32 t, vex_string path)
         .err = vex_str_lit("", 0),
         .val = true
     };
+}
+
+// ============================================================================
+// 12. HIGH-PERFORMANCE NETWORKING & HTTP 1.1 WEB ENGINE
+// ============================================================================
+
+static inline void _vex_net_init(void) {
+#ifdef _WIN32
+    static int initialized = 0;
+    if (!initialized) {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        initialized = 1;
+    }
+#endif
+}
+
+static inline int64_t vex_net_listen(int64_t port) {
+    _vex_net_init();
+    vex_socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == VEX_INVALID_SOCKET) return -1;
+
+    int opt = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons((uint16_t)port);
+
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == VEX_SOCKET_ERROR) {
+        closesocket(fd);
+        return -1;
+    }
+
+    if (listen(fd, 128) == VEX_SOCKET_ERROR) {
+        closesocket(fd);
+        return -1;
+    }
+
+    return (int64_t)fd;
+}
+
+static inline int64_t vex_net_accept(int64_t server_fd) {
+    _vex_net_init();
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    vex_socket_t client = accept((vex_socket_t)server_fd, (struct sockaddr*)&client_addr, &addr_len);
+    if (client == VEX_INVALID_SOCKET) return -1;
+    return (int64_t)client;
+}
+
+static inline vex_string vex_net_read(int64_t client_fd, int64_t max_bytes) {
+    if (max_bytes <= 0) max_bytes = 4096;
+    char* buf = (char*)malloc(max_bytes + 1);
+    if (!buf) return vex_str_lit("", 0);
+    _vex_record_alloc();
+
+    int n = recv((vex_socket_t)client_fd, buf, (int)max_bytes, 0);
+    if (n <= 0) {
+        free(buf);
+        _vex_record_free();
+        return vex_str_lit("", 0);
+    }
+    buf[n] = '\0';
+    return (vex_string){ .data = (const uint8_t*)buf, .len = n, .is_lit = false };
+}
+
+static inline int64_t vex_net_write(int64_t client_fd, vex_string msg) {
+    if (msg.len <= 0 || msg.data == NULL) return 0;
+    int sent = send((vex_socket_t)client_fd, (const char*)msg.data, msg.len, 0);
+    return (int64_t)sent;
+}
+
+static inline void vex_net_close(int64_t fd) {
+    if (fd >= 0) {
+        closesocket((vex_socket_t)fd);
+    }
+}
+
+static inline vex_string vex_http_response(int64_t status_code, vex_string content_type, vex_string body) {
+    const char* status_text = "OK";
+    if (status_code == 201) status_text = "Created";
+    else if (status_code == 400) status_text = "Bad Request";
+    else if (status_code == 404) status_text = "Not Found";
+    else if (status_code == 500) status_text = "Internal Server Error";
+
+    char ctype_buf[128];
+    int ctype_len = content_type.len < 127 ? content_type.len : 127;
+    if (content_type.data && ctype_len > 0) {
+        memcpy(ctype_buf, content_type.data, ctype_len);
+    }
+    ctype_buf[ctype_len] = '\0';
+
+    int header_est = 256 + body.len;
+    char* res = (char*)malloc(header_est);
+    if (!res) return vex_str_lit("", 0);
+    _vex_record_alloc();
+
+    int n = snprintf(res, header_est,
+        "HTTP/1.1 %lld %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        (long long)status_code, status_text, ctype_buf, body.len);
+
+    if (body.len > 0 && body.data) {
+        memcpy(res + n, body.data, body.len);
+        n += body.len;
+    }
+    res[n] = '\0';
+    return (vex_string){ .data = (const uint8_t*)res, .len = n, .is_lit = false };
+}
+
+// ============================================================================
+// 13. FAST JSON FIELD PARSER
+// ============================================================================
+
+static inline vex_string vex_json_get_str(vex_string json, vex_string key) {
+    char pattern[256];
+    int klen = key.len < 200 ? key.len : 200;
+    if (key.data && klen > 0) {
+        memcpy(pattern, key.data, klen);
+    }
+    pattern[klen] = '\0';
+
+    const char* hay = (const char*)json.data;
+    if (!hay) return vex_str_lit("", 0);
+
+    char search_quote[260];
+    snprintf(search_quote, sizeof(search_quote), "\"%s\"", pattern);
+    
+    char* found = strstr(hay, search_quote);
+    if (!found) return vex_str_lit("", 0);
+    
+    char* colon = strchr(found + strlen(search_quote), ':');
+    if (!colon) return vex_str_lit("", 0);
+    
+    char* val_start = strchr(colon, '"');
+    if (!val_start) return vex_str_lit("", 0);
+    val_start++;
+    
+    char* val_end = strchr(val_start, '"');
+    if (!val_end) return vex_str_lit("", 0);
+    
+    int val_len = (int)(val_end - val_start);
+    char* out = (char*)malloc(val_len + 1);
+    if (!out) return vex_str_lit("", 0);
+    _vex_record_alloc();
+    memcpy(out, val_start, val_len);
+    out[val_len] = '\0';
+    return (vex_string){ .data = (const uint8_t*)out, .len = val_len, .is_lit = false };
+}
+
+static inline int64_t vex_json_get_int(vex_string json, vex_string key) {
+    char search_quote[260];
+    int klen = key.len < 200 ? key.len : 200;
+    snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen, (const char*)key.data);
+
+    const char* hay = (const char*)json.data;
+    if (!hay) return 0;
+    char* found = strstr(hay, search_quote);
+    if (!found) return 0;
+
+    char* colon = strchr(found + strlen(search_quote), ':');
+    if (!colon) return 0;
+    colon++;
+    while (*colon == ' ' || *colon == '\t') colon++;
+
+    return (int64_t)strtoll(colon, NULL, 10);
+}
+
+static inline float vex_json_get_f32(vex_string json, vex_string key) {
+    char search_quote[260];
+    int klen = key.len < 200 ? key.len : 200;
+    snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen, (const char*)key.data);
+
+    const char* hay = (const char*)json.data;
+    if (!hay) return 0.0f;
+    char* found = strstr(hay, search_quote);
+    if (!found) return 0.0f;
+
+    char* colon = strchr(found + strlen(search_quote), ':');
+    if (!colon) return 0.0f;
+    colon++;
+    while (*colon == ' ' || *colon == '\t') colon++;
+
+    return (float)strtod(colon, NULL);
+}
+
+// ============================================================================
+// 14. NATIVE SAFETENSORS ZERO-COPY PARSER & LOADER
+// ============================================================================
+
+static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string tensor_name) {
+    char path_buf[1024];
+    int len = path.len < 1023 ? path.len : 1023;
+    if (path.data != NULL && len > 0) {
+        memcpy(path_buf, path.data, len);
+    }
+    path_buf[len] = '\0';
+    vex_str_free(&path);
+
+    char name_buf[256];
+    int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
+    if (tensor_name.data != NULL && nlen > 0) {
+        memcpy(name_buf, tensor_name.data, nlen);
+    }
+    name_buf[nlen] = '\0';
+    vex_str_free(&tensor_name);
+
+    FILE* f = fopen(path_buf, "rb");
+    if (!f) {
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("failed to open safetensors file '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    uint64_t header_len = 0;
+    if (fread(&header_len, sizeof(uint64_t), 1, f) != 1 || header_len > 100 * 1024 * 1024) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("corrupt safetensors header in '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    char* header_json = (char*)malloc(header_len + 1);
+    if (!header_json) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("failed to allocate memory for header (%llu bytes)", (unsigned long long)header_len),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    if (fread(header_json, 1, header_len, f) != header_len) {
+        free(header_json);
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("incomplete read of safetensors header in '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+    header_json[header_len] = '\0';
+
+    char tensor_key[300];
+    snprintf(tensor_key, sizeof(tensor_key), "\"%s\"", name_buf);
+    char* t_entry = strstr(header_json, tensor_key);
+    if (!t_entry) {
+        free(header_json);
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("tensor '%s' not found in '%s'", name_buf, path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    int rows = 1, cols = 1;
+    char* shape_ptr = strstr(t_entry, "\"shape\"");
+    if (shape_ptr) {
+        char* lbracket = strchr(shape_ptr, '[');
+        if (lbracket) {
+            rows = (int)strtol(lbracket + 1, &lbracket, 10);
+            while (*lbracket == ' ' || *lbracket == ',') lbracket++;
+            if (*lbracket != ']' && *lbracket != '\0') {
+                cols = (int)strtol(lbracket, NULL, 10);
+            }
+        }
+    }
+    if (rows <= 0) rows = 1;
+    if (cols <= 0) cols = 1;
+
+    uint64_t begin_off = 0;
+    char* off_ptr = strstr(t_entry, "\"data_offsets\"");
+    if (off_ptr) {
+        char* lbracket = strchr(off_ptr, '[');
+        if (lbracket) {
+            begin_off = (uint64_t)strtoull(lbracket + 1, NULL, 10);
+        }
+    }
+    free(header_json);
+
+    uint64_t file_offset = 8 + header_len + begin_off;
+#ifdef _WIN32
+    _fseeki64(f, file_offset, SEEK_SET);
+#else
+    fseeko(f, file_offset, SEEK_SET);
+#endif
+
+    vex_tensor_f32 t = vex_tensor_f32_alloc(rows, cols);
+    size_t expected_bytes = (size_t)rows * (size_t)cols * sizeof(float);
+    size_t read_bytes = fread(t.data, 1, expected_bytes, f);
+    fclose(f);
+
+    if (read_bytes != expected_bytes) {
+        vex_tensor_f32_free(&t);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("tensor '%s' data truncated: expected %zu bytes, read %zu", name_buf, expected_bytes, read_bytes),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    return (Result_tensor_f32){
+        .is_err = false,
+        .err = vex_str_lit("", 0),
+        .val = t
+    };
+}
+
+// ============================================================================
+// 15. HARDWARE SIMD AUTOGRAD BACKWARD OPS & OPTIMIZERS
+// ============================================================================
+
+static inline vex_tensor_f32 vex_tensor_transpose(vex_tensor_f32 a) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(a.cols, a.rows);
+    for (int r = 0; r < a.rows; ++r) {
+        for (int c = 0; c < a.cols; ++c) {
+            out.data[c * out.cols + r] = a.data[r * a.cols + c];
+        }
+    }
+    return out;
+}
+
+static inline vex_tensor_f32 vex_tensor_matmul_grad_a(vex_tensor_f32 grad_out, vex_tensor_f32 b) {
+    vex_tensor_f32 bt = vex_tensor_transpose(b);
+    vex_tensor_f32 grad_a = vex_tensor_matmul_f32(NULL, grad_out, bt);
+    vex_tensor_f32_free(&bt);
+    return grad_a;
+}
+
+static inline vex_tensor_f32 vex_tensor_matmul_grad_b(vex_tensor_f32 a, vex_tensor_f32 grad_out) {
+    vex_tensor_f32 at = vex_tensor_transpose(a);
+    vex_tensor_f32 grad_b = vex_tensor_matmul_f32(NULL, at, grad_out);
+    vex_tensor_f32_free(&at);
+    return grad_b;
+}
+
+static inline vex_tensor_f32 vex_tensor_relu_backward(vex_tensor_f32 input, vex_tensor_f32 grad_out) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(input.rows, input.cols);
+    int total = input.rows * input.cols;
+    int i = 0;
+
+#if defined(__AVX2__)
+    __m256 zero = _mm256_setzero_ps();
+    for (; i + 7 < total; i += 8) {
+        __m256 in_v = _mm256_load_ps(&input.data[i]);
+        __m256 grad_v = _mm256_load_ps(&grad_out.data[i]);
+        __m256 mask = _mm256_cmp_ps(in_v, zero, _CMP_GT_OQ);
+        __m256 res_v = _mm256_and_ps(mask, grad_v);
+        _mm256_store_ps(&out.data[i], res_v);
+    }
+#endif
+
+    for (; i < total; ++i) {
+        out.data[i] = (input.data[i] > 0.0f) ? grad_out.data[i] : 0.0f;
+    }
+    return out;
+}
+
+static inline void vex_tensor_sgd_step(vex_tensor_f32* param, vex_tensor_f32 grad, float lr) {
+    if (!param || !param->data || !grad.data) return;
+    int total = param->rows * param->cols;
+    int i = 0;
+
+#if defined(__AVX2__)
+    __m256 lr_v = _mm256_set1_ps(lr);
+    for (; i + 7 < total; i += 8) {
+        __m256 p_v = _mm256_load_ps(&param->data[i]);
+        __m256 g_v = _mm256_load_ps(&grad.data[i]);
+        __m256 step = _mm256_mul_ps(lr_v, g_v);
+        __m256 updated = _mm256_sub_ps(p_v, step);
+        _mm256_store_ps(&param->data[i], updated);
+    }
+#endif
+
+    for (; i < total; ++i) {
+        param->data[i] -= lr * grad.data[i];
+    }
 }
 
 static inline void vex_report_mem_stats(void) {

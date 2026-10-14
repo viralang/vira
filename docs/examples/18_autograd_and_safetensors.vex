@@ -1,0 +1,54 @@
+module main
+
+// OUT: === 1. NATIVE SAFETENSORS ZERO-COPY LOADER ===
+// OUT: Loaded SafeTensors weight \'fc1.weight\' (shape 4x4, sum=102.00)
+// OUT: === 2. FORWARD EVALUATION ===
+// OUT: Initial forward activation sum: 408.00
+// OUT: === 3. AUTOGRAD SIMD GRADIENT DESCENT ===
+// OUT: Step 0: loss=102.00
+// OUT: Step 1: loss=20.40
+// OUT: Step 2: loss=4.08
+// OUT: Converged activation sum: 306.82 (target: 306.00)
+// OUT: [vex_rt] active_leaks=0
+
+fn main() {
+	println('=== 1. NATIVE SAFETENSORS ZERO-COPY LOADER ===')
+	mut w := safetensors_load('models/model.safetensors', 'fc1.weight') or {
+		eprintln('Failed to load SafeTensors file: ${err}')
+		return
+	}
+
+	w_sum := tensor_sum(w)
+	println('Loaded SafeTensors weight \'fc1.weight\' (shape 4x4, sum=${w_sum})')
+
+	println('=== 2. FORWARD EVALUATION ===')
+	x := tensor_fill(4, 4, 1.0)
+	y_init := x @ w
+	init_sum := tensor_sum(y_init)
+	println('Initial forward activation sum: ${init_sum}')
+
+	println('=== 3. AUTOGRAD SIMD GRADIENT DESCENT ===')
+	// Target desired activation sum is 306.00
+	target_w := tensor_scale(w, 0.75)
+	y_target := x @ target_w
+
+	mut step := 0
+	for step < 3 {
+		y_pred := x @ w
+		diff := y_pred - y_target
+		current_loss := tensor_sum(diff)
+		println('Step ${step}: loss=${current_loss}')
+
+		// Compute backprop gradient: grad_W = X^T @ diff
+		grad_w := tensor_matmul_grad_b(x, diff)
+
+		// Apply SIMD SGD step: W = W - (lr * grad_W)
+		tensor_sgd_step(mut w, grad_w, 0.05)
+
+		step += 1
+	}
+
+	y_final := x @ w
+	final_sum := tensor_sum(y_final)
+	println('Converged activation sum: ${final_sum} (target: ${tensor_sum(y_target)})')
+}

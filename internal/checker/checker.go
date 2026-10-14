@@ -224,6 +224,104 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "path", Type: TypeString}},
 		ReturnType: &ResultType{Inner: TypeBool},
 	}
+
+	// Option 1: Networking & Web Primitives
+	c.functions["net_listen"] = &FnSig{
+		Name:       "net_listen",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "port", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["net_accept"] = &FnSig{
+		Name:       "net_accept",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "server_fd", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["net_read"] = &FnSig{
+		Name:       "net_read",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "client_fd", Type: TypeInt}, {Name: "max_bytes", Type: TypeInt}},
+		ReturnType: TypeString,
+	}
+	c.functions["net_write"] = &FnSig{
+		Name:       "net_write",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "client_fd", Type: TypeInt}, {Name: "msg", Type: TypeString}},
+		ReturnType: TypeInt,
+	}
+	c.functions["net_close"] = &FnSig{
+		Name:       "net_close",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "fd", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["http_response"] = &FnSig{
+		Name:   "http_response",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "status", Type: TypeInt}, {Name: "content_type", Type: TypeString}, {Name: "body", Type: TypeString}},
+		ReturnType: TypeString,
+	}
+
+	// Option 1: JSON Parser Primitives
+	c.functions["json_get_str"] = &FnSig{
+		Name:   "json_get_str",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		ReturnType: TypeString,
+	}
+	c.functions["json_get_int"] = &FnSig{
+		Name:   "json_get_int",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		ReturnType: TypeI64,
+	}
+	c.functions["json_get_f32"] = &FnSig{
+		Name:   "json_get_f32",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		ReturnType: TypeF32,
+	}
+
+	// Option 3: SafeTensors Zero-Copy Loader
+	c.functions["safetensors_load"] = &FnSig{
+		Name:   "safetensors_load",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
+		ReturnType: &ResultType{Inner: &TensorType{DType: TypeF32}},
+	}
+
+	// Option 3: Autograd SIMD Primitives
+	c.functions["tensor_transpose"] = &FnSig{
+		Name:       "tensor_transpose",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "t", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_matmul_grad_a"] = &FnSig{
+		Name:       "tensor_matmul_grad_a",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "grad_out", Type: &TensorType{DType: TypeF32}}, {Name: "b", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_matmul_grad_b"] = &FnSig{
+		Name:       "tensor_matmul_grad_b",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "a", Type: &TensorType{DType: TypeF32}}, {Name: "grad_out", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_relu_backward"] = &FnSig{
+		Name:       "tensor_relu_backward",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "input", Type: &TensorType{DType: TypeF32}}, {Name: "grad_out", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_sgd_step"] = &FnSig{
+		Name:   "tensor_sgd_step",
+		IsPub:  true,
+		Params: []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
+		ReturnType: TypeVoid,
+	}
 }
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.
@@ -779,14 +877,16 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 	case *ast.BinaryExpr:
 		l := c.checkExpr(e.Left, scope)
 		r := c.checkExpr(e.Right, scope)
-		if e.Op == token.TokAt {
-			// MatMul operator: tensor[f32] @ tensor[f32] -> tensor[f32]
+		if e.Op == token.TokAt || e.Op == token.TokPlus || e.Op == token.TokMinus {
 			lt, lok := l.(*TensorType)
 			rt, rok := r.(*TensorType)
 			if lok && rok && lt.DType.Equals(rt.DType) {
 				return lt
 			}
-			return &TensorType{DType: TypeF32}
+			if lok && rok {
+				c.errorf(e.BinSpan, "mismatched tensor dtypes in operation '%s': '%s' and '%s'", e.Op, lt.DType, rt.DType)
+				return lt
+			}
 		}
 		if !l.Equals(r) {
 			c.errorf(e.BinSpan, "mismatched types in binary operation '%s': '%s' and '%s'", e.Op, l, r)

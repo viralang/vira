@@ -1,0 +1,157 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Vex",
+  "scopeName": "source.vex",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#quadrants" },
+    { "include": "#operators" },
+    { "include": "#numbers" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.vex",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.vex",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.vex",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.vex",
+              "match": "\\\\."
+            },
+            {
+              "name": "variable.interpolation.vex",
+              "match": "\\$\\{[^\\}]+\\}"
+            }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.vex",
+          "match": "\\b(module|import|pub|mut|fn|return|if|else|match|for|in|or|is|as|break|continue)\\b"
+        },
+        {
+          "name": "keyword.declaration.vex",
+          "match": "\\b(struct|interface|actor|enum|type)\\b"
+        },
+        {
+          "name": "keyword.memory.vex",
+          "match": "\\b(arena)\\b"
+        },
+        {
+          "name": "constant.language.boolean.vex",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "quadrants": {
+      "patterns": [
+        {
+          "name": "storage.modifier.quadrant.vex",
+          "match": "\\b(pub:|mut:|pub mut:|default:)"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.primitive.vex",
+          "match": "\\b(int|i64|f32|bf16|f64|bool|string|void)\\b"
+        },
+        {
+          "name": "entity.name.type.tensor.vex",
+          "match": "\\b(tensor)\\[(f32|bf16|f64)\\]"
+        },
+        {
+          "name": "entity.name.type.future.vex",
+          "match": "\\b(Future)\\[[a-zA-Z0-9_]+\\]"
+        },
+        {
+          "name": "entity.name.type.user.vex",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.ai.matmul.vex",
+          "match": "@"
+        },
+        {
+          "name": "keyword.operator.actor.send.vex",
+          "match": "<-"
+        },
+        {
+          "name": "keyword.operator.assignment.vex",
+          "match": "(:=|\\+=|-=|\\*=|/=|%=|=)"
+        },
+        {
+          "name": "keyword.operator.comparison.vex",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.vex",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.bitwise.vex",
+          "match": "(<<|>>|&|\\||\\^|~)"
+        },
+        {
+          "name": "keyword.operator.result.vex",
+          "match": "(\\?|!)"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.vex",
+          "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.vex",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.vex",
+          "match": "\\b[0-9_]+(i64)?\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.vex",
+          "match": "\\b(println|eprintln|panic|tensor_fill|tensor_sum|tensor_relu|tensor_add|tensor_scale|tensor_load_bin|tensor_save_bin|file_exists|read_file|write_file|append_file|remove_file)\\b"
+        },
+        {
+          "name": "entity.name.function.vex",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

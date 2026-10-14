@@ -1,0 +1,32 @@
+{
+  "name": "vex-language",
+  "displayName": "Vex Programming Language",
+  "description": "Rich language support, syntax highlighting, and LSP integration for the Vex Programming Language.",
+  "version": "0.1.0",
+  "publisher": "vexlang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "vex",
+        "aliases": ["Vex", "vex"],
+        "extensions": [".vex"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vex",
+        "scopeName": "source.vex",
+        "path": "./syntaxes/vex.tmLanguage.json"
+      }
+    ]
+  }
+}
