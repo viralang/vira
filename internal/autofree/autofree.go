@@ -1,0 +1,408 @@
+package autofree
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/vexlang/vex/internal/ast"
+	"github.com/vexlang/vex/internal/checker"
+	"github.com/vexlang/vex/internal/token"
+)
+
+type EscapeState uint8
+
+const (
+	StateScopedLocal       EscapeState = iota // Freed deterministically when its lexical scope exits
+	StateEscapesViaReturn                     // Returned to caller -> ownership transferred, do NOT free
+	StateMovedToContainer                     // Stored into a struct literal or field -> container owns it
+	StateManagedByArena                       // Allocated inside `arena { ... }` -> freed in O(1) by slab
+)
+
+func (s EscapeState) String() string {
+	switch s {
+	case StateEscapesViaReturn:
+		return "ESCAPES_VIA_RETURN (ownership -> caller)"
+	case StateMovedToContainer:
+		return "MOVED_TO_CONTAINER (ownership -> struct/iface)"
+	case StateManagedByArena:
+		return "ARENA_MANAGED (O(1) slab free)"
+	default:
+		return "SCOPED_LOCAL (autofree injected)"
+	}
+}
+
+type TrackedVar struct {
+	Name        string
+	Type        checker.Type
+	CleanupKind ast.CleanupKind
+	State       EscapeState
+	DeclSpan    token.Span
+}
+
+type LexicalScope struct {
+	Parent  *LexicalScope
+	InArena bool
+	Vars    []*TrackedVar
+}
+
+func (ls *LexicalScope) Find(name string) *TrackedVar {
+	for cur := ls; cur != nil; cur = cur.Parent {
+		for _, v := range cur.Vars {
+			if v.Name == name {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+// FnReport stores the escape analysis audit trail for a single function.
+type FnReport struct {
+	FnName        string
+	TrackedVars   []*TrackedVar
+	InjectedFrees []*ast.DeferFreeStmt
+}
+
+type Analyzer struct {
+	chk             *checker.Checker
+	StructNeedsFree map[string]bool
+	Reports         []*FnReport
+	arenaCounter    int
+}
+
+func New(chk *checker.Checker) *Analyzer {
+	a := &Analyzer{
+		chk:             chk,
+		StructNeedsFree: make(map[string]bool),
+	}
+	a.computeStructDestructors()
+	return a
+}
+
+// computeStructDestructors determines which structs transitively own heap memory.
+func (a *Analyzer) computeStructDestructors() {
+	structs := a.chk.Structs()
+	changed := true
+	for changed {
+		changed = false
+		for name, st := range structs {
+			if a.StructNeedsFree[name] {
+				continue
+			}
+			for _, f := range st.Fields {
+				if ok, _ := a.typeNeedsCleanup(f.Type); ok {
+					a.StructNeedsFree[name] = true
+					changed = true
+					break
+				}
+			}
+			if !a.StructNeedsFree[name] {
+				for _, emb := range st.Embeds {
+					if a.StructNeedsFree[emb.Name] {
+						a.StructNeedsFree[name] = true
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
+	if t == nil {
+		return false, 0
+	}
+	switch v := t.(type) {
+	case *checker.PrimitiveType:
+		if v.Kind == checker.PrimString {
+			return true, ast.CleanupString
+		}
+		return false, 0
+	case *checker.TensorType:
+		return true, ast.CleanupTensor
+	case *checker.FutureType:
+		return true, ast.CleanupFuture
+	case *checker.StructType:
+		if v.IsActor {
+			return true, ast.CleanupActor
+		}
+		if a.StructNeedsFree[v.Name] {
+			return true, ast.CleanupStruct
+		}
+		return false, 0
+	case *checker.InterfaceType:
+		return true, ast.CleanupInterface
+	default:
+		return false, 0
+	}
+}
+
+// AnalyzeFile runs escape analysis and injects DeferFreeStmt nodes across all functions in the file.
+func (a *Analyzer) AnalyzeFile(file *ast.File) {
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FnDecl); ok {
+			report := &FnReport{FnName: a.formatFnName(fn)}
+			rootScope := &LexicalScope{}
+			a.rewriteBlock(fn.Body, rootScope, true, report)
+			a.Reports = append(a.Reports, report)
+		}
+	}
+}
+
+func (a *Analyzer) formatFnName(fn *ast.FnDecl) string {
+	if fn.Receiver != nil {
+		recvType := fn.Receiver.Type
+		if identType, ok := recvType.(*ast.IdentType); ok {
+			if st := a.chk.Structs()[identType.Name.Name]; st != nil {
+				return fmt.Sprintf("(%s).%s", st.Name, fn.Name.Name)
+			}
+		}
+		return fmt.Sprintf("(recv).%s", fn.Name.Name)
+	}
+	if fn.StaticType != nil {
+		return fmt.Sprintf("%s.%s", fn.StaticType.Name, fn.Name.Name)
+	}
+	return fn.Name.Name
+}
+
+// rewriteBlock analyzes statements in `block`, marks escaping variables, and injects LIFO DeferFreeStmts.
+func (a *Analyzer) rewriteBlock(
+	block *ast.BlockStmt,
+	scope *LexicalScope,
+	isFnRoot bool,
+	report *FnReport,
+) {
+	if block == nil {
+		return
+	}
+	var rewritten []ast.Stmt
+	diverged := false
+
+	for _, stmt := range block.Stmts {
+		switch s := stmt.(type) {
+		case *ast.VarDeclStmt:
+			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
+			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+
+			// 2. Register variable in current scope if its type owns heap memory
+			valType := a.chk.ExprTypes[s.Value]
+			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
+				state := StateScopedLocal
+				if scope.InArena {
+					state = StateManagedByArena
+				}
+				tv := &TrackedVar{
+					Name:        s.Name.Name,
+					Type:        valType,
+					CleanupKind: kind,
+					State:       state,
+					DeclSpan:    s.StmtSpan,
+				}
+				scope.Vars = append(scope.Vars, tv)
+				report.TrackedVars = append(report.TrackedVars, tv)
+			}
+			rewritten = append(rewritten, s)
+
+		case *ast.AssignStmt:
+			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+			rewritten = append(rewritten, s)
+
+		case *ast.IfStmt:
+			thenScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			a.rewriteBlock(s.Then, thenScope, false, report)
+			if s.Else != nil {
+				elseScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+				a.rewriteBlock(s.Else, elseScope, false, report)
+			}
+			rewritten = append(rewritten, s)
+
+		case *ast.ForStmt:
+			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			if s.Init != nil {
+				if vdecl, ok := s.Init.(*ast.VarDeclStmt); ok {
+					valType := a.chk.ExprTypes[vdecl.Value]
+					if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && vdecl.Name.Name != "_" {
+						state := StateScopedLocal
+						if loopScope.InArena {
+							state = StateManagedByArena
+						}
+						tv := &TrackedVar{
+							Name:        vdecl.Name.Name,
+							Type:        valType,
+							CleanupKind: kind,
+							State:       state,
+							DeclSpan:    vdecl.StmtSpan,
+						}
+						loopScope.Vars = append(loopScope.Vars, tv)
+						report.TrackedVars = append(report.TrackedVars, tv)
+					}
+				}
+			}
+			a.rewriteBlock(s.Body, loopScope, false, report)
+			rewritten = append(rewritten, s)
+
+		case *ast.BranchStmt:
+			rewritten = append(rewritten, s)
+
+		case *ast.ArenaStmt:
+			a.arenaCounter++
+			s.ArenaVar = fmt.Sprintf("_vex_arena_%d", a.arenaCounter)
+			arenaScope := &LexicalScope{Parent: scope, InArena: true}
+			a.rewriteBlock(s.Body, arenaScope, false, report)
+
+			// Inject O(1) slab teardown at the end of the `arena { ... }` block
+			arenaFree := &ast.DeferFreeStmt{
+				VarName:  s.ArenaVar,
+				TypeName: "vex_arena",
+				Kind:     ast.CleanupArena,
+				Reason:   "arena block exit (O(1) slab deallocation)",
+				StmtSpan: s.StmtSpan,
+			}
+			s.Body.Stmts = append(s.Body.Stmts, arenaFree)
+			report.InjectedFrees = append(report.InjectedFrees, arenaFree)
+			rewritten = append(rewritten, s)
+
+		case *ast.ReturnStmt:
+			// If returning a local variable (`return inv`), mark it as escaping so we don't free it!
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				if tv := scope.Find(ident.Ident.Name); tv != nil {
+					tv.State = StateEscapesViaReturn
+				}
+			} else if s.Value != nil {
+				a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+			}
+
+			// Unwind all active scopes up to function root in LIFO order before `return`
+			frees := a.collectScopeChainFrees(scope, "before return")
+			for _, f := range frees {
+				rewritten = append(rewritten, f)
+				report.InjectedFrees = append(report.InjectedFrees, f)
+			}
+			rewritten = append(rewritten, s)
+			diverged = true
+
+		case *ast.ExprStmt:
+			a.inspectExprMovesAndOrBlocks(s.Expr, scope, report)
+			rewritten = append(rewritten, s)
+
+		default:
+			rewritten = append(rewritten, s)
+		}
+	}
+
+	// If control flow reaches the end of the block without an explicit `return`,
+	// inject LIFO cleanup for variables declared in THIS lexical block.
+	if !diverged {
+		reason := "block scope exit"
+		if isFnRoot {
+			reason = "function scope exit"
+		}
+		frees := a.collectSingleScopeFrees(scope, reason)
+		for _, f := range frees {
+			rewritten = append(rewritten, f)
+			report.InjectedFrees = append(report.InjectedFrees, f)
+		}
+	}
+
+	block.Stmts = rewritten
+}
+
+func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScope, report *FnReport) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.StructInitExpr:
+		// Any local variable passed into a struct field (`Invoice{ id: local_id }`) transfers ownership
+		for _, f := range e.Fields {
+			if ident, ok := f.Value.(*ast.IdentExpr); ok {
+				if tv := scope.Find(ident.Ident.Name); tv != nil && tv.State == StateScopedLocal {
+					tv.State = StateMovedToContainer
+				}
+			} else {
+				a.inspectExprMovesAndOrBlocks(f.Value, scope, report)
+			}
+		}
+
+	case *ast.CallExpr:
+		// If this is an interface boxing cast `Payable(inv)`, the interface fat pointer borrows/boxes `inv`
+		if identCallee, ok := e.Callee.(*ast.IdentExpr); ok {
+			if _, isIface := a.chk.ExprTypes[e].(*checker.InterfaceType); isIface && len(e.Args) == 1 {
+				_ = identCallee
+				if argIdent, ok := e.Args[0].Expr.(*ast.IdentExpr); ok {
+					if tv := scope.Find(argIdent.Ident.Name); tv != nil && tv.State == StateScopedLocal {
+						tv.State = StateMovedToContainer
+					}
+				}
+			}
+		}
+		for _, arg := range e.Args {
+			a.inspectExprMovesAndOrBlocks(arg.Expr, scope, report)
+		}
+		if e.OrBlock != nil {
+			orScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			a.rewriteBlock(e.OrBlock, orScope, false, report)
+		}
+
+	case *ast.UnaryExpr:
+		a.inspectExprMovesAndOrBlocks(e.Expr, scope, report)
+	}
+}
+
+// collectSingleScopeFrees emits LIFO destructors for variables in a single block scope.
+func (a *Analyzer) collectSingleScopeFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+	var frees []*ast.DeferFreeStmt
+	for i := len(scope.Vars) - 1; i >= 0; i-- {
+		tv := scope.Vars[i]
+		if tv.State == StateScopedLocal {
+			frees = append(frees, &ast.DeferFreeStmt{
+				VarName:  tv.Name,
+				TypeName: tv.Type.String(),
+				Kind:     tv.CleanupKind,
+				Reason:   reason,
+				StmtSpan: tv.DeclSpan,
+			})
+		}
+	}
+	return frees
+}
+
+// collectScopeChainFrees walks from the current scope up to the function root in LIFO order for early returns.
+func (a *Analyzer) collectScopeChainFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+	var frees []*ast.DeferFreeStmt
+	for cur := scope; cur != nil; cur = cur.Parent {
+		frees = append(frees, a.collectSingleScopeFrees(cur, reason)...)
+	}
+	return frees
+}
+
+// FormatReport renders a human-readable summary of struct destructors, escape states, and injected frees.
+func (a *Analyzer) FormatReport() string {
+	var out strings.Builder
+	out.WriteString("1. Structs Requiring Generated `_autofree` Destructors:\n")
+	for name, needs := range a.StructNeedsFree {
+		if needs {
+			out.WriteString(fmt.Sprintf("   ├── struct %-12s -> requires `%s_autofree(&self)` (owns heap fields)\n", name, name))
+		} else {
+			out.WriteString(fmt.Sprintf("   ├── struct %-12s -> trivial stack value (0 heap fields, no destructor)\n", name))
+		}
+	}
+
+	out.WriteString("\n2. Function Escape Analysis & Injected LIFO Destructors:\n")
+	for _, rep := range a.Reports {
+		out.WriteString(fmt.Sprintf("\n   [fn %s]\n", rep.FnName))
+		if len(rep.TrackedVars) == 0 && len(rep.InjectedFrees) == 0 {
+			out.WriteString("     └── (pure stack primitives — 0 heap allocations)\n")
+			continue
+		}
+		for _, tv := range rep.TrackedVars {
+			out.WriteString(fmt.Sprintf("     ├── var %-12s (%-8s) : %s\n", tv.Name, tv.Type, tv.State))
+		}
+		for _, df := range rep.InjectedFrees {
+			out.WriteString(fmt.Sprintf("     └── INJECTED FREE: %s(&%s) [%s] (%s)\n",
+				df.Kind, df.VarName, df.TypeName, df.Reason))
+		}
+	}
+	return out.String()
+}

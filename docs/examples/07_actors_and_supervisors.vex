@@ -1,0 +1,55 @@
+module actor_demo
+
+// --- 1. SUPERVISED ACTOR DECLARATION ---
+pub actor WorkerNode {
+pub:
+	id int
+mut:
+	jobs_completed int = 0
+}
+
+pub fn (mut w WorkerNode) process_batch(workload_size int, trigger_fault bool) f32 {
+	w.jobs_completed = w.jobs_completed + 1
+
+	// Compute matrix multiplication workload
+	weights := tensor_fill(32, 32, 0.5)
+	inputs := tensor_fill(32, 32, 1.0)
+	result := weights @ inputs
+
+	// Simulate unexpected fault (e.g. GPU driver crash or numerical overflow)
+	if trigger_fault {
+		panic('WorkerNode numerical anomaly detected')
+	}
+
+	return tensor_sum(result)
+}
+
+fn main() {
+	println('=== 1. INITIALIZING SUPERVISED ACTORS ===')
+	mut node_a := WorkerNode{ id: 101, jobs_completed: 0 }
+	mut node_b := WorkerNode{ id: 102, jobs_completed: 0 }
+
+	println('=== 2. ASYNCHRONOUS FAN-OUT (<-) ACROSS THREAD POOL ===')
+	// Non-blocking asynchronous message dispatch
+	fut_a := node_a <- process_batch(32, false)
+	fut_b := node_b <- process_batch(32, true) // will fail and restart
+
+	println('=== 3. WORK-STEALING AWAIT WITH FAULT ISOLATION ===')
+	score_a := fut_a.await() or {
+		eprintln('Node A unexpected error: ${err}')
+		0.0
+	}
+	println('Node A completed successfully: sum=${score_a}')
+
+	score_b := fut_b.await() or {
+		println('Future caught supervised Node B fault: "${err}"')
+		0.0
+	}
+	println('Node B result handled safely with fallback: ${score_b}')
+
+	println('=== 4. POST-RESTART RECOVERY VERIFICATION ===')
+	// Node B's actor state was preserved and isolated arena slab wiped in O(1)
+	fut_b_retry := node_b <- process_batch(32, false)
+	score_b_retry := fut_b_retry.await() or { 0.0 }
+	println('Node B recovered and completed subsequent job: sum=${score_b_retry}')
+}

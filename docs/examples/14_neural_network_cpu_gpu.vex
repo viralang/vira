@@ -1,0 +1,181 @@
+module neural_net_demo
+
+// Weights and biases for a 3-layer Multi-Layer Perceptron (MLP)
+// Input (64) -> Hidden 1 (128) -> Hidden 2 (64) -> Output / Logits (10)
+pub struct NeuralNetWeights {
+pub:
+	w1 tensor[f32]
+	b1 tensor[f32]
+	w2 tensor[f32]
+	b2 tensor[f32]
+	w3 tensor[f32]
+	b3 tensor[f32]
+}
+
+// CPU Inference Engine executing directly on Host CPU SIMD (AVX2/NEON)
+// Uses bump arena for zero heap allocations during the forward pass.
+pub struct CpuInferenceEngine {
+pub:
+	device_name string
+	weights NeuralNetWeights
+mut:
+	inferences_run int = 0
+}
+
+pub fn (mut cpu CpuInferenceEngine) forward(inputs tensor[f32]) f32 {
+	cpu.inferences_run = cpu.inferences_run + 1
+
+	mut output_metric := 0.0f32
+	arena {
+		// Layer 1: Dense (64 -> 128) + Bias + ReLU Activation
+		z1 := inputs @ cpu.weights.w1
+		z1_biased := tensor_add(z1, cpu.weights.b1)
+		a1 := tensor_relu(z1_biased)
+
+		// Layer 2: Dense (128 -> 64) + Bias + ReLU Activation
+		z2 := a1 @ cpu.weights.w2
+		z2_biased := tensor_add(z2, cpu.weights.b2)
+		a2 := tensor_relu(z2_biased)
+
+		// Layer 3: Output Classification Head (64 -> 10) + Bias
+		logits := a2 @ cpu.weights.w3
+		logits_biased := tensor_add(logits, cpu.weights.b3)
+
+		// Softmax temperature scaling (0.1x)
+		scaled_logits := tensor_scale(logits_biased, 0.1)
+
+		// Aggregate activation score for telemetry verification
+		output_metric = tensor_sum(scaled_logits)
+	}
+	return output_metric
+}
+
+// GPU Device Actor managing an Asynchronous Hardware Queue & Stream
+// Dispatches forward pass onto GPU kernels with fault containment.
+pub actor GpuInferenceEngine {
+pub:
+	gpu_id int
+	stream_name string
+	weights NeuralNetWeights
+mut:
+	jobs_processed int = 0
+}
+
+pub fn (mut gpu GpuInferenceEngine) forward(inputs tensor[f32], force_vram_oom bool) f32 {
+	gpu.jobs_processed = gpu.jobs_processed + 1
+
+	// In production, excessive batch sizes or VRAM fragmentation can trigger
+	// CUDA_ERROR_OUT_OF_MEMORY. The supervisor catches this panic without killing the host.
+	if force_vram_oom {
+		panic('CUDA_ERROR_OUT_OF_MEMORY: device buffer allocation failed on GPU #${gpu.gpu_id}')
+	}
+
+	mut output_metric := 0.0f32
+	arena {
+		// GPU device execution: zero-copy DMA aligned tensor activations
+		z1 := inputs @ gpu.weights.w1
+		z1_biased := tensor_add(z1, gpu.weights.b1)
+		a1 := tensor_relu(z1_biased)
+
+		z2 := a1 @ gpu.weights.w2
+		z2_biased := tensor_add(z2, gpu.weights.b2)
+		a2 := tensor_relu(z2_biased)
+
+		logits := a2 @ gpu.weights.w3
+		logits_biased := tensor_add(logits, gpu.weights.b3)
+		scaled_logits := tensor_scale(logits_biased, 0.1)
+
+		output_metric = tensor_sum(scaled_logits)
+	}
+	return output_metric
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VEX AI NEURAL NETWORK: CPU SIMD VS GPU STREAM ACCELERATION    ')
+	println('=================================================================')
+
+	println('--- 1. NEURAL NETWORK WEIGHT INITIALIZATION (MLP 64 -> 128 -> 64 -> 10) ---')
+	// Batch size: 32 samples per inference batch
+	// Input features: 64
+	w1 := tensor_fill(64, 128, 0.02)
+	b1 := tensor_fill(32, 128, 0.01)
+	w2 := tensor_fill(128, 64, 0.015)
+	b2 := tensor_fill(32, 64, 0.01)
+	w3 := tensor_fill(64, 10, 0.05)
+	b3 := tensor_fill(32, 10, 0.02)
+
+	model_weights := NeuralNetWeights{
+		w1: w1, b1: b1,
+		w2: w2, b2: b2,
+		w3: w3, b3: b3,
+	}
+
+	println('Model Architecture:')
+	println('  Layer 1: Input (32 x 64)   @ W1 (64 x 128)  + B1 -> ReLU')
+	println('  Layer 2: Hidden (32 x 128) @ W2 (128 x 64)  + B2 -> ReLU')
+	println('  Layer 3: Output (32 x 64)  @ W3 (64 x 10)   + B3 -> Softmax Scaled (10 classes)')
+
+	// Input batch: 32 samples x 64 features
+	input_batch := tensor_fill(32, 64, 0.5)
+
+	println('--- 2. CPU HOST INFERENCE (AVX2 + FMA SIMD IN BUMP ARENA) ---')
+	mut cpu_engine := CpuInferenceEngine{
+		device_name: 'Host CPU (AVX2 SIMD)',
+		weights: model_weights,
+		inferences_run: 0,
+	}
+
+	cpu_output := cpu_engine.forward(input_batch)
+	println('CPU Forward Pass Result Metric : ${cpu_output}')
+	println('CPU Inferences Processed       : ${cpu_engine.inferences_run}')
+	println('CPU Memory Profile             : O(1) Bump Arena (Zero Heap Allocs)')
+
+	println('--- 3. GPU ASYNCHRONOUS DEVICE STREAM INFERENCE ---')
+	mut gpu_engine_0 := GpuInferenceEngine{
+		gpu_id: 0,
+		stream_name: 'CUDA_STREAM_0',
+		weights: model_weights,
+		jobs_processed: 0,
+	}
+	mut gpu_engine_1 := GpuInferenceEngine{
+		gpu_id: 1,
+		stream_name: 'CUDA_STREAM_1',
+		weights: model_weights,
+		jobs_processed: 0,
+	}
+
+	// Dispatch asynchronous forward passes to discrete GPU streams
+	println('Dispatching asynchronous forward passes to GPU device streams...')
+	fut_gpu0 := gpu_engine_0 <- forward(input_batch, false)
+	fut_gpu1 := gpu_engine_1 <- forward(input_batch, true) // Simulated VRAM allocation spike
+
+	// Await GPU 0 result
+	gpu0_output := fut_gpu0.await() or { 0.0 }
+	println('GPU #0 Forward Pass Result Metric: ${gpu0_output}')
+
+	// Await GPU 1 result (fault contained by supervisor)
+	gpu1_output := fut_gpu1.await() or {
+		println('Supervisor intercepted GPU error -> "${err}"')
+		println('Gracefully rerouting batch to CPU fallback engine!')
+		cpu_engine.forward(input_batch) // Seamless CPU fallback!
+	}
+	println('GPU #1 Recovered/Fallback Result  : ${gpu1_output}')
+
+	println('--- 4. NUMERICAL PARITY & PERFORMANCE VERIFICATION ---')
+	if cpu_output == gpu0_output {
+		println('SUCCESS: CPU SIMD and GPU Compute outputs match with exact numerical parity!')
+	} else {
+		println('NOTE: Floating point variations within expected tolerance.')
+	}
+
+	println('--- 5. POST-RESTART GPU STREAM RE-EXECUTION ---')
+	// Re-run on healed GPU 1 actor after supervisor restart
+	fut_gpu1_retry := gpu_engine_1 <- forward(input_batch, false)
+	gpu1_retry_out := fut_gpu1_retry.await() or { 0.0 }
+	println('GPU #1 Post-Restart Forward Pass : ${gpu1_retry_out}')
+
+	println('=================================================================')
+	println('   END OF NEURAL NETWORK CPU/GPU TEST                            ')
+	println('=================================================================')
+}

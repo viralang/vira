@@ -1,0 +1,63 @@
+module build_demo
+
+// Production telemetry payload
+pub struct ServiceConfig {
+pub:
+	app_name string
+	environment string
+	worker_threads int
+	batch_capacity int
+}
+
+pub fn ServiceConfig.default_config() ServiceConfig {
+	return ServiceConfig{
+		app_name: 'VexProductionService',
+		environment: 'production',
+		worker_threads: 4,
+		batch_capacity: 1024,
+	}
+}
+
+pub fn compute_workload(iterations int) f32 {
+	mut total := 0.0f32
+	arena {
+		inputs := tensor_fill(32, 32, 0.25)
+		weights := tensor_fill(32, 32, 0.50)
+		
+		for mut i := 0; i < iterations; i += 1 {
+			// MatMul compiled with hardware AVX2/NEON vector instructions
+			res := inputs @ weights
+			total += tensor_sum(res)
+		}
+	}
+	return total
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VEX COMPILATION, BUILD MODES & DEPLOYMENT TELEMETRY           ')
+	println('=================================================================')
+
+	config := ServiceConfig.default_config()
+	println('Service Identity:')
+	println('  Name            : ${config.app_name}')
+	println('  Environment     : ${config.environment}')
+	println('  Worker Threads  : ${config.worker_threads}')
+	println('  Batch Capacity  : ${config.batch_capacity}')
+
+	println('--- 1. EXECUTING BENCHMARK WORKLOAD ---')
+	println('Running 50 consecutive tensor activations...')
+	score := compute_workload(50)
+	println('Workload Output Score : ${score}')
+
+	println('--- 2. RUNTIME DEPLOYMENT PROFILE ---')
+	println('Binary Features:')
+	println('  * Native Machine Code (No Virtual Machine, No Bytecode)')
+	println('  * Zero Garbage Collector Pauses (Deterministic Autofree)')
+	println('  * Self-Contained Statically Linked Binary')
+	println('  * Hardware SIMD Vector Acceleration (AVX2 / ARM NEON)')
+
+	println('=================================================================')
+	println('   BUILD COMPLETE                                                ')
+	println('=================================================================')
+}

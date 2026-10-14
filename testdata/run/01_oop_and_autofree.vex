@@ -1,0 +1,74 @@
+module billing
+
+// OUT: Invoice #inv_9001 paid (15000 cents)
+// OUT: Invoice #inv_9001 [updated_at=1760000000]
+// OUT: [vex_rt] active_leaks=0
+
+pub struct AuditMeta {
+pub:
+	created_at i64
+pub mut:
+	updated_at i64
+}
+
+pub fn (mut a AuditMeta) touch() {
+	a.updated_at = 1760000000
+}
+
+pub struct Invoice {
+	AuditMeta
+	secret_token string
+mut:
+	retry_count int = 0
+pub:
+	id string
+	amount_cents i64
+pub mut:
+	is_paid bool
+}
+
+pub interface Payable {
+	id string
+	summary() string
+mut:
+	mark_paid() !string
+}
+
+pub fn Invoice.new(id string, amount_cents i64) Invoice {
+	res := Invoice{
+		AuditMeta: AuditMeta{
+			created_at: 1750000000,
+			updated_at: 1750000000
+		},
+		secret_token: 'sec_live_01',
+		id: id,
+		amount_cents: amount_cents,
+		is_paid: false
+	}
+	return res
+}
+
+pub fn (inv Invoice) summary() string {
+	return 'Invoice #${inv.id} [updated_at=${inv.updated_at}]'
+}
+
+pub fn (mut inv Invoice) mark_paid() !string {
+	if inv.amount_cents <= 0 {
+		return error('invalid amount')
+	}
+	inv.is_paid = true
+	inv.retry_count += 1
+	inv.touch()
+	return 'Invoice #${inv.id} paid (${inv.amount_cents} cents)'
+}
+
+fn main() {
+	mut inv := Invoice.new('inv_9001', 15000)
+	msg := inv.mark_paid() or {
+		return
+	}
+	println(msg)
+	println(inv.summary())
+	p := Payable(inv)
+	_ := p
+}

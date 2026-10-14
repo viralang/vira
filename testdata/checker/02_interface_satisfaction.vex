@@ -1,0 +1,17 @@
+module main
+
+pub interface Drawable {
+	id string
+	render() string
+}
+
+pub struct BrokenWidget {
+pub:
+	id string
+}
+
+fn main() {
+	w := BrokenWidget{ id: 'w1' }
+	d := Drawable(w) // ERROR: struct 'BrokenWidget' does not implement interface 'Drawable': missing method 'render'
+	_ := d
+}

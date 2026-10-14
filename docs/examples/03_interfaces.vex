@@ -1,0 +1,52 @@
+module interfaces_demo
+
+// --- 1. INTERFACE DEFINITION ---
+pub interface Notifier {
+	channel_name() string
+	send(recipient string, body string) string
+}
+
+// --- 2. IMPLEMENTING STRUCT A: EmailService ---
+pub struct EmailService {
+pub:
+	smtp_host string
+}
+
+pub fn (e EmailService) channel_name() string {
+	return 'Email [SMTP via ${e.smtp_host}]'
+}
+
+pub fn (e EmailService) send(recipient string, body string) string {
+	return 'Delivered email to ${recipient}: ${body}'
+}
+
+// --- 3. IMPLEMENTING STRUCT B: WebhookService ---
+pub struct WebhookService {
+pub:
+	endpoint string
+}
+
+pub fn (w WebhookService) channel_name() string {
+	return 'Webhook [POST ${w.endpoint}]'
+}
+
+pub fn (w WebhookService) send(recipient string, body string) string {
+	return 'Triggered webhook for ${recipient} with payload "${body}"'
+}
+
+fn main() {
+	println('=== 1. IMPLICIT INTERFACE SATISFACTION & FAT-POINTER BOXING ===')
+	email := EmailService{ smtp_host: 'smtp.vex.internal:587' }
+	webhook := WebhookService{ endpoint: 'https://api.vex.dev/events' }
+
+	// Boxing into Notifier interface fat-pointers (16 bytes: ._object + ._vtable)
+	n1 := Notifier(email)
+	n2 := Notifier(webhook)
+
+	println('=== 2. POLYMORPHIC VTABLE DISPATCH ===')
+	println(n1.channel_name())
+	println(n1.send('ops@company.com', 'Database migration completed'))
+
+	println(n2.channel_name())
+	println(n2.send('slack_bot', 'All deployment checks passed'))
+}

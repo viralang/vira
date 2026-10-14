@@ -1,0 +1,41 @@
+module io_demo
+
+fn main() {
+	test_file := 'sample_output.txt'
+
+	println('=== 1. CHECK FILE EXISTENCE ===')
+	initially_exists := file_exists(test_file)
+	println('File ${test_file} exists initially: ${initially_exists}')
+
+	println('=== 2. ATOMIC FILE WRITE ===')
+	content := 'Vex Language: Fast, Safe, Concurrent, and GC-Free\n'
+	_ := write_file(test_file, content) or {
+		eprintln('Failed to write file: ${err}')
+		return
+	}
+	println('Successfully wrote initial content to ${test_file}')
+
+	println('=== 3. APPENDING TO FILE ===')
+	extra_log := '[LOG] Tensor pipeline initialized at timestamp 1760000000\n'
+	_ := append_file(test_file, extra_log) or {
+		eprintln('Failed to append to file: ${err}')
+		return
+	}
+	println('Successfully appended log record to ${test_file}')
+
+	println('=== 4. READING FILE CONTENTS ===')
+	data := read_file(test_file) or {
+		eprintln('Failed to read file: ${err}')
+		return
+	}
+	println('--- Read File Content ---')
+	println(data)
+
+	println('=== 5. CLEANUP / REMOVE FILE ===')
+	_ := remove_file(test_file) or {
+		eprintln('Failed to remove file: ${err}')
+		return
+	}
+	now_exists := file_exists(test_file)
+	println('File ${test_file} deleted; exists now: ${now_exists}')
+}

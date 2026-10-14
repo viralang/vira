@@ -1,0 +1,161 @@
+module control_flow_demo
+
+pub struct TelemetryNode {
+pub:
+	node_id int
+mut:
+	status_flags int = 0
+	sample_count int = 0
+	accumulated_metric f32 = 0.0
+}
+
+// Static flag helpers
+pub fn TelemetryNode.flag_online() int { return 1 }
+pub fn TelemetryNode.flag_warning() int { return 2 }
+pub fn TelemetryNode.flag_critical() int { return 4 }
+pub fn TelemetryNode.flag_degraded() int { return 8 }
+
+pub fn (mut node TelemetryNode) update_flag(flag int, enable bool) {
+	if enable {
+		node.status_flags = node.status_flags | flag
+	} else {
+		// Clear bit using XOR if set
+		if (node.status_flags & flag) != 0 {
+			node.status_flags = node.status_flags ^ flag
+		}
+	}
+}
+
+pub fn (node TelemetryNode) has_flag(flag int) bool {
+	return (node.status_flags & flag) != 0
+}
+
+fn classify_temperature(temp f32) string {
+	if temp >= 95.0 {
+		return 'CRITICAL_OVERHEAT'
+	} else if temp >= 80.0 {
+		return 'WARNING_HOT'
+	} else if temp >= 50.0 {
+		return 'OPTIMAL'
+	} else if temp >= 20.0 {
+		return 'COOL'
+	} else {
+		return 'SUB_ZERO'
+	}
+}
+
+fn compute_collatz_steps(start_n int) int {
+	mut n := start_n
+	mut steps := 0
+	for n > 1 {
+		steps += 1
+		if (n % 2) == 0 {
+			n /= 2
+		} else {
+			n = (3 * n) + 1
+		}
+	}
+	return steps
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VEX CONTROL FLOW, LOOPS & OPERATORS DEMONSTRATION             ')
+	println('=================================================================')
+
+	println('--- 1. BRANCHING & MULTI-WAY IF / ELSE-IF / ELSE ---')
+	test_temps := 82.5f32
+	grade := classify_temperature(test_temps)
+	println('Thermal reading: ${test_temps}C -> Classification: ${grade}')
+
+	negative_temp := -15.0f32
+	cold_status := classify_temperature(negative_temp)
+	println('Thermal reading: ${negative_temp}C -> Classification: ${cold_status}')
+
+	println('--- 2. LOOPS: 3-PART C-STYLE FOR LOOP ---')
+	mut sum_squares := 0
+	for mut i := 1; i <= 6; i += 1 {
+		sq := i * i
+		sum_squares += sq
+		println('  Iter i=${i} -> square=${sq}, running_sum=${sum_squares}')
+	}
+	println('Sum of squares 1..6: ${sum_squares}')
+
+	println('--- 3. LOOPS: CONDITION-ONLY (WHILE) CONVERGENCE ---')
+	collatz_start := 27
+	steps := compute_collatz_steps(collatz_start)
+	println('Collatz conjecture steps for ${collatz_start} to reach 1: ${steps}')
+
+	println('--- 4. LOOPS: INFINITE LOOP WITH BREAK & CONTINUE ---')
+	mut stream_tick := 0
+	mut accepted_packets := 0
+	for {
+		stream_tick += 1
+
+		// Stop condition
+		if stream_tick > 12 {
+			break
+		}
+
+		// Filter out odd ticks using modulo operator (%)
+		if (stream_tick % 2) != 0 {
+			continue
+		}
+
+		accepted_packets += 1
+		println('  Processed even tick #${stream_tick} (Total accepted: ${accepted_packets})')
+	}
+
+	println('--- 5. ARITHMETIC & COMPOUND ASSIGNMENT OPERATORS ---')
+	mut accumulator := 100
+	println('Initial accumulator: ${accumulator}')
+	accumulator += 50
+	accumulator -= 25
+	accumulator *= 3
+	accumulator /= 5
+	accumulator %= 32
+	println('After (+= 50, -= 25, *= 3, /= 5, %= 32): ${accumulator}')
+
+	println('--- 6. BITWISE & SHIFT OPERATORS (&, |, ^, <<, >>) ---')
+	flag_online := TelemetryNode.flag_online()
+	flag_warning := TelemetryNode.flag_warning()
+	flag_critical := TelemetryNode.flag_critical()
+
+	mut node := TelemetryNode{ node_id: 42, status_flags: 0, sample_count: 0, accumulated_metric: 0.0 }
+	
+	node.update_flag(flag_online, true)
+	node.update_flag(flag_warning, true)
+	println('Node status flags: ${node.status_flags}')
+	println('  has_flag(flag_online):  ${node.has_flag(flag_online)}')
+	println('  has_flag(flag_warning): ${node.has_flag(flag_warning)}')
+	println('  has_flag(flag_critical):${node.has_flag(flag_critical)}')
+
+	// Test bit shifts
+	base_mask := 1
+	shifted_left := base_mask << 3      // 8 (FLAG_DEGRADED)
+	shifted_right := shifted_left >> 2  // 2 (FLAG_WARNING)
+	println('Bitwise shifts: (1 << 3) = ${shifted_left}, (8 >> 2) = ${shifted_right}')
+
+	println('--- 7. LOGICAL BOOLEAN OPERATORS (&&, ||, !) ---')
+	is_online := node.has_flag(flag_online)
+	is_critical := node.has_flag(flag_critical)
+	is_stable := is_online && (!is_critical)
+	
+	if is_stable {
+		println('System Stability Check: PASSED (Node is online and not critical)')
+	} else {
+		println('System Stability Check: FAILED')
+	}
+
+	println('--- 8. SIMD TENSOR & SPECIAL OPERATORS (@) ---')
+	weights := tensor_fill(16, 16, 0.5)
+	inputs := tensor_fill(16, 16, 2.0)
+	// Matrix multiplication with '@' operator
+	result_tensor := weights @ inputs
+	total_sum := tensor_sum(result_tensor)
+	println('SIMD Matmul (@) total sum of 16x16: ${total_sum}')
+
+	println('=================================================================')
+	println('   END OF FLOW, LOOPS & OPERATORS DEMO                           ')
+	println('=================================================================')
+}

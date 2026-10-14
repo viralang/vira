@@ -1,0 +1,46 @@
+module result_demo
+
+pub struct BankAccount {
+pub:
+	account_id string
+pub mut:
+	balance i64
+}
+
+pub fn (mut a BankAccount) withdraw(amount i64) !i64 {
+	if amount <= 0 {
+		return error('withdrawal amount must be greater than zero')
+	}
+	if amount > a.balance {
+		return error('insufficient funds in account ${a.account_id}')
+	}
+	a.balance = a.balance - amount
+	return a.balance
+}
+
+fn main() {
+	println('=== 1. HANDLING SUCCESSFUL RESULT (!T) ===')
+	mut acc := BankAccount{ account_id: 'acc_001', balance: 50000 }
+
+	new_bal := acc.withdraw(15000) or {
+		eprintln('Unexpected failure: ${err}')
+		return
+	}
+	println('Withdrawal approved! New balance: ${new_bal} cents')
+
+	println('=== 2. HANDLING ERROR RESULT WITH or { ... } ===')
+	// Attempt overdraft
+	failed_bal := acc.withdraw(999999) or {
+		println('Caught business logic error: ${err}')
+		0 // fallback default value
+	}
+	println('Fallback balance returned: ${failed_bal}')
+
+	println('=== 3. ZERO/NEGATIVE VALIDATION WITH or { ... } ===')
+	// Attempt non-positive withdrawal
+	zero_bal := acc.withdraw(0) or {
+		println('Validation rejected: ${err}')
+		acc.balance
+	}
+	println('Preserved balance: ${zero_bal} cents')
+}

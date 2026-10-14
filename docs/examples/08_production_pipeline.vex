@@ -1,0 +1,102 @@
+module pipeline
+
+// --- 1. TELEMETRY & AUDIT BASE ---
+pub struct MetricHeader {
+pub:
+	timestamp i64
+pub mut:
+	ops_count int
+}
+
+pub fn (mut m MetricHeader) record_op() {
+	m.ops_count = m.ops_count + 1
+}
+
+// --- 2. PIPELINE INFERENCE TASK ---
+pub struct InferenceJob {
+	MetricHeader
+pub:
+	job_id string
+	batch_size int
+pub mut:
+	status string
+}
+
+pub fn InferenceJob.create(id string, batch int) InferenceJob {
+	return InferenceJob{
+		MetricHeader: MetricHeader{ timestamp: 1760000000, ops_count: 0 },
+		job_id: id,
+		batch_size: batch,
+		status: 'PENDING'
+	}
+}
+
+// --- 3. AUDITABLE INTERFACE ---
+pub interface Auditable {
+	job_summary() string
+}
+
+pub fn (j InferenceJob) job_summary() string {
+	return 'Job [${j.job_id}]: status=${j.status}, batch=${j.batch_size}, ops=${j.ops_count}'
+}
+
+// --- 4. PARALLEL MODEL INFERENCE ACTOR ---
+pub actor InferenceEngine {
+pub:
+	model_id string
+mut:
+	inferences_served int = 0
+}
+
+pub fn (mut e InferenceEngine) predict(scale f32) !f32 {
+	if scale <= 0.0 {
+		return error('invalid inference scale: must be positive')
+	}
+	e.inferences_served = e.inferences_served + 1
+
+	// SIMD Tensor Forward Pass
+	weights := tensor_fill(32, 32, 0.25)
+	inputs := tensor_fill(32, 32, scale)
+	outputs := weights @ inputs
+
+	return tensor_sum(outputs)
+}
+
+fn main() {
+	println('=== 1. PREPARING PIPELINE JOBS & TELEMETRY ===')
+	mut job1 := InferenceJob.create('job_prod_001', 32)
+	mut job2 := InferenceJob.create('job_prod_002', 64)
+	job1.record_op()
+	job2.record_op()
+
+	// Dynamic interface inspection
+	a1 := Auditable(job1)
+	println(a1.job_summary())
+
+	println('=== 2. PARALLEL MULTI-ACTOR INFERENCE FAN-OUT ===')
+	mut engine1 := InferenceEngine{ model_id: 'llama_vision_v1', inferences_served: 0 }
+	mut engine2 := InferenceEngine{ model_id: 'llama_vision_v2', inferences_served: 0 }
+
+	fut1 := engine1 <- predict(1.5)
+	fut2 := engine2 <- predict(2.0)
+
+	println('=== 3. AWAITING RESULTS & FINALIZING STATUS ===')
+	res1 := fut1.await() or {
+		eprintln('Engine 1 failed: ${err}')
+		0.0
+	}
+	job1.status = 'COMPLETED'
+
+	res2 := fut2.await() or {
+		eprintln('Engine 2 failed: ${err}')
+		0.0
+	}
+	job2.status = 'COMPLETED'
+
+	println('Inference #1 Output Sum: ${res1}')
+	println('Inference #2 Output Sum: ${res2}')
+
+	println('=== 4. FINAL PIPELINE AUDIT REPORT ===')
+	println(job1.job_summary())
+	println(job2.job_summary())
+}

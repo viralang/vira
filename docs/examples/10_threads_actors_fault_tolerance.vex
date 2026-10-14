@@ -1,0 +1,98 @@
+module concurrency_demo
+
+pub actor ComputeNode {
+pub:
+	node_id int
+mut:
+	batches_completed int = 0
+	is_degraded bool = false
+}
+
+pub fn (mut node ComputeNode) compute_batch(multiplier f32, force_fault bool) f32 {
+	node.batches_completed = node.batches_completed + 1
+
+	// SIMD matrix math workload
+	weights := tensor_fill(32, 32, 0.25)
+	inputs := tensor_fill(32, 32, multiplier)
+	output := weights @ inputs
+
+	// Injected fault to test Erlang-style supervision
+	if force_fault {
+		node.is_degraded = true
+		panic('Node #${node.node_id} thermal throttling / NaN anomaly')
+	}
+
+	return tensor_sum(output)
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VEX MULTICORE WORK-STEALING ACTORS & SUPERVISOR DEMO          ')
+	println('=================================================================')
+
+	println('--- 1. INITIALIZING INDEPENDENT ACTOR NODES ---')
+	mut n1 := ComputeNode{ node_id: 1, batches_completed: 0, is_degraded: false }
+	mut n2 := ComputeNode{ node_id: 2, batches_completed: 0, is_degraded: false }
+	mut n3 := ComputeNode{ node_id: 3, batches_completed: 0, is_degraded: false }
+	mut n4 := ComputeNode{ node_id: 4, batches_completed: 0, is_degraded: false }
+
+	println('Nodes initialized with isolated mailboxes and private arena slabs')
+
+	println('--- 2. ASYNCHRONOUS FAN-OUT (<-) ACROSS CHASE-LEV WORK-STEALING POOL ---')
+	// Non-blocking dispatch: jobs pushed to Chase-Lev deques; idle threads steal work
+	fut1 := n1 <- compute_batch(1.0, false)
+	fut2 := n2 <- compute_batch(2.0, false)
+	fut3 := n3 <- compute_batch(3.0, true)  // Injected fault!
+	fut4 := n4 <- compute_batch(4.0, false)
+
+	println('Dispatched 4 asynchronous jobs returning Future[f32] handles')
+
+	println('--- 3. SYNCHRONIZING & AWAITING RESULTS (.await) ---')
+	res1 := fut1.await() or {
+		eprintln('Unexpected error on Node 1: ${err}')
+		0.0
+	}
+	res2 := fut2.await() or {
+		eprintln('Unexpected error on Node 2: ${err}')
+		0.0
+	}
+
+	// Node 3 will trap fault on worker thread
+	res3 := fut3.await() or {
+		println('Supervisor trapped fault on Node 3 -> "${err}"')
+		0.0 // Fallback value ensures zero pipeline stall
+	}
+
+	res4 := fut4.await() or {
+		eprintln('Unexpected error on Node 4: ${err}')
+		0.0
+	}
+
+	println('Parallel Fan-In Sync Complete:')
+	println('  Node 1 Result: ${res1}')
+	println('  Node 2 Result: ${res2}')
+	println('  Node 3 Result (Faulted & Handled): ${res3}')
+	println('  Node 4 Result: ${res4}')
+
+	println('--- 4. POST-SUPERVISOR SELF-HEALING & RETRY ---')
+	// Node 3's isolated arena slab was wiped in O(1) and supervisor reset it to running
+	fut3_retry := n3 <- compute_batch(3.0, false)
+	res3_recovered := fut3_retry.await() or {
+		eprintln('Retry failed: ${err}')
+		0.0
+	}
+	println('Node 3 successfully processed retry batch after restart: ${res3_recovered}')
+
+	println('--- 5. SEQUENTIAL MAILBOX GUARANTEE VERIFICATION ---')
+	// Multiple messages to the same actor are processed in serial order without races
+	f_seq1 := n1 <- compute_batch(1.5, false)
+	f_seq2 := n1 <- compute_batch(2.5, false)
+	s1 := f_seq1.await() or { 0.0 }
+	s2 := f_seq2.await() or { 0.0 }
+	println('Sequential Mailbox for Node 1: run1=${s1}, run2=${s2}')
+	println('Total batches completed on Node 1: ${n1.batches_completed}')
+
+	println('=================================================================')
+	println('   END OF CONCURRENCY DEMO (Review [vex_rt] Telemetry Below)     ')
+	println('=================================================================')
+}

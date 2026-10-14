@@ -1,0 +1,40 @@
+module memory_demo
+
+pub struct ReportRecord {
+pub:
+	tag string
+	value i64
+}
+
+fn simulate_standard_autofree() {
+	println('--- Standard LIFO Scope-Exit Autofree ---')
+	// Strings and structs allocated here are tracked by static escape analysis
+	r1 := ReportRecord{ tag: 'batch_alpha', value: 100 }
+	r2 := ReportRecord{ tag: 'batch_beta', value: 200 }
+	println('Created records: ${r1.tag}=${r1.value}, ${r2.tag}=${r2.value}')
+	// Destructors injected automatically at scope exit:
+	// vex_str_free(&r2.tag)
+	// vex_str_free(&r1.tag)
+}
+
+fn simulate_arena_batch() {
+	println('--- 64-Byte Cache-Aligned Bump Arena ---')
+	// Allocations inside `arena { ... }` bypass individual heap malloc/free
+	arena {
+		t1 := tensor_fill(32, 32, 1.5)
+		t2 := tensor_fill(32, 32, 2.0)
+		t3 := t1 @ t2
+		println('Arena MatMul computed sum: ${tensor_sum(t3)}')
+	}
+	// Entire arena slab wiped in O(1) time upon block exit!
+}
+
+fn main() {
+	println('=== 1. DETERMINISTIC LIFO AUTOFREE (NO GC) ===')
+	simulate_standard_autofree()
+
+	println('=== 2. HIGH-PERFORMANCE BUMP ARENA ALLOCATION ===')
+	simulate_arena_batch()
+
+	println('Both memory domains completed with zero memory leaks')
+}

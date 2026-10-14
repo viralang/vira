@@ -1,0 +1,42 @@
+module basics
+
+fn calculate_bonus(base i64, bonus_cents i64, is_top_performer bool) i64 {
+	if is_top_performer {
+		return base + bonus_cents
+	} else {
+		return base
+	}
+}
+
+fn main() {
+	println('=== 1. IMMUTABILITY & MUTABILITY ===')
+	// Bindings are immutable by default
+	company_name := 'VexCorp'
+	established := 2026
+	println('Welcome to ${company_name} (Est. ${established})')
+
+	// Mutable bindings use the 'mut' keyword
+	mut current_headcount := 42
+	println('Initial headcount: ${current_headcount}')
+	current_headcount = current_headcount + 5
+	println('Updated headcount after hiring: ${current_headcount}')
+
+	println('=== 2. NUMERIC & PRIMITIVE TYPES ===')
+	id := 1001                 // int (32-bit)
+	salary_cents := 12500000   // i64 (64-bit currency/timestamp)
+	perf_rating := 4.85        // f64 / float
+	is_senior := true          // bool
+
+	println('Employee #${id}: senior=${is_senior}, rating=${perf_rating}')
+
+	println('=== 3. CONTROL FLOW & CONDITIONAL LOGIC ===')
+	final_compensation := calculate_bonus(salary_cents, 2500000, is_senior)
+	println('Base salary: ${salary_cents} cents')
+	println('Final compensation with bonus: ${final_compensation} cents')
+
+	println('=== 4. BLANK IDENTIFIER (_) ===')
+	// Discard return values or temporary computations
+	_ := calculate_bonus(50000, 10000, false)
+	_ := 'discarded temporary value'
+	println('Blank identifier discards values cleanly without warnings')
+}

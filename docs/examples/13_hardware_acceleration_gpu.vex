@@ -1,0 +1,127 @@
+module hardware_accel_demo
+
+// Enumeration for Heterogeneous Hardware Accelerators
+pub struct AcceleratorProfile {
+pub:
+	name string
+	device_type string
+	peak_tflops f32
+	vector_width_bits int
+}
+
+pub fn AcceleratorProfile.host_cpu_simd() AcceleratorProfile {
+	return AcceleratorProfile{
+		name: 'Host CPU (AVX2 + FMA)',
+		device_type: 'CPU_SIMD',
+		peak_tflops: 0.85,
+		vector_width_bits: 256,
+	}
+}
+
+pub fn AcceleratorProfile.discrete_gpu() AcceleratorProfile {
+	return AcceleratorProfile{
+		name: 'NVIDIA RTX / Tensor Core',
+		device_type: 'GPU_CUDA',
+		peak_tflops: 65.0,
+		vector_width_bits: 1024,
+	}
+}
+
+pub fn AcceleratorProfile.unified_metal() AcceleratorProfile {
+	return AcceleratorProfile{
+		name: 'Apple Silicon GPU / Neural Engine',
+		device_type: 'GPU_METAL',
+		peak_tflops: 18.0,
+		vector_width_bits: 512,
+	}
+}
+
+// Actor managing an Asynchronous Hardware Compute Queue
+pub actor DeviceQueueWorker {
+pub:
+	device_id int
+	target_hardware string
+mut:
+	jobs_dispatched int = 0
+	is_busy bool = false
+}
+
+// Method simulating heterogeneous compute offloading with fault containment
+pub fn (mut worker DeviceQueueWorker) execute_kernel(batch_multiplier f32, force_oom bool) f32 {
+	worker.jobs_dispatched = worker.jobs_dispatched + 1
+
+	// In real GPU runtimes, a kernel launch crash (CUDA OOM, illegal address)
+	// would abort the process. In Vex, the supervisor boundary intercepts the fault,
+	// wipes the actor's scratch memory in O(1), and protects the host application.
+	if force_oom {
+		panic('CUDA_ERROR_OUT_OF_MEMORY: device memory allocation failed on Device #${worker.device_id}')
+	}
+
+	mut output_metric := 0.0f32
+	// High-throughput 64-byte aligned tensor computation (DMA ready)
+	arena {
+		inputs := tensor_fill(32, 64, batch_multiplier)
+		weights := tensor_fill(64, 32, 0.05)
+		// Hardware SIMD matrix multiplication
+		result := inputs @ weights
+		output_metric = tensor_sum(result)
+	}
+	return output_metric
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VEX HETEROGENEOUS HARDWARE ACCELERATION & GPU COMPUTING       ')
+	println('=================================================================')
+
+	println('--- 1. ACCELERATOR PROFILES & ZERO-COPY BUFFER ALIGNMENT ---')
+	cpu_prof := AcceleratorProfile.host_cpu_simd()
+	gpu_prof := AcceleratorProfile.discrete_gpu()
+	metal_prof := AcceleratorProfile.unified_metal()
+
+	println('Detected Hardware Compute Targets:')
+	println('  [1] ${cpu_prof.name} -> ${cpu_prof.vector_width_bits}-bit vector registers')
+	println('  [2] ${gpu_prof.name} -> Target: ${gpu_prof.device_type} (${gpu_prof.peak_tflops} TFLOPs)')
+	println('  [3] ${metal_prof.name} -> Target: ${metal_prof.device_type} (Unified DMA)')
+
+	println('Zero-Copy DMA Ready Memory Architecture:')
+	println('  * All Vex tensors are aligned to strict 64-byte cache lines.')
+	println('  * Memory pointers pass directly to CUDA, ROCm, Metal, or GGML without marshalling.')
+
+	println('--- 2. ASYNCHRONOUS DEVICE WORKERS & STREAMS ---')
+	mut gpu_node_0 := DeviceQueueWorker{ device_id: 0, target_hardware: 'GPU_CUDA', jobs_dispatched: 0, is_busy: false }
+	mut gpu_node_1 := DeviceQueueWorker{ device_id: 1, target_hardware: 'GPU_CUDA', jobs_dispatched: 0, is_busy: false }
+	mut npu_node   := DeviceQueueWorker{ device_id: 2, target_hardware: 'NPU_ACCEL', jobs_dispatched: 0, is_busy: false }
+
+	// Non-blocking asynchronous kernel dispatches returning Future[f32]
+	fut_gpu0 := gpu_node_0 <- execute_kernel(1.0, false)
+	fut_gpu1 := gpu_node_1 <- execute_kernel(2.0, true)  // Injected GPU Out-of-Memory fault
+	fut_npu  := npu_node   <- execute_kernel(0.5, false)
+
+	println('--- 3. SYNCHRONIZING DEVICE STREAMS & FAULT RECOVERY ---')
+	res_gpu0 := fut_gpu0.await() or {
+		eprintln('GPU 0 Error: ${err}')
+		0.0
+	}
+	println('GPU Device #0 Output: ${res_gpu0}')
+
+	// GPU 1 will trap the simulated CUDA OOM fault
+	res_gpu1 := fut_gpu1.await() or {
+		println('Supervisor intercepted hardware fault -> "${err}"')
+		0.0 // Graceful fallback prevents crash of host pipeline
+	}
+	println('GPU Device #1 Result (Handled Safely): ${res_gpu1}')
+
+	res_npu := fut_npu.await() or { 0.0 }
+	println('NPU Compute Engine Output: ${res_npu}')
+
+	println('--- 4. POST-RESTART GPU STREAM RE-ATTACHMENT ---')
+	// GPU Node 1 was automatically restarted by the Erlang-style supervisor
+	fut_gpu1_retry := gpu_node_1 <- execute_kernel(2.0, false)
+	res_gpu1_recovered := fut_gpu1_retry.await() or { 0.0 }
+	println('GPU Device #1 recovered after supervisor restart: ${res_gpu1_recovered}')
+
+	println('=================================================================')
+	println('   END OF HARDWARE ACCELERATION DEMO                             ')
+	println('=================================================================')
+}

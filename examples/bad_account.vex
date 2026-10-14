@@ -1,0 +1,27 @@
+module billing
+
+pub struct Account {
+	secret_pin int
+pub:
+	id string
+pub mut:
+	balance i64
+}
+
+pub fn (mut a Account) deposit(amount i64) !i64 {
+	a.balance += amount
+	return a.balance
+}
+
+fn main() {
+	x := 10
+	x = 20
+
+	imm_acc := Account{ secret_pin: 1234, id: 'acc_1', balance: 100 }
+	_ := imm_acc.deposit(50) or { 0 }
+
+	mut mut_acc := Account{ secret_pin: 1234, id: 'acc_2', balance: 200 }
+	mut_acc.id = 'hacked_id'
+	unhandled := mut_acc.deposit(500)
+	_ := unhandled
+}

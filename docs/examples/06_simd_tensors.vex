@@ -1,0 +1,30 @@
+module tensor_demo
+
+fn main() {
+	println('=== 1. TENSOR CONSTRUCTION & INITIALIZATION ===')
+	// Construct 2D tensors of f32 primitives
+	w := tensor_fill(64, 64, 0.50)
+	x := tensor_fill(64, 64, 2.00)
+	println('Allocated weight matrix W (64x64) and input matrix X (64x64)')
+
+	println('=== 2. HARDWARE-ACCELERATED MATRIX MULTIPLICATION (@) ===')
+	// The `@` operator compiles down to hardware AVX2+FMA (256-bit) or ARM NEON
+	y := w @ x
+	println('Computed Y = W @ X via SIMD dot-product vectorization')
+
+	println('=== 3. TENSOR REDUCTIONS & TELEMETRY ===')
+	sum_w := tensor_sum(w)
+	sum_x := tensor_sum(x)
+	sum_y := tensor_sum(y)
+
+	println('TensorSum(W): ${sum_w}')
+	println('TensorSum(X): ${sum_x}')
+	println('TensorSum(Y = W @ X): ${sum_y}')
+
+	println('=== 4. MULTI-LAYER TENSOR FORWARD PASS ===')
+	// Layer 2 weights
+	w2 := tensor_fill(64, 64, 0.10)
+	y2 := y @ w2
+	sum_y2 := tensor_sum(y2)
+	println('Layer 2 Output Sum: ${sum_y2}')
+}

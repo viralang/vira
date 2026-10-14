@@ -1,0 +1,697 @@
+# The Vex Programming Language: Complete Language Guide & Reference
+
+> **Version:** Stage-0 Compiler (v0.1.0)  
+> **Status:** Production-Ready Toolchain & Runtime  
+> **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
+
+---
+
+## Table of Contents
+
+1. [Introduction & Core Philosophy](#1-introduction--core-philosophy)
+2. [Toolchain & CLI Reference](#2-toolchain--cli-reference)
+3. [Language Basics](#3-language-basics)
+   - [Modules](#modules)
+   - [Variables & Immutability](#variables--immutability)
+   - [Blank Identifier (`_`)](#blank-identifier-_)
+   - [Primitive Types](#primitive-types)
+   - [String Interpolation](#string-interpolation)
+4. [4-Quadrant Struct Encapsulation & OOP](#4-4-quadrant-struct-encapsulation--oop)
+   - [Access Quadrants](#access-quadrants)
+   - [Struct Embedding & Composition](#struct-embedding--composition)
+   - [Methods (Value vs Mutable Receivers)](#methods-value-vs-mutable-receivers)
+   - [Static Factory Methods](#static-factory-methods)
+5. [Structural Interfaces & Dynamic Dispatch](#5-structural-interfaces--dynamic-dispatch)
+   - [Interface Definitions](#interface-definitions)
+   - [Implicit Satisfaction](#implicit-satisfaction)
+   - [Fat-Pointer Boxing & Dispatch](#fat-pointer-boxing--dispatch)
+6. [Error Handling: `!T` Result & `?T` Option](#6-error-handling-t-result--t-option)
+   - [Result Types (`!T`)](#result-types-t)
+   - [The `or { ... }` Unwrap Block](#the-or----block)
+   - [Compiler Enforcement](#compiler-enforcement)
+7. [Memory Management: Deterministic Autofree & Arenas](#7-memory-management-deterministic-autofree--arenas)
+   - [How Autofree Works (No GC)](#how-autofree-works-no-gc)
+   - [Static Escape Analysis Classification](#static-escape-analysis-classification)
+   - [Bump Arenas (`arena { ... }`)](#bump-arenas-arena----)
+8. [First-Class AI Tensors & SIMD Acceleration](#8-first-class-ai-tensors--simd-acceleration)
+   - [Tensor Types & Construction](#tensor-types--construction)
+   - [Matrix Multiplication (`@`)](#matrix-multiplication-)
+   - [SIMD Hardware Backends (AVX2 / NEON)](#simd-hardware-backends-avx2--neon)
+9. [Actor Concurrency & Fault Supervision](#9-actor-concurrency--fault-supervision)
+   - [Actor Definition](#actor-definition)
+   - [Message Passing (`<-`) & Futures](#message-passing----futures)
+   - [Lock-Free Work-Stealing Pool](#lock-free-work-stealing-pool)
+   - [Erlang-Style Fault Boundaries (`panic` & `OneForOne`)](#erlang-style-fault-boundaries-panic--oneforone)
+10. [Native File I/O & Buffer Operations](#10-native-file-io--buffer-operations)
+11. [Diagnostic Engine](#11-diagnostic-engine)
+12. [Complete End-to-End Program Walkthrough](#12-complete-end-to-end-program-walkthrough)
+
+---
+
+## 1. Introduction & Core Philosophy
+
+**Vex** is a modern systems and AI programming language designed to unite the performance of C and Rust with the ergonomics and compilation speed of Go and V.
+
+### Guiding Principles
+
+- **Zero-Garbage Collector Overhead:** Memory management is static, deterministic, and invisible via an escape-analyzing LIFO destructor injector (`autofree`).
+- **Zero-Allocation Frontend:** The compiler lexer operates at **0 B/op and 0 allocs/op**, tokenizing millions of lines per second without touching the heap.
+- **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and immutable/mutable quadrants.
+- **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored; failure to unwrap via `or { ... }` or propagate via `!` is a compile-time error.
+- **First-Class AI & Tensor Arithmetic:** 2D tensors are language primitives with hardware-accelerated matrix multiplication (`@`) running on AVX2+FMA or ARM NEON.
+- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), executed across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault containment.
+
+---
+
+## 2. Toolchain & CLI Reference
+
+The Vex compiler CLI binary is `vex` (or `vex.exe` on Windows).
+
+```
+vex <command> [flags] <file.vex>
+```
+
+### Available Commands
+
+| Command | Purpose | Example |
+| :--- | :--- | :--- |
+| `run` | Compile and immediately execute a Vex program | `vex run main.vex` |
+| `build` | Compile into a native standalone executable (`.exe` / ELF) | `vex build -prod -o app main.vex` |
+| `cgen` | Lower the Vex AST into human-readable C99 code | `vex cgen main.vex` |
+| `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vex check main.vex` |
+| `demo` | Generate and execute the built-in parallel AI actor demo | `vex demo` |
+
+### Compiler Flags
+
+- `-prod`: Enables maximum optimization flags (`-O3 -march=native -flto`).
+- `-sanitize`: Compiles with AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (`UBSan`).
+- `-o <path>`: Specifies output binary filename.
+- `-cc <bin>`: Overrides backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
+- `-keep-c`: Preserves intermediate generated `.c` files in `build/`.
+
+---
+
+## 3. Language Basics
+
+### Modules
+
+Every Vex source file begins with a `module` declaration defining its namespace boundary:
+
+```vex
+module billing
+```
+
+Symbols prefixed with `pub` are visible outside the module; un-prefixed symbols are module-private.
+
+---
+
+### Variables & Immutability
+
+Bindings in Vex are **immutable by default**. To reassign a variable, declare it with `mut`:
+
+```vex
+// Immutable binding (cannot be reassigned)
+x := 10
+// x = 20  <-- Compile-time error: cannot reassign immutable variable 'x'
+
+// Mutable binding
+mut y := 10
+y = 20 // OK
+```
+
+---
+
+### Blank Identifier (`_`)
+
+The blank identifier `_` discards values, unused bindings, or Result returns without polluting the scope:
+
+```vex
+_ := compute_heavy_task()
+```
+
+Multiple assignments to `_` in the same scope are valid and do not cause variable redeclaration errors.
+
+---
+
+### Primitive Types
+
+| Type | Description | Size |
+| :--- | :--- | :--- |
+| `int` | Default signed integer | 32-bit |
+| `i64` | Signed 64-bit integer (timestamps, currency) | 64-bit |
+| `f32` | Single-precision IEEE 754 float | 32-bit |
+| `f64` | Double-precision IEEE 754 float | 64-bit |
+| `bf16`| Brain Floating Point (AI weights) | 16-bit |
+| `bool`| Boolean (`true` or `false`) | 8-bit |
+| `string`| Immutable UTF-8 string slice (16 bytes: `data`, `len`, `is_lit`) | 16 bytes |
+
+---
+
+### String Interpolation
+
+Strings support zero-cost `${...}` expression interpolation:
+
+```vex
+name := 'Alice'
+score := 98.5
+println('Player ${name} scored ${score}%!')
+```
+
+---
+
+## 4. 4-Quadrant Struct Encapsulation & OOP
+
+Vex provides granular, 4-quadrant field encapsulation within a single struct definition:
+
+```vex
+pub struct Account {
+    // 1. Private & Immutable (default): only accessible within this module; read-only
+    secret_pin int
+
+mut:
+    // 2. Private & Mutable: only accessible within this module; can be modified
+    retry_count int = 0
+
+pub:
+    // 3. Public & Read-Only: visible everywhere; cannot be mutated outside module
+    id string
+    created_at i64
+
+pub mut:
+    // 4. Public & Mutable: visible and mutable everywhere
+    balance i64
+}
+```
+
+### Mutability Rules Enforced by Checker
+
+1. A field in `pub:` can **never** be reassigned outside its defining module.
+2. A field in `mut:` or `pub mut:` can only be mutated if the enclosing struct instance is bound as `mut`:
+   ```vex
+   acc := Account{ ... }
+   acc.balance += 50 // ERROR: cannot mutate field on immutable binding 'acc'
+
+   mut mut_acc := Account{ ... }
+   mut_acc.balance += 50 // OK!
+   ```
+
+---
+
+### Struct Embedding & Composition
+
+Vex replaces class inheritance with **struct embedding**. Fields and methods of the embedded struct are automatically promoted:
+
+```vex
+pub struct AuditMeta {
+pub:
+    created_at i64
+pub mut:
+    updated_at i64
+}
+
+pub fn (mut a AuditMeta) touch() {
+    a.updated_at = 1760000000
+}
+
+pub struct Invoice {
+    AuditMeta // Transparently embedded!
+pub:
+    id string
+    amount i64
+}
+
+fn main() {
+    mut inv := Invoice{ ... }
+    inv.touch()              // Promoted method dispatch!
+    println('${inv.updated_at}') // Promoted field access!
+}
+```
+
+---
+
+### Methods (Value vs Mutable Receivers)
+
+Methods are declared with an explicit receiver before the function name:
+
+```vex
+// Immutable receiver (read-only; can be called on immutable or mutable bindings)
+pub fn (inv Invoice) summary() string {
+    return 'Invoice #${inv.id}: ${inv.amount}'
+}
+
+// Mutable receiver (can only be called on 'mut' bindings)
+pub fn (mut inv Invoice) apply_discount(percent f32) {
+    inv.amount = i64(f32(inv.amount) * (1.0 - percent))
+}
+```
+
+---
+
+### Static Factory Methods
+
+Type-associated static functions use the `TypeName.method_name` syntax:
+
+```vex
+pub fn Invoice.new(id string, amount i64) Invoice {
+    return Invoice{
+        AuditMeta: AuditMeta{ created_at: 1750000000, updated_at: 1750000000 },
+        id: id,
+        amount: amount,
+    }
+}
+
+// Called via:
+inv := Invoice.new('inv_101', 5000)
+```
+
+---
+
+## 5. Structural Interfaces & Dynamic Dispatch
+
+### Interface Definitions
+
+Interfaces define a set of methods that a type must implement. Methods requiring mutation use `mut:`:
+
+```vex
+pub interface Payable {
+    summary() string
+mut:
+    mark_paid() !string
+}
+```
+
+### Implicit Satisfaction
+
+Types do **not** declare `implements Payable`. If a struct provides the required methods with matching signatures, it automatically satisfies the interface.
+
+### Fat-Pointer Boxing & Dynamic Dispatch
+
+Cast any satisfying struct to an interface to create a 16-byte fat pointer (`._object`, `._vtable`):
+
+```vex
+inv := Invoice.new('inv_9001', 15000)
+p := Payable(inv) // Boxes into dynamic interface fat-pointer
+
+println(p.summary()) // Dispatches through vtable
+```
+
+When `p` goes out of scope, the runtime invokes `p._vtable->_autofree(p._object)` to release both the internal struct heap fields and the boxed container.
+
+---
+
+## 6. Error Handling: `!T` Result & `?T` Option
+
+Vex eschews unhandled exceptions in favor of explicit, zero-cost `!T` Result types.
+
+### Result Types (`!T`)
+
+A function returning a Result indicates potential failure:
+
+```vex
+pub fn (mut inv Invoice) mark_paid() !string {
+    if inv.amount <= 0 {
+        return error('invalid invoice amount')
+    }
+    inv.is_paid = true
+    return 'Invoice #${inv.id} paid successfully'
+}
+```
+
+### The `or { ... }` Unwrap Block
+
+Result values must be unwrapped at the call site. The `or { ... }` block executes only on error, exposing the error message via the implicit variable `err`:
+
+```vex
+msg := inv.mark_paid() or {
+    eprintln('Failed to pay: ${err}')
+    return
+}
+println(msg)
+```
+
+Default fallback values can also be supplied directly:
+
+```vex
+val := risky_calc() or { 0.0 }
+```
+
+### Compiler Enforcement
+
+If you call a function returning `!T` without `or { ... }` or `!`, compilation fails:
+
+```
+error[SEMANTIC]: unhandled Result '!string' from 'Invoice.mark_paid()': handle it with 'or { ... }' or propagate with '!'
+```
+
+---
+
+## 7. Memory Management: Deterministic Autofree & Arenas
+
+Vex delivers automatic memory safety **without a garbage collector** and without manual calls to `free()`.
+
+### How Autofree Works
+
+1. During Phase 3 compilation, the **Static Escape Analyzer** examines variable lifecycles and control flow across all function blocks.
+2. If a variable owns heap memory (strings, tensors, boxed interfaces, structs with heap fields), the analyzer tracks its ownership state.
+3. At block and function exits, the analyzer injects deterministic **LIFO (Last-In, First-Out)** destructor calls (`vex_str_free`, `vex_tensor_f32_free`, `_autofree`).
+
+### Static Escape Classification
+
+| Classification | Meaning | Action Taken |
+| :--- | :--- | :--- |
+| `StateScopedLocal` | Variable does not outlive its enclosing block | Destructor injected at scope exit |
+| `StateEscapesViaReturn` | Variable is returned to the caller | Ownership transferred; cleanup skipped in current scope |
+| `StateMovedToContainer` | Variable is moved into a struct or interface box | Container takes ownership; cleanup transferred |
+| `StateManagedByArena` | Allocated within an `arena { ... }` block | Lifetime tied to arena slab; individual frees skipped |
+
+Run `vex check <file.vex>` to inspect the complete autofree escape analysis audit log.
+
+---
+
+### Bump Arenas (`arena { ... }`)
+
+For high-throughput workloads, temporary batch allocations can be placed in a fast, 64-byte cache-aligned bump arena:
+
+```vex
+arena {
+    t1 := tensor_fill(128, 128, 1.0)
+    t2 := tensor_fill(128, 128, 2.0)
+    t3 := t1 @ t2
+    println('Sum: ${tensor_sum(t3)}')
+} // Entire arena slab wiped in O(1) time upon block exit!
+```
+
+---
+
+## 8. First-Class AI Tensors & SIMD Acceleration
+
+### Tensor Types & Construction
+
+Tensors are first-class primitives in Vex:
+
+```vex
+w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
+x := tensor_fill(64, 64, 2.0)
+```
+
+### Matrix Multiplication (`@`)
+
+The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
+
+```vex
+y := w @ x // Performs 64x64 @ 64x64 matmul
+total := tensor_sum(y)
+```
+
+### SIMD Hardware Backends
+
+The Vex runtime automatically selects the fastest available vector instructions:
+
+- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
+- **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
+- **Fallback:** Cache-blocked 8x8 tiling algorithm for portable C99 execution
+
+---
+
+## 9. Actor Concurrency & Fault Supervision
+
+Vex features Erlang-inspired actor concurrency built for multicore machine learning workloads.
+
+### Actor Definition
+
+An actor is declared with the `actor` keyword:
+
+```vex
+pub actor AIWorker {
+pub:
+    id int
+mut:
+    batches_run int = 0
+}
+
+pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
+    w.batches_run += 1
+    weights := tensor_fill(64, 64, 0.25)
+    input := tensor_fill(64, 64, scale)
+    out := weights @ input
+
+    if simulate_fault {
+        panic('CUDA/NaN anomaly on parallel batch')
+    }
+    return tensor_sum(out)
+}
+```
+
+---
+
+### Message Passing (`<-`) & Futures
+
+Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
+
+```vex
+mut w1 := AIWorker{ id: 1, batches_run: 0 }
+mut w2 := AIWorker{ id: 2, batches_run: 0 }
+
+// Asynchronous parallel fan-out
+fut1 := w1 <- predict(2.0, false)
+fut2 := w2 <- predict(3.0, true) // Will simulate fault
+
+// Non-blocking work-stealing await
+res1 := fut1.await() or { 0.0 }
+res2 := fut2.await() or {
+    println('Worker 2 faulted: ${err}')
+    0.0
+}
+```
+
+---
+
+### Lock-Free Work-Stealing Pool
+
+- Tasks are submitted to a pool of worker threads sized to `min(CPU cores, 16)`.
+- Each worker maintains a lock-free **Chase-Lev deque**.
+- Idle workers automatically steal tasks from overloaded workers using atomic compare-and-swap operations.
+
+---
+
+### Erlang-Style Fault Boundaries (`panic` & `OneForOne`)
+
+When an actor encounters a `panic('...')`:
+
+1. The per-thread TLS fault boundary (`setjmp`/`longjmp`) intercepts the panic before it can crash the process.
+2. The actor's isolated scratch arena is wiped in **O(1)** time.
+3. The supervisor applies a `OneForOne` restart strategy, resetting internal state and logging the trapped error.
+4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
+
+```text
+[vex_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
+Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
+```
+
+---
+
+## 10. Native File I/O & Buffer Operations
+
+Vex provides native, hardware-level file operations returning zero-cost Result containers (`!string`, `!bool`):
+
+| Builtin Signature | Description |
+| :--- | :--- |
+| `file_exists(path string) bool` | Returns `true` if the target path exists. |
+| `read_file(path string) !string` | Reads the entire file into a heap-allocated UTF-8 string buffer managed by Autofree. |
+| `write_file(path string, content string) !bool` | Writes content to file atomically, creating or overwriting it. |
+| `append_file(path string, content string) !bool` | Appends content to the end of a file. |
+| `remove_file(path string) !bool` | Deletes the file from the filesystem. |
+
+### Example Usage
+
+```vex
+// Atomic write
+_ := write_file('log.txt', 'Pipeline started\n') or {
+    eprintln('Write failed: ${err}')
+    return
+}
+
+// Read with automatic buffer cleanup
+data := read_file('log.txt') or {
+    eprintln('Read failed: ${err}')
+    return
+}
+println(data) // Buffer freed automatically at scope exit!
+```
+
+---
+
+## 11. Diagnostic Engine
+
+The Vex compiler provides Rust/V-style caret diagnostics with exact column spans and actionable `= help:` suggestions.
+
+```
+error[SEMANTIC]: cannot reassign immutable variable 'x'
+  --> examples/bad_account.vex:18:2
+   |
+18 |     x = 20
+   |     ^^^^^^
+   = help: declare with 'mut x := ...'
+
+error[SEMANTIC]: cannot call mutable receiver method 'deposit()' on immutable binding 'imm_acc'
+  --> examples/bad_account.vex:21:7
+   |
+21 |     _ := imm_acc.deposit(50) or { 0 }
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: declare 'mut imm_acc := ...'
+
+error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated
+  --> examples/bad_account.vex:24:2
+   |
+24 |     mut_acc.id = 'hacked_id'
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+---
+
+## 12. Complete End-to-End Program Walkthrough
+
+The following program combines all core language features: OOP composition, fat-pointer interfaces, SIMD tensors, work-stealing actor concurrency, and fault tolerance:
+
+```vex
+module billing
+
+// --- 1. OOP STRUCTS & COMPOSITION ---
+
+pub struct AuditMeta {
+pub:
+	created_at i64
+pub mut:
+	updated_at i64
+}
+
+pub fn (mut a AuditMeta) touch() {
+	a.updated_at = 1760000000
+}
+
+pub struct Invoice {
+	AuditMeta
+	secret_token string
+mut:
+	retry_count int = 0
+pub:
+	id string
+	amount_cents i64
+pub mut:
+	is_paid bool
+}
+
+pub interface Payable {
+	summary() string
+mut:
+	mark_paid() !string
+}
+
+pub fn Invoice.new(id string, amount_cents i64) Invoice {
+	return Invoice{
+		AuditMeta: AuditMeta{ created_at: 1750000000, updated_at: 1750000000 },
+		secret_token: 'sec_live_01',
+		id: id,
+		amount_cents: amount_cents,
+		is_paid: false,
+	}
+}
+
+pub fn (inv Invoice) summary() string {
+	return 'Invoice #${inv.id} [updated_at=${inv.updated_at}]'
+}
+
+pub fn (mut inv Invoice) mark_paid() !string {
+	if inv.amount_cents <= 0 {
+		return error('invalid invoice amount')
+	}
+	inv.is_paid = true
+	inv.retry_count += 1
+	inv.touch()
+	return 'Invoice #${inv.id} paid (${inv.amount_cents} cents)'
+}
+
+// --- 2. MULTI-THREADED AI WORKER ACTOR ---
+
+pub actor AIWorker {
+pub:
+	id int
+mut:
+	batches_run int = 0
+}
+
+pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
+	w.batches_run += 1
+	weights := tensor_fill(64, 64, 0.25)
+	input := tensor_fill(64, 64, scale)
+	out := weights @ input
+
+	if simulate_fault {
+		panic('CUDA/NaN anomaly on parallel batch')
+	}
+	return tensor_sum(out)
+}
+
+// --- 3. APPLICATION ENTRYPOINT ---
+
+fn main() {
+	println('=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===')
+	mut inv := Invoice.new('inv_9001', 15000)
+	msg := inv.mark_paid() or {
+		eprintln(err)
+		return
+	}
+	println(msg)
+	p := Payable(inv)
+	_ := p
+
+	println('=== 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===')
+	mut w1 := AIWorker{ id: 1, batches_run: 0 }
+	mut w2 := AIWorker{ id: 2, batches_run: 0 }
+	mut w3 := AIWorker{ id: 3, batches_run: 0 }
+
+	// Dispatch 3 concurrent actor tasks across the thread pool
+	fut1 := w1 <- predict(2.0, false)
+	fut2 := w2 <- predict(3.0, true) // Injected panic
+	fut3 := w3 <- predict(4.0, false)
+
+	s1 := fut1.await() or { 0.0 }
+	s2 := fut2.await() or {
+		println('Future #2 caught parallel Worker #2 fault: ${err}')
+		0.0
+	}
+	s3 := fut3.await() or { 0.0 }
+
+	println('Parallel Future results -> w1=${s1}, w2(faulted)=${s2}, w3=${s3}')
+
+	// Supervised restart recovery verification
+	fut2_retry := w2 <- predict(3.0, false)
+	s2_recovered := fut2_retry.await() or { 0.0 }
+	println('Worker #2 recovered Future result -> w2=${s2_recovered}')
+}
+```
+
+### Compiling and Running
+
+```powershell
+# Fast build with native production optimizations
+.\vex.exe build -prod -o app.exe examples/parallel_ai_actors.vex
+
+# Execute
+.\app.exe
+```
+
+### Execution Telemetry Output
+
+```text
+=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===
+Invoice #inv_9001 paid (15000 cents)
+=== 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===
+[vex_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
+Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
+Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00
+Worker #2 recovered Future result -> w2=196608.00
+[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vex_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
+[vex_rt] active_leaks=0 | total_freed=12
+```
