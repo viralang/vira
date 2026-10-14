@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1403,6 +1404,454 @@ static inline void vex_tensor_sgd_step(vex_tensor_f32* param, vex_tensor_f32 gra
     for (; i < total; ++i) {
         param->data[i] -= lr * grad.data[i];
     }
+}
+
+// ============================================================================
+// 16. NATIVE GGUF V2/V3 ZERO-COPY BINARY PARSER (Q4_0, Q8_0, F16, F32)
+// ============================================================================
+
+static inline float _vex_fp16_to_fp32(uint16_t h) {
+#if defined(__F16C__)
+    return _cvtsh_ss(h);
+#else
+    uint32_t sign = ((uint32_t)h & 0x8000) << 16;
+    uint32_t exp  = ((uint32_t)h & 0x7C00) >> 10;
+    uint32_t mant = (uint32_t)h & 0x03FF;
+    if (exp == 0) {
+        if (mant == 0) {
+            float res;
+            uint32_t bits = sign;
+            memcpy(&res, &bits, sizeof(float));
+            return res;
+        }
+        while ((mant & 0x0400) == 0) {
+            mant <<= 1;
+            exp--;
+        }
+        exp++;
+        mant &= ~0x0400;
+    } else if (exp == 31) {
+        exp = 255;
+    } else {
+        exp = exp - 15 + 127;
+    }
+    uint32_t bits = sign | (exp << 23) | (mant << 13);
+    float res;
+    memcpy(&res, &bits, sizeof(float));
+    return res;
+#endif
+}
+
+static inline void _vex_gguf_skip_val(FILE* f, uint32_t val_type) {
+    switch (val_type) {
+        case 0: case 1: case 7:
+            fseek(f, 1, SEEK_CUR); break;
+        case 2: case 3:
+            fseek(f, 2, SEEK_CUR); break;
+        case 4: case 5: case 6:
+            fseek(f, 4, SEEK_CUR); break;
+        case 10: case 11: case 12:
+            fseek(f, 8, SEEK_CUR); break;
+        case 8: {
+            uint64_t slen = 0;
+            if (fread(&slen, sizeof(uint64_t), 1, f) == 1) {
+                fseek(f, (long)slen, SEEK_CUR);
+            }
+            break;
+        }
+        case 9: {
+            uint32_t elem_type = 0;
+            uint64_t elem_count = 0;
+            if (fread(&elem_type, sizeof(uint32_t), 1, f) == 1 &&
+                fread(&elem_count, sizeof(uint64_t), 1, f) == 1) {
+                for (uint64_t i = 0; i < elem_count; ++i) {
+                    _vex_gguf_skip_val(f, elem_type);
+                }
+            }
+            break;
+        }
+    }
+}
+
+static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string tensor_name) {
+    char path_buf[1024];
+    int len = path.len < 1023 ? path.len : 1023;
+    if (path.data && len > 0) memcpy(path_buf, path.data, len);
+    path_buf[len] = '\0';
+    vex_str_free(&path);
+
+    char name_buf[256];
+    int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
+    if (tensor_name.data && nlen > 0) memcpy(name_buf, tensor_name.data, nlen);
+    name_buf[nlen] = '\0';
+    vex_str_free(&tensor_name);
+
+    FILE* f = fopen(path_buf, "rb");
+    if (!f) {
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("failed to open GGUF file '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t tensor_count = 0;
+    uint64_t kv_count = 0;
+
+    if (fread(&magic, 4, 1, f) != 1 || magic != 0x46554747) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("invalid GGUF magic in '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+    if (fread(&version, 4, 1, f) != 1 || (version != 2 && version != 3)) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("unsupported GGUF version %u in '%s'", version, path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+    if (fread(&tensor_count, 8, 1, f) != 1 || fread(&kv_count, 8, 1, f) != 1) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("corrupt GGUF header in '%s'", path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    uint32_t alignment = 32;
+
+    for (uint64_t k = 0; k < kv_count; ++k) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, f) != 1) break;
+        char key_buf[256];
+        size_t to_read = klen < 255 ? klen : 255;
+        if (fread(key_buf, 1, to_read, f) != to_read) break;
+        key_buf[to_read] = '\0';
+        if (klen > to_read) fseek(f, (long)(klen - to_read), SEEK_CUR);
+
+        uint32_t val_type = 0;
+        if (fread(&val_type, 4, 1, f) != 1) break;
+
+        if (strcmp(key_buf, "general.alignment") == 0 && val_type == 4) {
+            uint32_t a = 32;
+            if (fread(&a, 4, 1, f) == 1 && a > 0) alignment = a;
+        } else {
+            _vex_gguf_skip_val(f, val_type);
+        }
+    }
+
+    bool found = false;
+    uint32_t matched_type = 0;
+    uint64_t matched_offset = 0;
+    int32_t t_rows = 1, t_cols = 1;
+
+    for (uint64_t t = 0; t < tensor_count; ++t) {
+        uint64_t n_len = 0;
+        if (fread(&n_len, 8, 1, f) != 1) break;
+        char cur_name[256];
+        size_t to_read = n_len < 255 ? n_len : 255;
+        if (fread(cur_name, 1, to_read, f) != to_read) break;
+        cur_name[to_read] = '\0';
+        if (n_len > to_read) fseek(f, (long)(n_len - to_read), SEEK_CUR);
+
+        uint32_t n_dims = 0;
+        if (fread(&n_dims, 4, 1, f) != 1) break;
+
+        uint64_t dims[4] = {1, 1, 1, 1};
+        for (uint32_t d = 0; d < n_dims && d < 4; ++d) {
+            if (fread(&dims[d], 8, 1, f) != 1) break;
+        }
+        if (n_dims > 4) {
+            fseek(f, (long)(8 * (n_dims - 4)), SEEK_CUR);
+        }
+
+        uint32_t dtype = 0;
+        uint64_t offset = 0;
+        if (fread(&dtype, 4, 1, f) != 1) break;
+        if (fread(&offset, 8, 1, f) != 1) break;
+
+        if (strcmp(cur_name, name_buf) == 0) {
+            found = true;
+            matched_type = dtype;
+            matched_offset = offset;
+            if (n_dims == 1) {
+                t_rows = 1;
+                t_cols = (int32_t)dims[0];
+            } else {
+                t_cols = (int32_t)dims[0];
+                t_rows = (int32_t)dims[1];
+            }
+        }
+    }
+
+    if (!found) {
+        fclose(f);
+        return (Result_tensor_f32){
+            .is_err = true,
+            .err = vex_str_format("tensor '%s' not found in GGUF file '%s'", name_buf, path_buf),
+            .val = (vex_tensor_f32){0}
+        };
+    }
+
+    int64_t cur_pos = ftell(f);
+    int64_t pad = (alignment - (cur_pos % alignment)) % alignment;
+    int64_t data_start = cur_pos + pad;
+
+    int64_t tensor_file_pos = data_start + matched_offset;
+#ifdef _WIN32
+    _fseeki64(f, tensor_file_pos, SEEK_SET);
+#else
+    fseeko(f, tensor_file_pos, SEEK_SET);
+#endif
+
+    vex_tensor_f32 t = vex_tensor_f32_alloc(t_rows, t_cols);
+    int32_t total = t_rows * t_cols;
+
+    if (matched_type == 0) {
+        fread(t.data, sizeof(float), total, f);
+    } else if (matched_type == 1) {
+        uint16_t* hbuf = (uint16_t*)malloc(total * sizeof(uint16_t));
+        if (hbuf) {
+            fread(hbuf, sizeof(uint16_t), total, f);
+            for (int32_t i = 0; i < total; ++i) {
+                t.data[i] = _vex_fp16_to_fp32(hbuf[i]);
+            }
+            free(hbuf);
+        }
+    } else if (matched_type == 7) {
+        int32_t blocks = total / 32;
+        for (int32_t b = 0; b < blocks; ++b) {
+            uint16_t scale_h = 0;
+            int8_t qs[32];
+            fread(&scale_h, 2, 1, f);
+            fread(qs, 1, 32, f);
+            float scale = _vex_fp16_to_fp32(scale_h);
+            int32_t base = b * 32;
+            for (int32_t j = 0; j < 32; ++j) {
+                t.data[base + j] = scale * (float)qs[j];
+            }
+        }
+    } else if (matched_type == 2) {
+        int32_t blocks = total / 32;
+        for (int32_t b = 0; b < blocks; ++b) {
+            uint16_t scale_h = 0;
+            uint8_t nibbles[16];
+            fread(&scale_h, 2, 1, f);
+            fread(nibbles, 1, 16, f);
+            float scale = _vex_fp16_to_fp32(scale_h);
+            int32_t base = b * 32;
+            for (int32_t j = 0; j < 16; ++j) {
+                uint8_t byte = nibbles[j];
+                int8_t v0 = (int8_t)(byte & 0x0F) - 8;
+                int8_t v1 = (int8_t)(byte >> 4) - 8;
+                t.data[base + 2 * j]     = scale * (float)v0;
+                t.data[base + 2 * j + 1] = scale * (float)v1;
+            }
+        }
+    } else {
+        fread(t.data, sizeof(float), total, f);
+    }
+
+    fclose(f);
+    return (Result_tensor_f32){
+        .is_err = false,
+        .err = vex_str_lit("", 0),
+        .val = t
+    };
+}
+
+// ============================================================================
+// 17. LLM TRANSFORMER OPERATORS (RMSNORM, ROPE, SILU, EMBEDDING, SAMPLING)
+// ============================================================================
+
+static inline vex_tensor_f32 vex_tensor_rmsnorm(vex_tensor_f32 x, vex_tensor_f32 weight, float eps) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(x.rows, x.cols);
+    for (int32_t r = 0; r < x.rows; ++r) {
+        float* x_row = &x.data[r * x.cols];
+        float* out_row = &out.data[r * x.cols];
+        float sum_sq = 0.0f;
+
+#if defined(__AVX2__)
+        __m256 v_sum_sq = _mm256_setzero_ps();
+        int32_t c = 0;
+        for (; c + 7 < x.cols; c += 8) {
+            __m256 vx = _mm256_loadu_ps(&x_row[c]);
+            v_sum_sq = _mm256_add_ps(v_sum_sq, _mm256_mul_ps(vx, vx));
+        }
+        __m128 lo = _mm256_castps256_ps128(v_sum_sq);
+        __m128 hi = _mm256_extractf128_ps(v_sum_sq, 1);
+        __m128 s = _mm_add_ps(lo, hi);
+        s = _mm_hadd_ps(s, s);
+        s = _mm_hadd_ps(s, s);
+        sum_sq += _mm_cvtss_f32(s);
+        for (; c < x.cols; ++c) {
+            sum_sq += x_row[c] * x_row[c];
+        }
+#else
+        for (int32_t c = 0; c < x.cols; ++c) {
+            sum_sq += x_row[c] * x_row[c];
+        }
+#endif
+        float mean_sq = sum_sq / (float)x.cols;
+        float inv_rms = 1.0f / sqrtf(mean_sq + eps);
+
+#if defined(__AVX2__)
+        __m256 v_inv = _mm256_set1_ps(inv_rms);
+        c = 0;
+        for (; c + 7 < x.cols; c += 8) {
+            __m256 vx = _mm256_loadu_ps(&x_row[c]);
+            __m256 vw = _mm256_loadu_ps(&weight.data[c]);
+            __m256 res = _mm256_mul_ps(_mm256_mul_ps(vx, v_inv), vw);
+            _mm256_storeu_ps(&out_row[c], res);
+        }
+        for (; c < x.cols; ++c) {
+            out_row[c] = x_row[c] * inv_rms * weight.data[c];
+        }
+#else
+        for (int32_t c = 0; c < x.cols; ++c) {
+            out_row[c] = x_row[c] * inv_rms * weight.data[c];
+        }
+#endif
+    }
+    return out;
+}
+
+static inline vex_tensor_f32 vex_tensor_rope(vex_tensor_f32 q, int64_t pos, float freq_base) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(q.rows, q.cols);
+    int32_t half_dim = q.cols / 2;
+
+    for (int32_t r = 0; r < q.rows; ++r) {
+        float* q_row = &q.data[r * q.cols];
+        float* out_row = &out.data[r * q.cols];
+
+        for (int32_t i = 0; i < half_dim; ++i) {
+            float exponent = -(2.0f * (float)i) / (float)q.cols;
+            float freq = powf(freq_base, exponent);
+            float angle = (float)pos * freq;
+            float cos_a = cosf(angle);
+            float sin_a = sinf(angle);
+
+            float q0 = q_row[2 * i];
+            float q1 = q_row[2 * i + 1];
+
+            out_row[2 * i]     = q0 * cos_a - q1 * sin_a;
+            out_row[2 * i + 1] = q0 * sin_a + q1 * cos_a;
+        }
+    }
+    return out;
+}
+
+static inline vex_tensor_f32 vex_tensor_silu(vex_tensor_f32 x) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(x.rows, x.cols);
+    int32_t total = x.rows * x.cols;
+    for (int32_t i = 0; i < total; ++i) {
+        float v = x.data[i];
+        out.data[i] = v / (1.0f + expf(-v));
+    }
+    return out;
+}
+
+static inline vex_tensor_f32 vex_tensor_elemwise_mul(vex_tensor_f32 a, vex_tensor_f32 b) {
+    if (a.rows != b.rows || a.cols != b.cols) {
+        fprintf(stderr, "vex tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
+                a.rows, a.cols, b.rows, b.cols);
+        exit(1);
+    }
+    vex_tensor_f32 out = vex_tensor_f32_alloc(a.rows, a.cols);
+    int32_t total = a.rows * a.cols;
+    int32_t i = 0;
+
+#if defined(__AVX2__)
+    for (; i + 7 < total; i += 8) {
+        __m256 va = _mm256_loadu_ps(&a.data[i]);
+        __m256 vb = _mm256_loadu_ps(&b.data[i]);
+        _mm256_storeu_ps(&out.data[i], _mm256_mul_ps(va, vb));
+    }
+#endif
+    for (; i < total; ++i) {
+        out.data[i] = a.data[i] * b.data[i];
+    }
+    return out;
+}
+
+static inline vex_tensor_f32 vex_tensor_softmax(vex_tensor_f32 logits) {
+    vex_tensor_f32 out = vex_tensor_f32_alloc(logits.rows, logits.cols);
+    for (int32_t r = 0; r < logits.rows; ++r) {
+        float* in_row = &logits.data[r * logits.cols];
+        float* out_row = &out.data[r * logits.cols];
+
+        float max_val = in_row[0];
+        for (int32_t c = 1; c < logits.cols; ++c) {
+            if (in_row[c] > max_val) max_val = in_row[c];
+        }
+
+        float sum = 0.0f;
+        for (int32_t c = 0; c < logits.cols; ++c) {
+            out_row[c] = expf(in_row[c] - max_val);
+            sum += out_row[c];
+        }
+
+        float inv_sum = sum > 0.0f ? (1.0f / sum) : 1.0f;
+        for (int32_t c = 0; c < logits.cols; ++c) {
+            out_row[c] *= inv_sum;
+        }
+    }
+    return out;
+}
+
+static inline int64_t vex_sample_token(vex_tensor_f32 logits, float temperature) {
+    int32_t total = logits.rows * logits.cols;
+    if (total == 0) return 0;
+
+    if (temperature <= 0.05f) {
+        int64_t best_idx = 0;
+        float best_val = logits.data[0];
+        for (int32_t i = 1; i < total; ++i) {
+            if (logits.data[i] > best_val) {
+                best_val = logits.data[i];
+                best_idx = (int64_t)i;
+            }
+        }
+        return best_idx;
+    }
+
+    vex_tensor_f32 scaled = vex_tensor_f32_alloc(logits.rows, logits.cols);
+    for (int32_t i = 0; i < total; ++i) {
+        scaled.data[i] = logits.data[i] / temperature;
+    }
+    vex_tensor_f32 probs = vex_tensor_softmax(scaled);
+    vex_tensor_f32_free(&scaled);
+
+    float r = (float)rand() / (float)RAND_MAX;
+    float cdf = 0.0f;
+    int64_t chosen = total - 1;
+    for (int32_t i = 0; i < total; ++i) {
+        cdf += probs.data[i];
+        if (r <= cdf) {
+            chosen = (int64_t)i;
+            break;
+        }
+    }
+    vex_tensor_f32_free(&probs);
+    return chosen;
+}
+
+static inline vex_tensor_f32 vex_tensor_embedding(vex_tensor_f32 table, int64_t token_id) {
+    if (token_id < 0 || token_id >= table.rows) {
+        fprintf(stderr, "vex tensor error: embedding index %lld out of range [0, %d)\n",
+                (long long)token_id, table.rows);
+        exit(1);
+    }
+    vex_tensor_f32 out = vex_tensor_f32_alloc(1, table.cols);
+    memcpy(out.data, &table.data[token_id * table.cols], (size_t)table.cols * sizeof(float));
+    return out;
 }
 
 static inline void vex_report_mem_stats(void) {

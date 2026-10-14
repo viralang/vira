@@ -997,6 +997,22 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				paramArg = "&" + paramArg
 			}
 			return fmt.Sprintf("vex_tensor_sgd_step(%s, %s, %s)", paramArg, argStrs[1], argStrs[2])
+		case "gguf_load_tensor":
+			return fmt.Sprintf("vex_gguf_load_tensor(%s)", strings.Join(argStrs, ", "))
+		case "tensor_rmsnorm":
+			return fmt.Sprintf("vex_tensor_rmsnorm(%s)", strings.Join(argStrs, ", "))
+		case "tensor_rope":
+			return fmt.Sprintf("vex_tensor_rope(%s)", strings.Join(argStrs, ", "))
+		case "tensor_silu":
+			return fmt.Sprintf("vex_tensor_silu(%s)", strings.Join(argStrs, ", "))
+		case "tensor_elemwise_mul":
+			return fmt.Sprintf("vex_tensor_elemwise_mul(%s)", strings.Join(argStrs, ", "))
+		case "tensor_softmax":
+			return fmt.Sprintf("vex_tensor_softmax(%s)", strings.Join(argStrs, ", "))
+		case "tensor_embedding":
+			return fmt.Sprintf("vex_tensor_embedding(%s)", strings.Join(argStrs, ", "))
+		case "sample_token":
+			return fmt.Sprintf("vex_sample_token(%s)", strings.Join(argStrs, ", "))
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

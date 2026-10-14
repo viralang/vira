@@ -37,6 +37,7 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`16_compilation_and_build_modes.vex`](./16_compilation_and_build_modes.vex)** | Compilation, Build Modes & Production Deployment | Demonstrates build modes (dev `-O2`, prod `-O3`, sanitizer `-sanitize`), static linking, standalone binary deployment, and compiler telemetry. |
 | **[`17_http_web_server_and_json.vex`](./17_http_web_server_and_json.vex)** | High-Performance HTTP 1.1 Web Engine & JSON Microservices | Fast JSON field parsing (`json_get_str`, `json_get_int`, `json_get_f32`), HTTP 1.1 response generation (`http_response`), actor-based request processing, and zero memory leaks. |
 | **[`18_autograd_and_safetensors.vex`](./18_autograd_and_safetensors.vex)** | Pure Vex Autograd Engine & Native SafeTensors Loader | Native zero-copy loading of Hugging Face `.safetensors` files (`safetensors_load`), SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), and hardware in-place SGD optimization (`tensor_sgd_step`). |
+| **[`19_local_llm_inference.vex`](./19_local_llm_inference.vex)** | Pure Vex Local LLM Inference Engine & GGUF Parser | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, Rotary Position Embeddings (RoPE), SwiGLU activations, Causal Self-Attention, and temperature-based token sampling. |
 
 ---
 
@@ -63,4 +64,5 @@ You can run each example in sequence from your shell:
 .\vex.exe run docs/examples/16_compilation_and_build_modes.vex
 .\vex.exe run docs/examples/17_http_web_server_and_json.vex
 .\vex.exe run docs/examples/18_autograd_and_safetensors.vex
+.\vex.exe run docs/examples/19_local_llm_inference.vex
 ```

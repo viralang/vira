@@ -322,6 +322,58 @@ func (c *Checker) registerBuiltins() {
 		Params: []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
 		ReturnType: TypeVoid,
 	}
+
+	// GGUF v2/v3 Zero-Copy Loader
+	c.functions["gguf_load_tensor"] = &FnSig{
+		Name:       "gguf_load_tensor",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
+		ReturnType: &ResultType{Inner: &TensorType{DType: TypeF32}},
+	}
+
+	// LLM Transformer Operators
+	c.functions["tensor_rmsnorm"] = &FnSig{
+		Name:       "tensor_rmsnorm",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}, {Name: "weight", Type: &TensorType{DType: TypeF32}}, {Name: "eps", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_rope"] = &FnSig{
+		Name:       "tensor_rope",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_silu"] = &FnSig{
+		Name:       "tensor_silu",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_elemwise_mul"] = &FnSig{
+		Name:       "tensor_elemwise_mul",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "a", Type: &TensorType{DType: TypeF32}}, {Name: "b", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_softmax"] = &FnSig{
+		Name:       "tensor_softmax",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "logits", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_embedding"] = &FnSig{
+		Name:       "tensor_embedding",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "table", Type: &TensorType{DType: TypeF32}}, {Name: "token_id", Type: TypeInt}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["sample_token"] = &FnSig{
+		Name:       "sample_token",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "logits", Type: &TensorType{DType: TypeF32}}, {Name: "temperature", Type: TypeF32}},
+		ReturnType: TypeInt,
+	}
 }
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.

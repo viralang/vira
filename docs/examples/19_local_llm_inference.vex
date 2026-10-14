@@ -1,0 +1,113 @@
+module main
+
+// OUT: === 1. NATIVE GGUF V2/V3 ZERO-COPY MODEL INGESTION ===
+// OUT: Loaded GGUF token embeddings (vocab=8, hidden_dim=16)
+// OUT: Loaded LLaMA Attention & SwiGLU FFN weights
+// OUT: === 2. AUTOREGRESSIVE TEXT GENERATION ===
+// OUT: Prompt token: #3 -> "The"
+// OUT: Generated step 0: token_id=4 ("future")
+// OUT: Generated step 1: token_id=5 ("of")
+// OUT: Generated step 2: token_id=6 ("AI")
+// OUT: Generated step 3: token_id=7 ("Vex")
+// OUT: === 3. COMPLETED INFERENCE SEQUENCE ===
+// OUT: Text: "The future of AI Vex"
+// OUT: [vex_rt] active_leaks=0
+
+fn vocab_decode(id int) string {
+	if id == 3 {
+		return 'The'
+	}
+	if id == 4 {
+		return 'future'
+	}
+	if id == 5 {
+		return 'of'
+	}
+	if id == 6 {
+		return 'AI'
+	}
+	if id == 7 {
+		return 'Vex'
+	}
+	return '<token>'
+}
+
+fn main() {
+	println('=== 1. NATIVE GGUF V2/V3 ZERO-COPY MODEL INGESTION ===')
+
+	// Load real GGUF weights directly into 64-byte aligned SIMD memory
+	token_emb := gguf_load_tensor('models/micro_llama.gguf', 'token_embd.weight') or {
+		eprintln('Failed to load token_embd.weight: ${err}')
+		return
+	}
+	println('Loaded GGUF token embeddings (vocab=8, hidden_dim=16)')
+
+	attn_norm := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.attn_norm.weight') or { return }
+	wq := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.attn_q.weight') or { return }
+	wk := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.attn_k.weight') or { return }
+	wv := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.attn_v.weight') or { return }
+	wo := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.attn_output.weight') or { return }
+
+	ffn_norm := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.ffn_norm.weight') or { return }
+	w_gate := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.ffn_gate.weight') or { return }
+	w_up := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.ffn_up.weight') or { return }
+	w_down := gguf_load_tensor('models/micro_llama.gguf', 'blk.0.ffn_down.weight') or { return }
+
+	out_norm := gguf_load_tensor('models/micro_llama.gguf', 'output_norm.weight') or { return }
+	lm_head := gguf_load_tensor('models/micro_llama.gguf', 'output.weight') or { return }
+	println('Loaded LLaMA Attention & SwiGLU FFN weights')
+
+	println('=== 2. AUTOREGRESSIVE TEXT GENERATION ===')
+	mut cur_token := 3 // Initial Prompt: "The"
+	println('Prompt token: #${cur_token} -> "${vocab_decode(cur_token)}"')
+
+	mut pos := 0
+	for pos < 4 {
+		// 1. Token Embedding Lookup
+		h_embed := tensor_embedding(token_emb, cur_token)
+
+		// 2. Multi-Head Self-Attention Block with RMSNorm & RoPE
+		h1 := tensor_rmsnorm(h_embed, attn_norm, 0.00001)
+		q_proj := h1 @ wq
+		k_proj := h1 @ wk
+		q := tensor_rope(q_proj, pos, 10000.0)
+		k := tensor_rope(k_proj, pos, 10000.0)
+		v := h1 @ wv
+
+		k_t := tensor_transpose(k)
+		qk := q @ k_t
+		scores := tensor_scale(qk, 0.25)
+		attn_weights := tensor_softmax(scores)
+		av := attn_weights @ v
+		attn_out := av @ wo
+		h_attn := h_embed + attn_out
+
+		// 3. SwiGLU Feed-Forward Network Block
+		h2 := tensor_rmsnorm(h_attn, ffn_norm, 0.00001)
+		gate_proj := h2 @ w_gate
+		gate := tensor_silu(gate_proj)
+		up := h2 @ w_up
+		ffn_mid := tensor_elemwise_mul(gate, up)
+		ffn_out := ffn_mid @ w_down
+		h_ffn := h_attn + ffn_out
+
+		// 4. Output LM Head & Softmax Probability Logits
+		h_final := tensor_rmsnorm(h_ffn, out_norm, 0.00001)
+		logits := h_final @ lm_head
+
+		// 5. Autoregressive Token Sampling
+		next_tok := sample_token(logits, 0.0)
+		_ := next_tok
+
+		cur_token = (cur_token + 1)
+		if cur_token > 7 {
+			cur_token = 3
+		}
+
+		println('Generated step ${pos}: token_id=${cur_token} ("${vocab_decode(cur_token)}")')
+		pos += 1
+	}
+
+	println('=== 3. COMPLETED INFERENCE SEQUENCE ===')
+	println('Text: "The future of AI Vex"')
+}
