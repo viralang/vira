@@ -124,6 +124,6 @@ Write-Host "==========================================================" -Foregro
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Open a new terminal window" -ForegroundColor White
-Write-Host "  2. Verify:  vex -h" -ForegroundColor White
+Write-Host "  2. Verify:  vira -h" -ForegroundColor White
 Write-Host "  3. Run GUI: vira run examples\gui_demo.vir" -ForegroundColor White
 Write-Host ""

@@ -1,0 +1,891 @@
+# The Vira Programming Language
+
+<p align="center">
+  <img src="editors/vscode/icon.png" alt="Vira Logo" width="128" height="128" style="border-radius: 20px;">
+</p>
+
+<p align="center">
+  <strong>A modern, high-performance systems and AI programming language.</strong><br>
+  Combines the execution speed, zero-cost abstractions, and hardware control of C & Rust with the simplicity, clean ergonomics, and instant compilation of Go.
+</p>
+
+<p align="center">
+  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.5-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.22+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
+  <a href="#7-memory-management-deterministic-autofree--arenas"><img src="https://img.shields.io/badge/memory-deterministic_autofree_(no_GC)-orange.svg?style=flat-square" alt="Memory"></a>
+  <a href="#9-actor-concurrency--fault-supervision"><img src="https://img.shields.io/badge/concurrency-chase--lev_actors-purple.svg?style=flat-square" alt="Concurrency"></a>
+  <a href="#8-first-class-ai-tensors--simd-acceleration"><img src="https://img.shields.io/badge/SIMD-AVX2_%2B_ARM_NEON-red.svg?style=flat-square" alt="SIMD"></a>
+</p>
+
+---
+
+## Table of Contents
+
+1. [Architectural Highlights & Core Philosophy](#1-architectural-highlights--core-philosophy)
+2. [Quick Installation Guide](#2-quick-installation-guide)
+3. [Toolchain & CLI Reference](#3-toolchain--cli-reference)
+4. [Master Catalog: Tutorials & Runnable Examples Table](#4-master-catalog-tutorials--runnable-examples-table)
+5. [Complete Language Guide & Syntax Breakdown](#5-complete-language-guide--syntax-breakdown)
+   - [Modules & Visibility](#modules--visibility)
+   - [Variables & Immutability](#variables--immutability)
+   - [Blank Identifier (`_`)](#blank-identifier-_)
+   - [Primitive Types](#primitive-types)
+   - [String Interpolation](#string-interpolation)
+   - [4-Quadrant Struct Encapsulation & OOP](#4-quadrant-struct-encapsulation--oop)
+   - [Struct Embedding & Composition](#struct-embedding--composition)
+   - [Methods (Value vs Mutable Pointer Receivers)](#methods-value-vs-mutable-pointer-receivers)
+   - [Static Factory Methods](#static-factory-methods)
+   - [Structural Interfaces & Dynamic Dispatch](#structural-interfaces--dynamic-dispatch)
+   - [Zero-Cost Error Handling: `!T` Result & `or { ... }`](#zero-cost-error-handling-t-result--or----)
+   - [Deterministic Memory Management: Autofree & Arenas](#deterministic-memory-management-autofree--arenas)
+   - [First-Class AI Tensors & SIMD Acceleration](#first-class-ai-tensors--simd-acceleration)
+   - [Pure Vira Autograd Engine & Native SafeTensors](#pure-vira-autograd-engine--native-safetensors)
+   - [Pure Vira Local LLM Engine & GGUF Parser](#pure-vira-local-llm-engine--gguf-parser)
+   - [Actor Concurrency & Erlang-Style Fault Supervision](#actor-concurrency--erlang-style-fault-supervision)
+   - [Native File I/O Operations](#native-file-io-operations)
+   - [High-Performance HTTP 1.1 Web Server & Fast JSON](#high-performance-http-11-web-server--fast-json)
+   - [Native Desktop GUI Engine](#native-desktop-gui-engine)
+   - [Rust/V-Style Diagnostic Engine](#rustv-style-diagnostic-engine)
+6. [Complete End-to-End Production Program](#6-complete-end-to-end-production-program)
+7. [VS Code Extension & LSP Integration](#7-vs-code-extension--lsp-integration)
+8. [Cross-Platform Release Packager](#8-cross-platform-release-packager)
+9. [Roadmap & Contributing](#9-roadmap--contributing)
+10. [License](#10-license)
+
+---
+
+## 1. Architectural Highlights & Core Philosophy
+
+Vira is engineered from the ground up for modern systems development, numerical computing, and machine learning infrastructure:
+
+- **Zero-Garbage Collector Overhead:** Memory management is static, deterministic, and invisible. The compiler's escape analysis tracks lifecycles and automatically injects LIFO destructors (`autofree`) at scope exits. No stop-the-world pauses, no GC tracing overhead.
+- **Zero-Allocation Lexer & Frontend:** Tokenizes millions of lines of code per second at **0 B/op and 0 allocs/op**, generating AST nodes with minimal memory overhead.
+- **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and read-only/mutable quadrants (`default`, `mut:`, `pub:`, `pub mut:`).
+- **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored. Failure to unwrap via `or { ... }` or propagate with `!` is a compile-time semantic error. No unhandled runtime exceptions.
+- **First-Class AI Tensors & Hardware SIMD:** 2D tensors (`tensor[f32]`) are language primitives with native `@` dot-product matrix multiplication vectorized via AVX2+FMA on x86_64 and ARM NEON on Apple Silicon/AArch64.
+- **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights with Q4_0/Q8_0 SIMD dequantization, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
+- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries and `OneForOne` supervisor restarts.
+- **Native Desktop GUI & Web Networking:** Built-in lightweight Canvas/Win32/X11 GUI framework and HTTP 1.1 asynchronous request processing engine with zero-copy JSON parsing.
+- **Clean C99 Backend:** Lowers directly into portable, readable C99, compiled via GCC, Clang, MinGW-w64, or TCC with `-O3 -flto -march=native` optimizations.
+
+---
+
+## 2. Quick Installation Guide
+
+### Windows (PowerShell)
+
+Install the latest release binary, runtime headers, examples, and documentation automatically:
+
+```powershell
+irm https://raw.githubusercontent.com/viralang/vira/main/scripts/install.ps1 | iex
+```
+
+Or run the local installer:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+### Linux & macOS (Bash)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/scripts/install.sh | bash
+```
+
+### Building From Source
+
+Prerequisites: Go 1.22+ and a C99 compiler (`gcc`, `clang`, or `x86_64-w64-mingw32-gcc`).
+
+```bash
+# Clone the repository
+git clone https://github.com/viralang/vira.git
+cd vira
+
+# Build the standalone Vira compiler
+go build -o vira.exe ./cmd/vira   # Windows
+go build -o vira ./cmd/vira       # Linux / macOS
+
+# Verify toolchain installation
+./vira version
+```
+
+---
+
+## 3. Toolchain & CLI Reference
+
+The Vira compiler CLI is invoked via `vira`:
+
+```bash
+vira <command> [flags] [arguments]
+```
+
+### Command Matrix
+
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
+| `build` | Compile into a native standalone executable (`.exe` / ELF / Mach-O) | `vira build -prod -o app main.vir` |
+| `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
+| `check` | Run syntax validation, 4-quadrant type-checking & print autofree escape analysis | `vira check main.vir` |
+| `test` | Run all unit tests (`*_test.vir`) in a directory or project | `vira test ./tests` |
+| `fmt` | Format Vira source files in-place to canonical style | `vira fmt ./src` |
+| `init` | Scaffold a new Vira module with `vex.mod` and entry point | `vira init my_app` |
+| `lsp` | Start the Language Server Protocol daemon (stdio) for VS Code / IDEs | `vira lsp` |
+| `demo` | Compile and execute the built-in parallel AI actor demo | `vira demo` |
+| `version` | Display Vira toolchain version, build commit, and target platform | `vira version` |
+
+### Compiler Flags
+
+- `-prod`: Enables aggressive native optimizations (`-O3 -march=native -flto`).
+- `-sanitize`: Compiles with AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (`UBSan`).
+- `-keep-c`: Preserves intermediate generated `.c` files in `build/` for auditing.
+- `-o <filename>`: Specifies the destination path for the compiled binary.
+- `-cc <compiler>`: Overrides the backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
+
+---
+
+## 4. Master Catalog: Tutorials & Runnable Examples Table
+
+The repository includes 20 comprehensive step-by-step tutorials paired directly with 19 standalone, self-contained runnable `.vir` example programs.
+
+| # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
+| :-: | :--- | :-: | :--- | :--- | :--- |
+| **01** | **Syntax & Basics** | Beginner | [`01_basics.vir`](docs/examples/01_basics.vir) | [`01_getting_started_and_basics.md`](docs/tutorials/01_getting_started_and_basics.md) | Immutability by default, `mut`, primitives (`int`, `i64`, `f32`, `bool`, `string`), string interpolation `${...}`, `if`/`else`, blank identifier `_`. |
+| **02** | **OOP & Encapsulation** | Intermediate | [`02_oop_composition.vir`](docs/examples/02_oop_composition.vir) | [`02_oop_and_4_quadrant_structs.md`](docs/tutorials/02_oop_and_4_quadrant_structs.md) | 4-quadrant struct access levels (`default`, `mut:`, `pub:`, `pub mut:`), struct embedding, promoted methods/fields, value vs pointer receivers. |
+| **03** | **Structural Interfaces** | Intermediate | [`03_interfaces.vir`](docs/examples/03_interfaces.vir) | [`03_interfaces_and_polymorphism.md`](docs/tutorials/03_interfaces_and_polymorphism.md) | Implicit interface satisfaction (no `implements` keyword), 16-byte fat-pointer boxing, dynamic polymorphic vtable dispatch, automatic destructor chaining. |
+| **04** | **Result Error Handling** | Intermediate | [`04_result_handling.vir`](docs/examples/04_result_handling.vir) | [`04_error_handling_and_results.md`](docs/tutorials/04_error_handling_and_results.md) | Result types (`!T`), `return error('...')`, mandatory unwrap blocks `or { ... }`, default fallbacks, compile-time unhandled error prevention. |
+| **05** | **Autofree & Arenas** | Advanced | [`05_arenas_and_autofree.vir`](docs/examples/05_arenas_and_autofree.vir) | [`05_autofree_and_bump_arenas.md`](docs/tutorials/05_autofree_and_bump_arenas.md) | Static LIFO scope-exit autofree without a GC, escape analysis states, 64-byte aligned bump arenas (`arena { ... }`) with O(1) bulk slab teardown. |
+| **06** | **SIMD AI Tensors** | Intermediate | [`06_simd_tensors.vir`](docs/examples/06_simd_tensors.vir) | [`06_simd_tensors_and_ai_math.md`](docs/tutorials/06_simd_tensors_and_ai_math.md) | 2D numerical tensors (`tensor[f32]`), matrix multiplication with the `@` operator, hardware AVX2/NEON vectorization, multi-layer forward passes. |
+| **07** | **Actors & Supervisors** | Advanced | [`07_actors_and_supervisors.vir`](docs/examples/07_actors_and_supervisors.vir) | [`07_actor_concurrency_and_supervisors.md`](docs/tutorials/07_actor_concurrency_and_supervisors.md) | Multi-threaded actors (`actor`), non-blocking asynchronous dispatch (`<-`), `Future[T]` `.await()`, Chase-Lev work-stealing, `panic` containment, `OneForOne` restarts. |
+| **08** | **Production Pipeline** | Advanced | [`08_production_pipeline.vir`](docs/examples/08_production_pipeline.vir) | [`08_building_production_systems.md`](docs/tutorials/08_building_production_systems.md) | Integrated real-world pipeline combining OOP telemetry, dynamic interfaces, parallel actor inference, error propagation, and 0 memory leaks. |
+| **09** | **Native File I/O** | Advanced | [`09_file_io.vir`](docs/examples/09_file_io.vir) | [`09_file_io_and_streams.md`](docs/tutorials/09_file_io_and_streams.md) | File existence checking, atomic writes, appending records, reading into autofreed buffers, and file deletion with Result error handling. |
+| **10** | **Multicore Concurrency** | Advanced | [`10_threads_actors_fault_tolerance.vir`](docs/examples/10_threads_actors_fault_tolerance.vir) | [`10_threads_actors_fault_tolerance.md`](docs/tutorials/10_threads_actors_fault_tolerance.md) | Multicore Chase-Lev thread pool, actor isolation, non-blocking dispatch (`<-`), `Future[T]` `.await()`, panic containment with `setjmp`/`longjmp`, O(1) arena wipes. |
+| **11** | **Control Flow & Loops** | Beginner | [`11_control_flow_loops_operators.vir`](docs/examples/11_control_flow_loops_operators.vir) | [`11_control_flow_loops_operators.md`](docs/tutorials/11_control_flow_loops_operators.md) | Multi-way branching (`if`/`else if`/`else`), unified `for` loops (3-part C-style, while-style, infinite), `break`/`continue`, bitwise shifts, compound assignments. |
+| **12** | **Deep Dive AI Tensors** | Advanced | [`12_deep_dive_tensors.vir`](docs/examples/12_deep_dive_tensors.vir) | [`12_deep_dive_ai_tensors_and_simd.md`](docs/tutorials/12_deep_dive_ai_tensors_and_simd.md) | Architectural comparison with Python, Mojo, Rust, Julia; 64-byte aligned tensors, AVX2+FMA vectorization, zero-allocation bump arena inference. |
+| **13** | **Hardware Acceleration** | Advanced | [`13_hardware_acceleration_gpu.vir`](docs/examples/13_hardware_acceleration_gpu.vir) | [`13_hardware_acceleration_gpu_npu.md`](docs/tutorials/13_hardware_acceleration_gpu_npu.md) | Discrete GPUs (CUDA/ROCm), Apple Metal Unified DMA, 64-byte PCIe cache alignment, zero-copy C-ABI handoff, supervisor containment for GPU OOM faults. |
+| **14** | **Neural Networks: CPU vs GPU** | Advanced | [`14_neural_network_cpu_gpu.vir`](docs/examples/14_neural_network_cpu_gpu.vir) | [`14_neural_network_cpu_gpu_inference.md`](docs/tutorials/14_neural_network_cpu_gpu_inference.md) | 3-layer MLP forward pass (Dense + Bias + ReLU + Softmax Scaling), AVX2/NEON SIMD execution, GPU device stream actors, CPU fallback on GPU OOM. |
+| **15** | **Pretrained Weights Loader** | Advanced | [`15_pretrained_weights_loader.vir`](docs/examples/15_pretrained_weights_loader.vir) | [`15_loading_pretrained_models_weights.md`](docs/tutorials/15_loading_pretrained_models_weights.md) | Zero-copy binary tensor ingestion (`tensor_load_bin`), bit-exact forward pass matching PyTorch reference output, asynchronous actor serving. |
+| **16** | **Compilation & Deployment** | Beginner/Adv | [`16_compilation_and_build_modes.vir`](docs/examples/16_compilation_and_build_modes.vir) | [`16_compilation_and_deployment.md`](docs/tutorials/16_compilation_and_deployment.md) | Ahead-Of-Time (AOT) pipeline, build flags (`-prod`, `-sanitize`, `-keep-c`, `-cc`), static linking, standalone binary deployment, and Docker containers. |
+| **17** | **HTTP 1.1 & Fast JSON** | Advanced | [`17_http_web_server_and_json.vir`](docs/examples/17_http_web_server_and_json.vir) | [`17_http_web_service_and_json.md`](docs/tutorials/17_http_web_service_and_json.md) | Fast JSON field parsing (`json_get_str`, `json_get_int`, `json_get_f32`), HTTP 1.1 response generation, actor-based request processing, 0 leaks. |
+| **18** | **Autograd & SafeTensors** | Advanced | [`18_autograd_and_safetensors.vir`](docs/examples/18_autograd_and_safetensors.vir) | [`18_autograd_and_safetensors.md`](docs/tutorials/18_autograd_and_safetensors.md) | Native zero-copy loading of Hugging Face `.safetensors`, SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), in-place SGD optimization. |
+| **19** | **Local LLM Engine (GGUF)** | Expert | [`19_local_llm_inference.vir`](docs/examples/19_local_llm_inference.vir) | [`20_gguf_llm_inference_engine.md`](docs/tutorials/20_gguf_llm_inference_engine.md) | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, RoPE embeddings, SwiGLU activations, Causal Self-Attention, token sampling. |
+| **20** | **Tooling, LSP & Packaging** | Beginner/Adv | `vira init`, `vex.mod`, `vira fmt` | [`19_tooling_lsp_and_package_management.md`](docs/tutorials/19_tooling_lsp_and_package_management.md) | Project scaffolding (`vira init`), manifest packages (`vex.mod`), code formatter (`vira fmt`), test runner (`vira test`), and Language Server (`vira lsp`). |
+
+---
+
+## 5. Complete Language Guide & Syntax Breakdown
+
+### Modules & Visibility
+
+Every Vira source file begins with a `module` declaration defining its namespace boundary:
+
+```vex
+module billing
+```
+
+Symbols prefixed with `pub` are visible outside the module; un-prefixed symbols are module-private.
+
+---
+
+### Variables & Immutability
+
+Bindings in Vira are **immutable by default**. To reassign a variable, declare it explicitly with `mut`:
+
+```vex
+// Immutable binding (cannot be reassigned)
+x := 10
+// x = 20  <-- Compile-time error: cannot reassign immutable variable 'x'
+
+// Mutable binding
+mut y := 10
+y = 20 // OK!
+```
+
+---
+
+### Blank Identifier (`_`)
+
+The blank identifier `_` discards unused values or Result returns without polluting the scope:
+
+```vex
+_ := compute_heavy_task()
+```
+
+Multiple assignments to `_` in the same scope are valid and never trigger variable redeclaration errors.
+
+---
+
+### Primitive Types
+
+| Type | Description | Size | Typical Use |
+| :--- | :--- | :--- | :--- |
+| `int` | Default signed integer | 32-bit | Loop counters, array indices |
+| `i64` | Signed 64-bit integer | 64-bit | Timestamps, financial cents, large counts |
+| `f32` | Single-precision IEEE 754 float | 32-bit | Neural network activations & weights |
+| `f64` | Double-precision IEEE 754 float | 64-bit | Scientific computing & high-precision math |
+| `bf16` | Brain Floating Point | 16-bit | Modern LLM and Transformer weights |
+| `bool` | Boolean (`true` or `false`) | 8-bit | Conditionals, state flags |
+| `string` | Immutable UTF-8 slice | 16 bytes | Strings (`data*`, `len`, `is_lit` flag) |
+
+---
+
+### String Interpolation
+
+Strings support zero-cost `${...}` expression interpolation:
+
+```vex
+name := 'Alice'
+score := 98.5
+println('Player ${name} scored ${score}%!')
+```
+
+---
+
+### 4-Quadrant Struct Encapsulation & OOP
+
+Vira provides granular, 4-quadrant field encapsulation within a single struct definition:
+
+```vex
+pub struct Account {
+    // 1. Private & Immutable (default): only accessible within this module; read-only
+    secret_pin int
+
+mut:
+    // 2. Private & Mutable: only accessible within this module; can be modified
+    retry_count int = 0
+
+pub:
+    // 3. Public & Read-Only: visible everywhere; cannot be mutated outside module
+    id string
+    created_at i64
+
+pub mut:
+    // 4. Public & Mutable: visible and mutable everywhere
+    balance i64
+}
+```
+
+#### Mutability Rules Enforced by Checker
+
+1. A field in `pub:` can **never** be reassigned outside its defining module.
+2. A field in `mut:` or `pub mut:` can only be mutated if the enclosing struct instance is bound as `mut`:
+   ```vex
+   acc := Account{ ... }
+   acc.balance += 50 // ERROR: cannot mutate field on immutable binding 'acc'
+
+   mut mut_acc := Account{ ... }
+   mut_acc.balance += 50 // OK!
+   ```
+
+---
+
+### Struct Embedding & Composition
+
+Vira replaces class inheritance with **struct embedding**. Fields and methods of the embedded struct are automatically promoted:
+
+```vex
+pub struct AuditMeta {
+pub:
+    created_at i64
+pub mut:
+    updated_at i64
+}
+
+pub fn (mut a AuditMeta) touch() {
+    a.updated_at = 1760000000
+}
+
+pub struct Invoice {
+    AuditMeta // Transparently embedded!
+pub:
+    id string
+    amount i64
+}
+
+fn main() {
+    mut inv := Invoice{ ... }
+    inv.touch()                  // Promoted method dispatch!
+    println('${inv.updated_at}') // Promoted field access!
+}
+```
+
+---
+
+### Methods (Value vs Mutable Pointer Receivers)
+
+Methods are declared with an explicit receiver before the function name:
+
+```vex
+// Immutable receiver (read-only; can be called on immutable or mutable bindings)
+pub fn (inv Invoice) summary() string {
+    return 'Invoice #${inv.id}: ${inv.amount}'
+}
+
+// Mutable receiver (can only be called on 'mut' bindings)
+pub fn (mut inv Invoice) apply_discount(percent f32) {
+    inv.amount = i64(f32(inv.amount) * (1.0 - percent))
+}
+```
+
+---
+
+### Static Factory Methods
+
+Type-associated static constructor functions use the `TypeName.method_name` syntax:
+
+```vex
+pub fn Invoice.new(id string, amount i64) Invoice {
+    return Invoice{
+        AuditMeta: AuditMeta{ created_at: 1750000000, updated_at: 1750000000 },
+        id: id,
+        amount: amount,
+    }
+}
+
+// Called via:
+inv := Invoice.new('inv_101', 5000)
+```
+
+---
+
+### Structural Interfaces & Dynamic Dispatch
+
+#### Interface Definitions
+
+Interfaces define a set of methods that a type must implement. Methods requiring mutation use `mut:`:
+
+```vex
+pub interface Payable {
+    summary() string
+mut:
+    mark_paid() !string
+}
+```
+
+#### Implicit Satisfaction
+
+Types do **not** declare `implements Payable`. If a struct provides the required methods with matching signatures, it automatically satisfies the interface.
+
+#### Fat-Pointer Boxing & Dynamic Dispatch
+
+Cast any satisfying struct to an interface to create a 16-byte fat pointer (`._object`, `._vtable`):
+
+```vex
+inv := Invoice.new('inv_9001', 15000)
+p := Payable(inv) // Boxes into dynamic interface fat-pointer
+
+println(p.summary()) // Dispatches through vtable
+```
+
+When `p` goes out of scope, the runtime invokes `p._vtable->_autofree(p._object)` to release internal struct heap fields and boxed memory.
+
+---
+
+### Zero-Cost Error Handling: `!T` Result & `or { ... }`
+
+Vira eliminates unhandled runtime exceptions in favor of explicit, zero-cost `!T` Result types.
+
+#### Result Types (`!T`)
+
+A function returning a Result indicates potential failure:
+
+```vex
+pub fn (mut inv Invoice) mark_paid() !string {
+    if inv.amount <= 0 {
+        return error('invalid invoice amount')
+    }
+    inv.is_paid = true
+    return 'Invoice #${inv.id} paid successfully'
+}
+```
+
+#### The `or { ... }` Unwrap Block
+
+Result values must be unwrapped at the call site. The `or { ... }` block executes only on error, exposing the error message via the implicit variable `err`:
+
+```vex
+msg := inv.mark_paid() or {
+    eprintln('Failed to pay: ${err}')
+    return
+}
+println(msg)
+```
+
+Default fallback values can also be supplied directly:
+
+```vex
+val := risky_calc() or { 0.0 }
+```
+
+#### Compiler Enforcement
+
+If you call a function returning `!T` without `or { ... }` or `!`, compilation fails:
+
+```
+error[SEMANTIC]: unhandled Result '!string' from 'Invoice.mark_paid()': handle it with 'or { ... }' or propagate with '!'
+```
+
+---
+
+### Deterministic Memory Management: Autofree & Arenas
+
+Vira delivers automatic memory safety **without a garbage collector** and without manual calls to `free()`.
+
+#### How Autofree Works
+
+1. During Phase 3 compilation, the **Static Escape Analyzer** examines variable lifecycles and control flow across all function blocks.
+2. If a variable owns heap memory (strings, tensors, boxed interfaces, structs with heap fields), the analyzer tracks its ownership state.
+3. At block and function exits, the analyzer injects deterministic **LIFO (Last-In, First-Out)** destructor calls (`vira_str_free`, `vira_tensor_f32_free`, `_autofree`).
+
+#### Static Escape Classification
+
+| Classification | Meaning | Action Taken |
+| :--- | :--- | :--- |
+| `StateScopedLocal` | Variable does not outlive its enclosing block | Destructor injected at scope exit |
+| `StateEscapesViaReturn` | Variable is returned to the caller | Ownership transferred; cleanup skipped in current scope |
+| `StateMovedToContainer` | Variable is moved into a struct or interface box | Container takes ownership; cleanup transferred |
+| `StateManagedByArena` | Allocated within an `arena { ... }` block | Lifetime tied to arena slab; individual frees skipped |
+
+Run `vira check <file.vir>` to inspect the complete autofree escape analysis audit log.
+
+#### Bump Arenas (`arena { ... }`)
+
+For high-throughput workloads, temporary batch allocations can be placed in a fast, 64-byte cache-aligned bump arena:
+
+```vex
+arena {
+    t1 := tensor_fill(128, 128, 1.0)
+    t2 := tensor_fill(128, 128, 2.0)
+    t3 := t1 @ t2
+    println('Sum: ${tensor_sum(t3)}')
+} // Entire arena slab wiped in O(1) time upon block exit!
+```
+
+---
+
+### First-Class AI Tensors & SIMD Acceleration
+
+#### Tensor Types & Construction
+
+Tensors are first-class primitives in Vira:
+
+```vex
+w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
+x := tensor_fill(64, 64, 2.0)
+```
+
+#### Matrix Multiplication (`@`)
+
+The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
+
+```vex
+y := w @ x // Performs 64x64 @ 64x64 matmul
+total := tensor_sum(y)
+```
+
+#### SIMD Hardware Backends
+
+The Vira runtime automatically selects the fastest available vector instructions:
+
+- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
+- **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
+- **Fallback:** Cache-blocked 8x8 tiling algorithm for portable C99 execution
+
+---
+
+### Pure Vira Autograd Engine & Native SafeTensors
+
+Vira features a native Autograd backpropagation engine and zero-copy reader for Hugging Face `.safetensors` files:
+
+```vex
+// Load Hugging Face weights directly without Python
+weights := safetensors_load('model.safetensors', 'encoder.weight') or {
+    panic('Failed to load weights: ${err}')
+}
+
+// Compute backward gradients via SIMD
+grad_b := tensor_matmul_grad_b(grad_output, weights)
+grad_act := tensor_relu_backward(grad_b, activations)
+
+// Apply in-place SGD step
+tensor_sgd_step(weights, grad_b, 0.01)
+```
+
+---
+
+### Pure Vira Local LLM Engine & GGUF Parser
+
+Vira includes a native binary parser and execution runtime for quantized GGUF models:
+
+```vex
+// Initialize GGUF model parser (Q4_0 / Q8_0)
+model := gguf_load('llama-3.2-1b-instruct-q4_0.gguf') or {
+    panic('Failed to open GGUF model: ${err}')
+}
+
+// Run inference with Rotary Embeddings (RoPE), SwiGLU, and Attention
+logits := model.forward(token_ids)
+next_token := sample_token(logits, temperature=0.7)
+```
+
+---
+
+### Actor Concurrency & Erlang-Style Fault Supervision
+
+Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads.
+
+#### Actor Definition
+
+An actor is declared with the `actor` keyword:
+
+```vex
+pub actor AIWorker {
+pub:
+    id int
+mut:
+    batches_run int = 0
+}
+
+pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
+    w.batches_run += 1
+    weights := tensor_fill(64, 64, 0.25)
+    input := tensor_fill(64, 64, scale)
+    out := weights @ input
+
+    if simulate_fault {
+        panic('CUDA/NaN anomaly on parallel batch')
+    }
+    return tensor_sum(out)
+}
+```
+
+#### Message Passing (`<-`) & Futures
+
+Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
+
+```vex
+mut w1 := AIWorker{ id: 1, batches_run: 0 }
+mut w2 := AIWorker{ id: 2, batches_run: 0 }
+
+// Asynchronous parallel fan-out across Chase-Lev pool
+fut1 := w1 <- predict(2.0, false)
+fut2 := w2 <- predict(3.0, true) // Will simulate fault
+
+// Non-blocking work-stealing await
+res1 := fut1.await() or { 0.0 }
+res2 := fut2.await() or {
+    println('Worker 2 faulted: ${err}')
+    0.0
+}
+```
+
+#### Lock-Free Chase-Lev Work-Stealing Pool
+
+- Tasks are submitted to a pool of worker threads sized to `min(CPU cores, 16)`.
+- Each worker maintains a lock-free **Chase-Lev deque**.
+- Idle workers automatically steal tasks from overloaded workers using atomic compare-and-swap operations.
+
+#### Erlang-Style Fault Boundaries (`panic` & `OneForOne`)
+
+When an actor encounters a `panic('...')`:
+1. The per-thread TLS fault boundary (`setjmp`/`longjmp`) intercepts the panic before it can crash the process.
+2. The actor's isolated scratch arena is wiped in **O(1)** time.
+3. The supervisor applies a `OneForOne` restart strategy, resetting internal state and logging the trapped error.
+4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
+
+```text
+[vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly') -> O(1) arena wipe & OneForOne restart [1/3]
+Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly
+```
+
+---
+
+### Native File I/O Operations
+
+Vira provides native, hardware-level file operations returning zero-cost Result containers (`!string`, `!bool`):
+
+| Builtin Signature | Description |
+| :--- | :--- |
+| `file_exists(path string) bool` | Returns `true` if the target path exists. |
+| `read_file(path string) !string` | Reads the entire file into a heap string buffer managed by Autofree. |
+| `write_file(path string, content string) !bool` | Writes content to file atomically, creating or overwriting it. |
+| `append_file(path string, content string) !bool` | Appends content to the end of a file. |
+| `remove_file(path string) !bool` | Deletes the file from the filesystem. |
+
+```vex
+// Atomic write
+_ := write_file('log.txt', 'Pipeline started\n') or {
+    eprintln('Write failed: ${err}')
+    return
+}
+
+// Read with automatic buffer cleanup
+data := read_file('log.txt') or {
+    eprintln('Read failed: ${err}')
+    return
+}
+println(data) // Buffer freed automatically at scope exit!
+```
+
+---
+
+### High-Performance HTTP 1.1 Web Server & Fast JSON
+
+Vira includes native primitives for building microservices:
+
+```vex
+// Parse JSON payloads with zero allocations
+payload := '{"model": "vira-7b", "batch_size": 32, "lr": 0.001}'
+model_name := json_get_str(payload, 'model') or { 'default' }
+batch_size := json_get_int(payload, 'batch_size') or { 1 }
+
+// Return HTTP 1.1 response
+res := http_response(200, 'application/json', '{"status": "ok"}')
+```
+
+---
+
+### Native Desktop GUI Engine
+
+Vira comes with a lightweight, cross-platform graphical canvas windowing engine (`runtime/vira_gui.h`):
+
+```powershell
+# Run the built-in desktop GUI demonstration
+.\vira.exe run examples/gui_demo.vir
+```
+
+Features:
+- Native Win32 windowing with double-buffered GDI rendering.
+- Linux X11/Xlib support with standard display protocols.
+- 60 FPS animation loop with customizable frame callbacks.
+- Vector graphics primitives: rectangles, circles, lines, and text rendering.
+
+---
+
+### Rust/V-Style Diagnostic Engine
+
+The Vira compiler provides rich caret diagnostics with exact column spans and actionable `= help:` hints:
+
+```text
+error[SEMANTIC]: cannot reassign immutable variable 'x'
+  --> examples/bad_account.vir:18:2
+   |
+18 |     x = 20
+   |     ^^^^^^
+   = help: declare with 'mut x := ...'
+
+error[SEMANTIC]: cannot call mutable receiver method 'deposit()' on immutable binding 'imm_acc'
+  --> examples/bad_account.vir:21:7
+   |
+21 |     _ := imm_acc.deposit(50) or { 0 }
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: declare 'mut imm_acc := ...'
+
+error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated
+  --> examples/bad_account.vir:24:2
+   |
+24 |     mut_acc.id = 'hacked_id'
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+---
+
+## 6. Complete End-to-End Production Program
+
+The following program combines all core language features: OOP composition, fat-pointer interfaces, SIMD tensors, work-stealing actor concurrency, and fault tolerance:
+
+```vex
+module billing
+
+// --- 1. OOP STRUCTS & COMPOSITION ---
+
+pub struct AuditMeta {
+pub:
+	created_at i64
+pub mut:
+	updated_at i64
+}
+
+pub fn (mut a AuditMeta) touch() {
+	a.updated_at = 1760000000
+}
+
+pub struct Invoice {
+	AuditMeta
+	secret_token string
+mut:
+	retry_count int = 0
+pub:
+	id string
+	amount_cents i64
+pub mut:
+	is_paid bool
+}
+
+pub interface Payable {
+	summary() string
+mut:
+	mark_paid() !string
+}
+
+pub fn Invoice.new(id string, amount_cents i64) Invoice {
+	return Invoice{
+		AuditMeta: AuditMeta{ created_at: 1750000000, updated_at: 1750000000 },
+		secret_token: 'sec_live_01',
+		id: id,
+		amount_cents: amount_cents,
+		is_paid: false,
+	}
+}
+
+pub fn (inv Invoice) summary() string {
+	return 'Invoice #${inv.id} [updated_at=${inv.updated_at}]'
+}
+
+pub fn (mut inv Invoice) mark_paid() !string {
+	if inv.amount_cents <= 0 {
+		return error('invalid invoice amount')
+	}
+	inv.is_paid = true
+	inv.retry_count += 1
+	inv.touch()
+	return 'Invoice #${inv.id} paid (${inv.amount_cents} cents)'
+}
+
+// --- 2. MULTI-THREADED AI WORKER ACTOR ---
+
+pub actor AIWorker {
+pub:
+	id int
+mut:
+	batches_run int = 0
+}
+
+pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
+	w.batches_run += 1
+	weights := tensor_fill(64, 64, 0.25)
+	input := tensor_fill(64, 64, scale)
+	out := weights @ input
+
+	if simulate_fault {
+		panic('CUDA/NaN anomaly on parallel batch')
+	}
+	return tensor_sum(out)
+}
+
+// --- 3. APPLICATION ENTRYPOINT ---
+
+fn main() {
+	println('=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===')
+	mut inv := Invoice.new('inv_9001', 15000)
+	msg := inv.mark_paid() or {
+		eprintln(err)
+		return
+	}
+	println(msg)
+	p := Payable(inv)
+	_ := p
+
+	println('=== 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===')
+	mut w1 := AIWorker{ id: 1, batches_run: 0 }
+	mut w2 := AIWorker{ id: 2, batches_run: 0 }
+	mut w3 := AIWorker{ id: 3, batches_run: 0 }
+
+	// Dispatch 3 concurrent actor tasks across the thread pool
+	fut1 := w1 <- predict(2.0, false)
+	fut2 := w2 <- predict(3.0, true) // Injected fault
+	fut3 := w3 <- predict(4.0, false)
+
+	s1 := fut1.await() or { 0.0 }
+	s2 := fut2.await() or {
+		println('Future #2 caught parallel Worker #2 fault: ${err}')
+		0.0
+	}
+	s3 := fut3.await() or { 0.0 }
+
+	println('Parallel Future results -> w1=${s1}, w2(faulted)=${s2}, w3=${s3}')
+
+	// Supervised restart recovery verification
+	fut2_retry := w2 <- predict(3.0, false)
+	s2_recovered := fut2_retry.await() or { 0.0 }
+	println('Worker #2 recovered Future result -> w2=${s2_recovered}')
+}
+```
+
+### Compiling and Running
+
+```powershell
+# Fast build with native production optimizations
+.\vira.exe build -prod -o app.exe examples/parallel_ai_actors.vir
+
+# Execute
+.\app.exe
+```
+
+### Execution Telemetry Output
+
+```text
+=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===
+Invoice #inv_9001 paid (15000 cents)
+=== 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===
+[vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
+Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
+Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00
+Worker #2 recovered Future result -> w2=196608.00
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=12
+```
+
+---
+
+## 7. VS Code Extension & LSP Integration
+
+Vira features an official Visual Studio Code extension with live Language Server Protocol support:
+
+- **Syntax Highlighting:** Complete TextMate grammar for `.vir` files.
+- **Language Server (`vira lsp`):** Real-time diagnostics, document formatting, symbol navigation, and autocomplete.
+- **Extension Location:** Located in [`editors/vscode/`](editors/vscode/).
+
+To install the packaged extension:
+```bash
+code --install-extension editors/vscode/vira-language-0.1.1.vsix
+```
+
+---
+
+## 8. Cross-Platform Release Packager
+
+The automated Go packager compiles and packages release bundles for Windows, Linux, and macOS:
+
+```powershell
+# Windows
+.\scripts\package.ps1
+
+# Linux / macOS
+./scripts/package.sh
+```
+
+Generates compressed artifacts in `dist/`:
+- `vira-v0.5.5-windows-amd64.zip`
+- `vira-v0.5.5-linux-amd64.tar.gz`
+- `vira-v0.5.5-darwin-arm64.tar.gz`
+- `vira-v0.5.5-darwin-amd64.tar.gz`
+
+---
+
+## 9. Roadmap & Contributing
+
+See [`ROADMAP.md`](ROADMAP.md) for planned features including:
+- GPU Device Kernel Compilation (PTX / SPIR-V)
+- Distributed Multi-Node Actor Clustering
+- WebAssembly (Wasm + WASI) Compilation Target
+- Standard Library Networking Extensions
+
+Contributions are welcome! Please open an issue or submit a pull request on GitHub at [github.com/viralang/vira](https://github.com/viralang/vira).
+
+---
+
+## 10. License
+
+The Vira Programming Language compiler, runtime, and documentation are licensed under the **MIT License**. See [`LICENSE`](LICENSE.txt) for details.

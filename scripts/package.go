@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -16,10 +18,10 @@ import (
 const version = "v0.5.5"
 
 type Target struct {
-	OS       string
-	Arch     string
-	ExeName  string
-	Archive  string // "zip" or "tar.gz"
+	OS      string
+	Arch    string
+	ExeName string
+	Archive string // "zip" or "tar.gz"
 }
 
 var targets = []Target{
@@ -55,7 +57,7 @@ func main() {
 		outBinary := filepath.Join(binDir, tgt.ExeName)
 
 		// 1. Cross-compile Vira binary
-		cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", outBinary, "./cmd/vex")
+		cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", outBinary, "./cmd/vira")
 		cmd.Env = append(os.Environ(),
 			"GOOS="+tgt.OS,
 			"GOARCH="+tgt.Arch,
@@ -174,7 +176,7 @@ func createTarGz(srcDir, tarPath string) {
 		header.Name = tarEntryPath
 
 		// Mark executable files with 0755
-		if !info.IsDir() && (strings.HasSuffix(tarEntryPath, "/vex") || strings.HasSuffix(tarEntryPath, ".sh")) {
+		if !info.IsDir() && (strings.HasSuffix(tarEntryPath, "/vira") || strings.HasSuffix(tarEntryPath, ".sh")) {
 			header.Mode = 0755
 		}
 
