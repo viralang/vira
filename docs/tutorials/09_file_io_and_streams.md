@@ -1,7 +1,7 @@
 # Tutorial 9: File I/O, Buffer Operations & Streams
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/09_file_io.vex`](../examples/09_file_io.vex)
+> **Matching Code Example:** [`docs/examples/09_file_io.vir`](../examples/09_file_io.vir)
 
 ---
 
@@ -18,7 +18,7 @@ In Vex, I/O operations are designed around three principles:
 
 ## 2. File I/O Primitives
 
-Vex provides native, hardware-accelerated file primitives:
+Vira provides native, hardware-accelerated file primitives:
 
 | Function Signature | Description | Return Type |
 | :--- | :--- | :--- |
@@ -63,11 +63,11 @@ _ := append_file(test_file, log_line) or {
 
 ## 4. Reading Files & Zero-Leak Buffer Autofree
 
-When you read a file with `read_file(path)`, the Vex runtime:
+When you read a file with `read_file(path)`, the Vira runtime:
 1. Opens the file descriptor in read-binary mode (`"rb"`).
 2. Seeks to the end to determine the exact file length in bytes.
 3. Allocates a memory buffer of size `len + 1` and reads the file in a single block.
-4. Records the allocation in the telemetry counters (`_vex_record_alloc()`).
+4. Records the allocation in the telemetry counters (`_vira_record_alloc()`).
 5. Returns a `Result_string` containing the unescaped UTF-8 string.
 
 ```vex
@@ -83,7 +83,7 @@ println(data)
 Because `data` is bound as a local variable of type `string`, the **Static Escape Analyzer** tracks it. When `data` goes out of scope at the end of the enclosing block, the compiler automatically injects:
 
 ```c
-vex_str_free(&data);
+vira_str_free(&data);
 ```
 
 This guarantees that file buffers never leak memory, even when reading gigabytes of data in nested loops.
@@ -140,10 +140,10 @@ fn main() {
 
 ## 7. Running the Code
 
-Execute the matching example from the Vex CLI:
+Execute the matching example from the Vira CLI:
 
 ```powershell
-.\vex.exe run docs/examples/09_file_io.vex
+.\vira.exe run docs/examples/09_file_io.vir
 ```
 
 Expected output:
@@ -156,17 +156,17 @@ Successfully wrote initial content to sample_output.txt
 Successfully appended log record to sample_output.txt
 === 4. READING FILE CONTENTS ===
 --- Read File Content ---
-Vex Language: Fast, Safe, Concurrent, and GC-Free
+Vira Language: Fast, Safe, Concurrent, and GC-Free
 [LOG] Tensor pipeline initialized at timestamp 1760000000
 === 5. CLEANUP / REMOVE FILE ===
 File sample_output.txt deleted; exists now: false
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=5
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=5
 ```
 
 ---
 
 ## Next Steps
 
-Review the [**Vex Master Curriculum Index**](./README.md) or explore the [**Vex Runnable Examples Catalog**](../examples/README.md) to continue expanding your Vex applications.
+Review the [**Vira Master Curriculum Index**](./README.md) or explore the [**Vira Runnable Examples Catalog**](../examples/README.md) to continue expanding your Vira applications.

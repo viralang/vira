@@ -10,35 +10,35 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/autofree"
-	"github.com/vexlang/vex/internal/cgen"
-	"github.com/vexlang/vex/internal/checker"
-	"github.com/vexlang/vex/internal/formatter"
-	"github.com/vexlang/vex/internal/lsp"
-	"github.com/vexlang/vex/internal/mod"
-	"github.com/vexlang/vex/internal/parser"
-	"github.com/vexlang/vex/internal/source"
-	vexrt "github.com/vexlang/vex/runtime"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/autofree"
+	"github.com/viralang/vira/internal/cgen"
+	"github.com/viralang/vira/internal/checker"
+	"github.com/viralang/vira/internal/formatter"
+	"github.com/viralang/vira/internal/lsp"
+	"github.com/viralang/vira/internal/mod"
+	"github.com/viralang/vira/internal/parser"
+	"github.com/viralang/vira/internal/source"
+	virart "github.com/viralang/vira/runtime"
 )
 
-const usageBanner = `Vex Programming Language Compiler (Stage-0 Toolchain)
+const usageBanner = `Vira Programming Language Compiler (Stage-0 Toolchain)
 
 Usage:
-  vex <command> [flags] [target]
+  vira <command> [flags] [target]
 
 Commands:
-  run     Compile and execute a .vex file or directory immediately
-  build   Compile a .vex file or directory into a standalone native binary
+  run     Compile and execute a .vir file or directory immediately
+  build   Compile a .vir file or directory into a standalone native binary
   cgen    Emit lowered C99 code (SIMD + Work-Stealing Actors)
   check   Run syntax, 4-quadrant mutability, and autofree escape analysis
   test    Discover and run test functions/files with leak checks
-  fmt     Format .vex source files according to official style rules
-  lsp     Start the Vex Language Server (LSP) over stdin/stdout
-  init    Initialize a new Vex project scaffold with vex.mod and src/
+  fmt     Format .vir source files according to official style rules
+  lsp     Start the Vira Language Server (LSP) over stdin/stdout
+  init    Initialize a new Vira project scaffold with vira.mod and src/
   demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
 
-Flags for 'vex build':
+Flags for 'vira build':
   -prod       Enable production optimizations (-O3 -march=native -flto)
   -sanitize   Enable AddressSanitizer & UndefinedBehaviorSanitizer
   -o <path>   Output binary path (default: <filename>)
@@ -89,7 +89,7 @@ func main() {
 	}
 }
 
-// --- SUBCOMMAND 1: `vex run` ---
+// --- SUBCOMMAND 1: `vira run` ---
 
 func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
@@ -98,14 +98,14 @@ func runCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex run [-prod] [-cc compiler] <file.vex | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-cc compiler] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
 
 	cCode, _, _ := compileVexToC99(vexPath, false)
 
-	tmpDir, err := os.MkdirTemp("", "vex_run_*")
+	tmpDir, err := os.MkdirTemp("", "vira_run_*")
 	if err != nil {
 		fatalIO(err)
 	}
@@ -141,7 +141,7 @@ func runCmd(args []string) {
 	}
 }
 
-// --- SUBCOMMAND 2: `vex build` ---
+// --- SUBCOMMAND 2: `vira build` ---
 
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
@@ -153,7 +153,7 @@ func buildCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex build [-prod] [-sanitize] [-o out] <file.vex | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-o out] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -195,7 +195,7 @@ func buildCmd(args []string) {
 		targetBin, elapsed.Round(time.Millisecond), compiler, modeDesc)
 }
 
-// --- SUBCOMMAND 3: `vex cgen` ---
+// --- SUBCOMMAND 3: `vira cgen` ---
 
 func cgenCmd(args []string) {
 	fs := flag.NewFlagSet("cgen", flag.ExitOnError)
@@ -203,7 +203,7 @@ func cgenCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex cgen [-o out.c] <file.vex | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira cgen [-o out.c] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -219,7 +219,7 @@ func cgenCmd(args []string) {
 	fmt.Print(cCode)
 }
 
-// --- SUBCOMMAND 4: `vex check` ---
+// --- SUBCOMMAND 4: `vira check` ---
 
 func checkCmd(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
@@ -227,7 +227,7 @@ func checkCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vex check [-autofree] <file.vex | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira check [-autofree] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -240,7 +240,7 @@ func checkCmd(args []string) {
 	_ = chk
 }
 
-// --- SUBCOMMAND 5: `vex test` ---
+// --- SUBCOMMAND 5: `vira test` ---
 
 func testCmd(args []string) {
 	fs := flag.NewFlagSet("test", flag.ExitOnError)
@@ -259,8 +259,8 @@ func testCmd(args []string) {
 
 	if fi.IsDir() {
 		_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
-			if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vex") {
-				if strings.HasSuffix(path, "_test.vex") {
+			if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vir") {
+				if strings.HasSuffix(path, "_test.vir") {
 					testFiles = append(testFiles, path)
 				} else if raw, rErr := os.ReadFile(path); rErr == nil && strings.Contains(string(raw), "fn test_") {
 					testFiles = append(testFiles, path)
@@ -273,7 +273,7 @@ func testCmd(args []string) {
 	}
 
 	if len(testFiles) == 0 {
-		fmt.Println("No tests found (searching for *_test.vex or files containing 'fn test_')")
+		fmt.Println("No tests found (searching for *_test.vir or files containing 'fn test_')")
 		return
 	}
 
@@ -286,7 +286,7 @@ func testCmd(args []string) {
 		start := time.Now()
 		cCode, _, _ := compileVexToC99(tFile, true)
 
-		tmpDir, err := os.MkdirTemp("", "vex_test_*")
+		tmpDir, err := os.MkdirTemp("", "vira_test_*")
 		if err != nil {
 			fatalIO(err)
 		}
@@ -326,7 +326,7 @@ func testCmd(args []string) {
 	}
 }
 
-// --- SUBCOMMAND 6: `vex fmt` ---
+// --- SUBCOMMAND 6: `vira fmt` ---
 
 func fmtCmd(args []string) {
 	fs := flag.NewFlagSet("fmt", flag.ExitOnError)
@@ -341,12 +341,12 @@ func fmtCmd(args []string) {
 	for _, target := range targets {
 		fi, err := os.Stat(target)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "vex fmt error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "vira fmt error: %v\n", err)
 			continue
 		}
 		if fi.IsDir() {
 			_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vex") {
+				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".vir") {
 					formatSingleFile(path, *writeBack)
 				}
 				return nil
@@ -360,7 +360,7 @@ func fmtCmd(args []string) {
 func formatSingleFile(path string, writeBack bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vex fmt read error (%s): %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "vira fmt read error (%s): %v\n", path, err)
 		return
 	}
 	src := string(raw)
@@ -368,7 +368,7 @@ func formatSingleFile(path string, writeBack bool) {
 	if writeBack {
 		if src != formatted {
 			if err := os.WriteFile(path, []byte(formatted), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "vex fmt write error (%s): %v\n", path, err)
+				fmt.Fprintf(os.Stderr, "vira fmt write error (%s): %v\n", path, err)
 				return
 			}
 			fmt.Printf("reformatted %s\n", path)
@@ -378,20 +378,20 @@ func formatSingleFile(path string, writeBack bool) {
 	}
 }
 
-// --- SUBCOMMAND 7: `vex lsp` ---
+// --- SUBCOMMAND 7: `vira lsp` ---
 
 func lspCmd() {
 	server := lsp.NewServer(os.Stdin, os.Stdout)
 	if err := server.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "vex lsp error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "vira lsp error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// --- SUBCOMMAND 8: `vex init` ---
+// --- SUBCOMMAND 8: `vira init` ---
 
 func initCmd(args []string) {
-	name := "my_vex_app"
+	name := "my_vira_app"
 	if len(args) > 0 {
 		name = args[0]
 	}
@@ -416,17 +416,17 @@ func initCmd(args []string) {
 	modContent := fmt.Sprintf(`module %s
 version 0.1.0
 license MIT
-description High-performance Vex application
+description High-performance Vira application
 `, modName)
-	_ = os.WriteFile(filepath.Join(targetDir, "vex.mod"), []byte(modContent), 0644)
+	_ = os.WriteFile(filepath.Join(targetDir, "vira.mod"), []byte(modContent), 0644)
 
 	mainContent := fmt.Sprintf(`module main
 
 fn main() {
-	println('Welcome to %s powered by Vex!')
+	println('Welcome to %s powered by Vira!')
 }
 `, modName)
-	_ = os.WriteFile(filepath.Join(targetDir, "src", "main.vex"), []byte(mainContent), 0644)
+	_ = os.WriteFile(filepath.Join(targetDir, "src", "main.vir"), []byte(mainContent), 0644)
 
 	gitIgnore := `build/
 bin/
@@ -436,27 +436,27 @@ out.c
 `
 	_ = os.WriteFile(filepath.Join(targetDir, ".gitignore"), []byte(gitIgnore), 0644)
 
-	fmt.Printf("✓ Initialized new Vex project %q in %s/\n", name, targetDir)
-	fmt.Printf("  • vex.mod (package manifest)\n")
-	fmt.Printf("  • src/main.vex (entry point)\n")
+	fmt.Printf("✓ Initialized new Vira project %q in %s/\n", name, targetDir)
+	fmt.Printf("  • vira.mod (package manifest)\n")
+	fmt.Printf("  • src/main.vir (entry point)\n")
 	fmt.Printf("  • .gitignore\n\n")
 	fmt.Printf("Next steps:\n")
 	if targetDir != "." {
 		fmt.Printf("  cd %s\n", targetDir)
 	}
-	fmt.Printf("  vex run src/main.vex\n")
+	fmt.Printf("  vira run src/main.vir\n")
 }
 
-// --- SUBCOMMAND 9: `vex demo` ---
+// --- SUBCOMMAND 9: `vira demo` ---
 
 func demoCmd() {
 	_ = os.MkdirAll("examples", 0755)
-	demoFile := filepath.Join("examples", "parallel_ai_actors.vex")
+	demoFile := filepath.Join("examples", "parallel_ai_actors.vir")
 	if err := os.WriteFile(demoFile, []byte(defaultDemoSource), 0644); err != nil {
 		fatalIO(err)
 	}
 	fmt.Printf("✓ Created sample program: %s\n", demoFile)
-	fmt.Println("✓ Running `vex run -prod examples/parallel_ai_actors.vex`...")
+	fmt.Println("✓ Running `vira run -prod examples/parallel_ai_actors.vir`...")
 	fmt.Println()
 	runCmd([]string{"-prod", demoFile})
 }
@@ -476,7 +476,9 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 			fatalIO(err)
 		}
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".vex") && !strings.HasSuffix(e.Name(), "_test.vex") {
+			isSource := (strings.HasSuffix(e.Name(), ".vir") || strings.HasSuffix(e.Name(), ".vex")) &&
+				!strings.HasSuffix(e.Name(), "_test.vir") && !strings.HasSuffix(e.Name(), "_test.vex")
+			if !e.IsDir() && isSource {
 				vexFiles = append(vexFiles, filepath.Join(targetPath, e.Name()))
 			}
 		}
@@ -485,14 +487,15 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 			if sfi, sErr := os.Stat(srcDir); sErr == nil && sfi.IsDir() {
 				sEntries, _ := os.ReadDir(srcDir)
 				for _, se := range sEntries {
-					if !se.IsDir() && strings.HasSuffix(se.Name(), ".vex") {
+					isSource := (strings.HasSuffix(se.Name(), ".vir") || strings.HasSuffix(se.Name(), ".vex"))
+					if !se.IsDir() && isSource {
 						vexFiles = append(vexFiles, filepath.Join(srcDir, se.Name()))
 					}
 				}
 			}
 		}
 		if len(vexFiles) == 0 {
-			fmt.Fprintf(os.Stderr, "no .vex source files found in %s\n", targetPath)
+			fmt.Fprintf(os.Stderr, "no .vir source files found in %s\n", targetPath)
 			os.Exit(1)
 		}
 	} else {
@@ -626,7 +629,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		if compiler == "" {
 			fmt.Fprintln(os.Stderr, "error: no C99 backend compiler found in PATH (searched: gcc, clang, cc, tcc)")
 			fmt.Fprintln(os.Stderr, "  = help: Install GCC (MinGW-w64 or w64devkit) or Clang (LLVM) and add it to your PATH.")
-			fmt.Fprintln(os.Stderr, "  = note: You can inspect and emit C99 code directly using: vex cgen <file.vex>")
+			fmt.Fprintln(os.Stderr, "  = note: You can inspect and emit C99 code directly using: vira cgen <file.vir>")
 			os.Exit(1)
 		}
 	}
@@ -712,6 +715,8 @@ func resolveExternalLibPaths() ([]string, []string, bool) {
 	}
 	if home != "" {
 		searchRoots = append(searchRoots,
+			filepath.Join(home, ".vira", "lib"),
+			filepath.Join(home, ".vira", "vendor"),
 			filepath.Join(home, ".vex", "lib"),
 			filepath.Join(home, ".vex", "vendor"),
 		)
@@ -758,27 +763,27 @@ func resolveExternalLibPaths() ([]string, []string, bool) {
 }
 
 func resolveRuntimeDir() string {
-	if info, err := os.Stat("runtime/vex_rt.h"); err == nil && !info.IsDir() {
+	if info, err := os.Stat("runtime/vira_rt.h"); err == nil && !info.IsDir() {
 		return "runtime"
 	}
 	if exe, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(exe), "runtime")
-		if info, err := os.Stat(filepath.Join(cand, "vex_rt.h")); err == nil && !info.IsDir() {
+		if info, err := os.Stat(filepath.Join(cand, "vira_rt.h")); err == nil && !info.IsDir() {
 			return cand
 		}
 	}
 
-	// Portable fallback: Extract embedded headers from vexrt.RuntimeFS to ~/.vex/runtime/
+	// Portable fallback: Extract embedded headers from virart.RuntimeFS to ~/.vir/runtime/
 	home, err := os.UserHomeDir()
 	if err == nil {
-		cacheDir := filepath.Join(home, ".vex", "runtime")
+		cacheDir := filepath.Join(home, ".vira", "runtime")
 		_ = os.MkdirAll(cacheDir, 0755)
 
-		entries, err := vexrt.RuntimeFS.ReadDir(".")
+		entries, err := virart.RuntimeFS.ReadDir(".")
 		if err == nil && len(entries) > 0 {
 			for _, e := range entries {
 				if !e.IsDir() && strings.HasSuffix(e.Name(), ".h") {
-					data, err := vexrt.RuntimeFS.ReadFile(e.Name())
+					data, err := virart.RuntimeFS.ReadFile(e.Name())
 					if err == nil {
 						_ = os.WriteFile(filepath.Join(cacheDir, e.Name()), data, 0644)
 					}

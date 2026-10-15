@@ -106,11 +106,11 @@ fn main() {
 	println('Loaded test batch: (8 samples x 16 features)')
 
 	println('--- 3. HOST CPU SIMD INFERENCE & NUMERICAL PARITY CHECK ---')
-	vex_output := model.forward(test_inputs)
-	println('Vex Output Metric (Activation Sum)   : ${vex_output}')
+	vira_output := model.forward(test_inputs)
+	println('Vira Output Metric (Activation Sum)   : ${vira_output}')
 	println('PyTorch Baseline Output Metric       : -0.60')
 
-	if vex_output == -0.60f32 {
+	if vira_output == -0.60f32 {
 		println('SUCCESS: Exact numerical parity verified against PyTorch!')
 	} else {
 		println('Numerical difference within IEEE 754 rounding tolerance.')
@@ -136,7 +136,7 @@ fn main() {
 		return
 	}
 	println('Exported model.w1 to "models/exported_w1_from_vex.bin" (2,048 bytes)')
-	println('Verified: Weights are 100% portable between Vex and PyTorch backends.')
+	println('Verified: Weights are 100% portable between Vira and PyTorch backends.')
 
 	// Clean up exported test artifact
 	_ := remove_file('models/exported_w1_from_vex.bin') or { false }

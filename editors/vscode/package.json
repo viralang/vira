@@ -1,20 +1,20 @@
 {
-  "name": "vex-language",
-  "displayName": "Vex Programming Language",
-  "description": "Rich language support, syntax highlighting, and LSP integration for the Vex Programming Language.",
+  "name": "vira-language",
+  "displayName": "Vira Programming Language",
+  "description": "Rich language support, syntax highlighting, and LSP integration for the Vira Programming Language.",
   "version": "0.1.1",
-  "publisher": "vexlang",
+  "publisher": "viralang",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/micromax/vex"
+    "url": "https://github.com/viralang/vira"
   },
   "engines": {
     "vscode": "^1.75.0"
   },
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:vex"
+    "onLanguage:vira"
   ],
   "categories": [
     "Programming Languages",
@@ -24,12 +24,13 @@
   "contributes": {
     "languages": [
       {
-        "id": "vex",
+        "id": "vira",
         "aliases": [
-          "Vex",
-          "vex"
+          "Vira",
+          "vira"
         ],
         "extensions": [
+          ".vir",
           ".vex"
         ],
         "configuration": "./language-configuration.json"
@@ -37,25 +38,25 @@
     ],
     "grammars": [
       {
-        "language": "vex",
-        "scopeName": "source.vex",
-        "path": "./syntaxes/vex.tmLanguage.json"
+        "language": "vira",
+        "scopeName": "source.vira",
+        "path": "./syntaxes/vira.tmLanguage.json"
       }
     ],
     "commands": [
       {
-        "command": "vex.restartServer",
-        "title": "Vex: Restart Language Server"
+        "command": "vira.restartServer",
+        "title": "Vira: Restart Language Server"
       }
     ],
     "configuration": {
       "type": "object",
-      "title": "Vex Language Server",
+      "title": "Vira Language Server",
       "properties": {
-        "vex.compilerPath": {
+        "vira.compilerPath": {
           "type": "string",
-          "default": "vex",
-          "description": "Path to the Vex compiler executable (defaults to 'vex' in PATH or ~/.vex/bin/vex)"
+          "default": "vira",
+          "description": "Path to the Vira compiler executable (defaults to 'vira' in PATH or ~/.vira/bin/vira)"
         }
       }
     }

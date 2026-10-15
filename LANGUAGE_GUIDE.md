@@ -1,4 +1,4 @@
-# The Vex Programming Language: Complete Language Guide & Reference
+# The Vira Programming Language: Complete Language Guide & Reference
 
 > **Version:** Stage-0 Compiler (v0.1.0)  
 > **Status:** Production-Ready Toolchain & Runtime  
@@ -65,21 +65,21 @@
 
 ## 2. Toolchain & CLI Reference
 
-The Vex compiler CLI binary is `vex` (or `vex.exe` on Windows).
+The Vira compiler CLI binary is `vex` (or `vira.exe` on Windows).
 
 ```
-vex <command> [flags] <file.vex>
+vira <command> [flags] <file.vir>
 ```
 
 ### Available Commands
 
 | Command | Purpose | Example |
 | :--- | :--- | :--- |
-| `run` | Compile and immediately execute a Vex program | `vex run main.vex` |
-| `build` | Compile into a native standalone executable (`.exe` / ELF) | `vex build -prod -o app main.vex` |
-| `cgen` | Lower the Vex AST into human-readable C99 code | `vex cgen main.vex` |
-| `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vex check main.vex` |
-| `demo` | Generate and execute the built-in parallel AI actor demo | `vex demo` |
+| `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
+| `build` | Compile into a native standalone executable (`.exe` / ELF) | `vira build -prod -o app main.vir` |
+| `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
+| `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vira check main.vir` |
+| `demo` | Generate and execute the built-in parallel AI actor demo | `vira demo` |
 
 ### Compiler Flags
 
@@ -95,7 +95,7 @@ vex <command> [flags] <file.vex>
 
 ### Modules
 
-Every Vex source file begins with a `module` declaration defining its namespace boundary:
+Every Vira source file begins with a `module` declaration defining its namespace boundary:
 
 ```vex
 module billing
@@ -107,7 +107,7 @@ Symbols prefixed with `pub` are visible outside the module; un-prefixed symbols 
 
 ### Variables & Immutability
 
-Bindings in Vex are **immutable by default**. To reassign a variable, declare it with `mut`:
+Bindings in Vira are **immutable by default**. To reassign a variable, declare it with `mut`:
 
 ```vex
 // Immutable binding (cannot be reassigned)
@@ -161,7 +161,7 @@ println('Player ${name} scored ${score}%!')
 
 ## 4. 4-Quadrant Struct Encapsulation & OOP
 
-Vex provides granular, 4-quadrant field encapsulation within a single struct definition:
+Vira provides granular, 4-quadrant field encapsulation within a single struct definition:
 
 ```vex
 pub struct Account {
@@ -199,7 +199,7 @@ pub mut:
 
 ### Struct Embedding & Composition
 
-Vex replaces class inheritance with **struct embedding**. Fields and methods of the embedded struct are automatically promoted:
+Vira replaces class inheritance with **struct embedding**. Fields and methods of the embedded struct are automatically promoted:
 
 ```vex
 pub struct AuditMeta {
@@ -301,7 +301,7 @@ When `p` goes out of scope, the runtime invokes `p._vtable->_autofree(p._object)
 
 ## 6. Error Handling: `!T` Result & `?T` Option
 
-Vex eschews unhandled exceptions in favor of explicit, zero-cost `!T` Result types.
+Vira eschews unhandled exceptions in favor of explicit, zero-cost `!T` Result types.
 
 ### Result Types (`!T`)
 
@@ -347,13 +347,13 @@ error[SEMANTIC]: unhandled Result '!string' from 'Invoice.mark_paid()': handle i
 
 ## 7. Memory Management: Deterministic Autofree & Arenas
 
-Vex delivers automatic memory safety **without a garbage collector** and without manual calls to `free()`.
+Vira delivers automatic memory safety **without a garbage collector** and without manual calls to `free()`.
 
 ### How Autofree Works
 
 1. During Phase 3 compilation, the **Static Escape Analyzer** examines variable lifecycles and control flow across all function blocks.
 2. If a variable owns heap memory (strings, tensors, boxed interfaces, structs with heap fields), the analyzer tracks its ownership state.
-3. At block and function exits, the analyzer injects deterministic **LIFO (Last-In, First-Out)** destructor calls (`vex_str_free`, `vex_tensor_f32_free`, `_autofree`).
+3. At block and function exits, the analyzer injects deterministic **LIFO (Last-In, First-Out)** destructor calls (`vira_str_free`, `vira_tensor_f32_free`, `_autofree`).
 
 ### Static Escape Classification
 
@@ -364,7 +364,7 @@ Vex delivers automatic memory safety **without a garbage collector** and without
 | `StateMovedToContainer` | Variable is moved into a struct or interface box | Container takes ownership; cleanup transferred |
 | `StateManagedByArena` | Allocated within an `arena { ... }` block | Lifetime tied to arena slab; individual frees skipped |
 
-Run `vex check <file.vex>` to inspect the complete autofree escape analysis audit log.
+Run `vira check <file.vir>` to inspect the complete autofree escape analysis audit log.
 
 ---
 
@@ -405,7 +405,7 @@ total := tensor_sum(y)
 
 ### SIMD Hardware Backends
 
-The Vex runtime automatically selects the fastest available vector instructions:
+The Vira runtime automatically selects the fastest available vector instructions:
 
 - **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
 - **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
@@ -415,7 +415,7 @@ The Vex runtime automatically selects the fastest available vector instructions:
 
 ## 9. Actor Concurrency & Fault Supervision
 
-Vex features Erlang-inspired actor concurrency built for multicore machine learning workloads.
+Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads.
 
 ### Actor Definition
 
@@ -484,7 +484,7 @@ When an actor encounters a `panic('...')`:
 4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
 
 ```text
-[vex_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
+[vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
 Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
 ```
 
@@ -492,7 +492,7 @@ Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
 
 ## 10. Native File I/O & Buffer Operations
 
-Vex provides native, hardware-level file operations returning zero-cost Result containers (`!string`, `!bool`):
+Vira provides native, hardware-level file operations returning zero-cost Result containers (`!string`, `!bool`):
 
 | Builtin Signature | Description |
 | :--- | :--- |
@@ -523,25 +523,25 @@ println(data) // Buffer freed automatically at scope exit!
 
 ## 11. Diagnostic Engine
 
-The Vex compiler provides Rust/V-style caret diagnostics with exact column spans and actionable `= help:` suggestions.
+The Vira compiler provides Rust/V-style caret diagnostics with exact column spans and actionable `= help:` suggestions.
 
 ```
 error[SEMANTIC]: cannot reassign immutable variable 'x'
-  --> examples/bad_account.vex:18:2
+  --> examples/bad_account.vir:18:2
    |
 18 |     x = 20
    |     ^^^^^^
    = help: declare with 'mut x := ...'
 
 error[SEMANTIC]: cannot call mutable receiver method 'deposit()' on immutable binding 'imm_acc'
-  --> examples/bad_account.vex:21:7
+  --> examples/bad_account.vir:21:7
    |
 21 |     _ := imm_acc.deposit(50) or { 0 }
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: declare 'mut imm_acc := ...'
 
 error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated
-  --> examples/bad_account.vex:24:2
+  --> examples/bad_account.vir:24:2
    |
 24 |     mut_acc.id = 'hacked_id'
    |     ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -675,7 +675,7 @@ fn main() {
 
 ```powershell
 # Fast build with native production optimizations
-.\vex.exe build -prod -o app.exe examples/parallel_ai_actors.vex
+.\vira.exe build -prod -o app.exe examples/parallel_ai_actors.vir
 
 # Execute
 .\app.exe
@@ -687,11 +687,11 @@ fn main() {
 === 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===
 Invoice #inv_9001 paid (15000 cents)
 === 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===
-[vex_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
+[vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
 Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch
 Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00
 Worker #2 recovered Future result -> w2=196608.00
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
-[vex_rt] active_leaks=0 | total_freed=12
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=12
 ```

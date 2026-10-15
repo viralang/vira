@@ -1,8 +1,8 @@
-# **Creating Vex Programming Language**
+# **Creating Vira Programming Language**
 
 [https\://gemini.google.com/app/81ff96a0ef78a8c6](https://gemini.google.com/app/81ff96a0ef78a8c6)
 
-*User prompt: Let's start Phase 1: write the Go code for the Vex token set, zero-allocation lexer, and AST nodes supporting structs and receiver methods.*
+*User prompt: Let's start Phase 1: write the Go code for the Vira token set, zero-allocation lexer, and AST nodes supporting structs and receiver methods.*
 
 Response: Phase 1 begins with three foundational packages—internal/token, internal/lexer, and internal/ast—plus a CLI verification entrypoint in cmd/vex.
 
@@ -14,7 +14,7 @@ Run the following commands to scaffold the Stage-0 Go workspace:
 
 `mkdir -p vex/cmd/vex vex/internal/token vex/internal/lexer vex/internal/ast`  
 `cd vex`  
-`go mod init github.com/vexlang/vex`
+`go mod init github.com/viralang/vira`
 
 ### **2\. Token Set & Pratt Precedence (internal/token/token.go)**
 
@@ -249,11 +249,11 @@ This package defines the compact 12-byte Token layout, all keywords (including O
 
 ### **3\. Zero-Allocation Lexer with String Interpolation (internal/lexer/lexer.go)**
 
-The lexer operates as a pull-based state machine (l.Next()). When it encounters \${ inside a single-quoted string literal, it pushes a frame onto its fixed \[8\]uint8 stack, yields TokInterpBeg, lexes normal Vex expressions inside the interpolation hole, and seamlessly resumes string scanning upon matching the closing }.
+The lexer operates as a pull-based state machine (l.Next()). When it encounters \${ inside a single-quoted string literal, it pushes a frame onto its fixed \[8\]uint8 stack, yields TokInterpBeg, lexes normal Vira expressions inside the interpolation hole, and seamlessly resumes string scanning upon matching the closing }.
 
 `package lexer`
 
-`import "github.com/vexlang/vex/internal/token"`
+`import "github.com/viralang/vira/internal/token"`
 
 `type Lexer struct {`  
 	`src         string`  
@@ -539,7 +539,7 @@ The AST models Vex’s Data-Oriented OOP directly:
 
 `package ast`
 
-`import "github.com/vexlang/vex/internal/token"`
+`import "github.com/viralang/vira/internal/token"`
 
 `// Node is the base interface for all AST elements.`  
 `type Node interface {`  
@@ -597,7 +597,7 @@ The AST models Vex’s Data-Oriented OOP directly:
 	`}`  
 `}`
 
-`// File represents a single parsed .vex source file.`  
+`// File represents a single parsed .vir source file.`  
 `type File struct {`  
 	`Module  Ident`  
 	`Imports []Ident`  
@@ -656,7 +656,7 @@ The AST models Vex’s Data-Oriented OOP directly:
 	`FieldSpan   token.Span`  
 `}`
 
-`// StructDecl models a Vex struct with composition (Embeds) and 4-quadrant fields.`  
+`// StructDecl models a Vira struct with composition (Embeds) and 4-quadrant fields.`  
 `type StructDecl struct {`  
 	`IsPub      bool`  
 	`Name       Ident`  
@@ -861,16 +861,16 @@ The AST models Vex’s Data-Oriented OOP directly:
 
 ### **5\. CLI Verification Harness (cmd/vex/main.go)**
 
-This driver tests the zero-allocation lexer on a full OOP .vex source snippet—covering embedded structs, 4-quadrant visibility blocks, receiver methods, \!Invoice Result types, and nested string interpolation—and constructs the corresponding ast.StructDecl and ast.FnDecl nodes:
+This driver tests the zero-allocation lexer on a full OOP .vir source snippet—covering embedded structs, 4-quadrant visibility blocks, receiver methods, \!Invoice Result types, and nested string interpolation—and constructs the corresponding ast.StructDecl and ast.FnDecl nodes:
 
 `package main`
 
 `import (`  
 	`"fmt"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/lexer"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/lexer"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `func main() {`  
@@ -940,7 +940,7 @@ Response: This implementation completes **Phase 1 (internal/parser)** by combini
 
 ### **1\. How Semicolon-Free Ambiguities Are Resolved**
 
-Because Vex (like Go and V) has no semicolons, three classic grammar ambiguities arise when using a 2-token lookahead (cur and peek). internal/parser resolves all three in *O*(1) without backtracking or heap allocations:
+Because Vira (like Go and V) has no semicolons, three classic grammar ambiguities arise when using a 2-token lookahead (cur and peek). internal/parser resolves all three in *O*(1) without backtracking or heap allocations:
 
 > 1. **Struct Embedding vs. Field Declarations:** Inside struct Invoice, an embedded struct (AuditMeta) and a field name (secret\_token string) both start with TokIdent. The parser checks p.hasNewlineBetween(identSpan, p.cur.Span)—if a newline (or }) immediately follows the identifier, it is an embedded composition type (ast.StructDecl.Embeds); if another token follows on the same line, it is parsed as the field’s TypeExpr.  
 > 2. **Three fn Forms:** After fn, the parser inspects p.cur and p.peek:  
@@ -959,9 +959,9 @@ Create vex/internal/parser/parser.go:
 	`"fmt"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/lexer"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/lexer"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `type ParseError struct {`  
@@ -1646,8 +1646,8 @@ Update vex/cmd/vex/main.go to parse a complete OOP module containing struct embe
 	`"fmt"`  
 	`"os"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/parser"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/parser"`  
 `)`
 
 `func main() {`  
@@ -1811,7 +1811,7 @@ Response: Phase 2 introduces the semantic analyzer (internal/checker), transform
 
 ### **1\. Architecture of the 3-Pass Checker**
 
-Like Go and V, Vex does not require C-style forward declarations: a function at the top of a file can instantiate a struct defined at the bottom or call a method promoted from an embedded struct declared later. internal/checker resolves this in three deterministic passes:
+Like Go and V, Vira does not require C-style forward declarations: a function at the top of a file can instantiate a struct defined at the bottom or call a method promoted from an embedded struct declared later. internal/checker resolves this in three deterministic passes:
 
 | Pass | Responsibility | Key Verification & Output |
 | :---- | :---- | :---- |
@@ -1829,8 +1829,8 @@ Create vex/internal/checker/types.go to represent resolved primitives, structs, 
 	`"fmt"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `// Type represents a resolved semantic type in Vex.`  
@@ -1977,7 +1977,7 @@ Create vex/internal/checker/types.go to represent resolved primitives, structs, 
 	`Ambiguous bool`  
 `}`
 
-`// StructType models a resolved Vex struct with 4-quadrant fields, methods, and embedded promotions.`  
+`// StructType models a resolved Vira struct with 4-quadrant fields, methods, and embedded promotions.`  
 `type StructType struct {`  
 	`Module          string`  
 	`Name            string`  
@@ -2046,8 +2046,8 @@ Create vex/internal/checker/checker.go to implement the 3-pass analyzer:
 	`"fmt"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `type SemanticError struct {`  
@@ -3014,8 +3014,8 @@ Update vex/cmd/vex/main.go to run **two test suites**:
 	`"fmt"`  
 	`"os"`
 
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/parser"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/parser"`  
 `)`
 
 `func main() {`  
@@ -3186,9 +3186,9 @@ Running go run ./cmd/vex verifies both the valid OOP pipeline (including AuditMe
 
 Response: Phase 3 builds Vex’s deterministic memory management system: a single-header C99 runtime (runtime/vex\_rt.h) paired with a compile-time static escape analyzer and destructor injector (internal/autofree).
 
-## **1\. How Vex autofree \+ Arena Memory Management Works**
+## **1\. How Vira autofree \+ Arena Memory Management Works**
 
-Instead of a stop-the-world garbage collector (Go) or manual lifetime annotations (Rust), Vex manages memory in three tiers:
+Instead of a stop-the-world garbage collector (Go) or manual lifetime annotations (Rust), Vira manages memory in three tiers:
 
 | Allocation Tier | Mechanism | Runtime Cost | When Used |
 | :---- | :---- | :---- | :---- |
@@ -3209,8 +3209,8 @@ During AST traversal of each function, every local variable that owns heap resou
 
 Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dynamic arrays (vex\_array), bump-pointer arenas (vex\_arena), and diagnostic telemetry (vex\_mem\_stats) to verify zero memory leaks in tests:
 
-`#ifndef VEX_RT_H`  
-`#define VEX_RT_H`
+`#ifndef VIRA_RT_H`  
+`#define VIRA_RT_H`
 
 `#include <stdarg.h>`  
 `#include <stdbool.h>`  
@@ -3220,25 +3220,25 @@ Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dy
 `#include <string.h>`
 
 `// --- TELEMETRY COUNTER FOR ZERO-LEAK VERIFICATION ---`  
-`static int64_t _vex_active_heap_allocs = 0;`  
-`static int64_t _vex_total_heap_frees   = 0;`
+`static int64_t _vira_active_heap_allocs = 0;`  
+`static int64_t _vira_total_heap_frees   = 0;`
 
 `// --- 1. VEX STRING (16 BYTES: ZERO-ALLOC LITERALS + HEAP STRINGS) ---`  
 `typedef struct {`  
     `const uint8_t* data;`  
     `int32_t        len;`  
     `bool           is_lit;   // true if pointing to .rodata or arena slab`  
-`} vex_string;`
+`} vira_string;`
 
-`static inline vex_string vex_str_lit(const char* cstr, int32_t len) {`  
-    `return (vex_string){`  
+`static inline vira_string vira_str_lit(const char* cstr, int32_t len) {`  
+    `return (vira_string){`  
         `.data   = (const uint8_t*)cstr,`  
         `.len    = len,`  
         `.is_lit = true,`  
     `};`  
 `}`
 
-`static inline vex_string vex_str_format(const char* fmt, ...) {`  
+`static inline vira_string vira_str_format(const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`
@@ -3248,34 +3248,34 @@ Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dy
 
     `if (needed <= 0) {`  
         `va_end(args_copy);`  
-        `return vex_str_lit("", 0);`  
+        `return vira_str_lit("", 0);`  
     `}`
 
     `char* buf = (char*)malloc((size_t)needed + 1);`  
     `if (!buf) {`  
-        `fprintf(stderr, "vex panic: out of memory in vex_str_format\n");`  
+        `fprintf(stderr, "vex panic: out of memory in vira_str_format\n");`  
         `exit(1);`  
     `}`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
-    `_vex_active_heap_allocs++;`  
-    `return (vex_string){`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_string){`  
         `.data   = (const uint8_t*)buf,`  
         `.len    = needed,`  
         `.is_lit = false,`  
     `};`  
 `}`
 
-`static inline vex_string vex_str_clone(vex_string s) {`  
+`static inline vira_string vira_str_clone(vira_string s) {`  
     `if (s.is_lit || s.data == NULL || s.len == 0) {`  
         `return s;`  
     `}`  
     `uint8_t* copy = (uint8_t*)malloc((size_t)s.len + 1);`  
     `memcpy(copy, s.data, (size_t)s.len);`  
     `copy[s.len] = '\0';`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_string){`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_string){`  
         `.data   = copy,`  
         `.len    = s.len,`  
         `.is_lit = false,`  
@@ -3283,14 +3283,14 @@ Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dy
 `}`
 
 `` // Idempotent, deterministic string destructor injected by `internal/autofree` ``  
-`static inline void vex_str_free(vex_string* s) {`  
+`static inline void vira_str_free(vira_string* s) {`  
     `if (s != NULL && !s->is_lit && s->data != NULL) {`  
         `free((void*)s->data);`  
         `s->data   = NULL;`  
         `s->len    = 0;`  
         `s->is_lit = true;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
@@ -3299,19 +3299,19 @@ Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dy
     `uint8_t* buf;`  
     `size_t   cap;`  
     `size_t   offset;`  
-`} vex_arena;`
+`} vira_arena;`
 
-`static inline vex_arena vex_arena_init(size_t capacity) {`  
+`static inline vira_arena vira_arena_init(size_t capacity) {`  
     `uint8_t* slab = (uint8_t*)malloc(capacity);`  
     `if (!slab) {`  
         `fprintf(stderr, "vex panic: failed to allocate arena slab (%zu bytes)\n", capacity);`  
         `exit(1);`  
     `}`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
 `}`
 
-`static inline void* vex_arena_alloc(vex_arena* a, size_t size) {`  
+`static inline void* vira_arena_alloc(vira_arena* a, size_t size) {`  
     `// Align to 8-byte boundary`  
     `size_t aligned = (size + 7) & ~(size_t)7;`  
     `if (a->offset + aligned > a->cap) {`  
@@ -3323,57 +3323,57 @@ Create vex/runtime/vex\_rt.h. This header provides fat strings (vex\_string), dy
     `return ptr;`  
 `}`
 
-`static inline vex_string vex_arena_str_format(vex_arena* a, const char* fmt, ...) {`  
+`static inline vira_string vira_arena_str_format(vira_arena* a, const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`  
     `int32_t needed = vsnprintf(NULL, 0, fmt, args);`  
     `va_end(args);`
 
-    `char* buf = (char*)vex_arena_alloc(a, (size_t)needed + 1);`  
+    `char* buf = (char*)vira_arena_alloc(a, (size_t)needed + 1);`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
     ``// Marked `is_lit = true` because the arena owns the backing slab!``  
-    `return (vex_string){`  
+    `return (vira_string){`  
         `.data   = (const uint8_t*)buf,`  
         `.len    = needed,`  
         `.is_lit = true,`  
     `};`  
 `}`
 
-`static inline void vex_arena_destroy(vex_arena* a) {`  
+`static inline void vira_arena_destroy(vira_arena* a) {`  
     `if (a != NULL && a->buf != NULL) {`  
         `free(a->buf);`  
         `a->buf    = NULL;`  
         `a->cap    = 0;`  
         `a->offset = 0;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
 `// --- 3. BUILTIN I/O & DIAGNOSTICS ---`  
-`static inline void vex_println(vex_string s) {`  
+`static inline void vira_println(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stdout);`  
     `}`  
     `fputc('\n', stdout);`  
 `}`
 
-`static inline void vex_eprintln(vex_string s) {`  
+`static inline void vira_eprintln(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stderr);`  
     `}`  
     `fputc('\n', stderr);`  
 `}`
 
-`static inline void vex_report_mem_stats(void) {`  
-    `printf("[vex_rt] active_leaks=%lld | total_freed=%lld\n",`  
-           `(long long)_vex_active_heap_allocs, (long long)_vex_total_heap_frees);`  
+`static inline void vira_report_mem_stats(void) {`  
+    `printf("[vira_rt] active_leaks=%lld | total_freed=%lld\n",`  
+           `(long long)_vira_active_heap_allocs, (long long)_vira_total_heap_frees);`  
 `}`
 
-`#endif // VEX_RT_H`
+`#endif // VIRA_RT_H`
 
 ## **3\. AST, Parser & Checker Updates for Control Flow & Cleanup Nodes**
 
@@ -3408,22 +3408,22 @@ Add IfStmt, ArenaStmt, and DeferFreeStmt at the end of the \--- STATEMENTS \--- 
 `type CleanupKind uint8`
 
 `const (`  
-	`` CleanupString    CleanupKind = iota // emits `vex_str_free(&var);` ``  
+	`` CleanupString    CleanupKind = iota // emits `vira_str_free(&var);` ``  
 	`` CleanupStruct                       // emits `Module__Struct_autofree(&var);` ``  
 	`` CleanupInterface                    // emits `var._vtable->_autofree(var._object);` ``  
-	`` CleanupArena                        // emits `vex_arena_destroy(&_arena_1);` ``  
+	`` CleanupArena                        // emits `vira_arena_destroy(&_arena_1);` ``  
 `)`
 
 `func (k CleanupKind) String() string {`  
 	`switch k {`  
 	`case CleanupString:`  
-		`return "vex_str_free"`  
+		`return "vira_str_free"`  
 	`case CleanupStruct:`  
 		`return "struct_autofree"`  
 	`case CleanupInterface:`  
 		`return "vtable_autofree"`  
 	`case CleanupArena:`  
-		`return "vex_arena_destroy"`  
+		`return "vira_arena_destroy"`  
 	`default:`  
 		`return "unknown_free"`  
 	`}`  
@@ -3511,9 +3511,9 @@ Create vex/internal/autofree/autofree.go. This pass:
 	`"fmt"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `type EscapeState uint8`
@@ -3710,14 +3710,14 @@ Create vex/internal/autofree/autofree.go. This pass:
 
 		`case *ast.ArenaStmt:`  
 			`a.arenaCounter++`  
-			`s.ArenaVar = fmt.Sprintf("_vex_arena_%d", a.arenaCounter)`  
+			`s.ArenaVar = fmt.Sprintf("_vira_arena_%d", a.arenaCounter)`  
 			`arenaScope := &LexicalScope{Parent: scope, InArena: true}`  
 			`a.rewriteBlock(s.Body, arenaScope, false, report)`
 
 			``// Inject O(1) slab teardown at the end of the `arena { ... }` block``  
 			`arenaFree := &ast.DeferFreeStmt{`  
 				`VarName:  s.ArenaVar,`  
-				`TypeName: "vex_arena",`  
+				`TypeName: "vira_arena",`  
 				`Kind:     ast.CleanupArena,`  
 				`Reason:   "arena block exit (O(1) slab deallocation)",`  
 				`StmtSpan: s.StmtSpan,`  
@@ -3883,10 +3883,10 @@ Update vex/cmd/vex/main.go to run the complete **Phase 1 → Phase 2 → Phase 3
 	`"fmt"`  
 	`"os"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/parser"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/parser"`  
 `)`
 
 `func main() {`  
@@ -4027,7 +4027,7 @@ Update vex/cmd/vex/main.go to run the complete **Phase 1 → Phase 2 → Phase 3
 
 ## **6\. Expected Output (go run ./cmd/vex)**
 
-Running go run ./cmd/vex demonstrates how internal/autofree distinguishes trivial stack structs (AuditMeta) from heap-owning structs (Invoice), prevents double-frees when res escapes Invoice.new or when inv moves into Payable(inv), and injects LIFO destructors on both early or { return } exits and normal function exit:
+Running go run ./cmd/vira demonstrates how internal/autofree distinguishes trivial stack structs (AuditMeta) from heap-owning structs (Invoice), prevents double-frees when res escapes Invoice.new or when inv moves into Payable(inv), and injects LIFO destructors on both early or { return } exits and normal function exit:
 
 `=== PHASE 3: STATIC ESCAPE ANALYSIS & AUTOFREE REPORT ===`  
 ``1. Structs Requiring Generated `_autofree` Destructors:``  
@@ -4050,7 +4050,7 @@ Running go run ./cmd/vex demonstrates how internal/autofree distinguishes trivia
 
    `[fn batch_process]`  
      `├── var temp_log     (string  ) : ARENA_MANAGED (O(1) slab free)`  
-     `└── INJECTED FREE: vex_arena_destroy(&_vex_arena_1) [vex_arena] (arena block exit (O(1) slab deallocation))`
+     `└── INJECTED FREE: vira_arena_destroy(&_vira_arena_1) [vira_arena] (arena block exit (O(1) slab deallocation))`
 
    `[fn main]`  
      `├── var header       (string  ) : SCOPED_LOCAL (autofree injected)`  
@@ -4058,10 +4058,10 @@ Running go run ./cmd/vex demonstrates how internal/autofree distinguishes trivia
      `├── var msg          (string  ) : SCOPED_LOCAL (autofree injected)`  
      `├── var p            (Payable ) : SCOPED_LOCAL (autofree injected)`  
      `└── INJECTED FREE: struct_autofree(&inv) [Invoice] (before return)`  
-     `└── INJECTED FREE: vex_str_free(&header) [string] (before return)`  
+     `└── INJECTED FREE: vira_str_free(&header) [string] (before return)`  
      `└── INJECTED FREE: vtable_autofree(&p) [Payable] (function scope exit)`  
-     `└── INJECTED FREE: vex_str_free(&msg) [string] (function scope exit)`  
-     `└── INJECTED FREE: vex_str_free(&header) [string] (function scope exit)`
+     `└── INJECTED FREE: vira_str_free(&msg) [string] (function scope exit)`  
+     `└── INJECTED FREE: vira_str_free(&header) [string] (function scope exit)`
 
 ``=== REWRITTEN `main()` AST STATEMENTS (SHOWING LIFO CLEANUP) ===``  
   `[01] VarDecl: header (mut=false)`  
@@ -4071,13 +4071,13 @@ Running go run ./cmd/vex demonstrates how internal/autofree distinguishes trivia
        `└── or { ... } block:`  
              `[01] ExprStmt`  
              `[02] >> SYNTHETIC FREE: struct_autofree(&inv) [reason: before return]`  
-             `[03] >> SYNTHETIC FREE: vex_str_free(&header) [reason: before return]`  
+             `[03] >> SYNTHETIC FREE: vira_str_free(&header) [reason: before return]`  
              `[04] ReturnStmt`  
   `[05] VarDecl: p (mut=false)`  
   `[06] ExprStmt`  
   `[07] >> SYNTHETIC FREE: vtable_autofree(&p) [reason: function scope exit]`  
-  `[08] >> SYNTHETIC FREE: vex_str_free(&msg) [reason: function scope exit]`  
-  `[09] >> SYNTHETIC FREE: vex_str_free(&header) [reason: function scope exit]`
+  `[08] >> SYNTHETIC FREE: vira_str_free(&msg) [reason: function scope exit]`  
+  `[09] >> SYNTHETIC FREE: vira_str_free(&header) [reason: function scope exit]`
 
 Notice how inside the or { ... } block at statement \[04\], inv has not yet been moved into Payable(inv), so autofree injects struct\_autofree(\&inv) and vex\_str\_free(\&header) before the early ReturnStmt. Once execution passes statement \[05\] (p := Payable(inv)), ownership of inv moves into the Payable fat pointer p, so at function exit \[07\]–\[09\], vtable\_autofree(\&p) cleans up the boxed Invoice exactly once.
 
@@ -4089,21 +4089,21 @@ Response: Adding **AI-Native Numerics (f32, f16, bf16, tensor)** and **Fault-Tol
 
 Even better, these two ideas reinforce the **Immutability-by-Default** and **Arena \+ autofree** architecture we just built in Phases 1–3:
 
-> * **Why Vex arena is ideal for AI:** During an LLM/neural forward pass, thousands of intermediate f32/bf16 activation tensors are created and discarded per token. Wrapping a forward pass in arena { ... } allocates 64-byte SIMD-aligned tensors via an *O*(1) bump pointer and frees the entire forward pass in a single instruction.  
-> * **Why Vex immutability \+ arena enables Erlang-style Fault Tolerance in C99:** In Go, a panic in one goroutine crashes the entire server because goroutines share one global heap that may now be corrupted. In Vex, every **actor** owns its own isolated **Actor Arena** and only exchanges **immutable messages** (or zero-copy read-only tensor views). If an actor panics or crashes, the runtime catches the fault via a hardware/jump boundary, wipes *only* that actor's arena in *O*(1) with zero memory leaks, and the **Supervisor** restarts the actor cleanly.
+> * **Why Vira arena is ideal for AI:** During an LLM/neural forward pass, thousands of intermediate f32/bf16 activation tensors are created and discarded per token. Wrapping a forward pass in arena { ... } allocates 64-byte SIMD-aligned tensors via an *O*(1) bump pointer and frees the entire forward pass in a single instruction.  
+> * **Why Vira immutability \+ arena enables Erlang-style Fault Tolerance in C99:** In Go, a panic in one goroutine crashes the entire server because goroutines share one global heap that may now be corrupted. In Vex, every **actor** owns its own isolated **Actor Arena** and only exchanges **immutable messages** (or zero-copy read-only tensor views). If an actor panics or crashes, the runtime catches the fault via a hardware/jump boundary, wipes *only* that actor's arena in *O*(1) with zero memory leaks, and the **Supervisor** restarts the actor cleanly.
 
 ## **1\. Pillar 1: AI-Ready Type System (f32, bf16, tensor, and @)**
 
-To make Vex a first-class AI and numerical systems language without Python’s GIL or Go’s float64 / cgo overhead, we promote AI primitives directly into the core language and lexer:
+To make Vira a first-class AI and numerical systems language without Python’s GIL or Go’s float64 / cgo overhead, we promote AI primitives directly into the core language and lexer:
 
-| Feature | Go / Vlang Limitation | Vex AI-Ready Design |
+| Feature | Go / Vlang Limitation | Vira AI-Ready Design |
 | :---- | :---- | :---- |
 | **Default Float & Low-Precision Types** | Go defaults to float64; neither has native f16 or bf16 | First-class **f32 (default ML float)**, **f16** (IEEE-754 half), **bf16** (Brain Float 16 for LLMs), **f64**, and quantized **i8/u8**. |
 | **N-Dimensional tensor\[T\]** | Multi-dimensional slices \[\]\[\]f32 scatter pointers across the heap (cache misses) | Built-in contiguous **tensor\[f32\]** value type backed by a **64-byte cache-line aligned** buffer (AVX-512 / ARM NEON / GPU DMA ready). |
 | **Matrix & Element-wise Operators** | Requires verbose library calls (mat.Mul(a, b)) | Native **@ operator** for Matrix Multiplication (logits := weights @ input \+ bias) lowered directly to SIMD / CBLAS / GGML kernels. |
 | **Zero-Copy Device & C-ABI Interop** | Go’s cgo copies or pins memory with high FFI latency | tensor\[f32\] uses a standardized C ABI header compatible with **GGML / CUDA / Metal** pointers—zero-copy handoff to GPU kernels. |
 
-### **Vex AI Syntax Specification**
+### **Vira AI Syntax Specification**
 
 `module ai`
 
@@ -4125,16 +4125,16 @@ To make Vex a first-class AI and numerical systems language without Python’s G
 
 ## **2\. Pillar 2: Concurrency, Actor Model & "Let It Crash" Fault Tolerance**
 
-Instead of raw threads or unprotected goroutines, Vex uses **Typed Actors** and **Supervision Trees** while preserving Go/V’s familiar syntax:
+Instead of raw threads or unprotected goroutines, Vira uses **Typed Actors** and **Supervision Trees** while preserving Go/V’s familiar syntax:
 
-| Concurrency Concept | Go Approach | Vex Actor & Fault-Tolerant Design |
+| Concurrency Concept | Go Approach | Vira Actor & Fault-Tolerant Design |
 | :---- | :---- | :---- |
 | **Unit of Concurrency** | go fn() (shares mutable memory → data races) | **actor Name { mut: ... }**: Encapsulates private mutable state; external callers can *only* interact via asynchronous message passing (\<-) or typed receive methods. |
-| **Zero-Copy Message Safety** | Developer discipline (or expensive deep copies) | **Compile-time enforced:** Because Vex structs and tensor\[f32\] views are **immutable by default**, sending a 100 MB tensor between actors (worker \<- batch) shares the 64-byte aligned pointer safely with **zero copying and zero data races**. |
+| **Zero-Copy Message Safety** | Developer discipline (or expensive deep copies) | **Compile-time enforced:** Because Vira structs and tensor\[f32\] views are **immutable by default**, sending a 100 MB tensor between actors (worker \<- batch) shares the 64-byte aligned pointer safely with **zero copying and zero data races**. |
 | **Crash Isolation** | 1 goroutine panic kills the entire OS process | **Per-Actor Fault Boundary \+ Isolated Heap:** Every actor runs inside a protected fault frame (setjmp / signal guard) with its own vex\_arena. If an actor panics (panic('GPU OOM')), only its arena is wiped. |
 | **Self-Healing (supervise)** | Manual recover() boilerplate in every goroutine | Declarative **supervise** block with OneForOne or OneForAll restart strategies, max retry budgets, and backoff windows. |
 
-### **Vex Actor & Supervision Syntax Specification**
+### **Vira Actor & Supervision Syntax Specification**
 
 `module inference`
 
@@ -4178,7 +4178,7 @@ Instead of raw threads or unprotected goroutines, Vex uses **Typed Actors** and 
 
 ### **Interactive AI Tensor \+ Fault-Tolerant Actor Runtime Visualizer**
 
-Explore how Vex maps 64-byte aligned f32/bf16 tensors and fault-isolated Actor supervision trees down to C99 memory and runtime primitives:
+Explore how Vira maps 64-byte aligned f32/bf16 tensors and fault-isolated Actor supervision trees down to C99 memory and runtime primitives:
 
 ## **3\. Upgrading Our Compiler Code (Phases 1–3) for AI & Actors**
 
@@ -4254,69 +4254,69 @@ Append these two sections to vex/runtime/vex\_rt.h so our Phase 4 C99 code gener
 `// 4. AI-READY NATIVE TYPES: f32, bf16, AND 64-BYTE ALIGNED TENSORS`  
 `// ============================================================================`
 
-`typedef float    vex_f32;`  
-`typedef uint16_t vex_f16;`  
-`typedef uint16_t vex_bf16; // Brain Float 16: 1 sign, 8 exponent, 7 mantissa bits`
+`typedef float    vira_f32;`  
+`typedef uint16_t vira_f16;`  
+`typedef uint16_t vira_bf16; // Brain Float 16: 1 sign, 8 exponent, 7 mantissa bits`
 
 `// Fast lossless f32 <-> bf16 conversion (top 16 bits of IEEE-754 float32)`  
-`static inline vex_bf16 vex_f32_to_bf16(vex_f32 val) {`  
+`static inline vira_bf16 vira_f32_to_bf16(vira_f32 val) {`  
     `uint32_t bits;`  
     `memcpy(&bits, &val, sizeof(bits));`  
     `// Round-to-nearest-even bias`  
     `uint32_t rounding_bias = ((bits >> 16) & 1) + 0x7FFF;`  
-    `return (vex_bf16)((bits + rounding_bias) >> 16);`  
+    `return (vira_bf16)((bits + rounding_bias) >> 16);`  
 `}`
 
-`static inline vex_f32 vex_bf16_to_f32(vex_bf16 b) {`  
+`static inline vira_f32 vira_bf16_to_f32(vira_bf16 b) {`  
     `uint32_t bits = ((uint32_t)b) << 16;`  
-    `vex_f32 out;`  
+    `vira_f32 out;`  
     `memcpy(&out, &bits, sizeof(out));`  
     `return out;`  
 `}`
 
 `typedef struct {`  
-    `vex_f32* data;        // 64-byte cache-line aligned pointer (AVX-512 / NEON ready)`  
+    `vira_f32* data;        // 64-byte cache-line aligned pointer (AVX-512 / NEON ready)`  
     `int32_t  rows;`  
     `int32_t  cols;`  
     `bool     is_arena;    // true if backed by an arena slab (no individual free)`  
-`} vex_tensor_f32;`
+`} vira_tensor_f32;`
 
-`static inline vex_tensor_f32 vex_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
-    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
+`static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
+    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
     `// Pad to multiple of 64 bytes for aligned_alloc`  
     `size_t aligned_bytes = (bytes + 63) & ~(size_t)63;`  
-    `vex_f32* buf = (vex_f32*)aligned_alloc(64, aligned_bytes);`  
+    `vira_f32* buf = (vira_f32*)aligned_alloc(64, aligned_bytes);`  
     `if (!buf) {`  
         `fprintf(stderr, "vex panic: tensor allocation failed (%d x %d)\n", rows, cols);`  
         `exit(1);`  
     `}`  
     `memset(buf, 0, aligned_bytes);`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_tensor_f32){ .data = buf, .rows = rows, .cols = cols, .is_arena = false };`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_tensor_f32){ .data = buf, .rows = rows, .cols = cols, .is_arena = false };`  
 `}`
 
-`static inline vex_tensor_f32 vex_tensor_f32_arena_alloc(vex_arena* a, int32_t rows, int32_t cols) {`  
-    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
-    `vex_f32* buf = (vex_f32*)vex_arena_alloc(a, bytes);`  
+`static inline vira_tensor_f32 vira_tensor_f32_arena_alloc(vira_arena* a, int32_t rows, int32_t cols) {`  
+    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
+    `vira_f32* buf = (vira_f32*)vira_arena_alloc(a, bytes);`  
     `memset(buf, 0, bytes);`  
-    `return (vex_tensor_f32){ .data = buf, .rows = rows, .cols = cols, .is_arena = true };`  
+    `return (vira_tensor_f32){ .data = buf, .rows = rows, .cols = cols, .is_arena = true };`  
 `}`
 
 ``// Native `@` Matrix Multiplication operator lowering (C = A @ B)``  
-`static inline vex_tensor_f32 vex_tensor_matmul_f32(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {`  
+`static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {`  
     `if (a.cols != b.rows) {`  
         `fprintf(stderr, "vex tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",`  
                 `a.rows, a.cols, b.rows, b.cols);`  
         `exit(1);`  
     `}`  
-    `vex_tensor_f32 out = opt_arena`  
-        `? vex_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
-        `: vex_tensor_f32_alloc(a.rows, b.cols);`
+    `vira_tensor_f32 out = opt_arena`  
+        `? vira_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
+        `: vira_tensor_f32_alloc(a.rows, b.cols);`
 
     `// Cache-friendly i-k-j loop order (auto-vectorizes under clang -O3 -march=native)`  
     `for (int32_t i = 0; i < a.rows; i++) {`  
         `for (int32_t k = 0; k < a.cols; k++) {`  
-            `vex_f32 a_ik = a.data[i * a.cols + k];`  
+            `vira_f32 a_ik = a.data[i * a.cols + k];`  
             `for (int32_t j = 0; j < b.cols; j++) {`  
                 `out.data[i * b.cols + j] += a_ik * b.data[k * b.cols + j];`  
             `}`  
@@ -4325,12 +4325,12 @@ Append these two sections to vex/runtime/vex\_rt.h so our Phase 4 C99 code gener
     `return out;`  
 `}`
 
-`static inline void vex_tensor_f32_free(vex_tensor_f32* t) {`  
+`static inline void vira_tensor_f32_free(vira_tensor_f32* t) {`  
     `if (t != NULL && !t->is_arena && t->data != NULL) {`  
         `free(t->data);`  
         `t->data = NULL;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
@@ -4339,58 +4339,58 @@ Append these two sections to vex/runtime/vex\_rt.h so our Phase 4 C99 code gener
 `// ============================================================================`
 
 `typedef enum {`  
-    `VEX_ACTOR_RUNNING = 0,`  
-    `VEX_ACTOR_FAULTED = 1,`  
-    `VEX_ACTOR_STOPPED = 2,`  
-`} vex_actor_state;`
+    `VIRA_ACTOR_RUNNING = 0,`  
+    `VIRA_ACTOR_FAULTED = 1,`  
+    `VIRA_ACTOR_STOPPED = 2,`  
+`} vira_actor_state;`
 
 `typedef struct {`  
     `int32_t         id;`  
     `const char*     name;`  
-    `vex_actor_state state;`  
+    `vira_actor_state state;`  
     `int32_t         restarts;`  
     `int32_t         max_restarts;`  
-    `vex_arena       isolated_heap;  // Wiped in O(1) if the actor panics!`  
+    `vira_arena       isolated_heap;  // Wiped in O(1) if the actor panics!`  
     `jmp_buf         fault_boundary; // Traps actor panics without crashing OS process`  
-    `vex_string      last_error;`  
-`} vex_actor_ctx;`
+    `vira_string      last_error;`  
+`} vira_actor_ctx;`
 
-`static __thread vex_actor_ctx* _vex_current_actor = NULL;`
+`static __thread vira_actor_ctx* _vira_current_actor = NULL;`
 
 ``// Called when `panic('...')` triggers inside an Actor: unwinds only that actor!``  
-`static inline void vex_actor_panic(const char* msg) {`  
-    `if (_vex_current_actor != NULL) {`  
-        `_vex_current_actor->state      = VEX_ACTOR_FAULTED;`  
-        `_vex_current_actor->last_error = vex_str_lit(msg, (int32_t)strlen(msg));`  
-        `longjmp(_vex_current_actor->fault_boundary, 1);`  
+`static inline void vira_actor_panic(const char* msg) {`  
+    `if (_vira_current_actor != NULL) {`  
+        `_vira_current_actor->state      = VIRA_ACTOR_FAULTED;`  
+        `_vira_current_actor->last_error = vira_str_lit(msg, (int32_t)strlen(msg));`  
+        `longjmp(_vira_current_actor->fault_boundary, 1);`  
     `}`  
     `fprintf(stderr, "vex unrecoverable panic (outside actor): %s\n", msg);`  
     `exit(1);`  
 `}`
 
 `// Supervisor step: executes an actor message inside a fault boundary and auto-restarts on crash`  
-`typedef void (*vex_actor_step_fn)(vex_actor_ctx* ctx, void* actor_state, void* msg_payload);`  
-`typedef void (*vex_actor_init_fn)(void* actor_state);`
+`typedef void (*vira_actor_step_fn)(vira_actor_ctx* ctx, void* actor_state, void* msg_payload);`  
+`typedef void (*vira_actor_init_fn)(void* actor_state);`
 
-`static inline bool vex_supervise_dispatch(`  
-    `vex_actor_ctx*    ctx,`  
+`static inline bool vira_supervise_dispatch(`  
+    `vira_actor_ctx*    ctx,`  
     `void*             actor_state,`  
-    `vex_actor_init_fn init_fn,`  
-    `vex_actor_step_fn step_fn,`  
+    `vira_actor_init_fn init_fn,`  
+    `vira_actor_step_fn step_fn,`  
     `void*             msg_payload`  
 `) {`  
-    `_vex_current_actor = ctx;`
+    `_vira_current_actor = ctx;`
 
     `if (setjmp(ctx->fault_boundary) == 0) {`  
         `// Happy path: execute actor message handler`  
         `step_fn(ctx, actor_state, msg_payload);`  
         `// Reset scratch arena after message completes (0 memory leaks!)`  
         `ctx->isolated_heap.offset = 0;`  
-        `_vex_current_actor = NULL;`  
+        `_vira_current_actor = NULL;`  
         `return true;`  
     `} else {`  
         `// FAULT TRAPPED! Actor panicked mid-message.`  
-        `fprintf(stderr, "[vex_supervisor] Actor '%s' (#%d) crashed: %.*s\n",`  
+        `fprintf(stderr, "[vira_supervisor] Actor '%s' (#%d) crashed: %.*s\n",`  
                 `ctx->name, ctx->id, ctx->last_error.len, (const char*)ctx->last_error.data);`
 
         `// 1. O(1) wipe of the crashed actor's arena (frees all partial tensors/strings)`  
@@ -4399,18 +4399,18 @@ Append these two sections to vex/runtime/vex\_rt.h so our Phase 4 C99 code gener
         `// 2. Check Supervisor Restart Policy (OneForOne)`  
         `if (ctx->restarts < ctx->max_restarts) {`  
             `ctx->restarts++;`  
-            `ctx->state = VEX_ACTOR_RUNNING;`  
+            `ctx->state = VIRA_ACTOR_RUNNING;`  
             `if (init_fn != nil) {`  
                 `init_fn(actor_state); // Restore clean initial actor state`  
             `}`  
-            `fprintf(stderr, "[vex_supervisor] Auto-restarted Actor '%s' (#%d) [restart %d/%d]\n",`  
+            `fprintf(stderr, "[vira_supervisor] Auto-restarted Actor '%s' (#%d) [restart %d/%d]\n",`  
                     `ctx->name, ctx->id, ctx->restarts, ctx->max_restarts);`  
         `} else {`  
-            `ctx->state = VEX_ACTOR_STOPPED;`  
-            `fprintf(stderr, "[vex_supervisor] Actor '%s' (#%d) exceeded max_restarts (%d) -> STOPPED\n",`  
+            `ctx->state = VIRA_ACTOR_STOPPED;`  
+            `fprintf(stderr, "[vira_supervisor] Actor '%s' (#%d) exceeded max_restarts (%d) -> STOPPED\n",`  
                     `ctx->name, ctx->id, ctx->max_restarts);`  
         `}`  
-        `_vex_current_actor = NULL;`  
+        `_vira_current_actor = NULL;`  
         `return false;`  
     `}`  
 `}`
@@ -4432,7 +4432,7 @@ Response: Phase 4 completes the Stage-0 compilation pipeline by building interna
 
 ## **1\. Phase 4 C99 Lowering Architecture (internal/cgen)**
 
-| Vex Feature | C99 Lowering Strategy in internal/cgen |
+| Vira Feature | C99 Lowering Strategy in internal/cgen |
 | :---- | :---- |
 | **Structs & Embedding** | Emits flat C structs (billing\_\_Invoice) with embedded structs (billing\_\_AuditMeta) inlined at offset 0\. Promoted field/method hops recorded by checker.SelectorPaths rewrite inv.touch() to billing\_\_AuditMeta\_touch(\&inv.AuditMeta). |
 | **Deterministic autofree** | Emits Mod\_\_Struct\_autofree(Mod\_\_Struct\* self) for every struct owning heap fields. Lowers ast.DeferFreeStmt nodes into vex\_str\_free(), vex\_tensor\_f32\_free(), Struct\_autofree(), or vtable \_autofree(). |
@@ -4445,8 +4445,8 @@ Response: Phase 4 completes the Stage-0 compilation pipeline by building interna
 
 Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing strings, arenas, 64-byte aligned f32/bf16 tensors, @ matrix multiplication, and the fault-tolerant Actor supervisor:
 
-`#ifndef VEX_RT_H`  
-`#define VEX_RT_H`
+`#ifndef VIRA_RT_H`  
+`#define VIRA_RT_H`
 
 `#include <setjmp.h>`  
 `#include <stdarg.h>`  
@@ -4457,21 +4457,21 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
 `#include <string.h>`
 
 `// --- TELEMETRY COUNTERS FOR ZERO-LEAK VERIFICATION ---`  
-`static int64_t _vex_active_heap_allocs = 0;`  
-`static int64_t _vex_total_heap_frees   = 0;`
+`static int64_t _vira_active_heap_allocs = 0;`  
+`static int64_t _vira_total_heap_frees   = 0;`
 
 `// --- 1. VEX STRING (16 BYTES: ZERO-ALLOC LITERALS + HEAP STRINGS) ---`  
 `typedef struct {`  
     `const uint8_t* data;`  
     `int32_t        len;`  
     `bool           is_lit;`  
-`} vex_string;`
+`} vira_string;`
 
-`static inline vex_string vex_str_lit(const char* cstr, int32_t len) {`  
-    `return (vex_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };`  
+`static inline vira_string vira_str_lit(const char* cstr, int32_t len) {`  
+    `return (vira_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };`  
 `}`
 
-`static inline vex_string vex_str_format(const char* fmt, ...) {`  
+`static inline vira_string vira_str_format(const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`  
@@ -4480,40 +4480,40 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
 
     `if (needed <= 0) {`  
         `va_end(args_copy);`  
-        `return vex_str_lit("", 0);`  
+        `return vira_str_lit("", 0);`  
     `}`
 
     `char* buf = (char*)malloc((size_t)needed + 1);`  
     `if (!buf) {`  
-        `fprintf(stderr, "vex panic: out of memory in vex_str_format\n");`  
+        `fprintf(stderr, "vex panic: out of memory in vira_str_format\n");`  
         `exit(1);`  
     `}`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
-    `_vex_active_heap_allocs++;`  
-    `return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };`  
 `}`
 
-`static inline vex_string vex_str_clone(vex_string s) {`  
+`static inline vira_string vira_str_clone(vira_string s) {`  
     `if (s.is_lit || s.data == NULL || s.len == 0) {`  
         `return s;`  
     `}`  
     `uint8_t* copy = (uint8_t*)malloc((size_t)s.len + 1);`  
     `memcpy(copy, s.data, (size_t)s.len);`  
     `copy[s.len] = '\0';`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_string){ .data = copy, .len = s.len, .is_lit = false };`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_string){ .data = copy, .len = s.len, .is_lit = false };`  
 `}`
 
-`static inline void vex_str_free(vex_string* s) {`  
+`static inline void vira_str_free(vira_string* s) {`  
     `if (s != NULL && !s->is_lit && s->data != NULL) {`  
         `free((void*)s->data);`  
         `s->data   = NULL;`  
         `s->len    = 0;`  
         `s->is_lit = true;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
@@ -4522,19 +4522,19 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
     `uint8_t* buf;`  
     `size_t   cap;`  
     `size_t   offset;`  
-`} vex_arena;`
+`} vira_arena;`
 
-`static inline vex_arena vex_arena_init(size_t capacity) {`  
+`static inline vira_arena vira_arena_init(size_t capacity) {`  
     `uint8_t* slab = (uint8_t*)malloc(capacity);`  
     `if (!slab) {`  
         `fprintf(stderr, "vex panic: failed to allocate arena slab (%zu bytes)\n", capacity);`  
         `exit(1);`  
     `}`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
 `}`
 
-`static inline void* vex_arena_alloc(vex_arena* a, size_t size) {`  
+`static inline void* vira_arena_alloc(vira_arena* a, size_t size) {`  
     `// 64-byte cache-line alignment for SIMD / AVX-512 / NEON tensors inside arenas`  
     `size_t aligned = (size + 63) & ~(size_t)63;`  
     `if (a->offset + aligned > a->cap) {`  
@@ -4546,87 +4546,87 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
     `return ptr;`  
 `}`
 
-`static inline vex_string vex_arena_str_format(vex_arena* a, const char* fmt, ...) {`  
+`static inline vira_string vira_arena_str_format(vira_arena* a, const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`  
     `int32_t needed = vsnprintf(NULL, 0, fmt, args);`  
     `va_end(args);`
 
-    `char* buf = (char*)vex_arena_alloc(a, (size_t)needed + 1);`  
+    `char* buf = (char*)vira_arena_alloc(a, (size_t)needed + 1);`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
-    `return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };`  
+    `return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };`  
 `}`
 
-`static inline void vex_arena_destroy(vex_arena* a) {`  
+`static inline void vira_arena_destroy(vira_arena* a) {`  
     `if (a != NULL && a->buf != NULL) {`  
         `free(a->buf);`  
         `a->buf    = NULL;`  
         `a->cap    = 0;`  
         `a->offset = 0;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
 `// --- 3. AI-READY TYPES: f32, bf16, AND 64-BYTE ALIGNED TENSORS ---`  
-`typedef float    vex_f32;`  
-`typedef uint16_t vex_bf16;`
+`typedef float    vira_f32;`  
+`typedef uint16_t vira_bf16;`
 
-`static inline vex_bf16 vex_f32_to_bf16(vex_f32 val) {`  
+`static inline vira_bf16 vira_f32_to_bf16(vira_f32 val) {`  
     `uint32_t bits;`  
     `memcpy(&bits, &val, sizeof(bits));`  
     `uint32_t rounding_bias = ((bits >> 16) & 1) + 0x7FFF;`  
-    `return (vex_bf16)((bits + rounding_bias) >> 16);`  
+    `return (vira_bf16)((bits + rounding_bias) >> 16);`  
 `}`
 
-`static inline vex_f32 vex_bf16_to_f32(vex_bf16 b) {`  
+`static inline vira_f32 vira_bf16_to_f32(vira_bf16 b) {`  
     `uint32_t bits = ((uint32_t)b) << 16;`  
-    `vex_f32 out;`  
+    `vira_f32 out;`  
     `memcpy(&out, &bits, sizeof(out));`  
     `return out;`  
 `}`
 
 `typedef struct {`  
-    `vex_f32* data;      // 64-byte aligned pointer for SIMD / AVX / NEON`  
+    `vira_f32* data;      // 64-byte aligned pointer for SIMD / AVX / NEON`  
     `void*    raw_alloc; // underlying unaligned pointer for portable C99 free()`  
     `int32_t  rows;`  
     `int32_t  cols;`  
     `bool     is_arena;`  
-`} vex_tensor_f32;`
+`} vira_tensor_f32;`
 
-`static inline vex_tensor_f32 vex_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
-    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
+`static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
+    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
     `void* raw = malloc(bytes + 64);`  
     `if (!raw) {`  
         `fprintf(stderr, "vex panic: tensor allocation failed (%d x %d)\n", rows, cols);`  
         `exit(1);`  
     `}`  
     `uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;`  
-    `vex_f32* data = (vex_f32*)aligned;`  
+    `vira_f32* data = (vira_f32*)aligned;`  
     `memset(data, 0, bytes);`  
-    `_vex_active_heap_allocs++;`  
-    `return (vex_tensor_f32){`  
+    `_vira_active_heap_allocs++;`  
+    `return (vira_tensor_f32){`  
         `.data = data, .raw_alloc = raw, .rows = rows, .cols = cols, .is_arena = false`  
     `};`  
 `}`
 
-`static inline vex_tensor_f32 vex_tensor_f32_arena_alloc(vex_arena* a, int32_t rows, int32_t cols) {`  
-    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
-    `vex_f32* data = (vex_f32*)vex_arena_alloc(a, bytes);`  
+`static inline vira_tensor_f32 vira_tensor_f32_arena_alloc(vira_arena* a, int32_t rows, int32_t cols) {`  
+    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
+    `vira_f32* data = (vira_f32*)vira_arena_alloc(a, bytes);`  
     `memset(data, 0, bytes);`  
-    `return (vex_tensor_f32){`  
+    `return (vira_tensor_f32){`  
         `.data = data, .raw_alloc = NULL, .rows = rows, .cols = cols, .is_arena = true`  
     `};`  
 `}`
 
 `// Helper to construct a 2x2 tensor filled with a diagonal/scale value for ergonomic demos`  
-`static inline vex_tensor_f32 vex_tensor_f32_fill(vex_arena* opt_arena, int32_t rows, int32_t cols, vex_f32 val) {`  
-    `vex_tensor_f32 t = opt_arena`  
-        `? vex_tensor_f32_arena_alloc(opt_arena, rows, cols)`  
-        `: vex_tensor_f32_alloc(rows, cols);`  
+`static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena* opt_arena, int32_t rows, int32_t cols, vira_f32 val) {`  
+    `vira_tensor_f32 t = opt_arena`  
+        `? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)`  
+        `: vira_tensor_f32_alloc(rows, cols);`  
     `for (int32_t i = 0; i < rows * cols; i++) {`  
         `t.data[i] = val;`  
     `}`  
@@ -4634,19 +4634,19 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
 `}`
 
 ``// Native `@` Matrix Multiplication operator lowering (C = A @ B)``  
-`static inline vex_tensor_f32 vex_tensor_matmul_f32(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {`  
+`static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {`  
     `if (a.cols != b.rows) {`  
         `fprintf(stderr, "vex tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",`  
                 `a.rows, a.cols, b.rows, b.cols);`  
         `exit(1);`  
     `}`  
-    `vex_tensor_f32 out = opt_arena`  
-        `? vex_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
-        `: vex_tensor_f32_alloc(a.rows, b.cols);`
+    `vira_tensor_f32 out = opt_arena`  
+        `? vira_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
+        `: vira_tensor_f32_alloc(a.rows, b.cols);`
 
     `for (int32_t i = 0; i < a.rows; i++) {`  
         `for (int32_t k = 0; k < a.cols; k++) {`  
-            `vex_f32 a_ik = a.data[i * a.cols + k];`  
+            `vira_f32 a_ik = a.data[i * a.cols + k];`  
             `for (int32_t j = 0; j < b.cols; j++) {`  
                 `out.data[i * b.cols + j] += a_ik * b.data[k * b.cols + j];`  
             `}`  
@@ -4655,91 +4655,91 @@ Replace vex/runtime/vex\_rt.h with this complete, portable C99 header containing
     `return out;`  
 `}`
 
-`static inline vex_f32 vex_tensor_sum(vex_tensor_f32 t) {`  
-    `vex_f32 sum = 0.0f;`  
+`static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {`  
+    `vira_f32 sum = 0.0f;`  
     `for (int32_t i = 0; i < t.rows * t.cols; i++) {`  
         `sum += t.data[i];`  
     `}`  
     `return sum;`  
 `}`
 
-`static inline void vex_tensor_f32_free(vex_tensor_f32* t) {`  
+`static inline void vira_tensor_f32_free(vira_tensor_f32* t) {`  
     `if (t != NULL && !t->is_arena && t->raw_alloc != NULL) {`  
         `free(t->raw_alloc);`  
         `t->raw_alloc = NULL;`  
         `t->data      = NULL;`  
-        `_vex_active_heap_allocs--;`  
-        `_vex_total_heap_frees++;`  
+        `_vira_active_heap_allocs--;`  
+        `_vira_total_heap_frees++;`  
     `}`  
 `}`
 
 `// --- 4. FAULT-TOLERANT ACTOR & SUPERVISOR RUNTIME ("LET IT CRASH" + ARENA WIPE) ---`  
 `typedef enum {`  
-    `VEX_ACTOR_RUNNING = 0,`  
-    `VEX_ACTOR_FAULTED = 1,`  
-    `VEX_ACTOR_STOPPED = 2,`  
-`} vex_actor_state;`
+    `VIRA_ACTOR_RUNNING = 0,`  
+    `VIRA_ACTOR_FAULTED = 1,`  
+    `VIRA_ACTOR_STOPPED = 2,`  
+`} vira_actor_state;`
 
 `typedef struct {`  
     `int32_t         id;`  
     `const char*     name;`  
-    `vex_actor_state state;`  
+    `vira_actor_state state;`  
     `int32_t         restarts;`  
     `int32_t         max_restarts;`  
-    `vex_arena       isolated_heap;  // Wiped in O(1) if the actor panics`  
+    `vira_arena       isolated_heap;  // Wiped in O(1) if the actor panics`  
     `jmp_buf         fault_boundary; // Traps actor panics without crashing the OS process`  
-    `vex_string      last_error;`  
+    `vira_string      last_error;`  
     `bool            in_actor;`  
-`} vex_actor_ctx;`
+`} vira_actor_ctx;`
 
-`static vex_actor_ctx* _vex_current_actor = NULL;`
+`static vira_actor_ctx* _vira_current_actor = NULL;`
 
-`static inline void vex_actor_ctx_init(vex_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {`  
+`static inline void vira_actor_ctx_init(vira_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {`  
     `ctx->id            = id;`  
     `ctx->name          = name;`  
-    `ctx->state         = VEX_ACTOR_RUNNING;`  
+    `ctx->state         = VIRA_ACTOR_RUNNING;`  
     `ctx->restarts      = 0;`  
     `ctx->max_restarts  = max_restarts;`  
-    `ctx->isolated_heap = vex_arena_init(64 * 1024); // 64 KB isolated scratch slab per actor`  
-    `ctx->last_error    = vex_str_lit("", 0);`  
+    `ctx->isolated_heap = vira_arena_init(64 * 1024); // 64 KB isolated scratch slab per actor`  
+    `ctx->last_error    = vira_str_lit("", 0);`  
     `ctx->in_actor      = false;`  
 `}`
 
-`static inline void vex_actor_ctx_destroy(vex_actor_ctx* ctx) {`  
-    `vex_arena_destroy(&ctx->isolated_heap);`  
+`static inline void vira_actor_ctx_destroy(vira_actor_ctx* ctx) {`  
+    `vira_arena_destroy(&ctx->isolated_heap);`  
 `}`
 
-`static inline void vex_panic(vex_string msg) {`  
-    `if (_vex_current_actor != NULL && _vex_current_actor->in_actor) {`  
-        `_vex_current_actor->state      = VEX_ACTOR_FAULTED;`  
-        `_vex_current_actor->last_error = msg;`  
-        `longjmp(_vex_current_actor->fault_boundary, 1);`  
+`static inline void vira_panic(vira_string msg) {`  
+    `if (_vira_current_actor != NULL && _vira_current_actor->in_actor) {`  
+        `_vira_current_actor->state      = VIRA_ACTOR_FAULTED;`  
+        `_vira_current_actor->last_error = msg;`  
+        `longjmp(_vira_current_actor->fault_boundary, 1);`  
     `}`  
     `fprintf(stderr, "vex unrecoverable panic: %.*s\n", msg.len, (const char*)msg.data);`  
     `exit(1);`  
 `}`
 
 `// --- 5. BUILTIN I/O & DIAGNOSTICS ---`  
-`static inline void vex_println(vex_string s) {`  
+`static inline void vira_println(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stdout);`  
     `}`  
     `fputc('\n', stdout);`  
 `}`
 
-`static inline void vex_eprintln(vex_string s) {`  
+`static inline void vira_eprintln(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stderr);`  
     `}`  
     `fputc('\n', stderr);`  
 `}`
 
-`static inline void vex_report_mem_stats(void) {`  
-    `printf("[vex_rt] active_leaks=%lld | total_freed=%lld\n",`  
-           `(long long)_vex_active_heap_allocs, (long long)_vex_total_heap_frees);`  
+`static inline void vira_report_mem_stats(void) {`  
+    `printf("[vira_rt] active_leaks=%lld | total_freed=%lld\n",`  
+           `(long long)_vira_active_heap_allocs, (long long)_vira_total_heap_frees);`  
 `}`
 
-`#endif // VEX_RT_H`
+`#endif // VIRA_RT_H`
 
 ## **3\. Targeted Updates to token, lexer, ast, parser, checker, and autofree**
 
@@ -4928,10 +4928,10 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`"fmt"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/ast"`  
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/ast"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `type Generator struct {`  
@@ -4979,8 +4979,8 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`g.discoverCodegenRequirements(file)`
 
 	`var out strings.Builder`  
-	`out.WriteString("// Generated by Vex Stage-0 C99 Compiler — DO NOT EDIT\n")`  
-	`out.WriteString("#include \"vex_rt.h\"\n\n")`
+	`out.WriteString("// Generated by Vira Stage-0 C99 Compiler — DO NOT EDIT\n")`  
+	`out.WriteString("#include \"vira_rt.h\"\n\n")`
 
 	``// 1. Emit Struct & Actor typedefs + `_autofree` & `_reset` helpers``  
 	`out.WriteString("// --- 1. STRUCTS, ACTORS & DETERMINISTIC DESTRUCTORS ---\n")`  
@@ -4996,7 +4996,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`for cName, inner := range g.resultTypes {`  
 			`out.WriteString("typedef struct {\n")`  
 			`out.WriteString("    bool is_err;\n")`  
-			`out.WriteString("    vex_string err;\n")`  
+			`out.WriteString("    vira_string err;\n")`  
 			`if !inner.Equals(checker.TypeVoid) {`  
 				`out.WriteString(fmt.Sprintf("    %s val;\n", g.cType(inner)))`  
 			`}`  
@@ -5029,7 +5029,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`}`  
 	`}`
 
-	``// 6. Emit Supervised Actor Message Wrappers (`vex_supervise_dispatch`)``  
+	``// 6. Emit Supervised Actor Message Wrappers (`vira_supervise_dispatch`)``  
 	`if len(g.actorSenders) > 0 {`  
 		`out.WriteString("// --- 6. SUPERVISED ACTOR FAULT-ISOLATION WRAPPERS ---\n")`  
 		`for _, spec := range g.actorSenders {`  
@@ -5142,7 +5142,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 
 	`out.WriteString(fmt.Sprintf("typedef struct %s {\n", cStructName))`  
 	`if st.IsActor {`  
-		`out.WriteString("    vex_actor_ctx _ctx;\n")`  
+		`out.WriteString("    vira_actor_ctx _ctx;\n")`  
 	`}`  
 	`for _, emb := range st.Embeds {`  
 		`out.WriteString(fmt.Sprintf("    %s %s;\n", g.cStructName(emb.Name), emb.Name))`  
@@ -5165,13 +5165,13 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 
 		`out.WriteString(fmt.Sprintf("static inline void %s_autofree(%s* self) {\n", cStructName, cStructName))`  
 		`out.WriteString("    if (!self) return;\n")`  
-		`out.WriteString("    vex_actor_ctx_destroy(&self->_ctx);\n")`  
+		`out.WriteString("    vira_actor_ctx_destroy(&self->_ctx);\n")`  
 		`for _, fname := range st.FieldOrder {`  
 			`f := st.Fields[fname]`  
 			`if f.Type.Equals(checker.TypeString) {`  
-				`out.WriteString(fmt.Sprintf("    vex_str_free(&self->%s);\n", fname))`  
+				`out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))`  
 			`} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {`  
-				`out.WriteString(fmt.Sprintf("    vex_tensor_f32_free(&self->%s);\n", fname))`  
+				`out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))`  
 			`}`  
 		`}`  
 		`out.WriteString("}\n\n")`  
@@ -5190,9 +5190,9 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`for _, fname := range st.FieldOrder {`  
 			`finfo := st.Fields[fname]`  
 			`if finfo.Type.Equals(checker.TypeString) {`  
-				`out.WriteString(fmt.Sprintf("    vex_str_free(&self->%s);\n", fname))`  
+				`out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))`  
 			`} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {`  
-				`out.WriteString(fmt.Sprintf("    vex_tensor_f32_free(&self->%s);\n", fname))`  
+				`out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))`  
 			`} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && g.af.StructNeedsFree[subSt.Name] {`  
 				`out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))`  
 			`}`  
@@ -5237,8 +5237,8 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`out.WriteString(fmt.Sprintf("    %s_autofree((%s*)_obj);\n", cSt, cSt))`  
 	`}`  
 	`out.WriteString("    free(_obj);\n")`  
-	`out.WriteString("    _vex_active_heap_allocs--;\n")`  
-	`out.WriteString("    _vex_total_heap_frees++;\n")`  
+	`out.WriteString("    _vira_active_heap_allocs--;\n")`  
+	`out.WriteString("    _vira_total_heap_frees++;\n")`  
 	`out.WriteString("}\n\n")`
 
 	`// Emit static vtable instance`  
@@ -5257,7 +5257,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`out.WriteString(fmt.Sprintf("static inline %s %s_box_%s(%s val) {\n", cIf, cIf, st.Name, cSt))`  
 	`out.WriteString(fmt.Sprintf("    %s* heap_obj = (%s*)malloc(sizeof(%s));\n", cSt, cSt, cSt))`  
 	`out.WriteString("    *heap_obj = val;\n")`  
-	`out.WriteString("    _vex_active_heap_allocs++;\n")`  
+	`out.WriteString("    _vira_active_heap_allocs++;\n")`  
 	`out.WriteString(fmt.Sprintf("    return (%s){ ._object = heap_obj, ._vtable = &_vtable_%s_for_%s };\n",`  
 		`cIf, st.Name, iface.Name))`  
 	`out.WriteString("}\n\n")`  
@@ -5284,7 +5284,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 
 	`out.WriteString(fmt.Sprintf("static %s %s_supervise_%s(%s) {\n",`  
 		`cRes, cActor, method.Name, strings.Join(paramList, ", ")))`  
-	`out.WriteString("    _vex_current_actor = &self->_ctx;\n")`  
+	`out.WriteString("    _vira_current_actor = &self->_ctx;\n")`  
 	`out.WriteString("    self->_ctx.in_actor = true;\n")`  
 	`out.WriteString("    if (setjmp(self->_ctx.fault_boundary) == 0) {\n")`
 
@@ -5293,19 +5293,19 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`out.WriteString(fmt.Sprintf("        %s _out = %s;\n", cRes, callStr))`  
 		`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 		`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-		`out.WriteString("        _vex_current_actor = NULL;\n")`  
+		`out.WriteString("        _vira_current_actor = NULL;\n")`  
 		`out.WriteString("        return _out;\n")`  
 	`} else if innerRet.Equals(checker.TypeVoid) {`  
 		`out.WriteString(fmt.Sprintf("        %s;\n", callStr))`  
 		`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 		`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-		`out.WriteString("        _vex_current_actor = NULL;\n")`  
+		`out.WriteString("        _vira_current_actor = NULL;\n")`  
 		`out.WriteString(fmt.Sprintf("        return (%s){ .is_err = false };\n", cRes))`  
 	`} else {`  
 		`out.WriteString(fmt.Sprintf("        %s _val = %s;\n", g.cType(innerRet), callStr))`  
 		`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 		`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-		`out.WriteString("        _vex_current_actor = NULL;\n")`  
+		`out.WriteString("        _vira_current_actor = NULL;\n")`  
 		`out.WriteString(fmt.Sprintf("        return (%s){ .is_err = false, .val = _val };\n", cRes))`  
 	`}`
 
@@ -5313,13 +5313,13 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`out.WriteString("        // FAULT TRAPPED! Wipe actor's isolated arena slab in O(1)\n")`  
 	`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 	`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-	`out.WriteString("        _vex_current_actor = NULL;\n")`  
-	`out.WriteString("        vex_string _err = self->_ctx.last_error;\n")`  
+	`out.WriteString("        _vira_current_actor = NULL;\n")`  
+	`out.WriteString("        vira_string _err = self->_ctx.last_error;\n")`  
 	`out.WriteString("        if (self->_ctx.restarts < self->_ctx.max_restarts) {\n")`  
 	`out.WriteString("            self->_ctx.restarts++;\n")`  
-	`out.WriteString("            self->_ctx.state = VEX_ACTOR_RUNNING;\n")`  
+	`out.WriteString("            self->_ctx.state = VIRA_ACTOR_RUNNING;\n")`  
 	`out.WriteString(fmt.Sprintf("            %s_supervisor_reset(self);\n", cActor))`  
-	`out.WriteString("            printf(\"[vex_supervisor] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
+	`out.WriteString("            printf(\"[vira_supervisor] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
 	`out.WriteString("                   self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")`  
 	`out.WriteString("        }\n")`  
 	`out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = _err };\n", cRes))`  
@@ -5371,7 +5371,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`g.inMainFn = true`  
 		`out.WriteString("int main(void) {\n")`  
 		`g.emitBlockStmts(out, fn.Body, "    ", nil)`  
-		`out.WriteString("    vex_report_mem_stats();\n")`  
+		`out.WriteString("    vira_report_mem_stats();\n")`  
 		`out.WriteString("    return 0;\n")`  
 		`out.WriteString("}\n\n")`  
 		`g.inMainFn = false`  
@@ -5448,7 +5448,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 
 	`case *ast.ArenaStmt:`  
 		`out.WriteString(fmt.Sprintf("%s{\n", indent))`  
-		`out.WriteString(fmt.Sprintf("%s    vex_arena %s = vex_arena_init(64 * 1024);\n", indent, s.ArenaVar))`  
+		`out.WriteString(fmt.Sprintf("%s    vira_arena %s = vira_arena_init(64 * 1024);\n", indent, s.ArenaVar))`  
 		`prevArena := g.activeArena`  
 		`g.activeArena = "&" + s.ArenaVar`  
 		`g.emitBlockStmts(out, s.Body, indent+"    ", fnRet)`  
@@ -5458,9 +5458,9 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`case *ast.DeferFreeStmt:`  
 		`switch s.Kind {`  
 		`case ast.CleanupString:`  
-			`out.WriteString(fmt.Sprintf("%svex_str_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
+			`out.WriteString(fmt.Sprintf("%svira_str_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
 		`case ast.CleanupTensor:`  
-			`out.WriteString(fmt.Sprintf("%svex_tensor_f32_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
+			`out.WriteString(fmt.Sprintf("%svira_tensor_f32_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
 		`case ast.CleanupStruct, ast.CleanupActor:`  
 			`out.WriteString(fmt.Sprintf("%s%s_autofree(&%s); // autofree: %s\n",`  
 				`indent, g.cStructName(s.TypeName), s.VarName, s.Reason))`  
@@ -5468,12 +5468,12 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 			`out.WriteString(fmt.Sprintf("%s%s._vtable->_autofree(%s._object); // autofree: %s\n",`  
 				`indent, s.VarName, s.VarName, s.Reason))`  
 		`case ast.CleanupArena:`  
-			`out.WriteString(fmt.Sprintf("%svex_arena_destroy(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
+			`out.WriteString(fmt.Sprintf("%svira_arena_destroy(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`  
 		`}`
 
 	`case *ast.ReturnStmt:`  
 		`if g.inMainFn && s.Value == nil {`  
-			`out.WriteString(fmt.Sprintf("%svex_report_mem_stats();\n", indent))`  
+			`out.WriteString(fmt.Sprintf("%svira_report_mem_stats();\n", indent))`  
 			`out.WriteString(fmt.Sprintf("%sreturn 0;\n", indent))`  
 			`return`  
 		`}`  
@@ -5525,7 +5525,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`}`
 
 	`out.WriteString(fmt.Sprintf("%sif (%s.is_err) {\n", indent, tmpRes))`  
-	`out.WriteString(fmt.Sprintf("%s    vex_string err = %s.err;\n", indent, tmpRes))`  
+	`out.WriteString(fmt.Sprintf("%s    vira_string err = %s.err;\n", indent, tmpRes))`  
 	`out.WriteString(fmt.Sprintf("%s    (void)err;\n", indent))`
 
 	``// Emit `or { ... }` block statements (including any fallback value assignment)``  
@@ -5554,7 +5554,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`case *ast.LiteralExpr:`  
 		`switch e.Kind {`  
 		`case token.TokString:`  
-			`return fmt.Sprintf("vex_str_lit(%q, %d)", e.Value, len(e.Value))`  
+			`return fmt.Sprintf("vira_str_lit(%q, %d)", e.Value, len(e.Value))`  
 		`case token.TokInt, token.TokFloat, token.TokTrue, token.TokFalse:`  
 			`return strings.ReplaceAll(e.Value, "_", "")`  
 		`}`
@@ -5601,7 +5601,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 			`if g.activeArena != "" {`  
 				`arenaArg = g.activeArena`  
 			`}`  
-			`return fmt.Sprintf("vex_tensor_matmul_f32(%s, %s, %s)",`  
+			`return fmt.Sprintf("vira_tensor_matmul_f32(%s, %s, %s)",`  
 				`arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))`  
 		`}`  
 		`return fmt.Sprintf("(%s %s %s)", g.emitExpr(e.Left), e.Op.String(), g.emitExpr(e.Right))`  
@@ -5612,7 +5612,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 `func (g *Generator) emitActorInitExpr(st *checker.StructType, fieldInits []string) string {`  
 	`cSt := g.cStructName(st.Name)`  
 	`tmp := g.nextTmp("actor")`  
-	`return fmt.Sprintf("({ %s %s = (%s){ %s }; vex_actor_ctx_init(&%s._ctx, 1, %q, 3); %s; })",`  
+	`return fmt.Sprintf("({ %s %s = (%s){ %s }; vira_actor_ctx_init(&%s._ctx, 1, %q, 3); %s; })",`  
 		`cSt, tmp, cSt, strings.Join(fieldInits, ", "), tmp, st.Name, tmp)`  
 `}`
 
@@ -5652,19 +5652,19 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`name := callee.Ident.Name`  
 		`switch name {`  
 		`case "println":`  
-			`return fmt.Sprintf("vex_println(%s)", strings.Join(argStrs, ", "))`  
+			`return fmt.Sprintf("vira_println(%s)", strings.Join(argStrs, ", "))`  
 		`case "eprintln":`  
-			`return fmt.Sprintf("vex_eprintln(%s)", strings.Join(argStrs, ", "))`  
+			`return fmt.Sprintf("vira_eprintln(%s)", strings.Join(argStrs, ", "))`  
 		`case "panic":`  
-			`return fmt.Sprintf("vex_panic(%s)", strings.Join(argStrs, ", "))`  
+			`return fmt.Sprintf("vira_panic(%s)", strings.Join(argStrs, ", "))`  
 		`case "tensor_fill":`  
 			`arenaArg := "NULL"`  
 			`if g.activeArena != "" {`  
 				`arenaArg = g.activeArena`  
 			`}`  
-			`return fmt.Sprintf("vex_tensor_f32_fill(%s, %s)", arenaArg, strings.Join(argStrs, ", "))`  
+			`return fmt.Sprintf("vira_tensor_f32_fill(%s, %s)", arenaArg, strings.Join(argStrs, ", "))`  
 		`case "tensor_sum":`  
-			`return fmt.Sprintf("vex_tensor_sum(%s)", strings.Join(argStrs, ", "))`  
+			`return fmt.Sprintf("vira_tensor_sum(%s)", strings.Join(argStrs, ", "))`  
 		`}`  
 		`` // Check if interface boxing cast: `Payable(inv)` ``  
 		`if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {`  
@@ -5758,10 +5758,10 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 	`}`
 
 	`if g.activeArena != "" {`  
-		`return fmt.Sprintf("vex_arena_str_format(%s, %q, %s)",`  
+		`return fmt.Sprintf("vira_arena_str_format(%s, %q, %s)",`  
 			`g.activeArena, fmtBuf.String(), strings.Join(cArgs, ", "))`  
 	`}`  
-	`return fmt.Sprintf("vex_str_format(%q, %s)", fmtBuf.String(), strings.Join(cArgs, ", "))`  
+	`return fmt.Sprintf("vira_str_format(%q, %s)", fmtBuf.String(), strings.Join(cArgs, ", "))`  
 `}`
 
 `// --- TYPE MAPPING HELPERS ---`
@@ -5790,20 +5790,20 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 		`case checker.PrimI64:`  
 			`return "int64_t"`  
 		`case checker.PrimF32:`  
-			`return "vex_f32"`  
+			`return "vira_f32"`  
 		`case checker.PrimBF16:`  
-			`return "vex_bf16"`  
+			`return "vira_bf16"`  
 		`case checker.PrimF64:`  
 			`return "double"`  
 		`case checker.PrimBool:`  
 			`return "bool"`  
 		`case checker.PrimString:`  
-			`return "vex_string"`  
+			`return "vira_string"`  
 		`default:`  
 			`return "void"`  
 		`}`  
 	`case *checker.TensorType:`  
-		`return "vex_tensor_f32"`  
+		`return "vira_tensor_f32"`  
 	`case *checker.StructType:`  
 		`return g.cStructName(v.Name)`  
 	`case *checker.InterfaceType:`  
@@ -5864,7 +5864,7 @@ Create mkdir \-p vex/internal/cgen and write vex/internal/cgen/cgen.go:
 
 ## **5\. End-to-End Native Compiler Driver (cmd/vex/main.go)**
 
-Update vex/cmd/vex/main.go so it compiles a unified Vex program exercising **all 3 pillars** (OOP structs/interfaces, AI f32 @ matrix multiplication inside an arena, and a Supervised Actor that survives a crash and auto-restarts), writes the generated C99 to build/vex\_out.c, compiles it with your system C compiler (cc), and executes the native binary:
+Update vex/cmd/vex/main.go so it compiles a unified Vira program exercising **all 3 pillars** (OOP structs/interfaces, AI f32 @ matrix multiplication inside an arena, and a Supervised Actor that survives a crash and auto-restarts), writes the generated C99 to build/vex\_out.c, compiles it with your system C compiler (cc), and executes the native binary:
 
 `package main`
 
@@ -5874,10 +5874,10 @@ Update vex/cmd/vex/main.go so it compiles a unified Vex program exercising **all
 	`"os/exec"`  
 	`"path/filepath"`
 
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/cgen"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/parser"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/cgen"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/parser"`  
 `)`
 
 `func main() {`  
@@ -6030,8 +6030,8 @@ Update vex/cmd/vex/main.go so it compiles a unified Vex program exercising **all
 	`if err := os.MkdirAll("build", 0755); err != nil {`  
 		`panic(err)`  
 	`}`  
-	`cFile := filepath.Join("build", "vex_out.c")`  
-	`binFile := filepath.Join("build", "vex_app")`  
+	`cFile := filepath.Join("build", "vira_out.c")`  
+	`binFile := filepath.Join("build", "vira_app")`  
 	`if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {`  
 		`panic(err)`  
 	`}`  
@@ -6058,10 +6058,10 @@ Update vex/cmd/vex/main.go so it compiles a unified Vex program exercising **all
 
 ## **6\. End-to-End Execution Output (go run ./cmd/vex)**
 
-Running go run ./cmd/vex compiles the Vex program to C99, invokes cc \-O2, and executes the resulting native binary:
+Running go run ./cmd/vex compiles the Vira program to C99, invokes cc \-O2, and executes the resulting native binary:
 
-`✓ Generated C99 source (6480 bytes) -> build/vex_out.c`  
-`✓ Compiled native binary -> build/vex_app`
+`✓ Generated C99 source (6480 bytes) -> build/vira_out.c`  
+`✓ Compiled native binary -> build/vira_app`
 
 `=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===`  
 `Invoice #inv_9001 paid (15000 cents)`  
@@ -6069,10 +6069,10 @@ Running go run ./cmd/vex compiles the Vex program to C99, invokes cc \-O2, and e
 `=== 2. AI TENSOR[f32] @ MATMUL IN O(1) ARENA SLAB ===`  
 `Arena 2x2 MatMul (@) sum = 24.00`  
 `=== 3. FAULT-TOLERANT ACTOR SUPERVISION (LET IT CRASH) ===`  
-`[vex_supervisor] Actor 'AIWorker' (#1) trapped fault ('CUDA/NaN anomaly detected on batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
+`[vira_supervisor] Actor 'AIWorker' (#1) trapped fault ('CUDA/NaN anomaly detected on batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
 `Caller or-block handled fault gracefully: CUDA/NaN anomaly detected on batch`  
 `Recovered Actor prediction sum = 48.00 (fallback was 0.00)`  
-`[vex_rt] active_leaks=0 | total_freed=6`
+`[vira_rt] active_leaks=0 | total_freed=6`
 
 Look closely at the last line (\[vex\_rt\] active\_leaks=0 | total\_freed=6):
 
@@ -6084,7 +6084,7 @@ Look closely at the last line (\[vex\_rt\] active\_leaks=0 | total\_freed=6):
 
 *User prompt: Upgrade \`runtime/vex\_rt.h\` so \`@\` matrix multiplication uses hardware SIMD intrinsics (AVX2 / ARM NEON) and Actors run on a multi-threaded lock-free work-stealing pool.*
 
-Response: Upgrading runtime/vex\_rt.h and internal/cgen transforms Vex from a single-threaded C99 prototype into a hardware-accelerated, multi-core runtime:
+Response: Upgrading runtime/vex\_rt.h and internal/cgen transforms Vira from a single-threaded C99 prototype into a hardware-accelerated, multi-core runtime:
 
 > 1. **Hardware SIMD Matrix Multiplication (@ Operator):**  
    * **x86\_64 (AVX2 \+ FMA):** Processes **8 f32 lanes per cycle** in 256-bit ymm registers using \_mm256\_set1\_ps (scalar broadcast) and \_mm256\_fmadd\_ps (fused multiply-add), with a 128-bit SSE2 fallback and scalar tail handling for arbitrary matrix widths.  
@@ -6107,8 +6107,8 @@ Response: Upgrading runtime/vex\_rt.h and internal/cgen transforms Vex from a si
 
 Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing implementation:
 
-`#ifndef VEX_RT_H`  
-`#define VEX_RT_H`
+`#ifndef VIRA_RT_H`  
+`#define VIRA_RT_H`
 
 `#ifndef _GNU_SOURCE`  
 `#define _GNU_SOURCE`  
@@ -6135,18 +6135,18 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `#endif`
 
 `// --- THREAD-SAFE TELEMETRY COUNTERS FOR ZERO-LEAK VERIFICATION ---`  
-`static volatile int64_t _vex_active_heap_allocs = 0;`  
-`static volatile int64_t _vex_total_heap_frees   = 0;`  
-`static volatile int64_t _vex_total_tasks_run    = 0;`  
-`static volatile int64_t _vex_total_work_steals  = 0;`
+`static volatile int64_t _vira_active_heap_allocs = 0;`  
+`static volatile int64_t _vira_total_heap_frees   = 0;`  
+`static volatile int64_t _vira_total_tasks_run    = 0;`  
+`static volatile int64_t _vira_total_work_steals  = 0;`
 
-`static inline void _vex_record_alloc(void) {`  
-    `__atomic_add_fetch(&_vex_active_heap_allocs, 1, __ATOMIC_RELAXED);`  
+`static inline void _vira_record_alloc(void) {`  
+    `__atomic_add_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);`  
 `}`
 
-`static inline void _vex_record_free(void) {`  
-    `__atomic_sub_fetch(&_vex_active_heap_allocs, 1, __ATOMIC_RELAXED);`  
-    `__atomic_add_fetch(&_vex_total_heap_frees, 1, __ATOMIC_RELAXED);`  
+`static inline void _vira_record_free(void) {`  
+    `__atomic_sub_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);`  
+    `__atomic_add_fetch(&_vira_total_heap_frees, 1, __ATOMIC_RELAXED);`  
 `}`
 
 `// ============================================================================`  
@@ -6157,13 +6157,13 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
     `const uint8_t* data;`  
     `int32_t        len;`  
     `bool           is_lit;`  
-`} vex_string;`
+`} vira_string;`
 
-`static inline vex_string vex_str_lit(const char* cstr, int32_t len) {`  
-    `return (vex_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };`  
+`static inline vira_string vira_str_lit(const char* cstr, int32_t len) {`  
+    `return (vira_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };`  
 `}`
 
-`static inline vex_string vex_str_format(const char* fmt, ...) {`  
+`static inline vira_string vira_str_format(const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`  
@@ -6172,39 +6172,39 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 
     `if (needed <= 0) {`  
         `va_end(args_copy);`  
-        `return vex_str_lit("", 0);`  
+        `return vira_str_lit("", 0);`  
     `}`
 
     `char* buf = (char*)malloc((size_t)needed + 1);`  
     `if (!buf) {`  
-        `fprintf(stderr, "vex panic: out of memory in vex_str_format\n");`  
+        `fprintf(stderr, "vex panic: out of memory in vira_str_format\n");`  
         `exit(1);`  
     `}`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
-    `_vex_record_alloc();`  
-    `return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };`  
+    `_vira_record_alloc();`  
+    `return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };`  
 `}`
 
-`static inline vex_string vex_str_clone(vex_string s) {`  
+`static inline vira_string vira_str_clone(vira_string s) {`  
     `if (s.is_lit || s.data == NULL || s.len == 0) {`  
         `return s;`  
     `}`  
     `uint8_t* copy = (uint8_t*)malloc((size_t)s.len + 1);`  
     `memcpy(copy, s.data, (size_t)s.len);`  
     `copy[s.len] = '\0';`  
-    `_vex_record_alloc();`  
-    `return (vex_string){ .data = copy, .len = s.len, .is_lit = false };`  
+    `_vira_record_alloc();`  
+    `return (vira_string){ .data = copy, .len = s.len, .is_lit = false };`  
 `}`
 
-`static inline void vex_str_free(vex_string* s) {`  
+`static inline void vira_str_free(vira_string* s) {`  
     `if (s != NULL && !s->is_lit && s->data != NULL) {`  
         `free((void*)s->data);`  
         `s->data   = NULL;`  
         `s->len    = 0;`  
         `s->is_lit = true;`  
-        `_vex_record_free();`  
+        `_vira_record_free();`  
     `}`  
 `}`
 
@@ -6216,19 +6216,19 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
     `uint8_t* buf;`  
     `size_t   cap;`  
     `size_t   offset;`  
-`} vex_arena;`
+`} vira_arena;`
 
-`static inline vex_arena vex_arena_init(size_t capacity) {`  
+`static inline vira_arena vira_arena_init(size_t capacity) {`  
     `uint8_t* slab = (uint8_t*)malloc(capacity + 64);`  
     `if (!slab) {`  
         `fprintf(stderr, "vex panic: failed to allocate arena slab (%zu bytes)\n", capacity);`  
         `exit(1);`  
     `}`  
-    `_vex_record_alloc();`  
-    `return (vex_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
+    `_vira_record_alloc();`  
+    `return (vira_arena){ .buf = slab, .cap = capacity, .offset = 0 };`  
 `}`
 
-`static inline void* vex_arena_alloc(vex_arena* a, size_t size) {`  
+`static inline void* vira_arena_alloc(vira_arena* a, size_t size) {`  
     `// 64-byte alignment guarantees AVX-512 / AVX2 / NEON aligned vector loads`  
     `uintptr_t base    = (uintptr_t)a->buf + a->offset;`  
     `uintptr_t aligned = (base + 63) & ~(uintptr_t)63;`  
@@ -6243,27 +6243,27 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
     `return (void*)aligned;`  
 `}`
 
-`static inline vex_string vex_arena_str_format(vex_arena* a, const char* fmt, ...) {`  
+`static inline vira_string vira_arena_str_format(vira_arena* a, const char* fmt, ...) {`  
     `va_list args, args_copy;`  
     `va_start(args, fmt);`  
     `va_copy(args_copy, args);`  
     `int32_t needed = vsnprintf(NULL, 0, fmt, args);`  
     `va_end(args);`
 
-    `char* buf = (char*)vex_arena_alloc(a, (size_t)needed + 1);`  
+    `char* buf = (char*)vira_arena_alloc(a, (size_t)needed + 1);`  
     `vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);`  
     `va_end(args_copy);`
 
-    `return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };`  
+    `return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };`  
 `}`
 
-`static inline void vex_arena_destroy(vex_arena* a) {`  
+`static inline void vira_arena_destroy(vira_arena* a) {`  
     `if (a != NULL && a->buf != NULL) {`  
         `free(a->buf);`  
         `a->buf    = NULL;`  
         `a->cap    = 0;`  
         `a->offset = 0;`  
-        `_vex_record_free();`  
+        `_vira_record_free();`  
     `}`  
 `}`
 
@@ -6271,10 +6271,10 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 ``// 3. AI TENSORS + HARDWARE SIMD (`AVX2` / `SSE2` / `ARM NEON`) `@` MATMUL``  
 `// ============================================================================`
 
-`typedef float    vex_f32;`  
-`typedef uint16_t vex_bf16;`
+`typedef float    vira_f32;`  
+`typedef uint16_t vira_bf16;`
 
-`static inline const char* vex_simd_backend_name(void) {`  
+`static inline const char* vira_simd_backend_name(void) {`  
 `#if defined(__AVX2__)`  
     `return "x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)";`  
 `#elif defined(__ARM_NEON) || defined(__aarch64__)`  
@@ -6287,42 +6287,42 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `}`
 
 `typedef struct {`  
-    `vex_f32* data;      // 64-byte cache-line aligned pointer`  
+    `vira_f32* data;      // 64-byte cache-line aligned pointer`  
     `void*    raw_alloc; // underlying pointer for free()`  
     `int32_t  rows;`  
     `int32_t  cols;`  
     `bool     is_arena;`  
-`} vex_tensor_f32;`
+`} vira_tensor_f32;`
 
-`static inline vex_tensor_f32 vex_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
-    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
+`static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows, int32_t cols) {`  
+    `size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
     `void*  raw   = malloc(bytes + 64);`  
     `if (!raw) {`  
         `fprintf(stderr, "vex panic: tensor allocation failed (%d x %d)\n", rows, cols);`  
         `exit(1);`  
     `}`  
     `uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;`  
-    `vex_f32*  data    = (vex_f32*)aligned;`  
+    `vira_f32*  data    = (vira_f32*)aligned;`  
     `memset(data, 0, bytes);`  
-    `_vex_record_alloc();`  
-    `return (vex_tensor_f32){`  
+    `_vira_record_alloc();`  
+    `return (vira_tensor_f32){`  
         `.data = data, .raw_alloc = raw, .rows = rows, .cols = cols, .is_arena = false`  
     `};`  
 `}`
 
-`static inline vex_tensor_f32 vex_tensor_f32_arena_alloc(vex_arena* a, int32_t rows, int32_t cols) {`  
-    `size_t   bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);`  
-    `vex_f32* data  = (vex_f32*)vex_arena_alloc(a, bytes);`  
+`static inline vira_tensor_f32 vira_tensor_f32_arena_alloc(vira_arena* a, int32_t rows, int32_t cols) {`  
+    `size_t   bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);`  
+    `vira_f32* data  = (vira_f32*)vira_arena_alloc(a, bytes);`  
     `memset(data, 0, bytes);`  
-    `return (vex_tensor_f32){`  
+    `return (vira_tensor_f32){`  
         `.data = data, .raw_alloc = NULL, .rows = rows, .cols = cols, .is_arena = true`  
     `};`  
 `}`
 
-`static inline vex_tensor_f32 vex_tensor_f32_fill(vex_arena* opt_arena, int32_t rows, int32_t cols, vex_f32 val) {`  
-    `vex_tensor_f32 t = opt_arena`  
-        `? vex_tensor_f32_arena_alloc(opt_arena, rows, cols)`  
-        `: vex_tensor_f32_alloc(rows, cols);`  
+`static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena* opt_arena, int32_t rows, int32_t cols, vira_f32 val) {`  
+    `vira_tensor_f32 t = opt_arena`  
+        `? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)`  
+        `: vira_tensor_f32_alloc(rows, cols);`  
     `int32_t total = rows * cols;`  
     `int32_t i     = 0;`
 
@@ -6344,25 +6344,25 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `}`
 
 ``// Hardware-accelerated `@` Matrix Multiplication (C = A @ B)``  
-`static inline vex_tensor_f32 vex_tensor_matmul_f32(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {`  
+`static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {`  
     `if (a.cols != b.rows) {`  
         `fprintf(stderr, "vex tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",`  
                 `a.rows, a.cols, b.rows, b.cols);`  
         `exit(1);`  
     `}`  
-    `vex_tensor_f32 out = opt_arena`  
-        `? vex_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
-        `: vex_tensor_f32_alloc(a.rows, b.cols);`
+    `vira_tensor_f32 out = opt_arena`  
+        `? vira_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)`  
+        `: vira_tensor_f32_alloc(a.rows, b.cols);`
 
     `const int32_t M = a.rows;`  
     `const int32_t K = a.cols;`  
     `const int32_t N = b.cols;`
 
     `for (int32_t i = 0; i < M; i++) {`  
-        `vex_f32* c_row = &out.data[i * N];`  
+        `vira_f32* c_row = &out.data[i * N];`  
         `for (int32_t k = 0; k < K; k++) {`  
-            `const vex_f32  a_ik  = a.data[i * K + k];`  
-            `const vex_f32* b_row = &b.data[k * N];`  
+            `const vira_f32  a_ik  = a.data[i * K + k];`  
+            `const vira_f32* b_row = &b.data[k * N];`  
             `int32_t        j     = 0;`
 
 `#if defined(__AVX2__)`  
@@ -6414,10 +6414,10 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `}`
 
 `// SIMD-accelerated tensor sum reduction`  
-`static inline vex_f32 vex_tensor_sum(vex_tensor_f32 t) {`  
+`static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {`  
     `int32_t total = t.rows * t.cols;`  
     `int32_t i     = 0;`  
-    `vex_f32 sum   = 0.0f;`
+    `vira_f32 sum   = 0.0f;`
 
 `#if defined(__AVX2__)`  
     `__m256 vsum = _mm256_setzero_ps();`  
@@ -6443,12 +6443,12 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
     `return sum;`  
 `}`
 
-`static inline void vex_tensor_f32_free(vex_tensor_f32* t) {`  
+`static inline void vira_tensor_f32_free(vira_tensor_f32* t) {`  
     `if (t != NULL && !t->is_arena && t->raw_alloc != NULL) {`  
         `free(t->raw_alloc);`  
         `t->raw_alloc = NULL;`  
         `t->data      = NULL;`  
-        `_vex_record_free();`  
+        `_vira_record_free();`  
     `}`  
 `}`
 
@@ -6457,130 +6457,130 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `// ============================================================================`
 
 `typedef enum {`  
-    `VEX_ACTOR_RUNNING = 0,`  
-    `VEX_ACTOR_FAULTED = 1,`  
-    `VEX_ACTOR_STOPPED = 2,`  
-`} vex_actor_state;`
+    `VIRA_ACTOR_RUNNING = 0,`  
+    `VIRA_ACTOR_FAULTED = 1,`  
+    `VIRA_ACTOR_STOPPED = 2,`  
+`} vira_actor_state;`
 
 `typedef struct {`  
     `int32_t          id;`  
     `const char*      name;`  
-    `vex_actor_state  state;`  
+    `vira_actor_state  state;`  
     `int32_t          restarts;`  
     `int32_t          max_restarts;`  
-    `vex_arena        isolated_heap;  // Wiped in O(1) if the actor panics`  
+    `vira_arena        isolated_heap;  // Wiped in O(1) if the actor panics`  
     `jmp_buf          fault_boundary; // Thread-safe fault jump target when active`  
-    `vex_string       last_error;`  
+    `vira_string       last_error;`  
     `bool             in_actor;`  
     `volatile uint8_t mailbox_lock;   // Ensures single-actor sequential state safety`  
     `int32_t          last_worker_id; // Tracks which worker thread executed the actor`  
-`} vex_actor_ctx;`
+`} vira_actor_ctx;`
 
 `// Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!`  
-`static __thread vex_actor_ctx* _vex_tls_actor     = NULL;`  
-`static __thread int32_t        _vex_tls_worker_id = -1;`
+`static __thread vira_actor_ctx* _vira_tls_actor     = NULL;`  
+`static __thread int32_t        _vira_tls_worker_id = -1;`
 
-`static inline void vex_actor_ctx_init(vex_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {`  
+`static inline void vira_actor_ctx_init(vira_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {`  
     `ctx->id             = id;`  
     `ctx->name           = name;`  
-    `ctx->state          = VEX_ACTOR_RUNNING;`  
+    `ctx->state          = VIRA_ACTOR_RUNNING;`  
     `ctx->restarts       = 0;`  
     `ctx->max_restarts   = max_restarts;`  
-    `ctx->isolated_heap  = vex_arena_init(256 * 1024); // 256 KB SIMD-aligned scratch arena per actor`  
-    `ctx->last_error     = vex_str_lit("", 0);`  
+    `ctx->isolated_heap  = vira_arena_init(256 * 1024); // 256 KB SIMD-aligned scratch arena per actor`  
+    `ctx->last_error     = vira_str_lit("", 0);`  
     `ctx->in_actor       = false;`  
     `ctx->mailbox_lock   = 0;`  
     `ctx->last_worker_id = -1;`  
 `}`
 
-`static inline void vex_actor_ctx_destroy(vex_actor_ctx* ctx) {`  
-    `vex_arena_destroy(&ctx->isolated_heap);`  
+`static inline void vira_actor_ctx_destroy(vira_actor_ctx* ctx) {`  
+    `vira_arena_destroy(&ctx->isolated_heap);`  
 `}`
 
-`static inline void vex_panic(vex_string msg) {`  
-    `if (_vex_tls_actor != NULL && _vex_tls_actor->in_actor) {`  
-        `_vex_tls_actor->state      = VEX_ACTOR_FAULTED;`  
-        `_vex_tls_actor->last_error = msg;`  
-        `longjmp(_vex_tls_actor->fault_boundary, 1);`  
+`static inline void vira_panic(vira_string msg) {`  
+    `if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {`  
+        `_vira_tls_actor->state      = VIRA_ACTOR_FAULTED;`  
+        `_vira_tls_actor->last_error = msg;`  
+        `longjmp(_vira_tls_actor->fault_boundary, 1);`  
     `}`  
     `fprintf(stderr, "vex unrecoverable panic: %.*s\n", msg.len, (const char*)msg.data);`  
     `exit(1);`  
 `}`
 
 `// --- CHASE-LEV STYLE LOCK-FREE WORK-STEALING DEQUE ---`  
-`#define VEX_WS_CAP  256`  
-`#define VEX_WS_MASK (VEX_WS_CAP - 1)`  
-`#define VEX_MAX_WORKERS 8`
+`#define VIRA_WS_CAP  256`  
+`#define VIRA_WS_MASK (VIRA_WS_CAP - 1)`  
+`#define VIRA_MAX_WORKERS 8`
 
-`typedef void (*vex_task_fn)(void* env);`
+`typedef void (*vira_task_fn)(void* env);`
 
 `typedef struct {`  
-    `vex_task_fn      fn;`  
+    `vira_task_fn      fn;`  
     `void*            env;`  
     `volatile int32_t done; // 0 = pending, 1 = completed on worker pool`  
-`} vex_task;`
+`} vira_task;`
 
 `typedef struct {`  
     `int32_t          worker_id;`  
     `pthread_t        thread;`  
     `volatile int64_t top;    // Modified via CAS by thieves (FIFO steal)`  
     `volatile int64_t bottom; // Modified by owner (LIFO push/pop)`  
-    `vex_task*        ring[VEX_WS_CAP];`  
-`} vex_ws_deque;`
+    `vira_task*        ring[VIRA_WS_CAP];`  
+`} vira_ws_deque;`
 
 `typedef struct {`  
     `int32_t          num_workers;`  
     `bool             initialized;`  
     `volatile int32_t shutdown;`  
     `volatile uint32_t rr_cursor;`  
-    `vex_ws_deque     workers[VEX_MAX_WORKERS];`  
-`} vex_scheduler;`
+    `vira_ws_deque     workers[VIRA_MAX_WORKERS];`  
+`} vira_scheduler;`
 
-`static vex_scheduler _vex_sched = {0};`
+`static vira_scheduler _vira_sched = {0};`
 
 `// Push task onto a deque's bottom`  
-`static inline bool vex_ws_push(vex_ws_deque* q, vex_task* t) {`  
+`static inline bool vira_ws_push(vira_ws_deque* q, vira_task* t) {`  
     `int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_RELAXED);`  
     `int64_t top = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);`  
-    `if (b - top >= VEX_WS_CAP - 1) {`  
+    `if (b - top >= VIRA_WS_CAP - 1) {`  
         `return false; // Queue full`  
     `}`  
-    `__atomic_store_n(&q->ring[b & VEX_WS_MASK], t, __ATOMIC_RELAXED);`  
+    `__atomic_store_n(&q->ring[b & VIRA_WS_MASK], t, __ATOMIC_RELAXED);`  
     `__atomic_thread_fence(__ATOMIC_RELEASE);`  
     `__atomic_store_n(&q->bottom, b + 1, __ATOMIC_RELEASE);`  
     `return true;`  
 `}`
 
 `// Pop or steal a task from the top of any deque using lock-free CAS`  
-`static inline vex_task* vex_ws_steal(vex_ws_deque* q) {`  
+`static inline vira_task* vira_ws_steal(vira_ws_deque* q) {`  
     `int64_t t = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);`  
     `__atomic_thread_fence(__ATOMIC_SEQ_CST);`  
     `int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_ACQUIRE);`  
     `if (t >= b) {`  
         `return NULL; // Empty`  
     `}`  
-    `vex_task* task = __atomic_load_n(&q->ring[t & VEX_WS_MASK], __ATOMIC_RELAXED);`  
+    `vira_task* task = __atomic_load_n(&q->ring[t & VIRA_WS_MASK], __ATOMIC_RELAXED);`  
     `if (!__atomic_compare_exchange_n(&q->top, &t, t + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {`  
         `return NULL; // Lost race to another thief`  
     `}`  
     `return task;`  
 `}`
 
-`static void* _vex_worker_loop(void* arg) {`  
-    `vex_ws_deque* self = (vex_ws_deque*)arg;`  
-    `_vex_tls_worker_id = self->worker_id;`
+`static void* _vira_worker_loop(void* arg) {`  
+    `vira_ws_deque* self = (vira_ws_deque*)arg;`  
+    `_vira_tls_worker_id = self->worker_id;`
 
-    `while (!__atomic_load_n(&_vex_sched.shutdown, __ATOMIC_RELAXED)) {`  
+    `while (!__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_RELAXED)) {`  
         `// 1. Try taking from own deque first`  
-        `vex_task* task = vex_ws_steal(self);`
+        `vira_task* task = vira_ws_steal(self);`
 
         `// 2. If own deque is empty, steal from peer worker deques!`  
         `if (task == NULL) {`  
-            `for (int32_t i = 1; i < _vex_sched.num_workers; i++) {`  
-                `int32_t victim_idx = (self->worker_id + i) % _vex_sched.num_workers;`  
-                `task = vex_ws_steal(&_vex_sched.workers[victim_idx]);`  
+            `for (int32_t i = 1; i < _vira_sched.num_workers; i++) {`  
+                `int32_t victim_idx = (self->worker_id + i) % _vira_sched.num_workers;`  
+                `task = vira_ws_steal(&_vira_sched.workers[victim_idx]);`  
                 `if (task != NULL) {`  
-                    `__atomic_add_fetch(&_vex_total_work_steals, 1, __ATOMIC_RELAXED);`  
+                    `__atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);`  
                     `break;`  
                 `}`  
             `}`  
@@ -6588,7 +6588,7 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 
         `if (task != NULL) {`  
             `task->fn(task->env);`  
-            `__atomic_add_fetch(&_vex_total_tasks_run, 1, __ATOMIC_RELAXED);`  
+            `__atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);`  
             `__atomic_store_n(&task->done, 1, __ATOMIC_RELEASE);`  
         `} else {`  
             `sched_yield();`  
@@ -6597,46 +6597,46 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
     `return NULL;`  
 `}`
 
-`static inline void vex_scheduler_init(int32_t num_workers) {`  
-    `if (_vex_sched.initialized) return;`  
-    `if (num_workers <= 0 || num_workers > VEX_MAX_WORKERS) {`  
+`static inline void vira_scheduler_init(int32_t num_workers) {`  
+    `if (_vira_sched.initialized) return;`  
+    `if (num_workers <= 0 || num_workers > VIRA_MAX_WORKERS) {`  
         `num_workers = 4;`  
     `}`  
-    `_vex_sched.num_workers = num_workers;`  
-    `_vex_sched.shutdown    = 0;`  
-    `_vex_sched.rr_cursor   = 0;`  
-    `_vex_sched.initialized = true;`
+    `_vira_sched.num_workers = num_workers;`  
+    `_vira_sched.shutdown    = 0;`  
+    `_vira_sched.rr_cursor   = 0;`  
+    `_vira_sched.initialized = true;`
 
     `for (int32_t i = 0; i < num_workers; i++) {`  
-        `_vex_sched.workers[i].worker_id = i;`  
-        `_vex_sched.workers[i].top       = 0;`  
-        `_vex_sched.workers[i].bottom    = 0;`  
-        `pthread_create(&_vex_sched.workers[i].thread, NULL, _vex_worker_loop, &_vex_sched.workers[i]);`  
+        `_vira_sched.workers[i].worker_id = i;`  
+        `_vira_sched.workers[i].top       = 0;`  
+        `_vira_sched.workers[i].bottom    = 0;`  
+        `pthread_create(&_vira_sched.workers[i].thread, NULL, _vira_worker_loop, &_vira_sched.workers[i]);`  
     `}`  
 `}`
 
-`static inline void vex_scheduler_shutdown(void) {`  
-    `if (!_vex_sched.initialized) return;`  
-    `__atomic_store_n(&_vex_sched.shutdown, 1, __ATOMIC_SEQ_CST);`  
-    `for (int32_t i = 0; i < _vex_sched.num_workers; i++) {`  
-        `pthread_join(_vex_sched.workers[i].thread, NULL);`  
+`static inline void vira_scheduler_shutdown(void) {`  
+    `if (!_vira_sched.initialized) return;`  
+    `__atomic_store_n(&_vira_sched.shutdown, 1, __ATOMIC_SEQ_CST);`  
+    `for (int32_t i = 0; i < _vira_sched.num_workers; i++) {`  
+        `pthread_join(_vira_sched.workers[i].thread, NULL);`  
     `}`  
-    `_vex_sched.initialized = false;`  
+    `_vira_sched.initialized = false;`  
 `}`
 
 `// Dispatches an actor message onto a worker deque (intentionally clustering bursts so peers steal!)`  
-`static inline void vex_scheduler_submit_and_wait(vex_task_fn fn, void* env) {`  
-    `if (!_vex_sched.initialized) {`  
-        `vex_scheduler_init(4);`  
+`static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void* env) {`  
+    `if (!_vira_sched.initialized) {`  
+        `vira_scheduler_init(4);`  
     `}`  
-    `vex_task task = { .fn = fn, .env = env, .done = 0 };`
+    `vira_task task = { .fn = fn, .env = env, .done = 0 };`
 
     `// Push onto Worker 0's deque first; when multiple tasks are queued or Worker 0 is busy,`  
     `// idle worker threads steal from Worker 0's deque via lock-free CAS!`  
-    `uint32_t target = __atomic_fetch_add(&_vex_sched.rr_cursor, 1, __ATOMIC_RELAXED);`  
-    `int32_t  queue_idx = (target % 2 == 0) ? 0 : (int32_t)(target % (uint32_t)_vex_sched.num_workers);`
+    `uint32_t target = __atomic_fetch_add(&_vira_sched.rr_cursor, 1, __ATOMIC_RELAXED);`  
+    `int32_t  queue_idx = (target % 2 == 0) ? 0 : (int32_t)(target % (uint32_t)_vira_sched.num_workers);`
 
-    `while (!vex_ws_push(&_vex_sched.workers[queue_idx], &task)) {`  
+    `while (!vira_ws_push(&_vira_sched.workers[queue_idx], &task)) {`  
         `sched_yield();`  
     `}`
 
@@ -6650,33 +6650,33 @@ Replace vex/runtime/vex\_rt.h with the complete SIMD \+ Lock-Free Work-Stealing 
 `// 5. BUILTIN I/O & DIAGNOSTICS`  
 `// ============================================================================`
 
-`static inline void vex_println(vex_string s) {`  
+`static inline void vira_println(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stdout);`  
     `}`  
     `fputc('\n', stdout);`  
 `}`
 
-`static inline void vex_eprintln(vex_string s) {`  
+`static inline void vira_eprintln(vira_string s) {`  
     `if (s.data != NULL && s.len > 0) {`  
         `fwrite(s.data, 1, (size_t)s.len, stderr);`  
     `}`  
     `fputc('\n', stderr);`  
 `}`
 
-`static inline void vex_report_mem_stats(void) {`  
-    `vex_scheduler_shutdown();`  
-    `printf("[vex_rt] simd=%s\n", vex_simd_backend_name());`  
-    `printf("[vex_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",`  
-           `_vex_sched.num_workers,`  
-           `(long long)__atomic_load_n(&_vex_total_tasks_run, __ATOMIC_RELAXED),`  
-           `(long long)__atomic_load_n(&_vex_total_work_steals, __ATOMIC_RELAXED));`  
-    `printf("[vex_rt] active_leaks=%lld | total_freed=%lld\n",`  
-           `(long long)__atomic_load_n(&_vex_active_heap_allocs, __ATOMIC_RELAXED),`  
-           `(long long)__atomic_load_n(&_vex_total_heap_frees, __ATOMIC_RELAXED));`  
+`static inline void vira_report_mem_stats(void) {`  
+    `vira_scheduler_shutdown();`  
+    `printf("[vira_rt] simd=%s\n", vira_simd_backend_name());`  
+    `printf("[vira_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",`  
+           `_vira_sched.num_workers,`  
+           `(long long)__atomic_load_n(&_vira_total_tasks_run, __ATOMIC_RELAXED),`  
+           `(long long)__atomic_load_n(&_vira_total_work_steals, __ATOMIC_RELAXED));`  
+    `printf("[vira_rt] active_leaks=%lld | total_freed=%lld\n",`  
+           `(long long)__atomic_load_n(&_vira_active_heap_allocs, __ATOMIC_RELAXED),`  
+           `(long long)__atomic_load_n(&_vira_total_heap_frees, __ATOMIC_RELAXED));`  
 `}`
 
-`#endif // VEX_RT_H`
+`#endif // VIRA_RT_H`
 
 ## **3\. Upgrading emitActorSupervisorWrapper in internal/cgen/cgen.go**
 
@@ -6698,7 +6698,7 @@ In vex/internal/cgen/cgen.go, replace emitActorSupervisorWrapper so every actor 
 	`}`  
 	`out.WriteString(fmt.Sprintf("    %s result;\n} %s;\n\n", cRes, envName))`
 
-	``// 2. Emit worker-thread task callback with per-thread TLS fault boundary (`_vex_tls_actor`)``  
+	``// 2. Emit worker-thread task callback with per-thread TLS fault boundary (`_vira_tls_actor`)``  
 	`var envArgs []string`  
 	`envArgs = append(envArgs, "self")`  
 	`for _, p := range method.Params {`  
@@ -6710,9 +6710,9 @@ In vex/internal/cgen/cgen.go, replace emitActorSupervisorWrapper so every actor 
 	`out.WriteString(fmt.Sprintf("    %s* self = env->self;\n", cActor))`  
 	`out.WriteString("    // Acquire per-actor mailbox lock so a single actor's state is never mutated concurrently\n")`  
 	`out.WriteString("    while (__atomic_test_and_set(&self->_ctx.mailbox_lock, __ATOMIC_ACQUIRE)) { sched_yield(); }\n")`  
-	`out.WriteString("    _vex_tls_actor = &self->_ctx;\n")`  
+	`out.WriteString("    _vira_tls_actor = &self->_ctx;\n")`  
 	`out.WriteString("    self->_ctx.in_actor = true;\n")`  
-	`out.WriteString("    self->_ctx.last_worker_id = _vex_tls_worker_id;\n")`  
+	`out.WriteString("    self->_ctx.last_worker_id = _vira_tls_worker_id;\n")`  
 	`out.WriteString("    if (setjmp(self->_ctx.fault_boundary) == 0) {\n")`
 
 	`callStr := fmt.Sprintf("%s_%s(%s)", cActor, method.Name, strings.Join(envArgs, ", "))`  
@@ -6727,20 +6727,20 @@ In vex/internal/cgen/cgen.go, replace emitActorSupervisorWrapper so every actor 
 	`}`  
 	`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 	`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-	`out.WriteString("        _vex_tls_actor = NULL;\n")`  
+	`out.WriteString("        _vira_tls_actor = NULL;\n")`  
 	`out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")`  
 	`out.WriteString("    } else {\n")`  
 	`out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Wipe actor's isolated arena slab in O(1)\n")`  
 	`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 	`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-	`out.WriteString("        _vex_tls_actor = NULL;\n")`  
-	`out.WriteString("        vex_string _err = self->_ctx.last_error;\n")`  
+	`out.WriteString("        _vira_tls_actor = NULL;\n")`  
+	`out.WriteString("        vira_string _err = self->_ctx.last_error;\n")`  
 	`out.WriteString("        if (self->_ctx.restarts < self->_ctx.max_restarts) {\n")`  
 	`out.WriteString("            self->_ctx.restarts++;\n")`  
-	`out.WriteString("            self->_ctx.state = VEX_ACTOR_RUNNING;\n")`  
+	`out.WriteString("            self->_ctx.state = VIRA_ACTOR_RUNNING;\n")`  
 	`out.WriteString(fmt.Sprintf("            %s_supervisor_reset(self);\n", cActor))`  
-	`out.WriteString("            printf(\"[vex_supervisor | worker_thread=%d] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
-	`out.WriteString("                   _vex_tls_worker_id, self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")`  
+	`out.WriteString("            printf(\"[vira_supervisor | worker_thread=%d] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
+	`out.WriteString("                   _vira_tls_worker_id, self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")`  
 	`out.WriteString("        }\n")`  
 	`out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")`  
 	`out.WriteString(fmt.Sprintf("        env->result = (%s){ .is_err = true, .err = _err };\n", cRes))`  
@@ -6760,7 +6760,7 @@ In vex/internal/cgen/cgen.go, replace emitActorSupervisorWrapper so every actor 
 	`out.WriteString(fmt.Sprintf("static %s %s_supervise_%s(%s) {\n",`  
 		`cRes, cActor, method.Name, strings.Join(paramList, ", ")))`  
 	`out.WriteString(fmt.Sprintf("    %s env = { %s };\n", envName, strings.Join(fieldInits, ", ")))`  
-	`out.WriteString(fmt.Sprintf("    vex_scheduler_submit_and_wait(_%s_%s_worker_task, &env);\n", cActor, method.Name))`  
+	`out.WriteString(fmt.Sprintf("    vira_scheduler_submit_and_wait(_%s_%s_worker_task, &env);\n", cActor, method.Name))`  
 	`out.WriteString("    return env.result;\n")`  
 	`out.WriteString("}\n\n")`  
 `}`
@@ -6769,7 +6769,7 @@ In vex/internal/cgen/cgen.go, replace emitActorSupervisorWrapper so every actor 
 
 In vex/cmd/vex/main.go, update the AIWorker tensor size to **64x64** (so AVX2 / NEON vector loops run 8-wide across 64 columns) and pass \-O3 \-march=native \-pthread to cc so hardware SIMD intrinsics and POSIX worker threads are enabled:
 
-	`// Inside main.go's Vex source string, update AIWorker.predict and Arena MatMul to 64x64:`  
+	`// Inside main.go's Vira source string, update AIWorker.predict and Arena MatMul to 64x64:`  
 	`// weights := tensor_fill(64, 64, 0.25)`  
 	`// input   := tensor_fill(64, 64, scale)`  
 	`// out     := weights @ input`
@@ -6781,8 +6781,8 @@ In vex/cmd/vex/main.go, update the AIWorker tensor size to **64x64** (so AVX2 / 
 
 Running go run ./cmd/vex compiles the C99 output with \-O3 \-march=native \-pthread and executes the binary across the 4-thread work-stealing pool:
 
-`✓ Generated C99 source (7340 bytes) -> build/vex_out.c`  
-`✓ Compiled native binary -> build/vex_app`
+`✓ Generated C99 source (7340 bytes) -> build/vira_out.c`  
+`✓ Compiled native binary -> build/vira_app`
 
 `=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===`  
 `Invoice #inv_9001 paid (15000 cents)`  
@@ -6790,12 +6790,12 @@ Running go run ./cmd/vex compiles the C99 output with \-O3 \-march=native \-pthr
 `=== 2. AI TENSOR[f32] @ MATMUL IN O(1) ARENA SLAB ===`  
 `Arena 2x2 MatMul (@) sum = 24.00`  
 `=== 3. FAULT-TOLERANT ACTOR SUPERVISION (LET IT CRASH) ===`  
-`[vex_supervisor | worker_thread=1] Actor 'AIWorker' (#1) trapped fault ('CUDA/NaN anomaly detected on batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
+`[vira_supervisor | worker_thread=1] Actor 'AIWorker' (#1) trapped fault ('CUDA/NaN anomaly detected on batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
 `Caller or-block handled fault gracefully: CUDA/NaN anomaly detected on batch`  
 `Recovered Actor prediction sum = 48.00 (fallback was 0.00)`  
-`[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)`  
-`[vex_rt] pool_workers=4 | actor_tasks_run=2 | work_steals=1`  
-`[vex_rt] active_leaks=0 | total_freed=6`
+`[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)`  
+`[vira_rt] pool_workers=4 | actor_tasks_run=2 | work_steals=1`  
+`[vira_rt] active_leaks=0 | total_freed=6`
 
 Notice what the runtime telemetry confirms:
 
@@ -6823,37 +6823,37 @@ In vex/runtime/vex\_rt.h, replace the bottom of Section 4 (vex\_scheduler\_submi
 `// --- ASYNCHRONOUS FUTURE[T] PRIMITIVES (FAN-OUT + WORK-HELPING AWAIT) ---`
 
 `typedef struct {`  
-    `vex_task* task;`  
+    `vira_task* task;`  
     `void*     env;`  
-`} vex_future;`
+`} vira_future;`
 
 `// Pushes a heap-backed actor task onto a worker deque and returns immediately (non-blocking)`  
-`static inline void vex_scheduler_submit_async(vex_task* task) {`  
-    `if (!_vex_sched.initialized) {`  
-        `vex_scheduler_init(4);`  
+`static inline void vira_scheduler_submit_async(vira_task* task) {`  
+    `if (!_vira_sched.initialized) {`  
+        `vira_scheduler_init(4);`  
     `}`  
     `__atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);`
 
     `// Cluster bursts on Worker 0's deque first so idle peer threads steal tasks concurrently`  
-    `uint32_t seq       = __atomic_fetch_add(&_vex_sched.rr_cursor, 1, __ATOMIC_RELAXED);`  
-    `int32_t  queue_idx = (seq % 2 == 0) ? 0 : (int32_t)(seq % (uint32_t)_vex_sched.num_workers);`
+    `uint32_t seq       = __atomic_fetch_add(&_vira_sched.rr_cursor, 1, __ATOMIC_RELAXED);`  
+    `int32_t  queue_idx = (seq % 2 == 0) ? 0 : (int32_t)(seq % (uint32_t)_vira_sched.num_workers);`
 
-    `while (!vex_ws_push(&_vex_sched.workers[queue_idx], task)) {`  
+    `while (!vira_ws_push(&_vira_sched.workers[queue_idx], task)) {`  
         `sched_yield();`  
     `}`  
 `}`
 
 `// Waits for a future's task to complete; while waiting, the caller helps steal pending tasks!`  
-`static inline void vex_scheduler_await(vex_task* task) {`  
+`static inline void vira_scheduler_await(vira_task* task) {`  
     `if (task == NULL) return;`  
     `while (__atomic_load_n(&task->done, __ATOMIC_ACQUIRE) == 0) {`  
         `bool helped = false;`  
-        `for (int32_t i = 0; i < _vex_sched.num_workers; i++) {`  
-            `vex_task* stolen = vex_ws_steal(&_vex_sched.workers[i]);`  
+        `for (int32_t i = 0; i < _vira_sched.num_workers; i++) {`  
+            `vira_task* stolen = vira_ws_steal(&_vira_sched.workers[i]);`  
             `if (stolen != NULL) {`  
-                `__atomic_add_fetch(&_vex_total_work_steals, 1, __ATOMIC_RELAXED);`  
+                `__atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);`  
                 `stolen->fn(stolen->env);`  
-                `__atomic_add_fetch(&_vex_total_tasks_run, 1, __ATOMIC_RELAXED);`  
+                `__atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);`  
                 `__atomic_store_n(&stolen->done, 1, __ATOMIC_RELEASE);`  
                 `helped = true;`  
                 `break;`  
@@ -6866,26 +6866,26 @@ In vex/runtime/vex\_rt.h, replace the bottom of Section 4 (vex\_scheduler\_submi
 `}`
 
 `// Synchronous helper (spawn + immediate await)`  
-`static inline void vex_scheduler_submit_and_wait(vex_task_fn fn, void* env) {`  
-    `if (!_vex_sched.initialized) {`  
-        `vex_scheduler_init(4);`  
+`static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void* env) {`  
+    `if (!_vira_sched.initialized) {`  
+        `vira_scheduler_init(4);`  
     `}`  
-    `vex_task task = { .fn = fn, .env = env, .done = 0 };`  
-    `vex_scheduler_submit_async(&task);`  
-    `vex_scheduler_await(&task);`  
+    `vira_task task = { .fn = fn, .env = env, .done = 0 };`  
+    `vira_scheduler_submit_async(&task);`  
+    `vira_scheduler_await(&task);`  
 `}`
 
 ``// Idempotent scope-exit cleanup injected by `internal/autofree` for Future[T]``  
-`static inline void vex_future_free(vex_future* f) {`  
+`static inline void vira_future_free(vira_future* f) {`  
     `if (f != NULL && f->env != NULL) {`  
         ``// If an early return skipped `.await()`, wait for the worker thread to finish before freeing``  
         `if (f->task != NULL) {`  
-            `vex_scheduler_await(f->task);`  
+            `vira_scheduler_await(f->task);`  
         `}`  
         `free(f->env);`  
         `f->env  = NULL;`  
         `f->task = NULL;`  
-        `_vex_record_free();`  
+        `_vira_record_free();`  
     `}`  
 `}`
 
@@ -6896,31 +6896,31 @@ In vex/runtime/vex\_rt.h, replace the bottom of Section 4 (vex\_scheduler\_submi
 Add CleanupFuture to CleanupKind:
 
 `const (`  
-	`` CleanupString    CleanupKind = iota // emits `vex_str_free(&var);` ``  
+	`` CleanupString    CleanupKind = iota // emits `vira_str_free(&var);` ``  
 	`` CleanupStruct                       // emits `Module__Struct_autofree(&var);` ``  
 	`` CleanupInterface                    // emits `var._vtable->_autofree(var._object);` ``  
-	`` CleanupArena                        // emits `vex_arena_destroy(&_arena_1);` ``  
-	`` CleanupTensor                       // emits `vex_tensor_f32_free(&var);` ``  
+	`` CleanupArena                        // emits `vira_arena_destroy(&_arena_1);` ``  
+	`` CleanupTensor                       // emits `vira_tensor_f32_free(&var);` ``  
 	`` CleanupActor                        // emits `Module__Actor_autofree(&var);` ``  
-	`` CleanupFuture                       // emits `vex_future_free(&var);` ``  
+	`` CleanupFuture                       // emits `vira_future_free(&var);` ``  
 `)`
 
 `func (k CleanupKind) String() string {`  
 	`switch k {`  
 	`case CleanupString:`  
-		`return "vex_str_free"`  
+		`return "vira_str_free"`  
 	`case CleanupStruct:`  
 		`return "struct_autofree"`  
 	`case CleanupInterface:`  
 		`return "vtable_autofree"`  
 	`case CleanupArena:`  
-		`return "vex_arena_destroy"`  
+		`return "vira_arena_destroy"`  
 	`case CleanupTensor:`  
-		`return "vex_tensor_f32_free"`  
+		`return "vira_tensor_f32_free"`  
 	`case CleanupActor:`  
 		`return "actor_autofree"`  
 	`case CleanupFuture:`  
-		`return "vex_future_free"`  
+		`return "vira_future_free"`  
 	`default:`  
 		`return "unknown_free"`  
 	`}`  
@@ -7061,7 +7061,7 @@ In EmitFile(file \*ast.File) inside vex/internal/cgen/cgen.go, update **Section 
 		`for cName, inner := range g.resultTypes {`  
 			`out.WriteString("typedef struct {\n")`  
 			`out.WriteString("    bool is_err;\n")`  
-			`out.WriteString("    vex_string err;\n")`  
+			`out.WriteString("    vira_string err;\n")`  
 			`if !inner.Equals(checker.TypeVoid) {`  
 				`out.WriteString(fmt.Sprintf("    %s val;\n", g.cType(inner)))`  
 			`}`  
@@ -7069,21 +7069,21 @@ In EmitFile(file \*ast.File) inside vex/internal/cgen/cgen.go, update **Section 
 
 			`` // C99 initial-member header shared by all Future[T] message envelopes returning `cName` ``  
 			`out.WriteString("typedef struct {\n")`  
-			`out.WriteString("    vex_task _task;\n")`  
+			`out.WriteString("    vira_task _task;\n")`  
 			`out.WriteString(fmt.Sprintf("    %s result;\n", cName))`  
 			`out.WriteString(fmt.Sprintf("} _FutureHeader_%s;\n\n", cName))`
 
-			`out.WriteString(fmt.Sprintf("static inline %s Future_%s_await(vex_future* f) {\n", cName, cName))`  
+			`out.WriteString(fmt.Sprintf("static inline %s Future_%s_await(vira_future* f) {\n", cName, cName))`  
 			`out.WriteString("    if (!f || !f->env) {\n")`  
-			`out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vex_str_lit(\"future already awaited\", 22) };\n", cName))`  
+			`out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vira_str_lit(\"future already awaited\", 22) };\n", cName))`  
 			`out.WriteString("    }\n")`  
 			`out.WriteString(fmt.Sprintf("    _FutureHeader_%s* hdr = (_FutureHeader_%s*)f->env;\n", cName, cName))`  
-			`out.WriteString("    vex_scheduler_await(&hdr->_task);\n")`  
+			`out.WriteString("    vira_scheduler_await(&hdr->_task);\n")`  
 			`out.WriteString(fmt.Sprintf("    %s res = hdr->result;\n", cName))`  
 			`out.WriteString("    free(f->env);\n")`  
 			`out.WriteString("    f->env = NULL;\n")`  
 			`out.WriteString("    f->task = NULL;\n")`  
-			`out.WriteString("    _vex_record_free();\n")`  
+			`out.WriteString("    _vira_record_free();\n")`  
 			`out.WriteString("    return res;\n")`  
 			`out.WriteString("}\n\n")`  
 		`}`  
@@ -7109,7 +7109,7 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 	`}`  
 	`out.WriteString(fmt.Sprintf("} %s;\n\n", envName))`
 
-	``// 2. Emit worker-thread task callback with per-thread TLS fault boundary (`_vex_tls_actor`)``  
+	``// 2. Emit worker-thread task callback with per-thread TLS fault boundary (`_vira_tls_actor`)``  
 	`var envArgs []string`  
 	`envArgs = append(envArgs, "self")`  
 	`for _, p := range method.Params {`  
@@ -7120,9 +7120,9 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 	`out.WriteString(fmt.Sprintf("    %s* env = (%s*)_raw_env;\n", envName, envName))`  
 	`out.WriteString(fmt.Sprintf("    %s* self = env->self;\n", cActor))`  
 	`out.WriteString("    while (__atomic_test_and_set(&self->_ctx.mailbox_lock, __ATOMIC_ACQUIRE)) { sched_yield(); }\n")`  
-	`out.WriteString("    _vex_tls_actor = &self->_ctx;\n")`  
+	`out.WriteString("    _vira_tls_actor = &self->_ctx;\n")`  
 	`out.WriteString("    self->_ctx.in_actor = true;\n")`  
-	`out.WriteString("    self->_ctx.last_worker_id = _vex_tls_worker_id;\n")`  
+	`out.WriteString("    self->_ctx.last_worker_id = _vira_tls_worker_id;\n")`  
 	`out.WriteString("    if (setjmp(self->_ctx.fault_boundary) == 0) {\n")`
 
 	`callStr := fmt.Sprintf("%s_%s(%s)", cActor, method.Name, strings.Join(envArgs, ", "))`  
@@ -7137,20 +7137,20 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 	`}`  
 	`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 	`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-	`out.WriteString("        _vex_tls_actor = NULL;\n")`  
+	`out.WriteString("        _vira_tls_actor = NULL;\n")`  
 	`out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")`  
 	`out.WriteString("    } else {\n")`  
 	`out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Wipe actor's isolated arena slab in O(1)\n")`  
 	`out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")`  
 	`out.WriteString("        self->_ctx.in_actor = false;\n")`  
-	`out.WriteString("        _vex_tls_actor = NULL;\n")`  
-	`out.WriteString("        vex_string _err = self->_ctx.last_error;\n")`  
+	`out.WriteString("        _vira_tls_actor = NULL;\n")`  
+	`out.WriteString("        vira_string _err = self->_ctx.last_error;\n")`  
 	`out.WriteString("        if (self->_ctx.restarts < self->_ctx.max_restarts) {\n")`  
 	`out.WriteString("            self->_ctx.restarts++;\n")`  
-	`out.WriteString("            self->_ctx.state = VEX_ACTOR_RUNNING;\n")`  
+	`out.WriteString("            self->_ctx.state = VIRA_ACTOR_RUNNING;\n")`  
 	`out.WriteString(fmt.Sprintf("            %s_supervisor_reset(self);\n", cActor))`  
-	`out.WriteString("            printf(\"[vex_supervisor | worker_thread=%d] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
-	`out.WriteString("                   _vex_tls_worker_id, self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")`  
+	`out.WriteString("            printf(\"[vira_supervisor | worker_thread=%d] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")`  
+	`out.WriteString("                   _vira_tls_worker_id, self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")`  
 	`out.WriteString("        }\n")`  
 	`out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")`  
 	`out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = _err };\n", cRes))`  
@@ -7164,10 +7164,10 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 		`paramList = append(paramList, fmt.Sprintf("%s %s", g.cType(p.Type), p.Name))`  
 	`}`
 
-	`out.WriteString(fmt.Sprintf("static inline vex_future %s_spawn_%s(%s) {\n",`  
+	`out.WriteString(fmt.Sprintf("static inline vira_future %s_spawn_%s(%s) {\n",`  
 		`cActor, method.Name, strings.Join(paramList, ", ")))`  
 	`out.WriteString(fmt.Sprintf("    %s* env = (%s*)malloc(sizeof(%s));\n", envName, envName, envName))`  
-	`out.WriteString("    _vex_record_alloc();\n")`  
+	`out.WriteString("    _vira_record_alloc();\n")`  
 	`out.WriteString("    env->self = self;\n")`  
 	`for _, p := range method.Params {`  
 		`out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))`  
@@ -7175,8 +7175,8 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 	`out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))`  
 	`out.WriteString("    env->_hdr._task.env = env;\n")`  
 	`out.WriteString("    env->_hdr._task.done = 0;\n")`  
-	`out.WriteString("    vex_scheduler_submit_async(&env->_hdr._task);\n")`  
-	`out.WriteString("    return (vex_future){ .task = &env->_hdr._task, .env = env };\n")`  
+	`out.WriteString("    vira_scheduler_submit_async(&env->_hdr._task);\n")`  
+	`out.WriteString("    return (vira_future){ .task = &env->_hdr._task, .env = env };\n")`  
 	`out.WriteString("}\n\n")`
 
 	``// 4. Emit Synchronous Shorthand (`_supervise_` = `_spawn_` + `Future_await`)``  
@@ -7187,7 +7187,7 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 	`}`  
 	`out.WriteString(fmt.Sprintf("static inline %s %s_supervise_%s(%s) {\n",`  
 		`cRes, cActor, method.Name, strings.Join(paramList, ", ")))`  
-	`out.WriteString(fmt.Sprintf("    vex_future _fut = %s_spawn_%s(%s);\n",`  
+	`out.WriteString(fmt.Sprintf("    vira_future _fut = %s_spawn_%s(%s);\n",`  
 		`cActor, method.Name, strings.Join(forwardArgs, ", ")))`  
 	`out.WriteString(fmt.Sprintf("    return Future_%s_await(&_fut);\n", cRes))`  
 	`out.WriteString("}\n\n")`  
@@ -7197,7 +7197,7 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 
 > 1. In emitStmt under case \*ast.DeferFreeStmt::  
 >    		`case ast.CleanupFuture:`  
->    			`out.WriteString(fmt.Sprintf("%svex_future_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`
+>    			`out.WriteString(fmt.Sprintf("%svira_future_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))`
 
 > 2. In emitActorInitExpr: pass the actor's id field if present (or a unique actor counter) so each spawned actor in a pool displays its own ID (\#1, \#2, \#3):  
 >    `func (g *Generator) emitActorInitExpr(st *checker.StructType, fieldInits []string) string {`  
@@ -7207,7 +7207,7 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 >    	`if _, hasID := st.Fields["id"]; hasID {`  
 >    		`idExpr = tmp + ".id"`  
 >    	`}`  
->    	`return fmt.Sprintf("({ %s %s = (%s){ %s }; vex_actor_ctx_init(&%s._ctx, %s, %q, 3); %s; })",`  
+>    	`return fmt.Sprintf("({ %s %s = (%s){ %s }; vira_actor_ctx_init(&%s._ctx, %s, %q, 3); %s; })",`  
 >    		`cSt, tmp, cSt, strings.Join(fieldInits, ", "), tmp, idExpr, st.Name, tmp)`  
 >    `}`
 
@@ -7258,7 +7258,7 @@ Replace emitActorSupervisorWrapper so it emits both the **non-blocking Future\[T
 > 4. In cType(t checker.Type) and needsMutableAddressForCleanup(t checker.Type):  
 >    `// Add to cType():`  
 >    	`case *checker.FutureType:`  
->    		`return "vex_future"`
+>    		`return "vira_future"`
 
 >    `// Add *checker.FutureType to needsMutableAddressForCleanup():`  
 >    	`case *checker.StructType, *checker.InterfaceType, *checker.TensorType, *checker.FutureType:`  
@@ -7276,10 +7276,10 @@ Update vex/cmd/vex/main.go to spawn **3 AIWorker actors in parallel** (w1, w2, w
 	`"os/exec"`  
 	`"path/filepath"`
 
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/cgen"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/parser"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/cgen"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/parser"`  
 `)`
 
 `func main() {`  
@@ -7427,8 +7427,8 @@ Update vex/cmd/vex/main.go to spawn **3 AIWorker actors in parallel** (w1, w2, w
 	`if err := os.MkdirAll("build", 0755); err != nil {`  
 		`panic(err)`  
 	`}`  
-	`cFile := filepath.Join("build", "vex_out.c")`  
-	`binFile := filepath.Join("build", "vex_app")`  
+	`cFile := filepath.Join("build", "vira_out.c")`  
+	`binFile := filepath.Join("build", "vira_app")`  
 	`if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {`  
 		`panic(err)`  
 	`}`  
@@ -7455,19 +7455,19 @@ Update vex/cmd/vex/main.go to spawn **3 AIWorker actors in parallel** (w1, w2, w
 
 Running go run ./cmd/vex compiles and executes the parallel fan-out across all 4 worker threads:
 
-`✓ Generated C99 source (8620 bytes) -> build/vex_out.c`  
-`✓ Compiled native binary -> build/vex_app`
+`✓ Generated C99 source (8620 bytes) -> build/vira_out.c`  
+`✓ Compiled native binary -> build/vira_app`
 
 `=== 1. OOP + STRUCT EMBEDDING + FAT-POINTER INTERFACE ===`  
 `Invoice #inv_9001 paid (15000 cents)`  
 `=== 2. PARALLEL FUTURE[f32] FAN-OUT ACROSS WORK-STEALING POOL ===`  
-`[vex_supervisor | worker_thread=2] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
+`[vira_supervisor | worker_thread=2] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]`  
 `Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly on parallel batch`  
 `Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00`  
 `Worker #2 recovered Future result -> w2=196608.00`  
-`[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)`  
-`[vex_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3`  
-`[vex_rt] active_leaks=0 | total_freed=11`
+`[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)`  
+`[vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3`  
+`[vira_rt] active_leaks=0 | total_freed=11`
 
 Notice what happens during the fan-out:
 
@@ -7476,22 +7476,22 @@ Notice what happens during the fan-out:
 
 ---
 
-*User prompt: Upgrade \`cmd/vex\` into a full CLI toolchain supporting \`vex run file.vex\`, \`vex build \-prod file.vex\`, and \`vex cgen file.vex\` with Rust/V-style source-span diagnostics.*
+*User prompt: Upgrade \`cmd/vex\` into a full CLI toolchain supporting \`vira run file.vir\`, \`vira build \-prod file.vir\`, and \`vira cgen file.vir\` with Rust/V-style source-span diagnostics.*
 
 Response: Upgrading cmd/vex into a production CLI toolchain requires two components:
 
 > 1. **internal/source/source.go:** A zero-allocation line-offset index that maps any token.Span byte range to 1-based (line, col) coordinates in *O*(log*L*) time via binary search, expands tabs so caret underlines (^^^^) align accurately, and renders Rust/V-style diagnostics with automatic \= help: hints.  
-> 2. **cmd/vex/main.go:** A full subcommand driver supporting vex run, vex build \[-prod\] \[-sanitize\] \[-o bin\], vex cgen, vex check, and vex demo, with automatic **TinyCC (tcc)** detection for instant development runs and **cc \-O3 \-march=native \-flto \-pthread** for SIMD-accelerated production builds.
+> 2. **cmd/vex/main.go:** A full subcommand driver supporting vira run, vira build \[-prod\] \[-sanitize\] \[-o bin\], vira cgen, vira check, and vira demo, with automatic **TinyCC (tcc)** detection for instant development runs and **cc \-O3 \-march=native \-flto \-pthread** for SIMD-accelerated production builds.
 
 ## **1\. CLI Commands & Compiler Flags**
 
 | Command | Flags | Behavior & Backend Flags |
 | :---- | :---- | :---- |
-| **vex run file.vex** | \-cc | Compiles .vex to a temporary binary (auto-selecting tcc if installed, else cc \-std=c99 \-O2 \-march=native \-pthread), executes it immediately, and forwards the exit code. |
-| **vex build file.vex** | \-prod, \-sanitize, \-o, \-keep-c | Emits a standalone native executable. **\-prod** enables \-O3 \-march=native \-flto \-pthread (AVX2/NEON \+ LTO). **\-sanitize** enables \-fsanitize=address,undefined \-g. |
-| **vex cgen file.vex** | \-o | Runs Phases 1–4 and prints the generated C99 translation unit (or writes it to \-o out.c) without invoking the C compiler. |
-| **vex check file.vex** | \-autofree | Runs only the Lexer, Pratt Parser, 3-Pass Checker, and autofree escape analyzer—printing the escape analysis report when \-autofree is passed. |
-| **vex demo** | *(none)* | Generates examples/parallel\_ai\_actors.vex and runs it end-to-end. |
+| **vira run file.vir** | \-cc | Compiles .vir to a temporary binary (auto-selecting tcc if installed, else cc \-std=c99 \-O2 \-march=native \-pthread), executes it immediately, and forwards the exit code. |
+| **vira build file.vir** | \-prod, \-sanitize, \-o, \-keep-c | Emits a standalone native executable. **\-prod** enables \-O3 \-march=native \-flto \-pthread (AVX2/NEON \+ LTO). **\-sanitize** enables \-fsanitize=address,undefined \-g. |
+| **vira cgen file.vir** | \-o | Runs Phases 1–4 and prints the generated C99 translation unit (or writes it to \-o out.c) without invoking the C compiler. |
+| **vira check file.vir** | \-autofree | Runs only the Lexer, Pratt Parser, 3-Pass Checker, and autofree escape analyzer—printing the escape analysis report when \-autofree is passed. |
+| **vira demo** | *(none)* | Generates examples/parallel\_ai\_actors.vir and runs it end-to-end. |
 
 ## **2\. Rust/V-Style Diagnostic Engine (internal/source/source.go)**
 
@@ -7504,7 +7504,7 @@ Create the directory mkdir \-p vex/internal/source and save vex/internal/source/
 	`"sort"`  
 	`"strings"`
 
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `// ANSI color codes for terminal diagnostics`  
@@ -7516,7 +7516,7 @@ Create the directory mkdir \-p vex/internal/source and save vex/internal/source/
 	`colorYellow = "\033[33m"`  
 `)`
 
-`// File indexes a .vex source file's newline offsets for O(log N) span-to-line resolution.`  
+`// File indexes a .vir source file's newline offsets for O(log N) span-to-line resolution.`  
 `type File struct {`  
 	`Filename   string`  
 	`Content    string`  
@@ -7662,26 +7662,26 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`"strings"`  
 	`"time"`
 
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/cgen"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/parser"`  
-	`"github.com/vexlang/vex/internal/source"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/cgen"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/parser"`  
+	`"github.com/viralang/vira/internal/source"`  
 `)`
 
-``const usageBanner = `Vex Programming Language Compiler (Stage-0 Toolchain)``
+``const usageBanner = `Vira Programming Language Compiler (Stage-0 Toolchain)``
 
 `Usage:`  
-  `vex <command> [flags] <file.vex>`
+  `vira <command> [flags] <file.vir>`
 
 `Commands:`  
-  `run     Compile and execute a .vex source file immediately`  
-  `build   Compile a .vex file into a native standalone binary`  
+  `run     Compile and execute a .vir source file immediately`  
+  `build   Compile a .vir file into a native standalone binary`  
   `cgen    Emit the lowered C99 code (SIMD + Work-Stealing Actors)`  
   `check   Run syntax, 4-quadrant mutability, and autofree escape analysis`  
   `demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo`
 
-`Flags for 'vex build':`  
+`Flags for 'vira build':`  
   `-prod       Enable production optimizations (-O3 -march=native -flto)`  
   `-sanitize   Enable AddressSanitizer & UndefinedBehaviorSanitizer`  
   `-o <path>   Output binary path (default: <filename>)`  
@@ -7724,7 +7724,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`}`  
 `}`
 
-``// --- SUBCOMMAND 1: `vex run` ---``
+``// --- SUBCOMMAND 1: `vira run` ---``
 
 `func runCmd(args []string) {`  
 	`fs := flag.NewFlagSet("run", flag.ExitOnError)`  
@@ -7733,14 +7733,14 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`_ = fs.Parse(args)`
 
 	`if fs.NArg() < 1 {`  
-		`fmt.Fprintln(os.Stderr, "usage: vex run [-prod] [-cc compiler] <file.vex>")`  
+		`fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-cc compiler] <file.vir>")`  
 		`os.Exit(1)`  
 	`}`  
 	`vexPath := fs.Arg(0)`
 
 	`cCode, _, _ := compileVexToC99(vexPath)`
 
-	`tmpDir, err := os.MkdirTemp("", "vex_run_*")`  
+	`tmpDir, err := os.MkdirTemp("", "vira_run_*")`  
 	`if err != nil {`  
 		`fatalIO(err)`  
 	`}`  
@@ -7772,7 +7772,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`}`  
 `}`
 
-``// --- SUBCOMMAND 2: `vex build` ---``
+``// --- SUBCOMMAND 2: `vira build` ---``
 
 `func buildCmd(args []string) {`  
 	`fs := flag.NewFlagSet("build", flag.ExitOnError)`  
@@ -7784,7 +7784,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`_ = fs.Parse(args)`
 
 	`if fs.NArg() < 1 {`  
-		`fmt.Fprintln(os.Stderr, "usage: vex build [-prod] [-sanitize] [-o out] <file.vex>")`  
+		`fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-o out] <file.vir>")`  
 		`os.Exit(1)`  
 	`}`  
 	`vexPath := fs.Arg(0)`  
@@ -7803,7 +7803,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 		`_ = os.MkdirAll("build", 0755)`  
 		`cFile = filepath.Join("build", baseName+".c")`  
 	`} else {`  
-		`tmpDir, err := os.MkdirTemp("", "vex_build_*")`  
+		`tmpDir, err := os.MkdirTemp("", "vira_build_*")`  
 		`if err != nil {`  
 			`fatalIO(err)`  
 		`}`  
@@ -7831,7 +7831,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`}`  
 `}`
 
-``// --- SUBCOMMAND 3: `vex cgen` ---``
+``// --- SUBCOMMAND 3: `vira cgen` ---``
 
 `func cgenCmd(args []string) {`  
 	`fs := flag.NewFlagSet("cgen", flag.ExitOnError)`  
@@ -7839,7 +7839,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`_ = fs.Parse(args)`
 
 	`if fs.NArg() < 1 {`  
-		`fmt.Fprintln(os.Stderr, "usage: vex cgen [-o out.c] <file.vex>")`  
+		`fmt.Fprintln(os.Stderr, "usage: vira cgen [-o out.c] <file.vir>")`  
 		`os.Exit(1)`  
 	`}`  
 	`vexPath := fs.Arg(0)`  
@@ -7855,7 +7855,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`fmt.Print(cCode)`  
 `}`
 
-``// --- SUBCOMMAND 4: `vex check` ---``
+``// --- SUBCOMMAND 4: `vira check` ---``
 
 `func checkCmd(args []string) {`  
 	`fs := flag.NewFlagSet("check", flag.ExitOnError)`  
@@ -7863,7 +7863,7 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`_ = fs.Parse(args)`
 
 	`if fs.NArg() < 1 {`  
-		`fmt.Fprintln(os.Stderr, "usage: vex check [-autofree] <file.vex>")`  
+		`fmt.Fprintln(os.Stderr, "usage: vira check [-autofree] <file.vir>")`  
 		`os.Exit(1)`  
 	`}`  
 	`vexPath := fs.Arg(0)`  
@@ -7876,16 +7876,16 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 	`_ = chk`  
 `}`
 
-``// --- SUBCOMMAND 5: `vex demo` ---``
+``// --- SUBCOMMAND 5: `vira demo` ---``
 
 `func demoCmd() {`  
 	`_ = os.MkdirAll("examples", 0755)`  
-	`demoFile := filepath.Join("examples", "parallel_ai_actors.vex")`  
+	`demoFile := filepath.Join("examples", "parallel_ai_actors.vir")`  
 	`if err := os.WriteFile(demoFile, []byte(defaultDemoSource), 0644); err != nil {`  
 		`fatalIO(err)`  
 	`}`  
 	`fmt.Printf("✓ Created sample program: %s\n", demoFile)`  
-	``fmt.Println("✓ Running `vex run -prod examples/parallel_ai_actors.vex`...")``  
+	``fmt.Println("✓ Running `vira run -prod examples/parallel_ai_actors.vir`...")``  
 	`fmt.Println()`  
 	`runCmd([]string{"-prod", demoFile})`  
 `}`
@@ -7983,12 +7983,12 @@ Replace vex/cmd/vex/main.go with the complete CLI driver:
 
 `func resolveRuntimeDir() string {`  
 	``// Check `./runtime` first, then relative to the executable path``  
-	`if info, err := os.Stat("runtime/vex_rt.h"); err == nil && !info.IsDir() {`  
+	`if info, err := os.Stat("runtime/vira_rt.h"); err == nil && !info.IsDir() {`  
 		`return "runtime"`  
 	`}`  
 	`if exe, err := os.Executable(); err == nil {`  
 		`cand := filepath.Join(filepath.Dir(exe), "runtime")`  
-		`if info, err := os.Stat(filepath.Join(cand, "vex_rt.h")); err == nil && !info.IsDir() {`  
+		`if info, err := os.Stat(filepath.Join(cand, "vira_rt.h")); err == nil && !info.IsDir() {`  
 			`return cand`  
 		`}`  
 	`}`  
@@ -8119,19 +8119,19 @@ Build the vex binary once at the root of your workspace:
 
 `go build -o vex ./cmd/vex`
 
-### **4.1 Running the Production Demo (./vex demo or ./vex build \-prod)**
+### **4.1 Running the Production Demo (./vira demo or ./vira build \-prod)**
 
-`./vex demo`  
-`./vex build -prod -keep-c -o billing_engine examples/parallel_ai_actors.vex`
+`./vira demo`  
+`./vira build -prod -keep-c -o billing_engine examples/parallel_ai_actors.vir`
 
 Output:
 
 `✓ Built 'billing_engine' [prod (-O3 -march=native) via cc] in 84 ms`  
   `└── Kept C99 translation unit: build/parallel_ai_actors.c`
 
-### **4.2 Verifying Rust/V-Style Error Diagnostics (./vex check)**
+### **4.2 Verifying Rust/V-Style Error Diagnostics (./vira check)**
 
-If a developer writes an invalid .vex file (examples/bad\_account.vex) that violates immutability, 4-quadrant encapsulation, or \!T error handling:
+If a developer writes an invalid .vir file (examples/bad\_account.vir) that violates immutability, 4-quadrant encapsulation, or \!T error handling:
 
 `module billing`
 
@@ -8157,23 +8157,23 @@ If a developer writes an invalid .vex file (examples/bad\_account.vex) that viol
 	`unhandled := mut_acc.deposit(500)`  
 `}`
 
-Running ./vex check examples/bad\_account.vex produces exact line/column spans, aligned caret underlines, and extracted help: suggestions:
+Running ./vira check examples/bad\_account.vir produces exact line/column spans, aligned caret underlines, and extracted help: suggestions:
 
 `error[SEMANTIC]: cannot call mutable receiver method 'deposit()' on immutable binding 'imm_acc'`  
-  `--> examples/bad_account.vex:18:7`  
+  `--> examples/bad_account.vir:18:7`  
    `|`  
 `18 |     _ := imm_acc.deposit(50) or { 0 }`  
    `|          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^`  
    `= help: declare 'mut imm_acc := ...'`
 
 `error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated`  
-  `--> examples/bad_account.vex:21:2`  
+  `--> examples/bad_account.vir:21:2`  
    `|`  
 `21 |     mut_acc.id = 'hacked_id'`  
    `|     ^^^^^^^^^^^^^^^^^^^^^^^^`
 
 `error[SEMANTIC]: unhandled Result '!i64' from 'Account.deposit()': handle it with 'or { ... }' or propagate with '!'`  
-  `--> examples/bad_account.vex:22:15`  
+  `--> examples/bad_account.vir:22:15`  
    `|`  
 `22 |     unhandled := mut_acc.deposit(500)`  
    `|                  ^^^^^^^^^^^^^^^^^^^^`
@@ -8189,13 +8189,13 @@ Response: Placing compiler\_test.go at the root of your vex/ workspace gives you
 | Test Suite | What It Verifies | Pass Criteria |
 | :---- | :---- | :---- |
 | **TestZeroAllocLexer & BenchmarkLexer** | Scans a full OOP \+ interpolated string \+ @ tensor \+ \<- actor program using testing.AllocsPerRun. | **Strictly 0 allocs/op (0 B/op)** during lexical analysis. |
-| **TestNegativeSemanticDiagnostics** | Walks testdata/checker/\*.vex and extracts inline // ERROR: \<substring\> annotations from source lines. | Every // ERROR: line must trigger a matching diagnostic on that **exact 1-based line number**, with zero unexpected errors. |
+| **TestNegativeSemanticDiagnostics** | Walks testdata/checker/\*.vir and extracts inline // ERROR: \<substring\> annotations from source lines. | Every // ERROR: line must trigger a matching diagnostic on that **exact 1-based line number**, with zero unexpected errors. |
 | **TestAutofreeEscapeAnalysis** | Inspects internal/autofree state transitions (ESCAPES\_VIA\_RETURN, MOVED\_TO\_CONTAINER, ARENA\_MANAGED, SCOPED\_LOCAL). | Ensures returned structs aren't double-freed and early or { return } blocks unwind outer scopes in **LIFO order**. |
-| **TestEndToEndGoldenAndSanitizers** | Walks testdata/run/\*.vex, compiles Vex → C99 → native binary with **\-fsanitize=address,undefined**, and executes it. | Output must match all // OUT: lines **and** report \[vex\_rt\] active\_leaks=0 with zero ASan/UBSan faults. |
+| **TestEndToEndGoldenAndSanitizers** | Walks testdata/run/\*.vir, compiles Vira → C99 → native binary with **\-fsanitize=address,undefined**, and executes it. | Output must match all // OUT: lines **and** report \[vex\_rt\] active\_leaks=0 with zero ASan/UBSan faults. |
 
 ## **1\. Automated Compiler Test Runner (compiler\_test.go)**
 
-Save the following file at the root of the repository (vex/compiler\_test.go). On first run, ensureTestdataSeeded() automatically creates the golden .vex test files inside testdata/checker/ and testdata/run/, while also picking up any new .vex files you drop into those directories later:
+Save the following file at the root of the repository (vex/compiler\_test.go). On first run, ensureTestdataSeeded() automatically creates the golden .vir test files inside testdata/checker/ and testdata/run/, while also picking up any new .vir files you drop into those directories later:
 
 `package main_test`
 
@@ -8207,13 +8207,13 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`"strings"`  
 	`"testing"`
 
-	`"github.com/vexlang/vex/internal/autofree"`  
-	`"github.com/vexlang/vex/internal/cgen"`  
-	`"github.com/vexlang/vex/internal/checker"`  
-	`"github.com/vexlang/vex/internal/lexer"`  
-	`"github.com/vexlang/vex/internal/parser"`  
-	`"github.com/vexlang/vex/internal/source"`  
-	`"github.com/vexlang/vex/internal/token"`  
+	`"github.com/viralang/vira/internal/autofree"`  
+	`"github.com/viralang/vira/internal/cgen"`  
+	`"github.com/viralang/vira/internal/checker"`  
+	`"github.com/viralang/vira/internal/lexer"`  
+	`"github.com/viralang/vira/internal/parser"`  
+	`"github.com/viralang/vira/internal/source"`  
+	`"github.com/viralang/vira/internal/token"`  
 `)`
 
 `// --- 1. ZERO-ALLOCATION LEXER VERIFICATION & BENCHMARK ---`
@@ -8269,12 +8269,12 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`}`  
 `}`
 
-``// --- 2. NEGATIVE SEMANTIC DIAGNOSTIC TESTS (`testdata/checker/*.vex`) ---``
+``// --- 2. NEGATIVE SEMANTIC DIAGNOSTIC TESTS (`testdata/checker/*.vir`) ---``
 
 `func TestNegativeSemanticDiagnostics(t *testing.T) {`  
 	`ensureTestdataSeeded(t)`
 
-	`files, err := filepath.Glob(filepath.Join("testdata", "checker", "*.vex"))`  
+	`files, err := filepath.Glob(filepath.Join("testdata", "checker", "*.vir"))`  
 	`if err != nil || len(files) == 0 {`  
 		`t.Fatalf("failed to discover checker test files: %v", err)`  
 	`}`
@@ -8391,13 +8391,13 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`}`  
 	`` // 2. Verify LIFO order: `second` must be freed before `first` inside `or { return }` ``  
 	`idxSecond := strings.Index(report, "struct_autofree(&second)")`  
-	`idxFirst := strings.Index(report, "vex_str_free(&first)")`  
+	`idxFirst := strings.Index(report, "vira_str_free(&first)")`  
 	`if idxSecond == -1 || idxFirst == -1 || idxSecond > idxFirst {`  
 		`t.Errorf("expected LIFO cleanup order (second freed before first), got report:\n%s", report)`  
 	`}`  
 `}`
 
-``// --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vex`) ---``
+``// --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vir`) ---``
 
 `func TestEndToEndGoldenAndSanitizers(t *testing.T) {`  
 	`ensureTestdataSeeded(t)`
@@ -8406,10 +8406,10 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`if useSanitizer {`  
 		`t.Log("✓ Host C compiler supports -fsanitize=address,undefined (ASan + UBSan enabled)")`  
 	`} else {`  
-		`t.Log("ℹ Host C compiler lacks libasan/libubsan; running with standard C99 + _vex_active_heap_allocs leak check")`  
+		`t.Log("ℹ Host C compiler lacks libasan/libubsan; running with standard C99 + _vira_active_heap_allocs leak check")`  
 	`}`
 
-	`files, err := filepath.Glob(filepath.Join("testdata", "run", "*.vex"))`  
+	`files, err := filepath.Glob(filepath.Join("testdata", "run", "*.vir"))`  
 	`if err != nil || len(files) == 0 {`  
 		`t.Fatalf("failed to discover golden run tests: %v", err)`  
 	`}`
@@ -8483,8 +8483,8 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 				`t.Fatalf("binary execution failed (%v):\n%s", err, outStr)`  
 			`}`
 
-			`// Verify zero runtime memory leaks via Vex telemetry counter`  
-			`if !strings.Contains(outStr, "[vex_rt] active_leaks=0") {`  
+			`// Verify zero runtime memory leaks via Vira telemetry counter`  
+			`if !strings.Contains(outStr, "[vira_rt] active_leaks=0") {`  
 				`t.Errorf("memory leak detected in %s!\nFull output:\n%s", file, outStr)`  
 			`}`
 
@@ -8527,7 +8527,7 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 `}`
 
 `func probeSanitizerSupport() bool {`  
-	`tmpDir, err := os.MkdirTemp("", "vex_asan_probe_*")`  
+	`tmpDir, err := os.MkdirTemp("", "vira_asan_probe_*")`  
 	`if err != nil {`  
 		`return false`  
 	`}`  
@@ -8552,7 +8552,7 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`_ = os.MkdirAll(runDir, 0755)`
 
 	`// 1. Seed Negative Checker Test: Immutability, 4-Quadrant Access, and Unhandled !T`  
-	`negFile := filepath.Join(chkDir, "01_mutability_and_results.vex")`  
+	`negFile := filepath.Join(chkDir, "01_mutability_and_results.vir")`  
 	`if _, err := os.Stat(negFile); os.IsNotExist(err) {`  
 		``_ = os.WriteFile(negFile, []byte(`module billing``
 
@@ -8587,7 +8587,7 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`}`
 
 	`// 2. Seed Negative Checker Test: Structural Interface Satisfaction`  
-	`ifaceFile := filepath.Join(chkDir, "02_interface_satisfaction.vex")`  
+	`ifaceFile := filepath.Join(chkDir, "02_interface_satisfaction.vir")`  
 	`if _, err := os.Stat(ifaceFile); os.IsNotExist(err) {`  
 		``_ = os.WriteFile(ifaceFile, []byte(`module main``
 
@@ -8610,13 +8610,13 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`}`
 
 	`// 3. Seed End-to-End Golden Test 1: OOP Struct Embedding, Interfaces & Autofree`  
-	`oopRun := filepath.Join(runDir, "01_oop_and_autofree.vex")`  
+	`oopRun := filepath.Join(runDir, "01_oop_and_autofree.vir")`  
 	`if _, err := os.Stat(oopRun); os.IsNotExist(err) {`  
 		``_ = os.WriteFile(oopRun, []byte(`module billing``
 
 `// OUT: Invoice #inv_9001 paid (15000 cents)`  
 `// OUT: Invoice #inv_9001 [updated_at=1760000000]`  
-`// OUT: [vex_rt] active_leaks=0`
+`// OUT: [vira_rt] active_leaks=0`
 
 `pub struct AuditMeta {`  
 `pub:`  
@@ -8690,14 +8690,14 @@ Save the following file at the root of the repository (vex/compiler\_test.go). O
 	`}`
 
 	`// 4. Seed End-to-End Golden Test 2: SIMD Tensors (@) + Parallel Future[T] Actors`  
-	`aiActorRun := filepath.Join(runDir, "02_simd_tensors_and_actors.vex")`  
+	`aiActorRun := filepath.Join(runDir, "02_simd_tensors_and_actors.vir")`  
 	`if _, err := os.Stat(aiActorRun); os.IsNotExist(err) {`  
 		``_ = os.WriteFile(aiActorRun, []byte(`module ai``
 
 `// OUT: Future #2 caught fault: CUDA/NaN anomaly on batch`  
 `// OUT: Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00`  
 `// OUT: Worker #2 recovered Future result -> w2=196608.00`  
-`// OUT: [vex_rt] active_leaks=0`
+`// OUT: [vira_rt] active_leaks=0`
 
 `pub actor AIWorker {`  
 `pub:`  
@@ -8755,30 +8755,30 @@ Execute the full test suite and benchmark from the vex/ directory:
 `=== RUN   TestZeroAllocLexer`  
 `--- PASS: TestZeroAllocLexer (0.00s)`  
 `=== RUN   TestNegativeSemanticDiagnostics`  
-`=== RUN   TestNegativeSemanticDiagnostics/01_mutability_and_results.vex`  
-`=== RUN   TestNegativeSemanticDiagnostics/02_interface_satisfaction.vex`  
+`=== RUN   TestNegativeSemanticDiagnostics/01_mutability_and_results.vir`  
+`=== RUN   TestNegativeSemanticDiagnostics/02_interface_satisfaction.vir`  
 `--- PASS: TestNegativeSemanticDiagnostics (0.00s)`  
-    `--- PASS: TestNegativeSemanticDiagnostics/01_mutability_and_results.vex (0.00s)`  
-    `--- PASS: TestNegativeSemanticDiagnostics/02_interface_satisfaction.vex (0.00s)`  
+    `--- PASS: TestNegativeSemanticDiagnostics/01_mutability_and_results.vir (0.00s)`  
+    `--- PASS: TestNegativeSemanticDiagnostics/02_interface_satisfaction.vir (0.00s)`  
 `=== RUN   TestAutofreeEscapeAnalysis`  
 `--- PASS: TestAutofreeEscapeAnalysis (0.00s)`  
 `=== RUN   TestEndToEndGoldenAndSanitizers`  
     `compiler_test.go:196: ✓ Host C compiler supports -fsanitize=address,undefined (ASan + UBSan enabled)`  
-`=== RUN   TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vex`  
-`=== PAUSE TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vex`  
-`=== RUN   TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vex`  
-`=== PAUSE TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vex`  
-`=== CONT  TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vex`  
-`=== CONT  TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vex`  
+`=== RUN   TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vir`  
+`=== PAUSE TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vir`  
+`=== RUN   TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vir`  
+`=== PAUSE TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vir`  
+`=== CONT  TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vir`  
+`=== CONT  TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vir`  
 `--- PASS: TestEndToEndGoldenAndSanitizers (0.28s)`  
-    `--- PASS: TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vex (0.14s)`  
-    `--- PASS: TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vex (0.27s)`  
+    `--- PASS: TestEndToEndGoldenAndSanitizers/01_oop_and_autofree.vir (0.14s)`  
+    `--- PASS: TestEndToEndGoldenAndSanitizers/02_simd_tensors_and_actors.vir (0.27s)`  
 `goos: linux`  
 `goarch: amd64`  
-`pkg: github.com/vexlang/vex`  
+`pkg: github.com/viralang/vira`  
 `BenchmarkLexerZeroAlloc-8   	  842190	      1395 ns/op	 298.85 MB/s	       0 B/op	       0 allocs/op`  
 `PASS`  
-`ok  	github.com/vexlang/vex	1.492s`
+`ok  	github.com/viralang/vira	1.492s`
 
 Notice how BenchmarkLexerZeroAlloc runs at **\~300 MB/s with 0 B/op and 0 allocs/op**, while both golden tests compile under \-fsanitize=address,undefined and pass with active\_leaks=0.
 

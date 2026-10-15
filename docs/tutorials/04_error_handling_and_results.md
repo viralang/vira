@@ -1,7 +1,7 @@
 # Tutorial 4: Zero-Cost Error Handling with Results (`!T`)
 
 > **Difficulty:** Intermediate  
-> **Matching Code Example:** [`docs/examples/04_result_handling.vex`](../examples/04_result_handling.vex)
+> **Matching Code Example:** [`docs/examples/04_result_handling.vir`](../examples/04_result_handling.vir)
 
 ---
 
@@ -9,7 +9,7 @@
 
 Exceptions in traditional languages break control flow, introduce invisible exit paths, and carry heavy runtime stack-unwinding penalties.
 
-Vex replaces exceptions with **mandatory, zero-cost `!T` Result types**:
+Vira replaces exceptions with **mandatory, zero-cost `!T` Result types**:
 - Functions declare potential failure in their type signature (`!i64`, `!string`).
 - Call sites **must** handle the Result using an `or { ... }` block or propagate it with `!`.
 - The compiler enforces error handling at compile-time—unhandled Results abort the build.
@@ -84,11 +84,11 @@ If you attempt to call a function returning `!T` without an `or { ... }` block:
 bad := acc.withdraw(500) // ERROR!
 ```
 
-The Vex compiler refuses to generate code and highlights the unhandled Result:
+The Vira compiler refuses to generate code and highlights the unhandled Result:
 
 ```
 error[SEMANTIC]: unhandled Result '!i64' from 'BankAccount.withdraw()': handle it with 'or { ... }' or propagate with '!'
-  --> main.vex:25:15
+  --> main.vir:25:15
    |
 25 |     bad := acc.withdraw(500)
    |            ^^^^^^^^^^^^^^^^^
@@ -101,7 +101,7 @@ This guarantees that errors can never be silently ignored in production.
 ## 6. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/04_result_handling.vex
+.\vira.exe run docs/examples/04_result_handling.vir
 ```
 
 Expected output:
@@ -114,11 +114,11 @@ Fallback balance returned: 0
 === 3. ZERO/NEGATIVE VALIDATION WITH or { ... } ===
 Validation rejected: withdrawal amount must be greater than zero
 Preserved balance: 35000 cents
-[vex_rt] active_leaks=0 | total_freed=6
+[vira_rt] active_leaks=0 | total_freed=6
 ```
 
 ---
 
 ## Next Steps
 
-Proceed to [**Tutorial 5: Deterministic Autofree & Bump Arenas**](./05_autofree_and_bump_arenas.md) to understand how Vex achieves automatic memory management without a garbage collector.
+Proceed to [**Tutorial 5: Deterministic Autofree & Bump Arenas**](./05_autofree_and_bump_arenas.md) to understand how Vira achieves automatic memory management without a garbage collector.

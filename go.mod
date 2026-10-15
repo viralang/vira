@@ -1,3 +1,3 @@
-module github.com/vexlang/vex
+module github.com/viralang/vira
 
 go 1.22

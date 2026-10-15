@@ -5,12 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/vexlang/vex/internal/mod"
+	"github.com/viralang/vira/internal/mod"
 )
 
 func TestParseManifest(t *testing.T) {
 	manifestContent := `
-# Vex Module Configuration
+# Vira Module Configuration
 module my_ai_engine
 version 1.2.0
 license Apache-2.0
@@ -34,7 +34,7 @@ description High-performance tensor graph
 }
 
 func TestFindProjectRoot(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "vex_mod_test_*")
+	tmpDir, err := os.MkdirTemp("", "vira_mod_test_*")
 	if err != nil {
 		t.Fatal(err)
 	}

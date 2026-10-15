@@ -1,19 +1,19 @@
-# Tutorial 16: Compiling, Building & Deploying Vex Applications
+# Tutorial 16: Compiling, Building & Deploying Vira Applications
 
 > **Difficulty:** Beginner to Advanced  
-> **Matching Code Example:** [`docs/examples/16_compilation_and_build_modes.vex`](../examples/16_compilation_and_build_modes.vex)
+> **Matching Code Example:** [`docs/examples/16_compilation_and_build_modes.vir`](../examples/16_compilation_and_build_modes.vir)
 
 ---
 
-## 1. The Vex Compilation Architecture
+## 1. The Vira Compilation Architecture
 
-Vex employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather than running an interpreted virtual machine or a stop-the-world garbage-collected runtime, Vex translates high-level code with strict type guarantees into **pure, standards-compliant C99**, which is then compiled down to native machine code by industrial C backends (GCC, Clang, or TinyCC).
+Vira employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather than running an interpreted virtual machine or a stop-the-world garbage-collected runtime, Vira translates high-level code with strict type guarantees into **pure, standards-compliant C99**, which is then compiled down to native machine code by industrial C backends (GCC, Clang, or TinyCC).
 
 ```
 +───────────────────────────────────────────────────────────────────────────────+
 │                         VEX COMPILATION PIPELINE                              │
 │                                                                               │
-│  [1] Source Code (.vex)                                                       │
+│  [1] Source Code (.vir)                                                       │
 │          │                                                                    │
 │          ▼                                                                    │
 │  [2] Lexer & Recursive-Descent Parser                                         │
@@ -28,7 +28,7 @@ Vex employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather t
 │  [5] Autofree Static Escape Analysis (LIFO Destructors Injected)              │
 │          │                                                                    │
 │          ▼                                                                    │
-│  [6] C99 Generator (runtime/vex_rt.h: SIMD, Actors, Arenas)                   │
+│  [6] C99 Generator (runtime/vira_rt.h: SIMD, Actors, Arenas)                   │
 │          │                                                                    │
 │          ▼                                                                    │
 │  [7] Native C Backend Compiler (GCC / Clang / TinyCC)                         │
@@ -48,44 +48,44 @@ Vex employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather t
 The `vex` command-line tool provides four specialized subcommands for development, building, auditing, and inspecting code:
 
 ```
-vex <command> [flags] <file.vex>
+vira <command> [flags] <file.vir>
 ```
 
-### 1. `vex run`: Rapid Development & Execution
+### 1. `vira run`: Rapid Development & Execution
 Compiles the application into a temporary sandbox and executes it immediately, forwarding all command-line arguments to the application:
 
 ```powershell
 # Run a file in development mode
-vex run docs/examples/16_compilation_and_build_modes.vex
+vira run docs/examples/16_compilation_and_build_modes.vir
 
 # Run in production mode with -O3 optimizations
-vex run -prod docs/examples/16_compilation_and_build_modes.vex
+vira run -prod docs/examples/16_compilation_and_build_modes.vir
 ```
 
-### 2. `vex build`: Ahead-Of-Time Standalone Compilation
+### 2. `vira build`: Ahead-Of-Time Standalone Compilation
 Produces a permanent, self-contained native executable binary:
 
 ```powershell
 # Build development binary (defaults to <name>.exe)
-vex build docs/examples/16_compilation_and_build_modes.vex
+vira build docs/examples/16_compilation_and_build_modes.vir
 
 # Build with custom output binary name
-vex build -o server.exe docs/examples/16_compilation_and_build_modes.vex
+vira build -o server.exe docs/examples/16_compilation_and_build_modes.vir
 
 # Build production binary with -O3 and vectorization
-vex build -prod -o server_prod.exe docs/examples/16_compilation_and_build_modes.vex
+vira build -prod -o server_prod.exe docs/examples/16_compilation_and_build_modes.vir
 ```
 
-### 3. `vex check`: Sub-Millisecond Type & Memory Audit
+### 3. `vira check`: Sub-Millisecond Type & Memory Audit
 Executes semantic validation and static escape analysis without invoking the C compiler. Ideal for IDE language servers, pre-commit hooks, and CI linting:
 
 ```powershell
-vex check docs/examples/16_compilation_and_build_modes.vex
+vira check docs/examples/16_compilation_and_build_modes.vir
 ```
 
 **Sample Output:**
 ```
-✓ docs/examples/16_compilation_and_build_modes.vex passed syntax, 4-quadrant mutability, and type checks (0 errors)
+✓ docs/examples/16_compilation_and_build_modes.vir passed syntax, 4-quadrant mutability, and type checks (0 errors)
 
 1. Structs Requiring Generated `_autofree` Destructors:
    ├── struct ServiceConfig -> requires `ServiceConfig_autofree(&self)` (owns heap fields)
@@ -95,18 +95,18 @@ vex check docs/examples/16_compilation_and_build_modes.vex
      ├── var inputs       (tensor[f32]) : ARENA_MANAGED (O(1) slab free)
      ├── var weights      (tensor[f32]) : ARENA_MANAGED (O(1) slab free)
      ├── var res          (tensor[f32]) : ARENA_MANAGED (O(1) slab free)
-     └── INJECTED FREE: vex_arena_destroy(&_vex_arena_1) [vex_arena] (arena block exit)
+     └── INJECTED FREE: vira_arena_destroy(&_vira_arena_1) [vira_arena] (arena block exit)
 ```
 
-### 4. `vex cgen`: C99 Code Inspection
-Emits the generated C99 translation unit to stdout or a file. Useful for auditing generated code, verifying SIMD intrinsics, or embedding Vex modules into C/C++ projects:
+### 4. `vira cgen`: C99 Code Inspection
+Emits the generated C99 translation unit to stdout or a file. Useful for auditing generated code, verifying SIMD intrinsics, or embedding Vira modules into C/C++ projects:
 
 ```powershell
 # Inspect C99 code on stdout
-vex cgen docs/examples/16_compilation_and_build_modes.vex
+vira cgen docs/examples/16_compilation_and_build_modes.vir
 
 # Save C99 code directly to a file
-vex cgen -o build/service.c docs/examples/16_compilation_and_build_modes.vex
+vira cgen -o build/service.c docs/examples/16_compilation_and_build_modes.vir
 ```
 
 ---
@@ -130,7 +130,7 @@ vex cgen -o build/service.c docs/examples/16_compilation_and_build_modes.vex
 When hunting memory corruption, buffer overflows, or undefined behavior, the `-sanitize` flag compiles the program with LLVM/GCC **AddressSanitizer (ASan)** and **UndefinedBehaviorSanitizer (UBSan)**:
 
 ```powershell
-vex build -sanitize -o app_sanitized.exe docs/examples/16_compilation_and_build_modes.vex
+vira build -sanitize -o app_sanitized.exe docs/examples/16_compilation_and_build_modes.vir
 .\app_sanitized.exe
 ```
 
@@ -138,7 +138,7 @@ vex build -sanitize -o app_sanitized.exe docs/examples/16_compilation_and_build_
 
 ## 4. Selecting Backend Compilers (`-cc`)
 
-Vex automatically detects any available C compiler in your `PATH` or standard installation locations:
+Vira automatically detects any available C compiler in your `PATH` or standard installation locations:
 
 ```
 Priority Search Order:
@@ -157,20 +157,20 @@ Priority Search Order:
 ### 2. Clang / LLVM (`-cc clang`)
 - Excellent for cross-compiling or integrating with LLVM toolchains:
   ```powershell
-  vex build -cc clang -o app.exe main.vex
+  vira build -cc clang -o app.exe main.vir
   ```
 
 ### 3. TinyCC (`-cc tcc`)
 - For instant compilation speed (compiles in **< 15 milliseconds**):
   ```powershell
-  vex build -cc tcc -o app.exe main.vex
+  vira build -cc tcc -o app.exe main.vir
   ```
 
 ---
 
 ## 5. Static Linking & Self-Contained Binaries
 
-Unlike Python (requires Python runtime + NumPy DLLs) or Go (large runtime GC threads), Vex binaries are **completely standalone**:
+Unlike Python (requires Python runtime + NumPy DLLs) or Go (large runtime GC threads), Vira binaries are **completely standalone**:
 
 1. **No External DLL Dependencies:** Compiled with `-static`, bundling pthread and standard C libraries directly into the executable.
 2. **No Runtime Overhead:** Execution starts directly at OS `main()`. There is no JIT compilation, no class loading, and no bytecode interpretation.
@@ -180,7 +180,7 @@ Unlike Python (requires Python runtime + NumPy DLLs) or Go (large runtime GC thr
 
 ## 6. Containerization & Production Docker Deployment
 
-Because Vex binaries are statically linked, they can run inside a **distroless** or minimal **Scratch / Alpine** Docker image with an image size under **15 MB**.
+Because Vira binaries are statically linked, they can run inside a **distroless** or minimal **Scratch / Alpine** Docker image with an image size under **15 MB**.
 
 ### Multi-Stage Production Dockerfile
 
@@ -194,11 +194,11 @@ RUN apk add --no-cache gcc musl-dev git
 WORKDIR /app
 COPY . .
 
-# Build Vex compiler
+# Build Vira compiler
 RUN go build -o /usr/local/bin/vex ./cmd/vex
 
-# Compile Vex application in production mode
-RUN vex build -prod -o /app/server docs/examples/16_compilation_and_build_modes.vex
+# Compile Vira application in production mode
+RUN vira build -prod -o /app/server docs/examples/16_compilation_and_build_modes.vir
 
 # Stage 2: Minimal Distroless Runtime Image
 FROM alpine:3.19
@@ -217,16 +217,16 @@ ENTRYPOINT ["/usr/local/bin/server"]
 
 ## 7. Step-by-Step Hands-on Walkthrough
 
-Let's compile and run the companion example [`docs/examples/16_compilation_and_build_modes.vex`](file:///c:/Users/hp/vex/docs/examples/16_compilation_and_build_modes.vex):
+Let's compile and run the companion example [`docs/examples/16_compilation_and_build_modes.vir`](file:///c:/Users/hp/vex/docs/examples/16_compilation_and_build_modes.vir):
 
 ### Step 1: Type & Memory Audit
 ```powershell
-.\vex.exe check docs/examples/16_compilation_and_build_modes.vex
+.\vira.exe check docs/examples/16_compilation_and_build_modes.vir
 ```
 
 ### Step 2: Compile Production Binary
 ```powershell
-.\vex.exe build -prod -o prod_service.exe docs/examples/16_compilation_and_build_modes.vex
+.\vira.exe build -prod -o prod_service.exe docs/examples/16_compilation_and_build_modes.vir
 ```
 
 ### Step 3: Execute Production Binary
@@ -256,16 +256,16 @@ Binary Features:
 =================================================================
    BUILD COMPLETE                                                
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=6
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=6
 ```
 
 ---
 
 ## Summary Checklist for Production Builds
 
-- [x] Run `vex check <file.vex>` to ensure zero type errors and verify escape analysis.
-- [x] Compile with `vex build -prod -o <binary> <file.vex>` for `-O3` optimizations.
+- [x] Run `vira check <file.vir>` to ensure zero type errors and verify escape analysis.
+- [x] Compile with `vira build -prod -o <binary> <file.vir>` for `-O3` optimizations.
 - [x] Validate zero memory leaks in telemetry (`active_leaks=0`).
 - [x] Package into minimal Docker scratch/alpine containers without runtime dependencies.

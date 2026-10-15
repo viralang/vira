@@ -10,7 +10,7 @@ In this tutorial, you will master Vex's built-in HTTP and JSON standard library 
 
 ## 1. Fast JSON Field Parsing Primitives
 
-Vex standard library provides fast, zero-allocation field parsers for JSON payloads:
+Vira standard library provides fast, zero-allocation field parsers for JSON payloads:
 
 | Built-in Function | Return Type | Description |
 | :--- | :--- | :--- |
@@ -78,7 +78,7 @@ sequenceDiagram
 
 ## 4. Complete Runnable Implementation
 
-Here is the complete source code from [docs/examples/17_http_web_server_and_json.vex](file:///c:/Users/hp/vex/docs/examples/17_http_web_server_and_json.vex):
+Here is the complete source code from [docs/examples/17_http_web_server_and_json.vir](file:///c:/Users/hp/vex/docs/examples/17_http_web_server_and_json.vir):
 
 ```vex
 module main
@@ -135,10 +135,10 @@ fn main() {
 
 ## 5. Execution & Verification
 
-Run the service using the Vex toolchain:
+Run the service using the Vira toolchain:
 
 ```bash
-vex run docs/examples/17_http_web_server_and_json.vex
+vira run docs/examples/17_http_web_server_and_json.vir
 ```
 
 Expected output:
@@ -152,9 +152,9 @@ Processed inference request for prompt: predict_turnover
 === 3. HTTP RESPONSE SERIALIZATION ===
 HTTP Response Code: 200
 Content-Type: application/json
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=1 | work_steals=1
-[vex_rt] active_leaks=0 | total_freed=8
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=1 | work_steals=1
+[vira_rt] active_leaks=0 | total_freed=8
 ```
 
 Notice the runtime telemetry confirms `active_leaks=0 | total_freed=8`, verifying that all HTTP response headers, buffers, and JSON payloads were freed deterministically.

@@ -1,13 +1,13 @@
 # Tutorial 2: OOP, 4-Quadrant Structs & Composition
 
 > **Difficulty:** Intermediate  
-> **Matching Code Example:** [`docs/examples/02_oop_composition.vex`](../examples/02_oop_composition.vex)
+> **Matching Code Example:** [`docs/examples/02_oop_composition.vir`](../examples/02_oop_composition.vir)
 
 ---
 
 ## 1. Overview
 
-Object-Oriented Programming in Vex is designed to prevent data races and encapsulation leaks. Rather than complex class inheritance hierarchies, Vex uses:
+Object-Oriented Programming in Vira is designed to prevent data races and encapsulation leaks. Rather than complex class inheritance hierarchies, Vira uses:
 - **4-Quadrant Field Encapsulation**
 - **Struct Embedding (Composition)**
 - **Explicit Receiver Methods**
@@ -17,7 +17,7 @@ Object-Oriented Programming in Vex is designed to prevent data races and encapsu
 
 ## 2. 4-Quadrant Field Encapsulation
 
-In most languages, fields are either public or private. Vex introduces **4-quadrant field encapsulation**, decoupling visibility from mutability within a single struct definition:
+In most languages, fields are either public or private. Vira introduces **4-quadrant field encapsulation**, decoupling visibility from mutability within a single struct definition:
 
 ```vex
 pub struct UserProfile {
@@ -50,7 +50,7 @@ pub mut:
 
 ## 3. Struct Embedding & Composition
 
-Vex uses struct embedding instead of class inheritance. When you embed a struct, all of its fields and methods are automatically promoted to the outer struct:
+Vira uses struct embedding instead of class inheritance. When you embed a struct, all of its fields and methods are automatically promoted to the outer struct:
 
 ```vex
 pub struct Timestamp {
@@ -136,7 +136,7 @@ user := UserProfile.new('alice', 'alice@vex.dev', 'hash123')
 ## 6. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/02_oop_composition.vex
+.\vira.exe run docs/examples/02_oop_composition.vir
 ```
 
 Expected output:

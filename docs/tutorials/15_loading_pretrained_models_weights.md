@@ -1,7 +1,7 @@
 # Tutorial 15: Loading Pretrained Model Weights (PyTorch, SafeTensors & GGUF Interoperability)
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/15_pretrained_weights_loader.vex`](../examples/15_pretrained_weights_loader.vex)  
+> **Matching Code Example:** [`docs/examples/15_pretrained_weights_loader.vir`](../examples/15_pretrained_weights_loader.vir)  
 > **Matching Python Exporter:** [`scripts/export_pytorch_model.py`](../../scripts/export_pytorch_model.py)
 
 ---
@@ -23,7 +23,7 @@ In modern deep learning, models are rarely trained from scratch on production se
 │   └── .numpy().tofile("w1.bin")            └── SafeTensors / GGUF payload     │
 │                                                          │                    │
 │                                                          ▼                    │
-│                                            [3] Serving (Vex Engine)           │
+│                                            [3] Serving (Vira Engine)           │
 │                                             ├── tensor_load_bin()             │
 │                                             ├── Zero-Allocation Bump Arena    │
 │                                             ├── Hardware AVX2/NEON SIMD       │
@@ -31,7 +31,7 @@ In modern deep learning, models are rarely trained from scratch on production se
 +───────────────────────────────────────────────────────────────────────────────+
 ```
 
-Because Vex uses **strict IEEE 754 single-precision floating point representations** (`vex_f32`) and **contiguous 64-byte aligned row-major memory slabs**, Vex can ingest raw weights directly from PyTorch without serialization layers, runtime bridges, or CPython GIL bottlenecks.
+Because Vira uses **strict IEEE 754 single-precision floating point representations** (`vira_f32`) and **contiguous 64-byte aligned row-major memory slabs**, Vira can ingest raw weights directly from PyTorch without serialization layers, runtime bridges, or CPython GIL bottlenecks.
 
 ---
 
@@ -90,7 +90,7 @@ python scripts/export_pytorch_model.py
 
 ## 3. Ingesting Pretrained Weights in Vex
 
-Vex provides native binary tensor I/O primitives:
+Vira provides native binary tensor I/O primitives:
 - `tensor_load_bin(rows, cols, path) !tensor[f32]`: Loads binary floats directly into an aligned tensor with Result error handling.
 - `tensor_save_bin(tensor, path) !bool`: Dumps tensor weights to disk in standard IEEE 754 binary format.
 
@@ -184,7 +184,7 @@ _ := tensor_save_bin(model.w1, 'models/exported_w1_from_vex.bin') or {
 }
 ```
 
-In Python, PyTorch can consume the Vex checkpoint immediately using `np.fromfile`:
+In Python, PyTorch can consume the Vira checkpoint immediately using `np.fromfile`:
 ```python
 import numpy as np
 import torch
@@ -192,7 +192,7 @@ import torch
 # Load binary weights produced by Vex
 w1_loaded = np.fromfile("models/exported_w1_from_vex.bin", dtype=np.float32).reshape(16, 32)
 torch_weight = torch.from_numpy(w1_loaded).t().contiguous()
-print("Successfully loaded Vex checkpoint into PyTorch tensor:", torch_weight.shape)
+print("Successfully loaded Vira checkpoint into PyTorch tensor:", torch_weight.shape)
 ```
 
 ---
@@ -202,7 +202,7 @@ print("Successfully loaded Vex checkpoint into PyTorch tensor:", torch_weight.sh
 Execute the complete verification pipeline:
 
 ```powershell
-.\vex.exe run docs/examples/15_pretrained_weights_loader.vex
+.\vira.exe run docs/examples/15_pretrained_weights_loader.vir
 ```
 
 ### Execution Output & Verification
@@ -218,7 +218,7 @@ Successfully loaded pretrained model: "SmallPretrainedMLP (PyTorch Export)"
 --- 2. LOADING TEST INPUT BATCH ---
 Loaded test batch: (8 samples x 16 features)
 --- 3. HOST CPU SIMD INFERENCE & NUMERICAL PARITY CHECK ---
-Vex Output Metric (Activation Sum)   : -0.60
+Vira Output Metric (Activation Sum)   : -0.60
 PyTorch Baseline Output Metric       : -0.60
 SUCCESS: Exact numerical parity verified against PyTorch!
 --- 4. MULTICORE ASYNCHRONOUS ACTOR SERVING ---
@@ -226,20 +226,20 @@ Asynchronous Actor Prediction Result : -0.60
 Actor Batches Served                 : 1
 --- 5. BIDIRECTIONAL PORTABILITY: EXPORTING WEIGHTS BACK TO PYTORCH ---
 Exported model.w1 to "models/exported_w1_from_vex.bin" (2,048 bytes)
-Verified: Weights are 100% portable between Vex and PyTorch backends.
+Verified: Weights are 100% portable between Vira and PyTorch backends.
 =================================================================
    END OF PRETRAINED WEIGHT VERIFICATION                         
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=1 | work_steals=1
-[vex_rt] active_leaks=0 | total_freed=21
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=1 | work_steals=1
+[vira_rt] active_leaks=0 | total_freed=21
 ```
 
 ---
 
 ## 7. Performance & Memory Comparison
 
-| Feature | Python / PyTorch Service | C++ / LibTorch | **Vex AI Serving** |
+| Feature | Python / PyTorch Service | C++ / LibTorch | **Vira AI Serving** |
 | :--- | :--- | :--- | :--- |
 | **Startup / Weight Load Time** | 2.5 – 5.0 seconds (Python import + PyObject instantiation) | 0.8 seconds | **0.02 seconds** (Direct DMA mapping) |
 | **Memory Fragmentation** | High (CPython heap allocations for every weight tensor) | Medium | **Zero** ($O(1)$ bump arenas + aligned buffers) |
@@ -252,4 +252,4 @@ Verified: Weights are 100% portable between Vex and PyTorch backends.
 ## Summary
 - **Universal Format:** Contiguous IEEE 754 floats bridge Python research and native production serving.
 - **Zero-Copy Ingestion:** `tensor_load_bin` maps weights directly into 64-byte aligned slabs ready for hardware AVX2/NEON vectorization.
-- **Bit-Exact Math:** Vex matches PyTorch's forward pass activation sums with exact numerical parity.
+- **Bit-Exact Math:** Vira matches PyTorch's forward pass activation sums with exact numerical parity.

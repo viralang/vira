@@ -36,8 +36,8 @@ pub fn (w WebhookService) send(recipient string, body string) string {
 
 fn main() {
 	println('=== 1. IMPLICIT INTERFACE SATISFACTION & FAT-POINTER BOXING ===')
-	email := EmailService{ smtp_host: 'smtp.vex.internal:587' }
-	webhook := WebhookService{ endpoint: 'https://api.vex.dev/events' }
+	email := EmailService{ smtp_host: 'smtp.vir.internal:587' }
+	webhook := WebhookService{ endpoint: 'https://api.vir.dev/events' }
 
 	// Boxing into Notifier interface fat-pointers (16 bytes: ._object + ._vtable)
 	n1 := Notifier(email)

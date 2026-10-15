@@ -1,7 +1,7 @@
 # Tutorial 5: Deterministic Autofree & Bump Arenas
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/05_arenas_and_autofree.vex`](../examples/05_arenas_and_autofree.vex)
+> **Matching Code Example:** [`docs/examples/05_arenas_and_autofree.vir`](../examples/05_arenas_and_autofree.vir)
 
 ---
 
@@ -14,13 +14,13 @@ Traditional approaches force developers to choose between:
 - **Traced Garbage Collection (Go/Java):** Safe, but introduces unpredictable stop-the-world pauses, heavy cache pollution, and high memory footprint.
 - **Borrow Checking (Rust):** Zero-cost safety, but complex lifetime annotations (`'a`, `'b`) and steep cognitive friction.
 
-Vex eliminates this dilemma with **Compiler-Driven Static Autofree & Bump Arenas**.
+Vira eliminates this dilemma with **Compiler-Driven Static Autofree & Bump Arenas**.
 
 ---
 
 ## 2. How Autofree Works
 
-During compilation (Phase 3), the Vex **Static Escape Analyzer** evaluates the control-flow graph of every function:
+During compilation (Phase 3), the Vira **Static Escape Analyzer** evaluates the control-flow graph of every function:
 
 1. **Ownership Detection:** Identifies any local variable that allocates heap memory (strings, tensors, boxed interfaces, or structs owning heap fields).
 2. **Escape Analysis:** Analyzes if the variable escapes the current stack frame (e.g. through a `return` statement or by being stored inside another container).
@@ -33,8 +33,8 @@ fn simulate_standard_autofree() {
 	println('Created records: ${r1.tag}, ${r2.tag}')
 
 	// The compiler automatically injects at scope exit:
-	// vex_str_free(&r2.tag); // LIFO #1
-	// vex_str_free(&r1.tag); // LIFO #2
+	// vira_str_free(&r2.tag); // LIFO #1
+	// vira_str_free(&r1.tag); // LIFO #2
 }
 ```
 
@@ -53,17 +53,17 @@ Every tracked variable is placed into one of four states:
 
 ---
 
-## 4. Auditing Autofree with `vex check`
+## 4. Auditing Autofree with `vira check`
 
 You can inspect the compiler's escape decisions directly by running:
 
 ```powershell
-.\vex.exe check docs/examples/05_arenas_and_autofree.vex
+.\vira.exe check docs/examples/05_arenas_and_autofree.vir
 ```
 
 Sample audit report:
 ```text
-✓ docs/examples/05_arenas_and_autofree.vex passed syntax and type checks (0 errors)
+✓ docs/examples/05_arenas_and_autofree.vir passed syntax and type checks (0 errors)
 
 1. Structs Requiring Generated `_autofree` Destructors:
    └── struct ReportRecord -> requires `ReportRecord_autofree(&self)`
@@ -82,7 +82,7 @@ Sample audit report:
 
 For high-throughput loops, neural net forward passes, or temporary batch computations, individual heap allocations introduce fragmentation and lock contention.
 
-Vex provides native **bump arenas**:
+Vira provides native **bump arenas**:
 
 ```vex
 arena {
@@ -104,7 +104,7 @@ arena {
 ## 6. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/05_arenas_and_autofree.vex
+.\vira.exe run docs/examples/05_arenas_and_autofree.vir
 ```
 
 Expected output:
@@ -116,7 +116,7 @@ Created records: batch_alpha=100, batch_beta=200
 --- 64-Byte Cache-Aligned Bump Arena ---
 Arena MatMul computed sum: 98304.00
 Both memory domains completed with zero memory leaks
-[vex_rt] active_leaks=0 | total_freed=2
+[vira_rt] active_leaks=0 | total_freed=2
 ```
 
 ---

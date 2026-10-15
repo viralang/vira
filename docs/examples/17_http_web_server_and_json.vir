@@ -9,7 +9,7 @@ module main
 // OUT: === 3. HTTP RESPONSE SERIALIZATION ===
 // OUT: HTTP Response Code: 200
 // OUT: Content-Type: application/json
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 pub actor InferenceWorker {
 pub:

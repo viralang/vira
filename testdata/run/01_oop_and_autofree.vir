@@ -2,7 +2,7 @@ module billing
 
 // OUT: Invoice #inv_9001 paid (15000 cents)
 // OUT: Invoice #inv_9001 [updated_at=1760000000]
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 pub struct AuditMeta {
 pub:

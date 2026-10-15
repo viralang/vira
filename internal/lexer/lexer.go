@@ -1,6 +1,6 @@
 package lexer
 
-import "github.com/vexlang/vex/internal/token"
+import "github.com/viralang/vira/internal/token"
 
 type Lexer struct {
 	src         string

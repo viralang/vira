@@ -1,7 +1,7 @@
 # Tutorial 7: Actor Concurrency & Fault Supervision
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/07_actors_and_supervisors.vex`](../examples/07_actors_and_supervisors.vex)
+> **Matching Code Example:** [`docs/examples/07_actors_and_supervisors.vir`](../examples/07_actors_and_supervisors.vir)
 
 ---
 
@@ -9,7 +9,7 @@
 
 Shared-memory multithreading with mutexes and locks is notoriously prone to deadlocks, race conditions, and priority inversions.
 
-Vex adopts the **Actor Model of Concurrency**:
+Vira adopts the **Actor Model of Concurrency**:
 - Actors maintain completely isolated state (no shared mutable memory).
 - Communication occurs exclusively through asynchronous message passing (`<-`).
 - Calls return a non-blocking `Future[T]`.
@@ -129,7 +129,7 @@ score_b_retry := fut_b_retry.await() or { 0.0 }
 ## 6. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/07_actors_and_supervisors.vex
+.\vira.exe run docs/examples/07_actors_and_supervisors.vir
 ```
 
 Expected output:
@@ -138,14 +138,14 @@ Expected output:
 === 2. ASYNCHRONOUS FAN-OUT (<-) ACROSS THREAD POOL ===
 === 3. WORK-STEALING AWAIT WITH FAULT ISOLATION ===
 Node A completed successfully: sum=16384.00
-[vex_supervisor | worker_thread=0] Actor 'WorkerNode' (#102) trapped fault ('WorkerNode numerical anomaly detected') -> O(1) arena wipe & OneForOne restart [1/3]
+[vira_supervisor | worker_thread=0] Actor 'WorkerNode' (#102) trapped fault ('WorkerNode numerical anomaly detected') -> O(1) arena wipe & OneForOne restart [1/3]
 Future caught supervised Node B fault: "WorkerNode numerical anomaly detected"
 Node B result handled safely with fallback: 0.00
 === 4. POST-RESTART RECOVERY VERIFICATION ===
 Node B recovered and completed subsequent job: sum=16384.00
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=3 | work_steals=3
-[vex_rt] active_leaks=0 | total_freed=9
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=3 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=9
 ```
 
 ---

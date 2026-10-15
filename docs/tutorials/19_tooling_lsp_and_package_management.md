@@ -1,28 +1,28 @@
 # Tutorial 19: Developer Tooling, LSP, VS Code Extension & Package Management
 
-A modern language needs a world-class developer experience. The Vex toolchain comes out of the box with zero-dependency built-in developer tools:
-1. **Package Management & Project Scaffolding:** `vex init`, `vex.mod`, and multi-file compilation.
-2. **Deterministic Code Formatter:** `vex fmt`.
-3. **Built-in Unit Testing Framework:** `vex test`.
-4. **Language Server Protocol (LSP):** `vex lsp`.
+A modern language needs a world-class developer experience. The Vira toolchain comes out of the box with zero-dependency built-in developer tools:
+1. **Package Management & Project Scaffolding:** `vira init`, `vex.mod`, and multi-file compilation.
+2. **Deterministic Code Formatter:** `vira fmt`.
+3. **Built-in Unit Testing Framework:** `vira test`.
+4. **Language Server Protocol (LSP):** `vira lsp`.
 5. **VS Code & Cursor Extension:** Syntax highlighting, snippets, and editor integration.
 
 ---
 
 ## 1. Project Initialization & `vex.mod`
 
-To scaffold a new Vex project:
+To scaffold a new Vira project:
 ```bash
-vex init my_service
+vira init my_service
 ```
 
-This creates the canonical Vex project structure:
+This creates the canonical Vira project structure:
 ```
 my_service/
 ├── vex.mod          # Package manifest (module, version, license)
 ├── .gitignore       # Pre-configured ignores for build/ and binaries
 ├── src/
-│   └── main.vex     # Application entry point
+│   └── main.vir     # Application entry point
 └── tests/           # Unit and integration test suite
 ```
 
@@ -32,25 +32,25 @@ The `vex.mod` file defines project metadata:
 module my_service
 version 0.1.0
 license MIT
-description High-performance Vex application
+description High-performance Vira application
 ```
 
 ---
 
 ## 2. Multi-File Compilation & Project Builds
 
-Vex supports compiling entire directories without manual header files or forward declarations:
+Vira supports compiling entire directories without manual header files or forward declarations:
 
 ```bash
 # Compile and run immediately
-vex run my_service/
+vira run my_service/
 
 # Build standalone optimized production binary
-vex build -prod -o bin/my_service my_service/
+vira build -prod -o bin/my_service my_service/
 ```
 
 During compilation:
-1. Vex scans the directory and parses all `.vex` files into ASTs.
+1. Vira scans the directory and parses all `.vir` files into ASTs.
 2. The module name is validated against `vex.mod`.
 3. All structs, interfaces, functions, and actors are registered in a single unified symbol table.
 4. Static escape analysis (Autofree) injects deterministic LIFO destructors across all files.
@@ -58,19 +58,19 @@ During compilation:
 
 ---
 
-## 3. Official Code Formatter: `vex fmt`
+## 3. Official Code Formatter: `vira fmt`
 
-Vex enforces clean, consistent style rules using the built-in formatter:
+Vira enforces clean, consistent style rules using the built-in formatter:
 
 ```bash
 # Preview formatted output to stdout
-vex fmt src/main.vex
+vira fmt src/main.vir
 
 # Format file in-place
-vex fmt -w src/main.vex
+vira fmt -w src/main.vir
 
 # Format entire project recursively
-vex fmt -w .
+vira fmt -w .
 ```
 
 ### Formatting Rules
@@ -80,16 +80,16 @@ vex fmt -w .
 
 ---
 
-## 4. Built-in Testing Framework: `vex test`
+## 4. Built-in Testing Framework: `vira test`
 
-Vex includes a built-in test runner that discovers and executes tests with automated memory leak detection:
+Vira includes a built-in test runner that discovers and executes tests with automated memory leak detection:
 
 ```bash
 # Run all tests in a directory
-vex test tests/
+vira test tests/
 
 # Run a specific test file
-vex test tests/math_test.vex
+vira test tests/math_test.vir
 ```
 
 ### Writing Tests in Vex
@@ -109,15 +109,15 @@ fn test_tensor_addition() {
 }
 ```
 
-When `vex test` runs:
+When `vira test` runs:
 1. It automatically synthesizes an isolated test harness.
 2. Runs each test function sequentially.
 3. Automatically queries the runtime memory counters to verify `active_leaks=0`.
 4. Reports pass/fail status and execution time:
 
 ```text
-=== RUN   tests\math_test.vex
---- PASS: tests\math_test.vex (0.87s)
+=== RUN   tests\math_test.vir
+--- PASS: tests\math_test.vir (0.87s)
     active_leaks=0 [Zero Memory Leaks Verified]
 
 Test Summary: 1 passed, 0 failed in 0.87s
@@ -125,12 +125,12 @@ Test Summary: 1 passed, 0 failed in 0.87s
 
 ---
 
-## 5. Language Server Protocol (`vex lsp`)
+## 5. Language Server Protocol (`vira lsp`)
 
-Vex ships with a native JSON-RPC 2.0 Language Server that communicates over standard input/output (`stdin`/`stdout`):
+Vira ships with a native JSON-RPC 2.0 Language Server that communicates over standard input/output (`stdin`/`stdout`):
 
 ```bash
-vex lsp
+vira lsp
 ```
 
 ### Supported LSP Capabilities
@@ -142,7 +142,7 @@ vex lsp
 
 ## 6. VS Code & Cursor Extension
 
-The official Vex VS Code extension is located in [editors/vscode](file:///c:/Users/hp/vex/editors/vscode):
+The official Vira VS Code extension is located in [editors/vscode](file:///c:/Users/hp/vex/editors/vscode):
 
 ### Files
 - [package.json](file:///c:/Users/hp/vex/editors/vscode/package.json): Extension manifest declaring language `vex` and command bindings.
@@ -153,9 +153,9 @@ The official Vex VS Code extension is located in [editors/vscode](file:///c:/Use
 Copy or symlink the folder to your VS Code extensions directory:
 ```bash
 # Windows
-cp -r editors/vscode ~/.vscode/extensions/vexlang.vex-0.1.0
+cp -r editors/vscode ~/.vscode/extensions/viralang.vir-0.1.0
 
 # Linux / macOS
-cp -r editors/vscode ~/.vscode/extensions/vexlang.vex-0.1.0
+cp -r editors/vscode ~/.vscode/extensions/viralang.vir-0.1.0
 ```
-Restart VS Code or Cursor, and all `.vex` files will have full syntax highlighting and formatting support!
+Restart VS Code or Cursor, and all `.vir` files will have full syntax highlighting and formatting support!

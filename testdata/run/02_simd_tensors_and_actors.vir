@@ -3,7 +3,7 @@ module ai
 // OUT: Future #2 caught fault: CUDA/NaN anomaly on batch
 // OUT: Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00
 // OUT: Worker #2 recovered Future result -> w2=196608.00
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 pub actor AIWorker {
 pub:

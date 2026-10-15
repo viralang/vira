@@ -54,7 +54,7 @@ pub fn (mut u UserProfile) award_points(points int) {
 
 fn main() {
 	println('=== 1. STATIC FACTORY CONSTRUCTOR ===')
-	mut user := UserProfile.new('alice', 'alice@vex.dev', 'sha256_hash_here')
+	mut user := UserProfile.new('alice', 'alice@vira.dev', 'sha256_hash_here')
 	println(user.display())
 
 	println('=== 2. PROMOTED FIELDS & METHODS (STRUCT EMBEDDING) ===')

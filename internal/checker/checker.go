@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/token"
 )
 
 type SemanticError struct {

@@ -8,7 +8,7 @@ fn main() {
 	println('File ${test_file} exists initially: ${initially_exists}')
 
 	println('=== 2. ATOMIC FILE WRITE ===')
-	content := 'Vex Language: Fast, Safe, Concurrent, and GC-Free\n'
+	content := 'Vira Language: Fast, Safe, Concurrent, and GC-Free\n'
 	_ := write_file(test_file, content) or {
 		eprintln('Failed to write file: ${err}')
 		return

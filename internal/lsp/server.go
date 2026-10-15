@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/checker"
-	"github.com/vexlang/vex/internal/formatter"
-	"github.com/vexlang/vex/internal/parser"
-	"github.com/vexlang/vex/internal/source"
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/checker"
+	"github.com/viralang/vira/internal/formatter"
+	"github.com/viralang/vira/internal/parser"
+	"github.com/viralang/vira/internal/source"
+	"github.com/viralang/vira/internal/token"
 )
 
 type Server struct {
@@ -338,7 +338,7 @@ func (s *Server) validateDocument(uri string, text string) {
 						End:   Position{Line: endLine - 1, Character: endCol - 1},
 					},
 					Severity: 1,
-					Source:   "vex checker",
+					Source:   "vira checker",
 					Message:  se.Msg,
 				})
 			}
@@ -354,25 +354,25 @@ func (s *Server) validateDocument(uri string, text string) {
 func (s *Server) computeHover(text string, pos Position) string {
 	lines := strings.Split(text, "\n")
 	if pos.Line < 0 || pos.Line >= len(lines) {
-		return "*(Vex Symbol)*"
+		return "*(Vira Symbol)*"
 	}
 	line := lines[pos.Line]
 	words := strings.Fields(line)
 	for _, w := range words {
 		switch w {
 		case "actor":
-			return "**Vex Actor Keyword**\n\nDefines an isolated, concurrent message-passing entity managed by a lock-free work-stealing pool and supervised for fault tolerance."
+			return "**Vira Actor Keyword**\n\nDefines an isolated, concurrent message-passing entity managed by a lock-free work-stealing pool and supervised for fault tolerance."
 		case "arena":
-			return "**Vex Bump Arena (`arena { ... }`)**\n\nAllocates intermediate objects and tensors inside an ultra-fast O(1) contiguous memory slab. Wiped instantly on block exit without `free()`."
+			return "**Vira Bump Arena (`arena { ... }`)**\n\nAllocates intermediate objects and tensors inside an ultra-fast O(1) contiguous memory slab. Wiped instantly on block exit without `free()`."
 		case "tensor":
-			return "**Vex First-Class SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 2D tensor supporting hardware-accelerated matrix multiplication (`@`) and zero-copy DMA to GPUs."
+			return "**Vira First-Class SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 2D tensor supporting hardware-accelerated matrix multiplication (`@`) and zero-copy DMA to GPUs."
 		case "@":
-			return "**Vex Hardware MatMul Operator (`@`)**\n\nCompiles directly to 256-bit AVX2+FMA or 128-bit ARM NEON vector instructions."
+			return "**Vira Hardware MatMul Operator (`@`)**\n\nCompiles directly to 256-bit AVX2+FMA or 128-bit ARM NEON vector instructions."
 		case "<-":
-			return "**Vex Asynchronous Actor Send Operator (`<-`)**\n\nNon-blocking message dispatch returning a `Future[T]` without stalling the caller thread."
+			return "**Vira Asynchronous Actor Send Operator (`<-`)**\n\nNon-blocking message dispatch returning a `Future[T]` without stalling the caller thread."
 		}
 	}
-	return "**Vex Language Symbol**\n\n*Type inference & definition ready.*"
+	return "**Vira Language Symbol**\n\n*Type inference & definition ready.*"
 }
 
 func (s *Server) findDefinition(uri string, text string, pos Position) interface{} {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/checker"
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/checker"
+	"github.com/viralang/vira/internal/token"
 )
 
 type EscapeState uint8
@@ -247,14 +247,14 @@ func (a *Analyzer) rewriteBlock(
 
 		case *ast.ArenaStmt:
 			a.arenaCounter++
-			s.ArenaVar = fmt.Sprintf("_vex_arena_%d", a.arenaCounter)
+			s.ArenaVar = fmt.Sprintf("_vira_arena_%d", a.arenaCounter)
 			arenaScope := &LexicalScope{Parent: scope, InArena: true}
 			a.rewriteBlock(s.Body, arenaScope, false, report)
 
 			// Inject O(1) slab teardown at the end of the `arena { ... }` block
 			arenaFree := &ast.DeferFreeStmt{
 				VarName:  s.ArenaVar,
-				TypeName: "vex_arena",
+				TypeName: "vira_arena",
 				Kind:     ast.CleanupArena,
 				Reason:   "arena block exit (O(1) slab deallocation)",
 				StmtSpan: s.StmtSpan,

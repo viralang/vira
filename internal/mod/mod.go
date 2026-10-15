@@ -69,13 +69,15 @@ func FindProjectRoot(startDir string) (string, *Manifest, error) {
 	}
 
 	for {
-		modPath := filepath.Join(curr, "vex.mod")
-		if data, err := os.ReadFile(modPath); err == nil {
-			m, err := ParseManifest(string(data))
-			if err != nil {
-				return curr, nil, fmt.Errorf("syntax error in %s: %w", modPath, err)
+		for _, name := range []string{"vira.mod", "vex.mod"} {
+			modPath := filepath.Join(curr, name)
+			if data, err := os.ReadFile(modPath); err == nil {
+				m, err := ParseManifest(string(data))
+				if err != nil {
+					return curr, nil, fmt.Errorf("syntax error in %s: %w", modPath, err)
+				}
+				return curr, m, nil
 			}
-			return curr, m, nil
 		}
 
 		parent := filepath.Dir(curr)

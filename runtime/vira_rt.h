@@ -1,5 +1,5 @@
-#ifndef VEX_RT_H
-#define VEX_RT_H
+#ifndef VIRA_RT_H
+#define VIRA_RT_H
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -23,17 +23,17 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-typedef SOCKET vex_socket_t;
-#define VEX_INVALID_SOCKET INVALID_SOCKET
-#define VEX_SOCKET_ERROR SOCKET_ERROR
+typedef SOCKET vira_socket_t;
+#define VIRA_INVALID_SOCKET INVALID_SOCKET
+#define VIRA_SOCKET_ERROR SOCKET_ERROR
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
-typedef int vex_socket_t;
-#define VEX_INVALID_SOCKET -1
-#define VEX_SOCKET_ERROR -1
+typedef int vira_socket_t;
+#define VIRA_INVALID_SOCKET -1
+#define VIRA_SOCKET_ERROR -1
 #define closesocket close
 #endif
 
@@ -47,18 +47,18 @@ typedef int vex_socket_t;
 #endif
 
 // --- THREAD-SAFE TELEMETRY COUNTERS FOR ZERO-LEAK VERIFICATION ---
-static volatile int64_t _vex_active_heap_allocs = 0;
-static volatile int64_t _vex_total_heap_frees   = 0;
-static volatile int64_t _vex_total_tasks_run    = 0;
-static volatile int64_t _vex_total_work_steals  = 0;
+static volatile int64_t _vira_active_heap_allocs = 0;
+static volatile int64_t _vira_total_heap_frees   = 0;
+static volatile int64_t _vira_total_tasks_run    = 0;
+static volatile int64_t _vira_total_work_steals  = 0;
 
-static inline void _vex_record_alloc(void) {
-    __atomic_add_fetch(&_vex_active_heap_allocs, 1, __ATOMIC_RELAXED);
+static inline void _vira_record_alloc(void) {
+    __atomic_add_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);
 }
 
-static inline void _vex_record_free(void) {
-    __atomic_sub_fetch(&_vex_active_heap_allocs, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&_vex_total_heap_frees, 1, __ATOMIC_RELAXED);
+static inline void _vira_record_free(void) {
+    __atomic_sub_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&_vira_total_heap_frees, 1, __ATOMIC_RELAXED);
 }
 
 // ============================================================================
@@ -69,13 +69,13 @@ typedef struct {
     const uint8_t* data;
     int32_t        len;
     bool           is_lit;
-} vex_string;
+} vira_string;
 
-static inline vex_string vex_str_lit(const char* cstr, int32_t len) {
-    return (vex_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };
+static inline vira_string vira_str_lit(const char* cstr, int32_t len) {
+    return (vira_string){ .data = (const uint8_t*)cstr, .len = len, .is_lit = true };
 }
 
-static inline bool vex_str_eq(vex_string a, vex_string b) {
+static inline bool vira_str_eq(vira_string a, vira_string b) {
     if (a.len != b.len) return false;
     if (a.len == 0) return true;
     if (a.data == b.data) return true;
@@ -83,7 +83,7 @@ static inline bool vex_str_eq(vex_string a, vex_string b) {
     return memcmp(a.data, b.data, (size_t)a.len) == 0;
 }
 
-static inline vex_string vex_str_format(const char* fmt, ...) {
+static inline vira_string vira_str_format(const char* fmt, ...) {
     va_list args, args_copy;
     va_start(args, fmt);
     va_copy(args_copy, args);
@@ -92,39 +92,39 @@ static inline vex_string vex_str_format(const char* fmt, ...) {
 
     if (needed <= 0) {
         va_end(args_copy);
-        return vex_str_lit("", 0);
+        return vira_str_lit("", 0);
     }
 
     char* buf = (char*)malloc((size_t)needed + 1);
     if (!buf) {
-        fprintf(stderr, "vex panic: out of memory in vex_str_format\n");
+        fprintf(stderr, "vex panic: out of memory in vira_str_format\n");
         exit(1);
     }
     vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);
     va_end(args_copy);
 
-    _vex_record_alloc();
-    return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };
+    _vira_record_alloc();
+    return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = false };
 }
 
-static inline vex_string vex_str_clone(vex_string s) {
+static inline vira_string vira_str_clone(vira_string s) {
     if (s.is_lit || s.data == NULL || s.len == 0) {
         return s;
     }
     uint8_t* copy = (uint8_t*)malloc((size_t)s.len + 1);
     memcpy(copy, s.data, (size_t)s.len);
     copy[s.len] = '\0';
-    _vex_record_alloc();
-    return (vex_string){ .data = copy, .len = s.len, .is_lit = false };
+    _vira_record_alloc();
+    return (vira_string){ .data = copy, .len = s.len, .is_lit = false };
 }
 
-static inline void vex_str_free(vex_string* s) {
+static inline void vira_str_free(vira_string* s) {
     if (s != NULL && !s->is_lit && s->data != NULL) {
         free((void*)s->data);
         s->data   = NULL;
         s->len    = 0;
         s->is_lit = true;
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
@@ -136,19 +136,19 @@ typedef struct {
     uint8_t* buf;
     size_t   cap;
     size_t   offset;
-} vex_arena;
+} vira_arena;
 
-static inline vex_arena vex_arena_init(size_t capacity) {
+static inline vira_arena vira_arena_init(size_t capacity) {
     uint8_t* slab = (uint8_t*)malloc(capacity + 64);
     if (!slab) {
         fprintf(stderr, "vex panic: failed to allocate arena slab (%zu bytes)\n", capacity);
         exit(1);
     }
-    _vex_record_alloc();
-    return (vex_arena){ .buf = slab, .cap = capacity, .offset = 0 };
+    _vira_record_alloc();
+    return (vira_arena){ .buf = slab, .cap = capacity, .offset = 0 };
 }
 
-static inline void* vex_arena_alloc(vex_arena* a, size_t size) {
+static inline void* vira_arena_alloc(vira_arena* a, size_t size) {
     // 64-byte alignment guarantees AVX-512 / AVX2 / NEON aligned vector loads
     uintptr_t base    = (uintptr_t)a->buf + a->offset;
     uintptr_t aligned = (base + 63) & ~(uintptr_t)63;
@@ -163,27 +163,27 @@ static inline void* vex_arena_alloc(vex_arena* a, size_t size) {
     return (void*)aligned;
 }
 
-static inline vex_string vex_arena_str_format(vex_arena* a, const char* fmt, ...) {
+static inline vira_string vira_arena_str_format(vira_arena* a, const char* fmt, ...) {
     va_list args, args_copy;
     va_start(args, fmt);
     va_copy(args_copy, args);
     int32_t needed = vsnprintf(NULL, 0, fmt, args);
     va_end(args);
 
-    char* buf = (char*)vex_arena_alloc(a, (size_t)needed + 1);
+    char* buf = (char*)vira_arena_alloc(a, (size_t)needed + 1);
     vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);
     va_end(args_copy);
 
-    return (vex_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };
+    return (vira_string){ .data = (const uint8_t*)buf, .len = needed, .is_lit = true };
 }
 
-static inline void vex_arena_destroy(vex_arena* a) {
+static inline void vira_arena_destroy(vira_arena* a) {
     if (a != NULL && a->buf != NULL) {
         free(a->buf);
         a->buf    = NULL;
         a->cap    = 0;
         a->offset = 0;
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
@@ -191,10 +191,10 @@ static inline void vex_arena_destroy(vex_arena* a) {
 // 3. AI TENSORS + HARDWARE SIMD (`AVX2` / `SSE2` / `ARM NEON`) `@` MATMUL
 // ============================================================================
 
-typedef float    vex_f32;
-typedef uint16_t vex_bf16;
+typedef float    vira_f32;
+typedef uint16_t vira_bf16;
 
-static inline const char* vex_simd_backend_name(void) {
+static inline const char* vira_simd_backend_name(void) {
 #if defined(__AVX2__)
     return "x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)";
 #elif defined(__ARM_NEON) || defined(__aarch64__)
@@ -207,42 +207,42 @@ static inline const char* vex_simd_backend_name(void) {
 }
 
 typedef struct {
-    vex_f32* data;      // 64-byte cache-line aligned pointer
+    vira_f32* data;      // 64-byte cache-line aligned pointer
     void*    raw_alloc; // underlying pointer for free()
     int32_t  rows;
     int32_t  cols;
     bool     is_arena;
-} vex_tensor_f32;
+} vira_tensor_f32;
 
-static inline vex_tensor_f32 vex_tensor_f32_alloc(int32_t rows, int32_t cols) {
-    size_t bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);
+static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows, int32_t cols) {
+    size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
     void*  raw   = malloc(bytes + 64);
     if (!raw) {
         fprintf(stderr, "vex panic: tensor allocation failed (%d x %d)\n", rows, cols);
         exit(1);
     }
     uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;
-    vex_f32*  data    = (vex_f32*)aligned;
+    vira_f32*  data    = (vira_f32*)aligned;
     memset(data, 0, bytes);
-    _vex_record_alloc();
-    return (vex_tensor_f32){
+    _vira_record_alloc();
+    return (vira_tensor_f32){
         .data = data, .raw_alloc = raw, .rows = rows, .cols = cols, .is_arena = false
     };
 }
 
-static inline vex_tensor_f32 vex_tensor_f32_arena_alloc(vex_arena* a, int32_t rows, int32_t cols) {
-    size_t   bytes = (size_t)rows * (size_t)cols * sizeof(vex_f32);
-    vex_f32* data  = (vex_f32*)vex_arena_alloc(a, bytes);
+static inline vira_tensor_f32 vira_tensor_f32_arena_alloc(vira_arena* a, int32_t rows, int32_t cols) {
+    size_t   bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
+    vira_f32* data  = (vira_f32*)vira_arena_alloc(a, bytes);
     memset(data, 0, bytes);
-    return (vex_tensor_f32){
+    return (vira_tensor_f32){
         .data = data, .raw_alloc = NULL, .rows = rows, .cols = cols, .is_arena = true
     };
 }
 
-static inline vex_tensor_f32 vex_tensor_f32_fill(vex_arena* opt_arena, int32_t rows, int32_t cols, vex_f32 val) {
-    vex_tensor_f32 t = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, rows, cols)
-        : vex_tensor_f32_alloc(rows, cols);
+static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena* opt_arena, int32_t rows, int32_t cols, vira_f32 val) {
+    vira_tensor_f32 t = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)
+        : vira_tensor_f32_alloc(rows, cols);
     int32_t total = rows * cols;
     int32_t i     = 0;
 
@@ -264,25 +264,25 @@ static inline vex_tensor_f32 vex_tensor_f32_fill(vex_arena* opt_arena, int32_t r
 }
 
 // Hardware-accelerated `@` Matrix Multiplication (C = A @ B)
-static inline vex_tensor_f32 vex_tensor_matmul_f32(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {
+static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     if (a.cols != b.rows) {
         fprintf(stderr, "vex tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",
                 a.rows, a.cols, b.rows, b.cols);
         exit(1);
     }
-    vex_tensor_f32 out = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)
-        : vex_tensor_f32_alloc(a.rows, b.cols);
+    vira_tensor_f32 out = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)
+        : vira_tensor_f32_alloc(a.rows, b.cols);
 
     const int32_t M = a.rows;
     const int32_t K = a.cols;
     const int32_t N = b.cols;
 
     for (int32_t i = 0; i < M; i++) {
-        vex_f32* c_row = &out.data[i * N];
+        vira_f32* c_row = &out.data[i * N];
         for (int32_t k = 0; k < K; k++) {
-            const vex_f32  a_ik  = a.data[i * K + k];
-            const vex_f32* b_row = &b.data[k * N];
+            const vira_f32  a_ik  = a.data[i * K + k];
+            const vira_f32* b_row = &b.data[k * N];
             int32_t        j     = 0;
 
 #if defined(__AVX2__)
@@ -332,10 +332,10 @@ static inline vex_tensor_f32 vex_tensor_matmul_f32(vex_arena* opt_arena, vex_ten
 }
 
 // SIMD-accelerated tensor sum reduction
-static inline vex_f32 vex_tensor_sum(vex_tensor_f32 t) {
+static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
     int32_t total = t.rows * t.cols;
     int32_t i     = 0;
-    vex_f32 sum   = 0.0f;
+    vira_f32 sum   = 0.0f;
 
 #if defined(__AVX2__)
     __m256 vsum = _mm256_setzero_ps();
@@ -362,10 +362,10 @@ static inline vex_f32 vex_tensor_sum(vex_tensor_f32 t) {
 }
 
 // SIMD-accelerated ReLU activation: out = max(0, t)
-static inline vex_tensor_f32 vex_tensor_relu(vex_arena* opt_arena, vex_tensor_f32 t) {
-    vex_tensor_f32 out = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
-        : vex_tensor_f32_alloc(t.rows, t.cols);
+static inline vira_tensor_f32 vira_tensor_relu(vira_arena* opt_arena, vira_tensor_f32 t) {
+    vira_tensor_f32 out = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
+        : vira_tensor_f32_alloc(t.rows, t.cols);
     int32_t total = t.rows * t.cols;
     int32_t i     = 0;
 
@@ -398,15 +398,15 @@ static inline vex_tensor_f32 vex_tensor_relu(vex_arena* opt_arena, vex_tensor_f3
 }
 
 // SIMD-accelerated tensor addition: out = a + b
-static inline vex_tensor_f32 vex_tensor_add(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {
+static inline vira_tensor_f32 vira_tensor_add(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     if (a.rows != b.rows || a.cols != b.cols) {
         fprintf(stderr, "vex tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
                 a.rows, a.cols, b.rows, b.cols);
         exit(1);
     }
-    vex_tensor_f32 out = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
-        : vex_tensor_f32_alloc(a.rows, a.cols);
+    vira_tensor_f32 out = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
+        : vira_tensor_f32_alloc(a.rows, a.cols);
     int32_t total = a.rows * a.cols;
     int32_t i     = 0;
 
@@ -436,15 +436,15 @@ static inline vex_tensor_f32 vex_tensor_add(vex_arena* opt_arena, vex_tensor_f32
 }
 
 // SIMD-accelerated tensor subtraction: out = a - b
-static inline vex_tensor_f32 vex_tensor_sub(vex_arena* opt_arena, vex_tensor_f32 a, vex_tensor_f32 b) {
+static inline vira_tensor_f32 vira_tensor_sub(vira_arena* opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     if (a.rows != b.rows || a.cols != b.cols) {
         fprintf(stderr, "vex tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
                 a.rows, a.cols, b.rows, b.cols);
         exit(1);
     }
-    vex_tensor_f32 out = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
-        : vex_tensor_f32_alloc(a.rows, a.cols);
+    vira_tensor_f32 out = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
+        : vira_tensor_f32_alloc(a.rows, a.cols);
     int32_t total = a.rows * a.cols;
     int32_t i     = 0;
 
@@ -474,10 +474,10 @@ static inline vex_tensor_f32 vex_tensor_sub(vex_arena* opt_arena, vex_tensor_f32
 }
 
 // SIMD-accelerated tensor scalar scaling: out = t * scale
-static inline vex_tensor_f32 vex_tensor_scale(vex_arena* opt_arena, vex_tensor_f32 t, vex_f32 scale) {
-    vex_tensor_f32 out = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
-        : vex_tensor_f32_alloc(t.rows, t.cols);
+static inline vira_tensor_f32 vira_tensor_scale(vira_arena* opt_arena, vira_tensor_f32 t, vira_f32 scale) {
+    vira_tensor_f32 out = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
+        : vira_tensor_f32_alloc(t.rows, t.cols);
     int32_t total = t.rows * t.cols;
     int32_t i     = 0;
 
@@ -506,12 +506,12 @@ static inline vex_tensor_f32 vex_tensor_scale(vex_arena* opt_arena, vex_tensor_f
     return out;
 }
 
-static inline void vex_tensor_f32_free(vex_tensor_f32* t) {
+static inline void vira_tensor_f32_free(vira_tensor_f32* t) {
     if (t != NULL && !t->is_arena && t->raw_alloc != NULL) {
         free(t->raw_alloc);
         t->raw_alloc = NULL;
         t->data      = NULL;
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
@@ -520,130 +520,130 @@ static inline void vex_tensor_f32_free(vex_tensor_f32* t) {
 // ============================================================================
 
 typedef enum {
-    VEX_ACTOR_RUNNING = 0,
-    VEX_ACTOR_FAULTED = 1,
-    VEX_ACTOR_STOPPED = 2,
-} vex_actor_state;
+    VIRA_ACTOR_RUNNING = 0,
+    VIRA_ACTOR_FAULTED = 1,
+    VIRA_ACTOR_STOPPED = 2,
+} vira_actor_state;
 
 typedef struct {
     int32_t          id;
     const char*      name;
-    vex_actor_state  state;
+    vira_actor_state  state;
     int32_t          restarts;
     int32_t          max_restarts;
-    vex_arena        isolated_heap;  // Wiped in O(1) if the actor panics
+    vira_arena        isolated_heap;  // Wiped in O(1) if the actor panics
     jmp_buf          fault_boundary; // Thread-safe fault jump target when active
-    vex_string       last_error;
+    vira_string       last_error;
     bool             in_actor;
     volatile uint8_t mailbox_lock;   // Ensures single-actor sequential state safety
     int32_t          last_worker_id; // Tracks which worker thread executed the actor
-} vex_actor_ctx;
+} vira_actor_ctx;
 
 // Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!
-static __thread vex_actor_ctx* _vex_tls_actor     = NULL;
-static __thread int32_t        _vex_tls_worker_id = -1;
+static __thread vira_actor_ctx* _vira_tls_actor     = NULL;
+static __thread int32_t        _vira_tls_worker_id = -1;
 
-static inline void vex_actor_ctx_init(vex_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {
+static inline void vira_actor_ctx_init(vira_actor_ctx* ctx, int32_t id, const char* name, int32_t max_restarts) {
     ctx->id             = id;
     ctx->name           = name;
-    ctx->state          = VEX_ACTOR_RUNNING;
+    ctx->state          = VIRA_ACTOR_RUNNING;
     ctx->restarts       = 0;
     ctx->max_restarts   = max_restarts;
-    ctx->isolated_heap  = vex_arena_init(256 * 1024); // 256 KB SIMD-aligned scratch arena per actor
-    ctx->last_error     = vex_str_lit("", 0);
+    ctx->isolated_heap  = vira_arena_init(256 * 1024); // 256 KB SIMD-aligned scratch arena per actor
+    ctx->last_error     = vira_str_lit("", 0);
     ctx->in_actor       = false;
     ctx->mailbox_lock   = 0;
     ctx->last_worker_id = -1;
 }
 
-static inline void vex_actor_ctx_destroy(vex_actor_ctx* ctx) {
-    vex_arena_destroy(&ctx->isolated_heap);
+static inline void vira_actor_ctx_destroy(vira_actor_ctx* ctx) {
+    vira_arena_destroy(&ctx->isolated_heap);
 }
 
-static inline void vex_panic(vex_string msg) {
-    if (_vex_tls_actor != NULL && _vex_tls_actor->in_actor) {
-        _vex_tls_actor->state      = VEX_ACTOR_FAULTED;
-        _vex_tls_actor->last_error = msg;
-        longjmp(_vex_tls_actor->fault_boundary, 1);
+static inline void vira_panic(vira_string msg) {
+    if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
+        _vira_tls_actor->state      = VIRA_ACTOR_FAULTED;
+        _vira_tls_actor->last_error = msg;
+        longjmp(_vira_tls_actor->fault_boundary, 1);
     }
     fprintf(stderr, "vex unrecoverable panic: %.*s\n", msg.len, (const char*)msg.data);
     exit(1);
 }
 
 // --- CHASE-LEV STYLE LOCK-FREE WORK-STEALING DEQUE ---
-#define VEX_WS_CAP  256
-#define VEX_WS_MASK (VEX_WS_CAP - 1)
-#define VEX_MAX_WORKERS 8
+#define VIRA_WS_CAP  256
+#define VIRA_WS_MASK (VIRA_WS_CAP - 1)
+#define VIRA_MAX_WORKERS 8
 
-typedef void (*vex_task_fn)(void* env);
+typedef void (*vira_task_fn)(void* env);
 
 typedef struct {
-    vex_task_fn      fn;
+    vira_task_fn      fn;
     void*            env;
     volatile int32_t done; // 0 = pending, 1 = completed on worker pool
-} vex_task;
+} vira_task;
 
 typedef struct {
     int32_t          worker_id;
     pthread_t        thread;
     volatile int64_t top;    // Modified via CAS by thieves (FIFO steal)
     volatile int64_t bottom; // Modified by owner (LIFO push/pop)
-    vex_task*        ring[VEX_WS_CAP];
-} vex_ws_deque;
+    vira_task*        ring[VIRA_WS_CAP];
+} vira_ws_deque;
 
 typedef struct {
     int32_t          num_workers;
     bool             initialized;
     volatile int32_t shutdown;
     volatile uint32_t rr_cursor;
-    vex_ws_deque     workers[VEX_MAX_WORKERS];
-} vex_scheduler;
+    vira_ws_deque     workers[VIRA_MAX_WORKERS];
+} vira_scheduler;
 
-static vex_scheduler _vex_sched = {0};
+static vira_scheduler _vira_sched = {0};
 
 // Push task onto a deque's bottom
-static inline bool vex_ws_push(vex_ws_deque* q, vex_task* t) {
+static inline bool vira_ws_push(vira_ws_deque* q, vira_task* t) {
     int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_RELAXED);
     int64_t top = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);
-    if (b - top >= VEX_WS_CAP - 1) {
+    if (b - top >= VIRA_WS_CAP - 1) {
         return false; // Queue full
     }
-    __atomic_store_n(&q->ring[b & VEX_WS_MASK], t, __ATOMIC_RELAXED);
+    __atomic_store_n(&q->ring[b & VIRA_WS_MASK], t, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     __atomic_store_n(&q->bottom, b + 1, __ATOMIC_RELEASE);
     return true;
 }
 
 // Pop or steal a task from the top of any deque using lock-free CAS
-static inline vex_task* vex_ws_steal(vex_ws_deque* q) {
+static inline vira_task* vira_ws_steal(vira_ws_deque* q) {
     int64_t t = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_ACQUIRE);
     if (t >= b) {
         return NULL; // Empty
     }
-    vex_task* task = __atomic_load_n(&q->ring[t & VEX_WS_MASK], __ATOMIC_RELAXED);
+    vira_task* task = __atomic_load_n(&q->ring[t & VIRA_WS_MASK], __ATOMIC_RELAXED);
     if (!__atomic_compare_exchange_n(&q->top, &t, t + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
         return NULL; // Lost race to another thief
     }
     return task;
 }
 
-static void* _vex_worker_loop(void* arg) {
-    vex_ws_deque* self = (vex_ws_deque*)arg;
-    _vex_tls_worker_id = self->worker_id;
+static void* _vira_worker_loop(void* arg) {
+    vira_ws_deque* self = (vira_ws_deque*)arg;
+    _vira_tls_worker_id = self->worker_id;
 
-    while (!__atomic_load_n(&_vex_sched.shutdown, __ATOMIC_RELAXED)) {
+    while (!__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_RELAXED)) {
         // 1. Try taking from own deque first
-        vex_task* task = vex_ws_steal(self);
+        vira_task* task = vira_ws_steal(self);
 
         // 2. If own deque is empty, steal from peer worker deques!
         if (task == NULL) {
-            for (int32_t i = 1; i < _vex_sched.num_workers; i++) {
-                int32_t victim_idx = (self->worker_id + i) % _vex_sched.num_workers;
-                task = vex_ws_steal(&_vex_sched.workers[victim_idx]);
+            for (int32_t i = 1; i < _vira_sched.num_workers; i++) {
+                int32_t victim_idx = (self->worker_id + i) % _vira_sched.num_workers;
+                task = vira_ws_steal(&_vira_sched.workers[victim_idx]);
                 if (task != NULL) {
-                    __atomic_add_fetch(&_vex_total_work_steals, 1, __ATOMIC_RELAXED);
+                    __atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);
                     break;
                 }
             }
@@ -651,7 +651,7 @@ static void* _vex_worker_loop(void* arg) {
 
         if (task != NULL) {
             task->fn(task->env);
-            __atomic_add_fetch(&_vex_total_tasks_run, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);
             __atomic_store_n(&task->done, 1, __ATOMIC_RELEASE);
         } else {
             sched_yield();
@@ -660,67 +660,67 @@ static void* _vex_worker_loop(void* arg) {
     return NULL;
 }
 
-static inline void vex_scheduler_init(int32_t num_workers) {
-    if (_vex_sched.initialized) return;
-    if (num_workers <= 0 || num_workers > VEX_MAX_WORKERS) {
+static inline void vira_scheduler_init(int32_t num_workers) {
+    if (_vira_sched.initialized) return;
+    if (num_workers <= 0 || num_workers > VIRA_MAX_WORKERS) {
         num_workers = 4;
     }
-    _vex_sched.num_workers = num_workers;
-    _vex_sched.shutdown    = 0;
-    _vex_sched.rr_cursor   = 0;
-    _vex_sched.initialized = true;
+    _vira_sched.num_workers = num_workers;
+    _vira_sched.shutdown    = 0;
+    _vira_sched.rr_cursor   = 0;
+    _vira_sched.initialized = true;
 
     for (int32_t i = 0; i < num_workers; i++) {
-        _vex_sched.workers[i].worker_id = i;
-        _vex_sched.workers[i].top       = 0;
-        _vex_sched.workers[i].bottom    = 0;
-        pthread_create(&_vex_sched.workers[i].thread, NULL, _vex_worker_loop, &_vex_sched.workers[i]);
+        _vira_sched.workers[i].worker_id = i;
+        _vira_sched.workers[i].top       = 0;
+        _vira_sched.workers[i].bottom    = 0;
+        pthread_create(&_vira_sched.workers[i].thread, NULL, _vira_worker_loop, &_vira_sched.workers[i]);
     }
 }
 
-static inline void vex_scheduler_shutdown(void) {
-    if (!_vex_sched.initialized) return;
-    __atomic_store_n(&_vex_sched.shutdown, 1, __ATOMIC_SEQ_CST);
-    for (int32_t i = 0; i < _vex_sched.num_workers; i++) {
-        pthread_join(_vex_sched.workers[i].thread, NULL);
+static inline void vira_scheduler_shutdown(void) {
+    if (!_vira_sched.initialized) return;
+    __atomic_store_n(&_vira_sched.shutdown, 1, __ATOMIC_SEQ_CST);
+    for (int32_t i = 0; i < _vira_sched.num_workers; i++) {
+        pthread_join(_vira_sched.workers[i].thread, NULL);
     }
-    _vex_sched.initialized = false;
+    _vira_sched.initialized = false;
 }
 
 // --- ASYNCHRONOUS FUTURE[T] PRIMITIVES (FAN-OUT + WORK-HELPING AWAIT) ---
 
 typedef struct {
-    vex_task* task;
+    vira_task* task;
     void*     env;
-} vex_future;
+} vira_future;
 
 // Pushes a heap-backed actor task onto a worker deque and returns immediately (non-blocking)
-static inline void vex_scheduler_submit_async(vex_task* task) {
-    if (!_vex_sched.initialized) {
-        vex_scheduler_init(4);
+static inline void vira_scheduler_submit_async(vira_task* task) {
+    if (!_vira_sched.initialized) {
+        vira_scheduler_init(4);
     }
     __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
 
     // Cluster bursts on Worker 0's deque first so idle peer threads steal tasks concurrently
-    uint32_t seq       = __atomic_fetch_add(&_vex_sched.rr_cursor, 1, __ATOMIC_RELAXED);
-    int32_t  queue_idx = (seq % 2 == 0) ? 0 : (int32_t)(seq % (uint32_t)_vex_sched.num_workers);
+    uint32_t seq       = __atomic_fetch_add(&_vira_sched.rr_cursor, 1, __ATOMIC_RELAXED);
+    int32_t  queue_idx = (seq % 2 == 0) ? 0 : (int32_t)(seq % (uint32_t)_vira_sched.num_workers);
 
-    while (!vex_ws_push(&_vex_sched.workers[queue_idx], task)) {
+    while (!vira_ws_push(&_vira_sched.workers[queue_idx], task)) {
         sched_yield();
     }
 }
 
 // Waits for a future's task to complete; while waiting, the caller helps steal pending tasks!
-static inline void vex_scheduler_await(vex_task* task) {
+static inline void vira_scheduler_await(vira_task* task) {
     if (task == NULL) return;
     while (__atomic_load_n(&task->done, __ATOMIC_ACQUIRE) == 0) {
         bool helped = false;
-        for (int32_t i = 0; i < _vex_sched.num_workers; i++) {
-            vex_task* stolen = vex_ws_steal(&_vex_sched.workers[i]);
+        for (int32_t i = 0; i < _vira_sched.num_workers; i++) {
+            vira_task* stolen = vira_ws_steal(&_vira_sched.workers[i]);
             if (stolen != NULL) {
-                __atomic_add_fetch(&_vex_total_work_steals, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);
                 stolen->fn(stolen->env);
-                __atomic_add_fetch(&_vex_total_tasks_run, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);
                 __atomic_store_n(&stolen->done, 1, __ATOMIC_RELEASE);
                 helped = true;
                 break;
@@ -733,26 +733,26 @@ static inline void vex_scheduler_await(vex_task* task) {
 }
 
 // Synchronous helper (spawn + immediate await)
-static inline void vex_scheduler_submit_and_wait(vex_task_fn fn, void* env) {
-    if (!_vex_sched.initialized) {
-        vex_scheduler_init(4);
+static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void* env) {
+    if (!_vira_sched.initialized) {
+        vira_scheduler_init(4);
     }
-    vex_task task = { .fn = fn, .env = env, .done = 0 };
-    vex_scheduler_submit_async(&task);
-    vex_scheduler_await(&task);
+    vira_task task = { .fn = fn, .env = env, .done = 0 };
+    vira_scheduler_submit_async(&task);
+    vira_scheduler_await(&task);
 }
 
 // Idempotent scope-exit cleanup injected by `internal/autofree` for Future[T]
-static inline void vex_future_free(vex_future* f) {
+static inline void vira_future_free(vira_future* f) {
     if (f != NULL && f->env != NULL) {
         // If an early return skipped `.await()`, wait for the worker thread to finish before freeing
         if (f->task != NULL) {
-            vex_scheduler_await(f->task);
+            vira_scheduler_await(f->task);
         }
         free(f->env);
         f->env  = NULL;
         f->task = NULL;
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
@@ -760,7 +760,7 @@ static inline void vex_future_free(vex_future* f) {
 // 5. BUILTIN I/O & DIAGNOSTICS
 // ============================================================================
 
-static inline void vex_println(vex_string s) {
+static inline void vira_println(vira_string s) {
     if (s.data != NULL && s.len > 0) {
         fwrite(s.data, 1, (size_t)s.len, stdout);
     }
@@ -768,26 +768,26 @@ static inline void vex_println(vex_string s) {
     fflush(stdout);
 }
 
-static inline void vex_println_temp(vex_string s) {
-    vex_println(s);
+static inline void vira_println_temp(vira_string s) {
+    vira_println(s);
     if (!s.is_lit && s.data != NULL) {
         free((void*)s.data);
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
-static inline void vex_eprintln(vex_string s) {
+static inline void vira_eprintln(vira_string s) {
     if (s.data != NULL && s.len > 0) {
         fwrite(s.data, 1, (size_t)s.len, stderr);
     }
     fputc('\n', stderr);
 }
 
-static inline void vex_eprintln_temp(vex_string s) {
-    vex_eprintln(s);
+static inline void vira_eprintln_temp(vira_string s) {
+    vira_eprintln(s);
     if (!s.is_lit && s.data != NULL) {
         free((void*)s.data);
-        _vex_record_free();
+        _vira_record_free();
     }
 }
 
@@ -799,8 +799,8 @@ static inline void vex_eprintln_temp(vex_string s) {
 #define _Result_string_DEFINED
 typedef struct {
     bool       is_err;
-    vex_string err;
-    vex_string val;
+    vira_string err;
+    vira_string val;
 } Result_string;
 #endif
 
@@ -808,12 +808,12 @@ typedef struct {
 #define _Result_bool_DEFINED
 typedef struct {
     bool       is_err;
-    vex_string err;
+    vira_string err;
     bool       val;
 } Result_bool;
 #endif
 
-static inline bool vex_file_exists(vex_string path) {
+static inline bool vira_file_exists(vira_string path) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
@@ -828,7 +828,7 @@ static inline bool vex_file_exists(vex_string path) {
     return false;
 }
 
-static inline Result_string vex_read_file(vex_string path) {
+static inline Result_string vira_read_file(vira_string path) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
@@ -838,31 +838,31 @@ static inline Result_string vex_read_file(vex_string path) {
 
     FILE* f = fopen(path_buf, "rb");
     if (!f) {
-        return (Result_string){ .is_err = true, .err = vex_str_format("failed to open file '%s'", path_buf) };
+        return (Result_string){ .is_err = true, .err = vira_str_format("failed to open file '%s'", path_buf) };
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz < 0) {
         fclose(f);
-        return (Result_string){ .is_err = true, .err = vex_str_format("failed to seek in '%s'", path_buf) };
+        return (Result_string){ .is_err = true, .err = vira_str_format("failed to seek in '%s'", path_buf) };
     }
     char* buf = (char*)malloc((size_t)sz + 1);
     if (!buf) {
         fclose(f);
-        return (Result_string){ .is_err = true, .err = vex_str_lit("out of memory reading file", 26) };
+        return (Result_string){ .is_err = true, .err = vira_str_lit("out of memory reading file", 26) };
     }
     size_t read_bytes = fread(buf, 1, (size_t)sz, f);
     buf[read_bytes] = '\0';
     fclose(f);
-    _vex_record_alloc();
+    _vira_record_alloc();
     return (Result_string){
         .is_err = false,
-        .val = (vex_string){ .data = (const uint8_t*)buf, .len = (int32_t)read_bytes, .is_lit = false }
+        .val = (vira_string){ .data = (const uint8_t*)buf, .len = (int32_t)read_bytes, .is_lit = false }
     };
 }
 
-static inline Result_bool vex_write_file(vex_string path, vex_string content) {
+static inline Result_bool vira_write_file(vira_string path, vira_string content) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
@@ -872,20 +872,20 @@ static inline Result_bool vex_write_file(vex_string path, vex_string content) {
 
     FILE* f = fopen(path_buf, "wb");
     if (!f) {
-        return (Result_bool){ .is_err = true, .err = vex_str_format("failed to open file '%s' for writing", path_buf) };
+        return (Result_bool){ .is_err = true, .err = vira_str_format("failed to open file '%s' for writing", path_buf) };
     }
     if (content.len > 0 && content.data != NULL) {
         size_t written = fwrite(content.data, 1, (size_t)content.len, f);
         if (written != (size_t)content.len) {
             fclose(f);
-            return (Result_bool){ .is_err = true, .err = vex_str_format("failed to write complete content to '%s'", path_buf) };
+            return (Result_bool){ .is_err = true, .err = vira_str_format("failed to write complete content to '%s'", path_buf) };
         }
     }
     fclose(f);
     return (Result_bool){ .is_err = false, .val = true };
 }
 
-static inline Result_bool vex_append_file(vex_string path, vex_string content) {
+static inline Result_bool vira_append_file(vira_string path, vira_string content) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
@@ -895,20 +895,20 @@ static inline Result_bool vex_append_file(vex_string path, vex_string content) {
 
     FILE* f = fopen(path_buf, "ab");
     if (!f) {
-        return (Result_bool){ .is_err = true, .err = vex_str_format("failed to open file '%s' for appending", path_buf) };
+        return (Result_bool){ .is_err = true, .err = vira_str_format("failed to open file '%s' for appending", path_buf) };
     }
     if (content.len > 0 && content.data != NULL) {
         size_t written = fwrite(content.data, 1, (size_t)content.len, f);
         if (written != (size_t)content.len) {
             fclose(f);
-            return (Result_bool){ .is_err = true, .err = vex_str_format("failed to append complete content to '%s'", path_buf) };
+            return (Result_bool){ .is_err = true, .err = vira_str_format("failed to append complete content to '%s'", path_buf) };
         }
     }
     fclose(f);
     return (Result_bool){ .is_err = false, .val = true };
 }
 
-static inline Result_bool vex_remove_file(vex_string path) {
+static inline Result_bool vira_remove_file(vira_string path) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
@@ -919,7 +919,7 @@ static inline Result_bool vex_remove_file(vex_string path) {
     if (remove(path_buf) == 0) {
         return (Result_bool){ .is_err = false, .val = true };
     }
-    return (Result_bool){ .is_err = true, .err = vex_str_format("failed to remove file '%s'", path_buf) };
+    return (Result_bool){ .is_err = true, .err = vira_str_format("failed to remove file '%s'", path_buf) };
 }
 
 // ============================================================================
@@ -930,86 +930,86 @@ static inline Result_bool vex_remove_file(vex_string path) {
 #define _Result_tensor_f32_DEFINED
 typedef struct {
     bool           is_err;
-    vex_string     err;
-    vex_tensor_f32 val;
+    vira_string     err;
+    vira_tensor_f32 val;
 } Result_tensor_f32;
 #endif
 
-static inline Result_tensor_f32 vex_tensor_load_bin(vex_arena* opt_arena, int32_t rows, int32_t cols, vex_string path) {
+static inline Result_tensor_f32 vira_tensor_load_bin(vira_arena* opt_arena, int32_t rows, int32_t cols, vira_string path) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
         memcpy(path_buf, path.data, len);
     }
     path_buf[len] = '\0';
-    vex_str_free(&path);
+    vira_str_free(&path);
 
     FILE* f = fopen(path_buf, "rb");
     if (!f) {
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("could not open weight file '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("could not open weight file '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
-    vex_tensor_f32 t = opt_arena
-        ? vex_tensor_f32_arena_alloc(opt_arena, rows, cols)
-        : vex_tensor_f32_alloc(rows, cols);
+    vira_tensor_f32 t = opt_arena
+        ? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)
+        : vira_tensor_f32_alloc(rows, cols);
 
     size_t expected = (size_t)rows * (size_t)cols;
-    size_t read_count = fread(t.data, sizeof(vex_f32), expected, f);
+    size_t read_count = fread(t.data, sizeof(vira_f32), expected, f);
     fclose(f);
 
     if (read_count != expected) {
-        if (!opt_arena) vex_tensor_f32_free(&t);
+        if (!opt_arena) vira_tensor_f32_free(&t);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("weight file '%s' size mismatch: expected %zu floats, read %zu", path_buf, expected, read_count),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("weight file '%s' size mismatch: expected %zu floats, read %zu", path_buf, expected, read_count),
+            .val = (vira_tensor_f32){0}
         };
     }
 
     return (Result_tensor_f32){
         .is_err = false,
-        .err = vex_str_lit("", 0),
+        .err = vira_str_lit("", 0),
         .val = t
     };
 }
 
-static inline Result_bool vex_tensor_save_bin(vex_tensor_f32 t, vex_string path) {
+static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t, vira_string path) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
         memcpy(path_buf, path.data, len);
     }
     path_buf[len] = '\0';
-    vex_str_free(&path);
+    vira_str_free(&path);
 
     FILE* f = fopen(path_buf, "wb");
     if (!f) {
         return (Result_bool){
             .is_err = true,
-            .err = vex_str_format("failed to open file '%s' for writing weights", path_buf),
+            .err = vira_str_format("failed to open file '%s' for writing weights", path_buf),
             .val = false
         };
     }
 
     size_t total = (size_t)t.rows * (size_t)t.cols;
-    size_t written = fwrite(t.data, sizeof(vex_f32), total, f);
+    size_t written = fwrite(t.data, sizeof(vira_f32), total, f);
     fclose(f);
 
     if (written != total) {
         return (Result_bool){
             .is_err = true,
-            .err = vex_str_format("failed to write complete weights to '%s'", path_buf),
+            .err = vira_str_format("failed to write complete weights to '%s'", path_buf),
             .val = false
         };
     }
 
     return (Result_bool){
         .is_err = false,
-        .err = vex_str_lit("", 0),
+        .err = vira_str_lit("", 0),
         .val = true
     };
 }
@@ -1018,7 +1018,7 @@ static inline Result_bool vex_tensor_save_bin(vex_tensor_f32 t, vex_string path)
 // 12. HIGH-PERFORMANCE NETWORKING & HTTP 1.1 WEB ENGINE
 // ============================================================================
 
-static inline void _vex_net_init(void) {
+static inline void _vira_net_init(void) {
 #ifdef _WIN32
     static int initialized = 0;
     if (!initialized) {
@@ -1029,10 +1029,10 @@ static inline void _vex_net_init(void) {
 #endif
 }
 
-static inline int64_t vex_net_listen(int64_t port) {
-    _vex_net_init();
-    vex_socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == VEX_INVALID_SOCKET) return -1;
+static inline int64_t vira_net_listen(int64_t port) {
+    _vira_net_init();
+    vira_socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == VIRA_INVALID_SOCKET) return -1;
 
     int opt = 1;
 #ifdef _WIN32
@@ -1047,12 +1047,12 @@ static inline int64_t vex_net_listen(int64_t port) {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons((uint16_t)port);
 
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == VEX_SOCKET_ERROR) {
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == VIRA_SOCKET_ERROR) {
         closesocket(fd);
         return -1;
     }
 
-    if (listen(fd, 128) == VEX_SOCKET_ERROR) {
+    if (listen(fd, 128) == VIRA_SOCKET_ERROR) {
         closesocket(fd);
         return -1;
     }
@@ -1060,44 +1060,44 @@ static inline int64_t vex_net_listen(int64_t port) {
     return (int64_t)fd;
 }
 
-static inline int64_t vex_net_accept(int64_t server_fd) {
-    _vex_net_init();
+static inline int64_t vira_net_accept(int64_t server_fd) {
+    _vira_net_init();
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
-    vex_socket_t client = accept((vex_socket_t)server_fd, (struct sockaddr*)&client_addr, &addr_len);
-    if (client == VEX_INVALID_SOCKET) return -1;
+    vira_socket_t client = accept((vira_socket_t)server_fd, (struct sockaddr*)&client_addr, &addr_len);
+    if (client == VIRA_INVALID_SOCKET) return -1;
     return (int64_t)client;
 }
 
-static inline vex_string vex_net_read(int64_t client_fd, int64_t max_bytes) {
+static inline vira_string vira_net_read(int64_t client_fd, int64_t max_bytes) {
     if (max_bytes <= 0) max_bytes = 4096;
     char* buf = (char*)malloc(max_bytes + 1);
-    if (!buf) return vex_str_lit("", 0);
-    _vex_record_alloc();
+    if (!buf) return vira_str_lit("", 0);
+    _vira_record_alloc();
 
-    int n = recv((vex_socket_t)client_fd, buf, (int)max_bytes, 0);
+    int n = recv((vira_socket_t)client_fd, buf, (int)max_bytes, 0);
     if (n <= 0) {
         free(buf);
-        _vex_record_free();
-        return vex_str_lit("", 0);
+        _vira_record_free();
+        return vira_str_lit("", 0);
     }
     buf[n] = '\0';
-    return (vex_string){ .data = (const uint8_t*)buf, .len = n, .is_lit = false };
+    return (vira_string){ .data = (const uint8_t*)buf, .len = n, .is_lit = false };
 }
 
-static inline int64_t vex_net_write(int64_t client_fd, vex_string msg) {
+static inline int64_t vira_net_write(int64_t client_fd, vira_string msg) {
     if (msg.len <= 0 || msg.data == NULL) return 0;
-    int sent = send((vex_socket_t)client_fd, (const char*)msg.data, msg.len, 0);
+    int sent = send((vira_socket_t)client_fd, (const char*)msg.data, msg.len, 0);
     return (int64_t)sent;
 }
 
-static inline void vex_net_close(int64_t fd) {
+static inline void vira_net_close(int64_t fd) {
     if (fd >= 0) {
-        closesocket((vex_socket_t)fd);
+        closesocket((vira_socket_t)fd);
     }
 }
 
-static inline vex_string vex_http_response(int64_t status_code, vex_string content_type, vex_string body) {
+static inline vira_string vira_http_response(int64_t status_code, vira_string content_type, vira_string body) {
     const char* status_text = "OK";
     if (status_code == 201) status_text = "Created";
     else if (status_code == 400) status_text = "Bad Request";
@@ -1113,8 +1113,8 @@ static inline vex_string vex_http_response(int64_t status_code, vex_string conte
 
     int header_est = 256 + body.len;
     char* res = (char*)malloc(header_est);
-    if (!res) return vex_str_lit("", 0);
-    _vex_record_alloc();
+    if (!res) return vira_str_lit("", 0);
+    _vira_record_alloc();
 
     int n = snprintf(res, header_est,
         "HTTP/1.1 %lld %s\r\n"
@@ -1129,14 +1129,14 @@ static inline vex_string vex_http_response(int64_t status_code, vex_string conte
         n += body.len;
     }
     res[n] = '\0';
-    return (vex_string){ .data = (const uint8_t*)res, .len = n, .is_lit = false };
+    return (vira_string){ .data = (const uint8_t*)res, .len = n, .is_lit = false };
 }
 
 // ============================================================================
 // 13. FAST JSON FIELD PARSER
 // ============================================================================
 
-static inline vex_string vex_json_get_str(vex_string json, vex_string key) {
+static inline vira_string vira_json_get_str(vira_string json, vira_string key) {
     char pattern[256];
     int klen = key.len < 200 ? key.len : 200;
     if (key.data && klen > 0) {
@@ -1145,34 +1145,34 @@ static inline vex_string vex_json_get_str(vex_string json, vex_string key) {
     pattern[klen] = '\0';
 
     const char* hay = (const char*)json.data;
-    if (!hay) return vex_str_lit("", 0);
+    if (!hay) return vira_str_lit("", 0);
 
     char search_quote[260];
     snprintf(search_quote, sizeof(search_quote), "\"%s\"", pattern);
     
     const char* found = strstr(hay, search_quote);
-    if (!found) return vex_str_lit("", 0);
+    if (!found) return vira_str_lit("", 0);
     
     const char* colon = strchr(found + strlen(search_quote), ':');
-    if (!colon) return vex_str_lit("", 0);
+    if (!colon) return vira_str_lit("", 0);
     
     const char* val_start = strchr(colon, '"');
-    if (!val_start) return vex_str_lit("", 0);
+    if (!val_start) return vira_str_lit("", 0);
     val_start++;
     
     const char* val_end = strchr(val_start, '"');
-    if (!val_end) return vex_str_lit("", 0);
+    if (!val_end) return vira_str_lit("", 0);
     
     int val_len = (int)(val_end - val_start);
     char* out = (char*)malloc(val_len + 1);
-    if (!out) return vex_str_lit("", 0);
-    _vex_record_alloc();
+    if (!out) return vira_str_lit("", 0);
+    _vira_record_alloc();
     memcpy(out, val_start, val_len);
     out[val_len] = '\0';
-    return (vex_string){ .data = (const uint8_t*)out, .len = val_len, .is_lit = false };
+    return (vira_string){ .data = (const uint8_t*)out, .len = val_len, .is_lit = false };
 }
 
-static inline int64_t vex_json_get_int(vex_string json, vex_string key) {
+static inline int64_t vira_json_get_int(vira_string json, vira_string key) {
     char search_quote[260];
     int klen = key.len < 200 ? key.len : 200;
     snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen, (const char*)key.data);
@@ -1190,7 +1190,7 @@ static inline int64_t vex_json_get_int(vex_string json, vex_string key) {
     return (int64_t)strtoll(colon, NULL, 10);
 }
 
-static inline float vex_json_get_f32(vex_string json, vex_string key) {
+static inline float vira_json_get_f32(vira_string json, vira_string key) {
     char search_quote[260];
     int klen = key.len < 200 ? key.len : 200;
     snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen, (const char*)key.data);
@@ -1212,14 +1212,14 @@ static inline float vex_json_get_f32(vex_string json, vex_string key) {
 // 14. NATIVE SAFETENSORS ZERO-COPY PARSER & LOADER
 // ============================================================================
 
-static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string tensor_name) {
+static inline Result_tensor_f32 vira_safetensors_load(vira_string path, vira_string tensor_name) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data != NULL && len > 0) {
         memcpy(path_buf, path.data, len);
     }
     path_buf[len] = '\0';
-    vex_str_free(&path);
+    vira_str_free(&path);
 
     char name_buf[256];
     int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
@@ -1227,14 +1227,14 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
         memcpy(name_buf, tensor_name.data, nlen);
     }
     name_buf[nlen] = '\0';
-    vex_str_free(&tensor_name);
+    vira_str_free(&tensor_name);
 
     FILE* f = fopen(path_buf, "rb");
     if (!f) {
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("failed to open safetensors file '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("failed to open safetensors file '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1243,8 +1243,8 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("corrupt safetensors header in '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("corrupt safetensors header in '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1253,8 +1253,8 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("failed to allocate memory for header (%llu bytes)", (unsigned long long)header_len),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("failed to allocate memory for header (%llu bytes)", (unsigned long long)header_len),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1263,8 +1263,8 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("incomplete read of safetensors header in '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("incomplete read of safetensors header in '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
     header_json[header_len] = '\0';
@@ -1277,8 +1277,8 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("tensor '%s' not found in '%s'", name_buf, path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("tensor '%s' not found in '%s'", name_buf, path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1314,23 +1314,23 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
     fseeko(f, file_offset, SEEK_SET);
 #endif
 
-    vex_tensor_f32 t = vex_tensor_f32_alloc(rows, cols);
+    vira_tensor_f32 t = vira_tensor_f32_alloc(rows, cols);
     size_t expected_bytes = (size_t)rows * (size_t)cols * sizeof(float);
     size_t read_bytes = fread(t.data, 1, expected_bytes, f);
     fclose(f);
 
     if (read_bytes != expected_bytes) {
-        vex_tensor_f32_free(&t);
+        vira_tensor_f32_free(&t);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("tensor '%s' data truncated: expected %zu bytes, read %zu", name_buf, expected_bytes, read_bytes),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("tensor '%s' data truncated: expected %zu bytes, read %zu", name_buf, expected_bytes, read_bytes),
+            .val = (vira_tensor_f32){0}
         };
     }
 
     return (Result_tensor_f32){
         .is_err = false,
-        .err = vex_str_lit("", 0),
+        .err = vira_str_lit("", 0),
         .val = t
     };
 }
@@ -1339,8 +1339,8 @@ static inline Result_tensor_f32 vex_safetensors_load(vex_string path, vex_string
 // 15. HARDWARE SIMD AUTOGRAD BACKWARD OPS & OPTIMIZERS
 // ============================================================================
 
-static inline vex_tensor_f32 vex_tensor_transpose(vex_tensor_f32 a) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(a.cols, a.rows);
+static inline vira_tensor_f32 vira_tensor_transpose(vira_tensor_f32 a) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(a.cols, a.rows);
     for (int r = 0; r < a.rows; ++r) {
         for (int c = 0; c < a.cols; ++c) {
             out.data[c * out.cols + r] = a.data[r * a.cols + c];
@@ -1349,22 +1349,22 @@ static inline vex_tensor_f32 vex_tensor_transpose(vex_tensor_f32 a) {
     return out;
 }
 
-static inline vex_tensor_f32 vex_tensor_matmul_grad_a(vex_tensor_f32 grad_out, vex_tensor_f32 b) {
-    vex_tensor_f32 bt = vex_tensor_transpose(b);
-    vex_tensor_f32 grad_a = vex_tensor_matmul_f32(NULL, grad_out, bt);
-    vex_tensor_f32_free(&bt);
+static inline vira_tensor_f32 vira_tensor_matmul_grad_a(vira_tensor_f32 grad_out, vira_tensor_f32 b) {
+    vira_tensor_f32 bt = vira_tensor_transpose(b);
+    vira_tensor_f32 grad_a = vira_tensor_matmul_f32(NULL, grad_out, bt);
+    vira_tensor_f32_free(&bt);
     return grad_a;
 }
 
-static inline vex_tensor_f32 vex_tensor_matmul_grad_b(vex_tensor_f32 a, vex_tensor_f32 grad_out) {
-    vex_tensor_f32 at = vex_tensor_transpose(a);
-    vex_tensor_f32 grad_b = vex_tensor_matmul_f32(NULL, at, grad_out);
-    vex_tensor_f32_free(&at);
+static inline vira_tensor_f32 vira_tensor_matmul_grad_b(vira_tensor_f32 a, vira_tensor_f32 grad_out) {
+    vira_tensor_f32 at = vira_tensor_transpose(a);
+    vira_tensor_f32 grad_b = vira_tensor_matmul_f32(NULL, at, grad_out);
+    vira_tensor_f32_free(&at);
     return grad_b;
 }
 
-static inline vex_tensor_f32 vex_tensor_relu_backward(vex_tensor_f32 input, vex_tensor_f32 grad_out) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(input.rows, input.cols);
+static inline vira_tensor_f32 vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(input.rows, input.cols);
     int total = input.rows * input.cols;
     int i = 0;
 
@@ -1385,7 +1385,7 @@ static inline vex_tensor_f32 vex_tensor_relu_backward(vex_tensor_f32 input, vex_
     return out;
 }
 
-static inline void vex_tensor_sgd_step(vex_tensor_f32* param, vex_tensor_f32 grad, float lr) {
+static inline void vira_tensor_sgd_step(vira_tensor_f32* param, vira_tensor_f32 grad, float lr) {
     if (!param || !param->data || !grad.data) return;
     int total = param->rows * param->cols;
     int i = 0;
@@ -1410,7 +1410,7 @@ static inline void vex_tensor_sgd_step(vex_tensor_f32* param, vex_tensor_f32 gra
 // 16. NATIVE GGUF V2/V3 ZERO-COPY BINARY PARSER (Q4_0, Q8_0, F16, F32)
 // ============================================================================
 
-static inline float _vex_fp16_to_fp32(uint16_t h) {
+static inline float _vira_fp16_to_fp32(uint16_t h) {
 #if defined(__F16C__)
     return _cvtsh_ss(h);
 #else
@@ -1442,7 +1442,7 @@ static inline float _vex_fp16_to_fp32(uint16_t h) {
 #endif
 }
 
-static inline void _vex_gguf_skip_val(FILE* f, uint32_t val_type) {
+static inline void _vira_gguf_skip_val(FILE* f, uint32_t val_type) {
     switch (val_type) {
         case 0: case 1: case 7:
             fseek(f, 1, SEEK_CUR); break;
@@ -1465,7 +1465,7 @@ static inline void _vex_gguf_skip_val(FILE* f, uint32_t val_type) {
             if (fread(&elem_type, sizeof(uint32_t), 1, f) == 1 &&
                 fread(&elem_count, sizeof(uint64_t), 1, f) == 1) {
                 for (uint64_t i = 0; i < elem_count; ++i) {
-                    _vex_gguf_skip_val(f, elem_type);
+                    _vira_gguf_skip_val(f, elem_type);
                 }
             }
             break;
@@ -1473,25 +1473,25 @@ static inline void _vex_gguf_skip_val(FILE* f, uint32_t val_type) {
     }
 }
 
-static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string tensor_name) {
+static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path, vira_string tensor_name) {
     char path_buf[1024];
     int len = path.len < 1023 ? path.len : 1023;
     if (path.data && len > 0) memcpy(path_buf, path.data, len);
     path_buf[len] = '\0';
-    vex_str_free(&path);
+    vira_str_free(&path);
 
     char name_buf[256];
     int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
     if (tensor_name.data && nlen > 0) memcpy(name_buf, tensor_name.data, nlen);
     name_buf[nlen] = '\0';
-    vex_str_free(&tensor_name);
+    vira_str_free(&tensor_name);
 
     FILE* f = fopen(path_buf, "rb");
     if (!f) {
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("failed to open GGUF file '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("failed to open GGUF file '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1504,24 +1504,24 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("invalid GGUF magic in '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("invalid GGUF magic in '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
     if (fread(&version, 4, 1, f) != 1 || (version != 2 && version != 3)) {
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("unsupported GGUF version %u in '%s'", version, path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("unsupported GGUF version %u in '%s'", version, path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
     if (fread(&tensor_count, 8, 1, f) != 1 || fread(&kv_count, 8, 1, f) != 1) {
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("corrupt GGUF header in '%s'", path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("corrupt GGUF header in '%s'", path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1543,7 +1543,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
             uint32_t a = 32;
             if (fread(&a, 4, 1, f) == 1 && a > 0) alignment = a;
         } else {
-            _vex_gguf_skip_val(f, val_type);
+            _vira_gguf_skip_val(f, val_type);
         }
     }
 
@@ -1595,8 +1595,8 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
         fclose(f);
         return (Result_tensor_f32){
             .is_err = true,
-            .err = vex_str_format("tensor '%s' not found in GGUF file '%s'", name_buf, path_buf),
-            .val = (vex_tensor_f32){0}
+            .err = vira_str_format("tensor '%s' not found in GGUF file '%s'", name_buf, path_buf),
+            .val = (vira_tensor_f32){0}
         };
     }
 
@@ -1611,7 +1611,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
     fseeko(f, tensor_file_pos, SEEK_SET);
 #endif
 
-    vex_tensor_f32 t = vex_tensor_f32_alloc(t_rows, t_cols);
+    vira_tensor_f32 t = vira_tensor_f32_alloc(t_rows, t_cols);
     int32_t total = t_rows * t_cols;
 
     if (matched_type == 0) {
@@ -1621,7 +1621,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
         if (hbuf) {
             fread(hbuf, sizeof(uint16_t), total, f);
             for (int32_t i = 0; i < total; ++i) {
-                t.data[i] = _vex_fp16_to_fp32(hbuf[i]);
+                t.data[i] = _vira_fp16_to_fp32(hbuf[i]);
             }
             free(hbuf);
         }
@@ -1632,7 +1632,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
             int8_t qs[32];
             fread(&scale_h, 2, 1, f);
             fread(qs, 1, 32, f);
-            float scale = _vex_fp16_to_fp32(scale_h);
+            float scale = _vira_fp16_to_fp32(scale_h);
             int32_t base = b * 32;
             for (int32_t j = 0; j < 32; ++j) {
                 t.data[base + j] = scale * (float)qs[j];
@@ -1645,7 +1645,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
             uint8_t nibbles[16];
             fread(&scale_h, 2, 1, f);
             fread(nibbles, 1, 16, f);
-            float scale = _vex_fp16_to_fp32(scale_h);
+            float scale = _vira_fp16_to_fp32(scale_h);
             int32_t base = b * 32;
             for (int32_t j = 0; j < 16; ++j) {
                 uint8_t byte = nibbles[j];
@@ -1662,7 +1662,7 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
     fclose(f);
     return (Result_tensor_f32){
         .is_err = false,
-        .err = vex_str_lit("", 0),
+        .err = vira_str_lit("", 0),
         .val = t
     };
 }
@@ -1671,8 +1671,8 @@ static inline Result_tensor_f32 vex_gguf_load_tensor(vex_string path, vex_string
 // 17. LLM TRANSFORMER OPERATORS (RMSNORM, ROPE, SILU, EMBEDDING, SAMPLING)
 // ============================================================================
 
-static inline vex_tensor_f32 vex_tensor_rmsnorm(vex_tensor_f32 x, vex_tensor_f32 weight, float eps) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(x.rows, x.cols);
+static inline vira_tensor_f32 vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(x.rows, x.cols);
     for (int32_t r = 0; r < x.rows; ++r) {
         float* x_row = &x.data[r * x.cols];
         float* out_row = &out.data[r * x.cols];
@@ -1723,8 +1723,8 @@ static inline vex_tensor_f32 vex_tensor_rmsnorm(vex_tensor_f32 x, vex_tensor_f32
     return out;
 }
 
-static inline vex_tensor_f32 vex_tensor_rope(vex_tensor_f32 q, int64_t pos, float freq_base) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(q.rows, q.cols);
+static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos, float freq_base) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(q.rows, q.cols);
     int32_t half_dim = q.cols / 2;
 
     for (int32_t r = 0; r < q.rows; ++r) {
@@ -1748,8 +1748,8 @@ static inline vex_tensor_f32 vex_tensor_rope(vex_tensor_f32 q, int64_t pos, floa
     return out;
 }
 
-static inline vex_tensor_f32 vex_tensor_silu(vex_tensor_f32 x) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(x.rows, x.cols);
+static inline vira_tensor_f32 vira_tensor_silu(vira_tensor_f32 x) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(x.rows, x.cols);
     int32_t total = x.rows * x.cols;
     for (int32_t i = 0; i < total; ++i) {
         float v = x.data[i];
@@ -1758,13 +1758,13 @@ static inline vex_tensor_f32 vex_tensor_silu(vex_tensor_f32 x) {
     return out;
 }
 
-static inline vex_tensor_f32 vex_tensor_elemwise_mul(vex_tensor_f32 a, vex_tensor_f32 b) {
+static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a, vira_tensor_f32 b) {
     if (a.rows != b.rows || a.cols != b.cols) {
         fprintf(stderr, "vex tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
                 a.rows, a.cols, b.rows, b.cols);
         exit(1);
     }
-    vex_tensor_f32 out = vex_tensor_f32_alloc(a.rows, a.cols);
+    vira_tensor_f32 out = vira_tensor_f32_alloc(a.rows, a.cols);
     int32_t total = a.rows * a.cols;
     int32_t i = 0;
 
@@ -1781,8 +1781,8 @@ static inline vex_tensor_f32 vex_tensor_elemwise_mul(vex_tensor_f32 a, vex_tenso
     return out;
 }
 
-static inline vex_tensor_f32 vex_tensor_softmax(vex_tensor_f32 logits) {
-    vex_tensor_f32 out = vex_tensor_f32_alloc(logits.rows, logits.cols);
+static inline vira_tensor_f32 vira_tensor_softmax(vira_tensor_f32 logits) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc(logits.rows, logits.cols);
     for (int32_t r = 0; r < logits.rows; ++r) {
         float* in_row = &logits.data[r * logits.cols];
         float* out_row = &out.data[r * logits.cols];
@@ -1806,7 +1806,7 @@ static inline vex_tensor_f32 vex_tensor_softmax(vex_tensor_f32 logits) {
     return out;
 }
 
-static inline int64_t vex_sample_token(vex_tensor_f32 logits, float temperature) {
+static inline int64_t vira_sample_token(vira_tensor_f32 logits, float temperature) {
     int32_t total = logits.rows * logits.cols;
     if (total == 0) return 0;
 
@@ -1822,12 +1822,12 @@ static inline int64_t vex_sample_token(vex_tensor_f32 logits, float temperature)
         return best_idx;
     }
 
-    vex_tensor_f32 scaled = vex_tensor_f32_alloc(logits.rows, logits.cols);
+    vira_tensor_f32 scaled = vira_tensor_f32_alloc(logits.rows, logits.cols);
     for (int32_t i = 0; i < total; ++i) {
         scaled.data[i] = logits.data[i] / temperature;
     }
-    vex_tensor_f32 probs = vex_tensor_softmax(scaled);
-    vex_tensor_f32_free(&scaled);
+    vira_tensor_f32 probs = vira_tensor_softmax(scaled);
+    vira_tensor_f32_free(&scaled);
 
     float r = (float)rand() / (float)RAND_MAX;
     float cdf = 0.0f;
@@ -1839,34 +1839,34 @@ static inline int64_t vex_sample_token(vex_tensor_f32 logits, float temperature)
             break;
         }
     }
-    vex_tensor_f32_free(&probs);
+    vira_tensor_f32_free(&probs);
     return chosen;
 }
 
-static inline vex_tensor_f32 vex_tensor_embedding(vex_tensor_f32 table, int64_t token_id) {
+static inline vira_tensor_f32 vira_tensor_embedding(vira_tensor_f32 table, int64_t token_id) {
     if (token_id < 0 || token_id >= table.rows) {
         fprintf(stderr, "vex tensor error: embedding index %lld out of range [0, %d)\n",
                 (long long)token_id, table.rows);
         exit(1);
     }
-    vex_tensor_f32 out = vex_tensor_f32_alloc(1, table.cols);
+    vira_tensor_f32 out = vira_tensor_f32_alloc(1, table.cols);
     memcpy(out.data, &table.data[token_id * table.cols], (size_t)table.cols * sizeof(float));
     return out;
 }
 
-static inline void vex_report_mem_stats(void) {
-    vex_scheduler_shutdown();
-    printf("[vex_rt] simd=%s\n", vex_simd_backend_name());
-    printf("[vex_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",
-           _vex_sched.num_workers,
-           (long long)__atomic_load_n(&_vex_total_tasks_run, __ATOMIC_RELAXED),
-           (long long)__atomic_load_n(&_vex_total_work_steals, __ATOMIC_RELAXED));
-    printf("[vex_rt] active_leaks=%lld | total_freed=%lld\n",
-           (long long)__atomic_load_n(&_vex_active_heap_allocs, __ATOMIC_RELAXED),
-           (long long)__atomic_load_n(&_vex_total_heap_frees, __ATOMIC_RELAXED));
+static inline void vira_report_mem_stats(void) {
+    vira_scheduler_shutdown();
+    printf("[vira_rt] simd=%s\n", vira_simd_backend_name());
+    printf("[vira_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",
+           _vira_sched.num_workers,
+           (long long)__atomic_load_n(&_vira_total_tasks_run, __ATOMIC_RELAXED),
+           (long long)__atomic_load_n(&_vira_total_work_steals, __ATOMIC_RELAXED));
+    printf("[vira_rt] active_leaks=%lld | total_freed=%lld\n",
+           (long long)__atomic_load_n(&_vira_active_heap_allocs, __ATOMIC_RELAXED),
+           (long long)__atomic_load_n(&_vira_total_heap_frees, __ATOMIC_RELAXED));
     fflush(stdout);
 }
 
-#include "vex_gui.h"
+#include "vira_gui.h"
 
-#endif // VEX_RT_H
+#endif // VIRA_RT_H

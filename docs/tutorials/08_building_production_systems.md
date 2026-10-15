@@ -1,7 +1,7 @@
 # Tutorial 8: Building Production AI Pipelines
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/08_production_pipeline.vex`](../examples/08_production_pipeline.vex)
+> **Matching Code Example:** [`docs/examples/08_production_pipeline.vir`](../examples/08_production_pipeline.vir)
 
 ---
 
@@ -112,10 +112,10 @@ pub fn (mut e InferenceEngine) predict(scale f32) !f32 {
 
 ## 4. Production Compilation & Optimization
 
-When preparing Vex applications for production deployment, compile with the `-prod` flag:
+When preparing Vira applications for production deployment, compile with the `-prod` flag:
 
 ```powershell
-.\vex.exe build -prod -o pipeline.exe docs/examples/08_production_pipeline.vex
+.\vira.exe build -prod -o pipeline.exe docs/examples/08_production_pipeline.vir
 ```
 
 ### What `-prod` Activates Under the Hood:
@@ -127,7 +127,7 @@ When preparing Vex applications for production deployment, compile with the `-pr
 ### Testing for Memory Safety (`-sanitize`):
 To run automated sanitizers during CI/CD:
 ```powershell
-.\vex.exe build -sanitize -o pipeline_sanitized.exe docs/examples/08_production_pipeline.vex
+.\vira.exe build -sanitize -o pipeline_sanitized.exe docs/examples/08_production_pipeline.vir
 ```
 This enables LLVM/GCC AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (`UBSan`) to verify zero heap corruption.
 
@@ -136,7 +136,7 @@ This enables LLVM/GCC AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (
 ## 5. Running the Pipeline
 
 ```powershell
-.\vex.exe run docs/examples/08_production_pipeline.vex
+.\vira.exe run docs/examples/08_production_pipeline.vir
 ```
 
 Expected output:
@@ -150,13 +150,13 @@ Inference #2 Output Sum: 16384.00
 === 4. FINAL PIPELINE AUDIT REPORT ===
 Job [job_prod_001]: status=COMPLETED, batch=32, ops=1
 Job [job_prod_002]: status=COMPLETED, batch=64, ops=1
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=2 | work_steals=2
-[vex_rt] active_leaks=0 | total_freed=10
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=2 | work_steals=2
+[vira_rt] active_leaks=0 | total_freed=10
 ```
 
 ---
 
 ## Summary
 
-You now have a complete mastery of the Vex programming language! You can build high-performance systems, machine learning microservices, and concurrent backends with fearless concurrency and zero garbage-collector overhead.
+You now have a complete mastery of the Vira programming language! You can build high-performance systems, machine learning microservices, and concurrent backends with fearless concurrency and zero garbage-collector overhead.

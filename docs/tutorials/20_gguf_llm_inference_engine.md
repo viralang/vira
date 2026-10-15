@@ -1,4 +1,4 @@
-# Tutorial 20: Pure Vex Local LLM Inference Engine & Native GGUF Parser
+# Tutorial 20: Pure Vira Local LLM Inference Engine & Native GGUF Parser
 
 Running large language models (LLMs) locally has become the standard for private, low-latency AI applications. However, existing frameworks typically rely on massive C++ codebases (like `llama.cpp`) or heavy Python runtimes with PyTorch dependencies.
 
@@ -111,7 +111,7 @@ ffn_out := ffn_mid @ w_down
 
 ## 3. Complete Runnable Implementation
 
-Here is the complete source code from [docs/examples/19_local_llm_inference.vex](file:///c:/Users/hp/vex/docs/examples/19_local_llm_inference.vex):
+Here is the complete source code from [docs/examples/19_local_llm_inference.vir](file:///c:/Users/hp/vex/docs/examples/19_local_llm_inference.vir):
 
 ```vex
 module main
@@ -226,8 +226,8 @@ To run the local LLM generation pipeline:
 # 1. Export real GGUF binary model
 python scripts/export_micro_gguf.py
 
-# 2. Compile and run pure Vex LLM inference
-vex run docs/examples/19_local_llm_inference.vex
+# 2. Compile and run pure Vira LLM inference
+vira run docs/examples/19_local_llm_inference.vir
 ```
 
 Expected output:
@@ -243,9 +243,9 @@ Generated step 2: token_id=6 ("AI")
 Generated step 3: token_id=7 ("Vex")
 === 3. COMPLETED INFERENCE SEQUENCE ===
 Text: "The future of AI Vex"
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=109
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=109
 ```
 
 All 109 intermediate tensors across the multi-head attention, rotary rotations, softmax scoring, and SwiGLU projections were automatically, deterministically freed with **zero memory leaks (`active_leaks=0`)**!

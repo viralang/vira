@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Vex Programming Language - Linux & macOS Automated Installer & Dependency Resolver
-# Usage: curl -fsSL https://vexlang.org/install.sh | bash
+# Vira Programming Language - Linux & macOS Automated Installer & Dependency Resolver
+# Usage: curl -fsSL https://viralang.org/install.sh | bash
 #    or: ./scripts/install.sh
 
 set -e
 
-VEX_VERSION="v0.5.5"
-INSTALL_DIR="$HOME/.vex"
+VIRA_VERSION="v0.5.5"
+INSTALL_DIR="$HOME/.vir"
 BIN_DIR="$INSTALL_DIR/bin"
 RUNTIME_DIR="$INSTALL_DIR/runtime"
 LIB_DIR="$INSTALL_DIR/lib"
@@ -18,7 +18,7 @@ CYAN="$(tput setaf 6 2>/dev/null || echo '')"
 RESET="$(tput sgr0 2>/dev/null || echo '')"
 
 echo "${CYAN}${BOLD}==========================================================${RESET}"
-echo "${CYAN}${BOLD}   Vex Programming Language - Installer (${VEX_VERSION})${RESET}"
+echo "${CYAN}${BOLD}   Vira Programming Language - Installer (${VIRA_VERSION})${RESET}"
 echo "${CYAN}${BOLD}==========================================================${RESET}"
 echo ""
 
@@ -46,7 +46,7 @@ echo "${YELLOW}[2/5] Creating installation directories in $INSTALL_DIR...${RESET
 mkdir -p "$BIN_DIR" "$RUNTIME_DIR" "$LIB_DIR"
 
 # 3. Install Compiler Binary
-echo "${YELLOW}[3/5] Installing Vex compiler binary...${RESET}"
+echo "${YELLOW}[3/5] Installing Vira compiler binary...${RESET}"
 INSTALLED=0
 
 if [ -f "./vex" ]; then
@@ -64,27 +64,27 @@ elif [ -f "../vex" ]; then
     chmod +x "$BIN_DIR/vex"
     echo "  ${GREEN}✓ Installed local binary from ../vex${RESET}"
     INSTALLED=1
-elif [ -f "./dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
+elif [ -f "./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
     TMP_DIST="$(mktemp -d)"
-    tar -xzf "./dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
+    tar -xzf "./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
     cp "$TMP_DIST"/*/bin/vex "$BIN_DIR/vex"
     chmod +x "$BIN_DIR/vex"
     rm -rf "$TMP_DIST"
-    echo "  ${GREEN}✓ Installed from local package: ./dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
+    echo "  ${GREEN}✓ Installed from local package: ./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
     INSTALLED=1
-elif [ -f "../dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
+elif [ -f "../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
     TMP_DIST="$(mktemp -d)"
-    tar -xzf "../dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
+    tar -xzf "../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
     cp "$TMP_DIST"/*/bin/vex "$BIN_DIR/vex"
     chmod +x "$BIN_DIR/vex"
     rm -rf "$TMP_DIST"
-    echo "  ${GREEN}✓ Installed from local package: ../dist/vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
+    echo "  ${GREEN}✓ Installed from local package: ../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
     INSTALLED=1
 fi
 
 if [ $INSTALLED -eq 0 ]; then
-    TAR_NAME="vex-${VEX_VERSION}-${OS}-${TARGET_ARCH}.tar.gz"
-    DOWNLOAD_URL="https://github.com/micromax/vex/releases/download/${VEX_VERSION}/${TAR_NAME}"
+    TAR_NAME="vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz"
+    DOWNLOAD_URL="https://github.com/viralang/vira/releases/download/${VIRA_VERSION}/${TAR_NAME}"
     TMP_DIR="$(mktemp -d)"
 
     echo "  = Downloading $TAR_NAME from GitHub..."
@@ -106,7 +106,7 @@ if [ $INSTALLED -eq 0 ]; then
             chmod +x "$BIN_DIR/vex"
             echo "  ${GREEN}✓ Built vex binary from source via Go${RESET}"
         else
-            echo "  ${YELLOW}! Please ensure 'vex' binary is placed in $BIN_DIR${RESET}"
+            echo "  ${YELLOW}! Please ensure 'vira' binary is placed in $BIN_DIR${RESET}"
         fi
     fi
     rm -rf "$TMP_DIR"
@@ -192,7 +192,7 @@ fi
 
 # 6. Configure Shell PATH
 echo "${YELLOW}[5/5] Configuring shell PATH...${RESET}"
-PATH_LINE="export PATH=\"\$HOME/.vex/bin:\$PATH\""
+PATH_LINE="export PATH=\"\$HOME/.vir/bin:\$PATH\""
 
 SHELL_PROFILES=()
 [ -f "$HOME/.bashrc" ] && SHELL_PROFILES+=("$HOME/.bashrc")
@@ -201,26 +201,26 @@ SHELL_PROFILES=()
 
 ADDED_TO_PROFILE=0
 for profile in "${SHELL_PROFILES[@]}"; do
-    if ! grep -q ".vex/bin" "$profile" 2>/dev/null; then
+    if ! grep -q ".vir/bin" "$profile" 2>/dev/null; then
         echo "" >> "$profile"
-        echo "# Vex Programming Language" >> "$profile"
+        echo "# Vira Programming Language" >> "$profile"
         echo "$PATH_LINE" >> "$profile"
-        echo "  ${GREEN}✓ Added ~/.vex/bin to $profile${RESET}"
+        echo "  ${GREEN}✓ Added ~/.vir/bin to $profile${RESET}"
         ADDED_TO_PROFILE=1
     fi
 done
 
 if [ $ADDED_TO_PROFILE -eq 0 ]; then
-    echo "  ${GREEN}✓ ~/.vex/bin is already in shell profile${RESET}"
+    echo "  ${GREEN}✓ ~/.vir/bin is already in shell profile${RESET}"
 fi
 
 echo ""
 echo "${GREEN}${BOLD}==========================================================${RESET}"
-echo "${GREEN}${BOLD}  ✓ Vex was successfully installed to: $INSTALL_DIR${RESET}"
+echo "${GREEN}${BOLD}  ✓ Vira was successfully installed to: $INSTALL_DIR${RESET}"
 echo "${GREEN}${BOLD}==========================================================${RESET}"
 echo ""
 echo "${CYAN}Next steps:${RESET}"
 echo "  1. Reload shell:  ${BOLD}source ~/.bashrc${RESET} (or ${BOLD}source ~/.zshrc${RESET})"
 echo "  2. Verify:        ${BOLD}vex -h${RESET}"
-echo "  3. Run demo:      ${BOLD}vex run examples/gui_demo.vex${RESET}"
+echo "  3. Run demo:      ${BOLD}vira run examples/gui_demo.vir${RESET}"
 echo ""

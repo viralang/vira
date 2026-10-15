@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/autofree"
-	"github.com/vexlang/vex/internal/cgen"
-	"github.com/vexlang/vex/internal/checker"
-	"github.com/vexlang/vex/internal/lexer"
-	"github.com/vexlang/vex/internal/parser"
-	"github.com/vexlang/vex/internal/source"
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/autofree"
+	"github.com/viralang/vira/internal/cgen"
+	"github.com/viralang/vira/internal/checker"
+	"github.com/viralang/vira/internal/lexer"
+	"github.com/viralang/vira/internal/parser"
+	"github.com/viralang/vira/internal/source"
+	"github.com/viralang/vira/internal/token"
 )
 
 // --- 1. ZERO-ALLOCATION LEXER VERIFICATION & BENCHMARK ---
@@ -71,12 +71,12 @@ func BenchmarkLexerZeroAlloc(b *testing.B) {
 	}
 }
 
-// --- 2. NEGATIVE SEMANTIC DIAGNOSTIC TESTS (`testdata/checker/*.vex`) ---
+// --- 2. NEGATIVE SEMANTIC DIAGNOSTIC TESTS (`testdata/checker/*.vir`) ---
 
 func TestNegativeSemanticDiagnostics(t *testing.T) {
 	ensureTestdataSeeded(t)
 
-	files, err := filepath.Glob(filepath.Join("testdata", "checker", "*.vex"))
+	files, err := filepath.Glob(filepath.Join("testdata", "checker", "*.vir"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("failed to discover checker test files: %v", err)
 	}
@@ -192,13 +192,13 @@ fn main() {
 	}
 	// 2. Verify LIFO order: `second` must be freed before `first` inside `or { return }`
 	idxSecond := strings.Index(report, "struct_autofree(&second)")
-	idxFirst := strings.Index(report, "vex_str_free(&first)")
+	idxFirst := strings.Index(report, "vira_str_free(&first)")
 	if idxSecond == -1 || idxFirst == -1 || idxSecond > idxFirst {
 		t.Errorf("expected LIFO cleanup order (second freed before first), got report:\n%s", report)
 	}
 }
 
-// --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vex`) ---
+// --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vir`) ---
 
 func TestEndToEndGoldenAndSanitizers(t *testing.T) {
 	ensureTestdataSeeded(t)
@@ -228,10 +228,10 @@ func TestEndToEndGoldenAndSanitizers(t *testing.T) {
 	if useSanitizer {
 		t.Logf("✓ Host C compiler (%s) supports -fsanitize=address,undefined (ASan + UBSan enabled)", cCompiler)
 	} else {
-		t.Logf("ℹ Host C compiler (%s) running with standard C99 + _vex_active_heap_allocs leak check", cCompiler)
+		t.Logf("ℹ Host C compiler (%s) running with standard C99 + _vira_active_heap_allocs leak check", cCompiler)
 	}
 
-	files, err := filepath.Glob(filepath.Join("testdata", "run", "*.vex"))
+	files, err := filepath.Glob(filepath.Join("testdata", "run", "*.vir"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("failed to discover golden run tests: %v", err)
 	}
@@ -308,8 +308,8 @@ func TestEndToEndGoldenAndSanitizers(t *testing.T) {
 				t.Fatalf("binary execution failed (%v):\n%s", err, outStr)
 			}
 
-			// Verify zero runtime memory leaks via Vex telemetry counter
-			if !strings.Contains(outStr, "[vex_rt] active_leaks=0") {
+			// Verify zero runtime memory leaks via Vira telemetry counter
+			if !strings.Contains(outStr, "[vira_rt] active_leaks=0") {
 				t.Errorf("memory leak detected in %s!\nFull output:\n%s", file, outStr)
 			}
 
@@ -352,7 +352,7 @@ func parseExpectedOutputComments(src string) []string {
 }
 
 func probeSanitizerSupport(compiler string) bool {
-	tmpDir, err := os.MkdirTemp("", "vex_asan_probe_*")
+	tmpDir, err := os.MkdirTemp("", "vira_asan_probe_*")
 	if err != nil {
 		return false
 	}
@@ -378,7 +378,7 @@ func ensureTestdataSeeded(t *testing.T) {
 	_ = os.MkdirAll(runDir, 0755)
 
 	// 1. Seed Negative Checker Test: Immutability, 4-Quadrant Access, and Unhandled !T
-	negFile := filepath.Join(chkDir, "01_mutability_and_results.vex")
+	negFile := filepath.Join(chkDir, "01_mutability_and_results.vir")
 	if _, err := os.Stat(negFile); os.IsNotExist(err) {
 		_ = os.WriteFile(negFile, []byte(`module billing
 
@@ -413,7 +413,7 @@ fn main() {
 	}
 
 	// 2. Seed Negative Checker Test: Structural Interface Satisfaction
-	ifaceFile := filepath.Join(chkDir, "02_interface_satisfaction.vex")
+	ifaceFile := filepath.Join(chkDir, "02_interface_satisfaction.vir")
 	if _, err := os.Stat(ifaceFile); os.IsNotExist(err) {
 		_ = os.WriteFile(ifaceFile, []byte(`module main
 
@@ -436,13 +436,13 @@ fn main() {
 	}
 
 	// 3. Seed End-to-End Golden Test 1: OOP Struct Embedding, Interfaces & Autofree
-	oopRun := filepath.Join(runDir, "01_oop_and_autofree.vex")
+	oopRun := filepath.Join(runDir, "01_oop_and_autofree.vir")
 	if _, err := os.Stat(oopRun); os.IsNotExist(err) {
 		_ = os.WriteFile(oopRun, []byte(`module billing
 
 // OUT: Invoice #inv_9001 paid (15000 cents)
 // OUT: Invoice #inv_9001 [updated_at=1760000000]
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 pub struct AuditMeta {
 pub:
@@ -516,14 +516,14 @@ fn main() {
 	}
 
 	// 4. Seed End-to-End Golden Test 2: SIMD Tensors (@) + Parallel Future[T] Actors
-	aiActorRun := filepath.Join(runDir, "02_simd_tensors_and_actors.vex")
+	aiActorRun := filepath.Join(runDir, "02_simd_tensors_and_actors.vir")
 	if _, err := os.Stat(aiActorRun); os.IsNotExist(err) {
 		_ = os.WriteFile(aiActorRun, []byte(`module ai
 
 // OUT: Future #2 caught fault: CUDA/NaN anomaly on batch
 // OUT: Parallel Future results -> w1=131072.00, w2(faulted)=0.00, w3=262144.00
 // OUT: Worker #2 recovered Future result -> w2=196608.00
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 pub actor AIWorker {
 pub:
@@ -648,7 +648,7 @@ fn main() {
 	if !gui_should_close() {
 		gui_begin()
 		gui_clear(0x181825)
-		gui_draw_text('Hello Vex GUI', 20, 20, 18, 0xFFFFFF)
+		gui_draw_text('Hello Vira GUI', 20, 20, 18, 0xFFFFFF)
 		gui_draw_rect(10, 10, 100, 50, 0x334455)
 		gui_draw_circle(200, 200, 25.0f32, 0x8899AA)
 		gui_draw_line(0, 0, 100, 100, 0xFF0000)
@@ -686,22 +686,22 @@ fn main() {
 	cCode := gen.EmitFile(astFile)
 
 	for _, expected := range []string{
-		"vex_gui_init",
-		"vex_gui_set_target_fps",
-		"vex_gui_should_close",
-		"vex_gui_begin",
-		"vex_gui_clear",
-		"vex_gui_draw_text",
-		"vex_gui_draw_rect",
-		"vex_gui_draw_circle",
-		"vex_gui_draw_line",
-		"vex_gui_button",
-		"vex_gui_slider",
-		"vex_gui_checkbox",
-		"vex_gui_mouse_x",
-		"vex_gui_mouse_y",
-		"vex_gui_end",
-		"vex_gui_close",
+		"vira_gui_init",
+		"vira_gui_set_target_fps",
+		"vira_gui_should_close",
+		"vira_gui_begin",
+		"vira_gui_clear",
+		"vira_gui_draw_text",
+		"vira_gui_draw_rect",
+		"vira_gui_draw_circle",
+		"vira_gui_draw_line",
+		"vira_gui_button",
+		"vira_gui_slider",
+		"vira_gui_checkbox",
+		"vira_gui_mouse_x",
+		"vira_gui_mouse_y",
+		"vira_gui_end",
+		"vira_gui_close",
 	} {
 		if !strings.Contains(cCode, expected) {
 			t.Errorf("expected %s in emitted C code", expected)

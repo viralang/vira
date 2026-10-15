@@ -1,8 +1,8 @@
-# Tutorial 18: Pure Vex Autograd Engine & Native SafeTensors Loader
+# Tutorial 18: Pure Vira Autograd Engine & Native SafeTensors Loader
 
 Modern machine learning workloads depend heavily on Python-based frameworks (such as PyTorch and Hugging Face `safetensors`), creating complex deployment environments, large container footprints (often exceeding several gigabytes), and runtime memory overheads.
 
-Vex changes this paradigm by providing:
+Vira changes this paradigm by providing:
 1. **A native zero-copy SafeTensors parser** that reads Hugging Face `.safetensors` files directly into 64-byte aligned SIMD memory without Python.
 2. **First-class Autograd & backward gradient operators** for backpropagation (`tensor_matmul_grad_a`, `tensor_matmul_grad_b`, `tensor_relu_backward`).
 3. **Hardware-vectorized in-place optimizers** (`tensor_sgd_step`) accelerated by AVX2+FMA on x86-64 and NEON on ARM64.
@@ -33,11 +33,11 @@ In Vex, `safetensors_load(path, tensor_name)`:
 1. Reads the 8-byte header size $N$.
 2. Parses the JSON metadata to extract `"shape"` and `"data_offsets"`.
 3. Seeks directly to `8 + N + offset_begin`.
-4. Executes a single zero-copy DMA read directly into a 64-byte aligned `vex_tensor_f32` buffer ready for immediate AVX2 vector execution.
+4. Executes a single zero-copy DMA read directly into a 64-byte aligned `vira_tensor_f32` buffer ready for immediate AVX2 vector execution.
 
 ---
 
-## 2. Mathematical Foundations of Vex Autograd
+## 2. Mathematical Foundations of Vira Autograd
 
 Given a linear transformation with input $X \in \mathbb{R}^{M \times K}$ and weight matrix $W \in \mathbb{R}^{K \times N}$:
 
@@ -49,7 +49,7 @@ $$\frac{\partial \mathcal{L}}{\partial X} = \Delta @ W^T \quad (\text{shape } M 
 
 $$\frac{\partial \mathcal{L}}{\partial W} = X^T @ \Delta \quad (\text{shape } K \times N)$$
 
-Vex provides optimized hardware primitives for both:
+Vira provides optimized hardware primitives for both:
 - `grad_x := tensor_matmul_grad_a(diff, w)`
 - `grad_w := tensor_matmul_grad_b(x, diff)`
 
@@ -81,7 +81,7 @@ tensor_sgd_step(mut w, grad_w, 0.05)
 
 ## 4. Complete Runnable Implementation
 
-Here is the source code from [docs/examples/18_autograd_and_safetensors.vex](file:///c:/Users/hp/vex/docs/examples/18_autograd_and_safetensors.vex):
+Here is the source code from [docs/examples/18_autograd_and_safetensors.vir](file:///c:/Users/hp/vex/docs/examples/18_autograd_and_safetensors.vir):
 
 ```vex
 module main
@@ -136,7 +136,7 @@ fn main() {
 To run the example:
 ```bash
 python scripts/export_safetensors.py
-vex run docs/examples/18_autograd_and_safetensors.vex
+vira run docs/examples/18_autograd_and_safetensors.vir
 ```
 
 Expected execution output:
@@ -150,9 +150,9 @@ Step 0: loss=102.00
 Step 1: loss=20.40
 Step 2: loss=4.08
 Converged activation sum: 306.82 (target: 306.00)
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=24
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=24
 ```
 
 The loss decreases exponentially by $(1 - \eta \cdot \|X\|^2) = (1 - 0.05 \cdot 16) = 0.20$ each step:

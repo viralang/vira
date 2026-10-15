@@ -9,7 +9,7 @@ module main
 // OUT: Step 1: loss=20.40
 // OUT: Step 2: loss=4.08
 // OUT: Converged activation sum: 306.82 (target: 306.00)
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 fn main() {
 	println('=== 1. NATIVE SAFETENSORS ZERO-COPY LOADER ===')

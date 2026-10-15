@@ -1,6 +1,6 @@
 package ast
 
-import "github.com/vexlang/vex/internal/token"
+import "github.com/viralang/vira/internal/token"
 
 // Node is the base interface for all AST elements.
 type Node interface {
@@ -58,7 +58,7 @@ func (a AccessMode) String() string {
 	}
 }
 
-// File represents a single parsed .vex source file.
+// File represents a single parsed .vir source file.
 type File struct {
 	Module   Ident
 	Imports  []Ident
@@ -117,7 +117,7 @@ type StructField struct {
 	FieldSpan   token.Span
 }
 
-// StructDecl models a Vex struct or actor with composition (Embeds) and 4-quadrant fields.
+// StructDecl models a Vira struct or actor with composition (Embeds) and 4-quadrant fields.
 type StructDecl struct {
 	IsPub      bool
 	IsActor    bool // true if declared with `actor Name { ... }`
@@ -271,7 +271,7 @@ func (s *BranchStmt) stmtNode()        {}
 
 // ArenaStmt represents a lexical `arena { ... }` slab allocation block.
 type ArenaStmt struct {
-	ArenaVar string // synthetic C variable name (e.g., "_vex_arena_1")
+	ArenaVar string // synthetic C variable name (e.g., "_vira_arena_1")
 	Body     *BlockStmt
 	StmtSpan token.Span
 }
@@ -283,31 +283,31 @@ func (s *ArenaStmt) stmtNode()        {}
 type CleanupKind uint8
 
 const (
-	CleanupString    CleanupKind = iota // emits `vex_str_free(&var);`
+	CleanupString    CleanupKind = iota // emits `vira_str_free(&var);`
 	CleanupStruct                       // emits `Module__Struct_autofree(&var);`
 	CleanupInterface                    // emits `var._vtable->_autofree(var._object);`
-	CleanupArena                        // emits `vex_arena_destroy(&_arena_1);`
-	CleanupTensor                       // emits `vex_tensor_f32_free(&var);`
+	CleanupArena                        // emits `vira_arena_destroy(&_arena_1);`
+	CleanupTensor                       // emits `vira_tensor_f32_free(&var);`
 	CleanupActor                        // emits `Module__Actor_autofree(&var);`
-	CleanupFuture                       // emits `vex_future_free(&var);`
+	CleanupFuture                       // emits `vira_future_free(&var);`
 )
 
 func (k CleanupKind) String() string {
 	switch k {
 	case CleanupString:
-		return "vex_str_free"
+		return "vira_str_free"
 	case CleanupStruct:
 		return "struct_autofree"
 	case CleanupInterface:
 		return "vtable_autofree"
 	case CleanupArena:
-		return "vex_arena_destroy"
+		return "vira_arena_destroy"
 	case CleanupTensor:
-		return "vex_tensor_f32_free"
+		return "vira_tensor_f32_free"
 	case CleanupActor:
 		return "actor_autofree"
 	case CleanupFuture:
-		return "vex_future_free"
+		return "vira_future_free"
 	default:
 		return "unknown_free"
 	}

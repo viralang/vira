@@ -1,0 +1,10 @@
+*.exe
+*.o
+*.a
+build/
+bin/
+dist/
+out.c
+editors/vscode/*.vsix
+editors/vscode/node_modules/
+.vscode/

@@ -1,7 +1,7 @@
 # Tutorial 13: Hardware Acceleration, GPUs, NPUs & Heterogeneous Computing
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/13_hardware_acceleration_gpu.vex`](../examples/13_hardware_acceleration_gpu.vex)
+> **Matching Code Example:** [`docs/examples/13_hardware_acceleration_gpu.vir`](../examples/13_hardware_acceleration_gpu.vir)
 
 ---
 
@@ -45,22 +45,22 @@ In standard C++ or PyTorch servers, if a batch exceeds GPU VRAM, CUDA raises a f
 
 ---
 
-## 3. How Vex Solves the Hardware Interop Problem
+## 3. How Vira Solves the Hardware Interop Problem
 
-Vex addresses hardware acceleration at the type system, memory layout, and concurrency levels:
+Vira addresses hardware acceleration at the type system, memory layout, and concurrency levels:
 
 ### 1. Strict 64-Byte Cache-Line & DMA Alignment
-Every `tensor[f32]` in Vex is allocated on a 64-byte aligned boundary:
+Every `tensor[f32]` in Vira is allocated on a 64-byte aligned boundary:
 
 ```c
-// Vex runtime tensor layout (runtime/vex_rt.h)
+// Vira runtime tensor layout (runtime/vira_rt.h)
 typedef struct {
-    vex_f32* data;      // 64-byte cache-line aligned pointer
+    vira_f32* data;      // 64-byte cache-line aligned pointer
     void*    raw_alloc; // underlying pointer for free()
     int32_t  rows;
     int32_t  cols;
     bool     is_arena;
-} vex_tensor_f32;
+} vira_tensor_f32;
 ```
 
 - **Direct Memory Access (DMA) Ready:** 64-byte alignment matches PCIe packet boundaries and GPU cache line widths.
@@ -68,7 +68,7 @@ typedef struct {
 
 ### 2. Zero-Copy on Unified Memory (Apple Silicon & Grace Hopper)
 On modern unified architectures, the CPU and GPU share the same physical memory bus:
-- Vex bump arenas (`arena { ... }`) allocate memory directly on the unified bus.
+- Vira bump arenas (`arena { ... }`) allocate memory directly on the unified bus.
 - CPU vector units (ARM NEON) and GPU compute kernels can read and write the **exact same memory buffer** with zero transfer latency.
 
 ### 3. Erlang-Style Fault Containment for GPU OOM
@@ -121,7 +121,7 @@ When a GPU worker runs out of memory, **only that worker's task is failed**; the
 
 ## 4. Multi-Stream Asynchronous Offloading
 
-Vex integrates device execution with its native non-blocking send (`<-`) and work-stealing scheduler:
+Vira integrates device execution with its native non-blocking send (`<-`) and work-stealing scheduler:
 
 ```vex
 mut gpu_node_0 := DeviceQueueWorker{ device_id: 0, target_hardware: 'GPU_CUDA', jobs_dispatched: 0 }
@@ -166,7 +166,7 @@ While the host thread waits for the GPU kernel to finish via `.await()`, Vex's C
 Run the verified heterogeneous acceleration example:
 
 ```powershell
-.\vex.exe run docs/examples/13_hardware_acceleration_gpu.vex
+.\vira.exe run docs/examples/13_hardware_acceleration_gpu.vir
 ```
 
 ### Execution Output
@@ -180,11 +180,11 @@ Detected Hardware Compute Targets:
   [2] NVIDIA RTX / Tensor Core -> Target: GPU_CUDA (65.00 TFLOPs)
   [3] Apple Silicon GPU / Neural Engine -> Target: GPU_METAL (Unified DMA)
 Zero-Copy DMA Ready Memory Architecture:
-  * All Vex tensors are aligned to strict 64-byte cache lines.
+  * All Vira tensors are aligned to strict 64-byte cache lines.
   * Memory pointers pass directly to CUDA, ROCm, Metal, or GGML without marshalling.
 --- 2. ASYNCHRONOUS DEVICE WORKERS & STREAMS ---
 --- 3. SYNCHRONIZING DEVICE STREAMS & FAULT RECOVERY ---
-[vex_supervisor | worker_thread=0] Actor 'DeviceQueueWorker' (#1) trapped fault ('CUDA_ERROR_OUT_OF_MEMORY: device memory allocation failed on Device #1') -> O(1) arena wipe & OneForOne restart [1/3]
+[vira_supervisor | worker_thread=0] Actor 'DeviceQueueWorker' (#1) trapped fault ('CUDA_ERROR_OUT_OF_MEMORY: device memory allocation failed on Device #1') -> O(1) arena wipe & OneForOne restart [1/3]
 GPU Device #0 Output: 3276.80
 Supervisor intercepted hardware fault -> "CUDA_ERROR_OUT_OF_MEMORY: device memory allocation failed on Device #1"
 GPU Device #1 Result (Handled Safely): 0.00
@@ -194,14 +194,14 @@ GPU Device #1 recovered after supervisor restart: 6553.61
 =================================================================
    END OF HARDWARE ACCELERATION DEMO                             
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
-[vex_rt] active_leaks=0 | total_freed=18
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=18
 ```
 
 ---
 
-## 7. The Vex Hardware Acceleration Roadmap
+## 7. The Vira Hardware Acceleration Roadmap
 
 Vex's hardware roadmap is structured in three progressive tiers:
 

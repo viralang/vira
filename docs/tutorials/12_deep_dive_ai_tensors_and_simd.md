@@ -1,7 +1,7 @@
 # Tutorial 12: First-Class AI Tensors, Hardware SIMD & Multi-Language Comparison
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/12_deep_dive_tensors.vex`](../examples/12_deep_dive_tensors.vex)
+> **Matching Code Example:** [`docs/examples/12_deep_dive_tensors.vir`](../examples/12_deep_dive_tensors.vir)
 
 ---
 
@@ -15,7 +15,7 @@ While libraries provide immense flexibility, treating tensors as foreign objects
 3. **The Concurrency Barrier (GIL):** Interpreted languages rely on locks (like Python's Global Interpreter Lock) to protect object models, crippling multi-threaded parallel model inference on multicore CPUs.
 4. **Syntax Awkwardness:** Matrix math requires method chains (`a.matmul(b)`) or function calls (`torch.mm(a, b)`) rather than clean mathematical notation.
 
-Vex treats **numerical tensors as first-class citizens directly in the compiler, AST, type system, and runtime engine**.
+Vira treats **numerical tensors as first-class citizens directly in the compiler, AST, type system, and runtime engine**.
 
 ---
 
@@ -36,28 +36,28 @@ Vex treats **numerical tensors as first-class citizens directly in the compiler,
 
 ### Key Comparisons Breakdown
 
-### Vex vs. Python / PyTorch
+### Vira vs. Python / PyTorch
 - **Python's Bottleneck:** In Python, executing `y = w @ x` invokes CPython dispatch, checks type dictionaries, releases/acquires the GIL, and enters a C++ library. For small to medium matrix batches, the Python interpretation overhead frequently exceeds the actual SIMD computation time!
-- **The Vex Advantage:** Vex generates zero-overhead, direct C99 vector intrinsics. The `@` operator compiles directly to unrolled FMA loops, executing with **zero interpreter overhead, zero GIL, and zero FFI bridging**.
+- **The Vira Advantage:** Vira generates zero-overhead, direct C99 vector intrinsics. The `@` operator compiles directly to unrolled FMA loops, executing with **zero interpreter overhead, zero GIL, and zero FFI bridging**.
 
-### Vex vs. C++ (Eigen / BLAS)
+### Vira vs. C++ (Eigen / BLAS)
 - **C++'s Pitfall:** C++ requires cumbersome template metaprogramming, header inclusion chains, and notoriously tricky 16/32/64-byte pointer alignment rules (`EIGEN_MAKE_ALIGNED_OPERATOR_NEW`). Unaligned loads on AVX-512/AVX2 can cause `SIGBUS` or a 3x throughput degradation.
-- **The Vex Advantage:** Every `tensor[f32]` in Vex is guaranteed to be 64-byte cache-line aligned at creation time. Developers write standard mathematical code, while the compiler guarantees memory safety and alignment.
+- **The Vira Advantage:** Every `tensor[f32]` in Vira is guaranteed to be 64-byte cache-line aligned at creation time. Developers write standard mathematical code, while the compiler guarantees memory safety and alignment.
 
-### Vex vs. Rust (Candle / ndarray)
+### Vira vs. Rust (Candle / ndarray)
 - **Rust's Friction:** Rust provides memory safety and speed, but tensor multidimensional slicing and dynamic graph computations frequently fight the borrow checker, necessitating `Rc<RefCell<...>>` or unsafe pointer casting.
-- **The Vex Advantage:** Vex uses **Deterministic Scope-Exit Autofree** combined with **Lexical Bump Arenas (`arena { ... }`)**. The compiler mathematically tracks when a tensor leaves scope and frees it without manual lifetime annotations.
+- **The Vira Advantage:** Vira uses **Deterministic Scope-Exit Autofree** combined with **Lexical Bump Arenas (`arena { ... }`)**. The compiler mathematically tracks when a tensor leaves scope and frees it without manual lifetime annotations.
 
 ---
 
 ## 3. Hardware Architecture & SIMD Vectorization
 
-Vex is designed from the hardware up to saturate modern CPU vector registers:
+Vira is designed from the hardware up to saturate modern CPU vector registers:
 
 ```
                       VEX TENSOR MEMORY LAYOUT (64-BYTE ALIGNED)
   ┌─────────────────────────────────────────────────────────────────────────────┐
-  │ [vex_f32: 0..7] │ [vex_f32: 8..15] │ [vex_f32: 16..23] │ [vex_f32: 24..31]  │
+  │ [vira_f32: 0..7] │ [vira_f32: 8..15] │ [vira_f32: 16..23] │ [vira_f32: 24..31]  │
   └─────────────────────────────────────────────────────────────────────────────┘
    ◄─── 32 Bytes ───► ◄─── 32 Bytes ───► ◄─── 32 Bytes ───► ◄─── 32 Bytes ───►
    AVX2 YMM Register   AVX2 YMM Register   AVX2 YMM Register   AVX2 YMM Register
@@ -83,7 +83,7 @@ In multi-layer deep learning pipelines (like Transformers or MLPs), forward pass
 
 If each matrix invokes `malloc()` and `free()`, memory fragmentation spikes and performance stalls.
 
-Vex provides **Lexical Bump Arenas**:
+Vira provides **Lexical Bump Arenas**:
 
 ```vex
 arena {
@@ -166,7 +166,7 @@ res4 := fut4.await() or { 0.0 }
 
 ## 6. Complete Developer Walkthrough
 
-Let's examine the complete standalone program in [`docs/examples/12_deep_dive_tensors.vex`](../examples/12_deep_dive_tensors.vex):
+Let's examine the complete standalone program in [`docs/examples/12_deep_dive_tensors.vir`](../examples/12_deep_dive_tensors.vir):
 
 ```vex
 module deep_dive_tensors
@@ -239,13 +239,13 @@ fn main() {
 To execute directly in JIT/development mode:
 
 ```powershell
-.\vex.exe run docs/examples/12_deep_dive_tensors.vex
+.\vira.exe run docs/examples/12_deep_dive_tensors.vir
 ```
 
 To compile a production-ready, stripped standalone native binary:
 
 ```powershell
-.\vex.exe build -prod -o ai_server.exe docs/examples/12_deep_dive_tensors.vex
+.\vira.exe build -prod -o ai_server.exe docs/examples/12_deep_dive_tensors.vir
 .\ai_server.exe
 ```
 
@@ -276,9 +276,9 @@ Multicore Actor Inference Results:
 =================================================================
    END OF AI TENSOR DEEP DIVE (Review Telemetry Below)           
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
-[vex_rt] active_leaks=0 | total_freed=28
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=28
 ```
 
 ### Summary of Guarantees

@@ -93,6 +93,6 @@ fn main() {
 	println('Total batches completed on Node 1: ${n1.batches_completed}')
 
 	println('=================================================================')
-	println('   END OF CONCURRENCY DEMO (Review [vex_rt] Telemetry Below)     ')
+	println('   END OF CONCURRENCY DEMO (Review [vira_rt] Telemetry Below)     ')
 	println('=================================================================')
 }

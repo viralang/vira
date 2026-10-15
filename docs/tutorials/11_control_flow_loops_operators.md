@@ -1,13 +1,13 @@
 # Tutorial 11: Control Flow, Loops, and Operators
 
 > **Difficulty:** Beginner to Intermediate  
-> **Matching Code Example:** [`docs/examples/11_control_flow_loops_operators.vex`](../examples/11_control_flow_loops_operators.vex)
+> **Matching Code Example:** [`docs/examples/11_control_flow_loops_operators.vir`](../examples/11_control_flow_loops_operators.vir)
 
 ---
 
 ## 1. Overview
 
-Vex combines expressive, clean syntax with zero-overhead C99 emission. Unlike languages with sprawling operator overloading or ambiguous ternary expressions, Vex emphasizes:
+Vira combines expressive, clean syntax with zero-overhead C99 emission. Unlike languages with sprawling operator overloading or ambiguous ternary expressions, Vira emphasizes:
 - **Explicit Branching:** Predictable `if` / `else if` / `else` chains.
 - **Unified Loop Keyword (`for`):** One keyword for all looping needs: C-style 3-part iterations, condition-only (while) loops, and infinite event loops.
 - **Fine-Grained Loop Control:** Native `break` and `continue`.
@@ -17,7 +17,7 @@ Vex combines expressive, clean syntax with zero-overhead C99 emission. Unlike la
 
 ## 2. Conditional Branching (`if`, `else if`, `else`)
 
-Conditions in Vex do not require parentheses around the test expression, but braces `{ ... }` around the body are mandatory:
+Conditions in Vira do not require parentheses around the test expression, but braces `{ ... }` around the body are mandatory:
 
 ```vex
 fn classify_temperature(temp f32) string {
@@ -43,7 +43,7 @@ fn classify_temperature(temp f32) string {
 
 ## 3. The Unified `for` Loop
 
-Vex unifies all iteration patterns under the `for` keyword.
+Vira unifies all iteration patterns under the `for` keyword.
 
 ### Form 1: 3-Part C-Style Loop
 Used for counted iterations over intervals:
@@ -189,7 +189,7 @@ pub fn (node TelemetryNode) has_flag(flag int) bool {
 }
 ```
 
-### Vex Special Operators
+### Vira Special Operators
 
 | Operator | Name | Purpose | Example |
 | :---: | :--- | :--- | :--- |
@@ -202,7 +202,7 @@ pub fn (node TelemetryNode) has_flag(flag int) bool {
 
 ## 5. Operator Precedence Hierarchy
 
-Vex utilizes a Pratt precedence-climbing parser with unambiguous precedence tiers:
+Vira utilizes a Pratt precedence-climbing parser with unambiguous precedence tiers:
 
 | Tier | Precedence Level | Operators | Associativity |
 | :---: | :---: | :--- | :---: |
@@ -222,7 +222,7 @@ Vex utilizes a Pratt precedence-climbing parser with unambiguous precedence tier
 Execute the verified example:
 
 ```powershell
-.\vex.exe run docs/examples/11_control_flow_loops_operators.vex
+.\vira.exe run docs/examples/11_control_flow_loops_operators.vir
 ```
 
 ### Execution Output
@@ -266,7 +266,7 @@ SIMD Matmul (@) total sum of 16x16: 4096.00
 =================================================================
    END OF FLOW, LOOPS & OPERATORS DEMO                           
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=27
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=27
 ```

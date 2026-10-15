@@ -1,7 +1,7 @@
 # Tutorial 14: Neural Network Inference on CPU SIMD vs. GPU Compute Streams
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/14_neural_network_cpu_gpu.vex`](../examples/14_neural_network_cpu_gpu.vex)
+> **Matching Code Example:** [`docs/examples/14_neural_network_cpu_gpu.vir`](../examples/14_neural_network_cpu_gpu.vir)
 
 ---
 
@@ -30,7 +30,7 @@ In modern AI production services, serving deep neural networks poses a fundament
    - How do you write a clean, unified neural network model that can execute deterministically on **both** CPU and GPU without code duplication?
    - How do you protect your server from crashing when a GPU runs out of VRAM (`CUDA_ERROR_OUT_OF_MEMORY`)?
 
-Vex solves this by combining **first-class tensor SIMD primitives**, **zero-allocation bump arenas**, and **supervised actor concurrency**.
+Vira solves this by combining **first-class tensor SIMD primitives**, **zero-allocation bump arenas**, and **supervised actor concurrency**.
 
 ---
 
@@ -53,7 +53,7 @@ pub:
 ```
 
 ### First-Class AI Tensor Primitives
-Vex provides hardware-accelerated tensor primitives out of the box:
+Vira provides hardware-accelerated tensor primitives out of the box:
 - `@` : 64-byte cache-line aligned matrix multiplication (AVX2+FMA / ARM NEON).
 - `tensor_add(a, b)` : SIMD element-wise bias addition.
 - `tensor_relu(t)` : Vectorized ReLU non-linearity ($\max(0, x)$).
@@ -168,7 +168,7 @@ gpu1_output := fut_gpu1.await() or {
 
 ## 5. Numerical Parity Verification
 
-Because Vex uses strict IEEE 754 single-precision floating point representations and contiguous 64-byte aligned memory layouts, the CPU SIMD execution and GPU device compute stream produce **identical mathematical activations**:
+Because Vira uses strict IEEE 754 single-precision floating point representations and contiguous 64-byte aligned memory layouts, the CPU SIMD execution and GPU device compute stream produce **identical mathematical activations**:
 
 ```vex
 if cpu_output == gpu0_output {
@@ -183,7 +183,7 @@ if cpu_output == gpu0_output {
 Run the neural network CPU vs. GPU inference example:
 
 ```powershell
-.\vex.exe run docs/examples/14_neural_network_cpu_gpu.vex
+.\vira.exe run docs/examples/14_neural_network_cpu_gpu.vir
 ```
 
 ### Execution Output & Telemetry
@@ -202,7 +202,7 @@ CPU Inferences Processed       : 1
 CPU Memory Profile             : O(1) Bump Arena (Zero Heap Allocs)
 --- 3. GPU ASYNCHRONOUS DEVICE STREAM INFERENCE ---
 Dispatching asynchronous forward passes to GPU device streams...
-[vex_supervisor | worker_thread=0] Actor 'GpuInferenceEngine' (#1) trapped fault ('CUDA_ERROR_OUT_OF_MEMORY: device buffer allocation failed on GPU #1') -> O(1) arena wipe & OneForOne restart [1/3]
+[vira_supervisor | worker_thread=0] Actor 'GpuInferenceEngine' (#1) trapped fault ('CUDA_ERROR_OUT_OF_MEMORY: device buffer allocation failed on GPU #1') -> O(1) arena wipe & OneForOne restart [1/3]
 GPU #0 Forward Pass Result Metric: 129.46
 Supervisor intercepted GPU error -> "CUDA_ERROR_OUT_OF_MEMORY: device buffer allocation failed on GPU #1"
 Gracefully rerouting batch to CPU fallback engine!
@@ -214,9 +214,9 @@ GPU #1 Post-Restart Forward Pass : 129.46
 =================================================================
    END OF NEURAL NETWORK CPU/GPU TEST                            
 =================================================================
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=4 | actor_tasks_run=3 | work_steals=3
-[vex_rt] active_leaks=0 | total_freed=22
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=4 | actor_tasks_run=3 | work_steals=3
+[vira_rt] active_leaks=0 | total_freed=22
 ```
 
 ---

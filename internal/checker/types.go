@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vexlang/vex/internal/ast"
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/ast"
+	"github.com/viralang/vira/internal/token"
 )
 
 // Type represents a resolved semantic type in Vex.
@@ -187,7 +187,7 @@ type PromotedMethod struct {
 	Ambiguous bool
 }
 
-// StructType models a resolved Vex struct or actor with 4-quadrant fields, methods, and embedded promotions.
+// StructType models a resolved Vira struct or actor with 4-quadrant fields, methods, and embedded promotions.
 type StructType struct {
 	Module          string
 	Name            string

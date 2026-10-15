@@ -13,8 +13,8 @@ fn simulate_standard_autofree() {
 	r2 := ReportRecord{ tag: 'batch_beta', value: 200 }
 	println('Created records: ${r1.tag}=${r1.value}, ${r2.tag}=${r2.value}')
 	// Destructors injected automatically at scope exit:
-	// vex_str_free(&r2.tag)
-	// vex_str_free(&r1.tag)
+	// vira_str_free(&r2.tag)
+	// vira_str_free(&r1.tag)
 }
 
 fn simulate_arena_batch() {

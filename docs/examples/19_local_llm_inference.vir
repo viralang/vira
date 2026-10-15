@@ -11,7 +11,7 @@ module main
 // OUT: Generated step 3: token_id=7 ("Vex")
 // OUT: === 3. COMPLETED INFERENCE SEQUENCE ===
 // OUT: Text: "The future of AI Vex"
-// OUT: [vex_rt] active_leaks=0
+// OUT: [vira_rt] active_leaks=0
 
 fn vocab_decode(id int) string {
 	if id == 3 {

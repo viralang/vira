@@ -85,7 +85,7 @@ fn main() {
 	println('  [3] ${metal_prof.name} -> Target: ${metal_prof.device_type} (Unified DMA)')
 
 	println('Zero-Copy DMA Ready Memory Architecture:')
-	println('  * All Vex tensors are aligned to strict 64-byte cache lines.')
+	println('  * All Vira tensors are aligned to strict 64-byte cache lines.')
 	println('  * Memory pointers pass directly to CUDA, ROCm, Metal, or GGML without marshalling.')
 
 	println('--- 2. ASYNCHRONOUS DEVICE WORKERS & STREAMS ---')

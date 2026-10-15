@@ -1,13 +1,13 @@
 # Tutorial 3: Structural Interfaces & Dynamic Dispatch
 
 > **Difficulty:** Intermediate  
-> **Matching Code Example:** [`docs/examples/03_interfaces.vex`](../examples/03_interfaces.vex)
+> **Matching Code Example:** [`docs/examples/03_interfaces.vir`](../examples/03_interfaces.vir)
 
 ---
 
 ## 1. Overview
 
-Vex implements **structural subtyping** (often called "duck typing" with compile-time type safety). You do not explicitly declare that a type implements an interface; if a struct defines methods matching an interface's signatures, it satisfies that interface automatically.
+Vira implements **structural subtyping** (often called "duck typing" with compile-time type safety). You do not explicitly declare that a type implements an interface; if a struct defines methods matching an interface's signatures, it satisfies that interface automatically.
 
 In this tutorial, you will learn:
 - How to declare interfaces
@@ -72,8 +72,8 @@ Neither `EmailService` nor `WebhookService` contains an `implements Notifier` cl
 To utilize runtime polymorphism, box a satisfying struct instance into an interface value:
 
 ```vex
-email := EmailService{ smtp_host: 'smtp.vex.internal:587' }
-webhook := WebhookService{ endpoint: 'https://api.vex.dev/events' }
+email := EmailService{ smtp_host: 'smtp.vir.internal:587' }
+webhook := WebhookService{ endpoint: 'https://api.vir.dev/events' }
 
 // Boxing into 16-byte fat-pointers
 n1 := Notifier(email)
@@ -82,7 +82,7 @@ n2 := Notifier(webhook)
 
 ### Memory Layout Under the Hood
 
-An interface value in Vex is a 16-byte fat pointer consisting of two 64-bit addresses:
+An interface value in Vira is a 16-byte fat pointer consisting of two 64-bit addresses:
 
 ```
 +-----------------------------------+------------------------------------+
@@ -94,7 +94,7 @@ When you invoke a method on an interface variable:
 ```vex
 println(n1.channel_name())
 ```
-The Vex compiler generates a direct vtable dereference in C99:
+The Vira compiler generates a direct vtable dereference in C99:
 ```c
 n1._vtable->channel_name(n1._object);
 ```
@@ -107,8 +107,8 @@ Every generated vtable includes an internal `._autofree` hook:
 
 ```c
 typedef struct Notifier_vtable {
-    vex_string (*channel_name)(const void* _self);
-    vex_string (*send)(const void* _self, vex_string, vex_string);
+    vira_string (*channel_name)(const void* _self);
+    vira_string (*send)(const void* _self, vira_string, vira_string);
     void (*_autofree)(void* _self); // Injected by compiler
 } Notifier_vtable;
 ```
@@ -124,18 +124,18 @@ This ensures that both the boxed heap container and any heap-allocated fields (l
 ## 6. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/03_interfaces.vex
+.\vira.exe run docs/examples/03_interfaces.vir
 ```
 
 Expected output:
 ```text
 === 1. IMPLICIT INTERFACE SATISFACTION & FAT-POINTER BOXING ===
 === 2. POLYMORPHIC VTABLE DISPATCH ===
-Email [SMTP via smtp.vex.internal:587]
+Email [SMTP via smtp.vir.internal:587]
 Delivered email to ops@company.com: Database migration completed
-Webhook [POST https://api.vex.dev/events]
+Webhook [POST https://api.vir.dev/events]
 Triggered webhook for slack_bot with payload "All deployment checks passed"
-[vex_rt] active_leaks=0 | total_freed=6
+[vira_rt] active_leaks=0 | total_freed=6
 ```
 
 ---

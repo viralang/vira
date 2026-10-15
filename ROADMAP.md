@@ -1,12 +1,12 @@
-# Vex Language Roadmap & Strategic Frontiers
+# Vira Language Roadmap & Strategic Frontiers
 
-Welcome to the official roadmap for the **Vex Programming Language**! This document tracks our completed milestones, current architectural foundation, and upcoming strategic frontiers on the path to **v1.0**.
+Welcome to the official roadmap for the **Vira Programming Language**! This document tracks our completed milestones, current architectural foundation, and upcoming strategic frontiers on the path to **v1.0**.
 
 ---
 
 ## 🎯 Vision & Core Philosophy
 
-Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered specifically for **native AI systems, deterministic performance, and actor concurrency**.
+Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered specifically for **native AI systems, deterministic performance, and actor concurrency**.
 
 * **Deterministic Resource Management:** Zero garbage collector overhead, zero hidden pauses, and zero memory leaks (`active_leaks=0`) via static scope escape analysis (Autofree) and 64-byte aligned bump arenas.
 * **First-Class AI Tensors:** Contiguous, cache-friendly tensor representations with built-in hardware SIMD vectorization (AVX2 + FMA, ARM NEON), native Hugging Face `.safetensors`, and GGUF v2/v3 local LLM inference with zero Python or C++ runtime dependencies.
@@ -67,11 +67,11 @@ Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered s
   - Temperature-scaled token sampling generating autoregressive text.
 
 ### 4. Developer Tooling & Package Ecosystem (v0.5.5)
-- [x] **Code Formatter (`vex fmt`):** AST-aware formatter with `-w` in-place formatting and automated multi-file directory discovery.
-- [x] **Automated Test Runner (`vex test`):** Synthesizes isolated test harnesses, runs `*_test.vex` files, and automatically validates zero memory leaks (`active_leaks=0`).
-- [x] **Language Server Protocol (`vex lsp`):** Standard JSON-RPC 2.0 LSP server providing diagnostics, hover documentation, and on-save formatting.
+- [x] **Code Formatter (`vira fmt`):** AST-aware formatter with `-w` in-place formatting and automated multi-file directory discovery.
+- [x] **Automated Test Runner (`vira test`):** Synthesizes isolated test harnesses, runs `*_test.vir` files, and automatically validates zero memory leaks (`active_leaks=0`).
+- [x] **Language Server Protocol (`vira lsp`):** Standard JSON-RPC 2.0 LSP server providing diagnostics, hover documentation, and on-save formatting.
 - [x] **VS Code Extension (`editors/vscode/`):** Full extension package with syntax grammar, bracket matching, code snippets, and LSP client integration.
-- [x] **Package Manifest & Multi-File Projects (`vex init` & `vex.mod`):** Scaffolding and multi-file directory compilation into single unified binaries.
+- [x] **Package Manifest & Multi-File Projects (`vira init` & `vex.mod`):** Scaffolding and multi-file directory compilation into single unified binaries.
 - [x] **Curriculum & Documentation:** 19 runnable standalone examples and 20 step-by-step tutorials with verified 0 leaks.
 
 ---
@@ -90,7 +90,7 @@ Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered s
   - Non-blocking socket polling (`select`/`epoll`/`kqueue`/`WSAPoll`).
 - [ ] **Real-Time Token Streaming (SSE):**
   - Native Server-Sent Events (`text/event-stream`) chunked response writer.
-  - Hook the pure Vex GGUF inference engine directly into the streaming writer, yielding tokens to web clients token-by-token with sub-millisecond dispatch.
+  - Hook the pure Vira GGUF inference engine directly into the streaming writer, yielding tokens to web clients token-by-token with sub-millisecond dispatch.
 - [ ] **Standardized JSON Schema Serialization:**
   - High-level struct-to-JSON serialization (`json_encode(struct)`) matching OpenAI-compatible completion specifications.
 
@@ -108,12 +108,12 @@ Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered s
     }
     ```
   - Linking flags (`-l`, `-L`) integrated into `vex.mod` manifests.
-- [ ] **Shared Dynamic Library Compilation (`vex build -shared`):**
+- [ ] **Shared Dynamic Library Compilation (`vira build -shared`):**
   - Produce `.dll` (Windows), `.so` (Linux), and `.dylib` (macOS) shared libraries adhering to standard C-ABI calling conventions.
-  - Automatic C header file (`.h`) generation matching exported public Vex functions.
+  - Automatic C header file (`.h`) generation matching exported public Vira functions.
 - [ ] **Python Interoperability / C-Extension Generator:**
   - Tooling command `vex pybind` generating Python C-extension bindings with zero-copy NumPy / PyTorch tensor buffer interchange.
-  - Enables Python data science stacks to invoke Vex SIMD tensors and local GGUF models directly.
+  - Enables Python data science stacks to invoke Vira SIMD tensors and local GGUF models directly.
 
 ---
 
@@ -168,7 +168,7 @@ Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered s
   - Dependency fetching via Git repositories (`vex get github.com/user/pkg`).
   - Deterministic lockfile generation (`vex.lock`) with cryptographic hash verification.
 - [ ] **Documentation Generator (`vex doc`):**
-  - Extract docstrings and type signatures from `.vex` source code and generate browsable, search-indexed static HTML documentation sites.
+  - Extract docstrings and type signatures from `.vir` source code and generate browsable, search-indexed static HTML documentation sites.
 - [ ] **Standard Library Expansion:**
   - Cryptography (`crypto/sha256`, `crypto/aes`).
   - Compression (`compress/gzip`, `compress/zstd`).
@@ -180,13 +180,13 @@ Vex is an Ahead-Of-Time (AOT) compiled systems programming language engineered s
 
 ## 📊 Quality & Performance Standards
 
-Every feature added to the Vex codebase must adhere to the following non-negotiable principles:
+Every feature added to the Vira codebase must adhere to the following non-negotiable principles:
 
 | Metric | Target Standard | Verification Method |
 | :--- | :--- | :--- |
 | **Memory Leaks** | Exactly `0` (`active_leaks=0`) | Runtime leak counter and GCC `-fsanitize=address` |
-| **Test Coverage** | 100% green test suite | `go test ./...` and `vex test` |
-| **Documentation** | Tutorial + Example pair | Every major feature requires a runnable `.vex` example and a markdown tutorial in `docs/` |
+| **Test Coverage** | 100% green test suite | `go test ./...` and `vira test` |
+| **Documentation** | Tutorial + Example pair | Every major feature requires a runnable `.vir` example and a markdown tutorial in `docs/` |
 | **Cross-Platform** | Zero Windows/Linux/macOS friction | Tested across Win32/MinGW, Linux (glibc/musl), and macOS (Apple Clang) |
 | **SIMD Alignment** | 64-byte aligned buffers | Tested for AVX2 (256-bit) and ARM NEON (128-bit) alignment |
 
@@ -194,7 +194,7 @@ Every feature added to the Vex codebase must adhere to the following non-negotia
 
 ## 🤝 Contributing & Community
 
-* **Source Code:** [github.com/vexlang/vex](https://github.com/vexlang/vex)
+* **Source Code:** [github.com/viralang/vira](https://github.com/viralang/vira)
 * **Language Tutorials:** [docs/tutorials/](docs/tutorials/)
 * **Runnable Examples:** [docs/examples/](docs/examples/)
 * **Language Specification & Architecture:** [LANGUAGE_GUIDE.md](LANGUAGE_GUIDE.md)

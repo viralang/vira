@@ -1,7 +1,7 @@
 # Tutorial 10: Threads, Actors, Synchronization, and Fault Tolerance
 
 > **Difficulty:** Advanced  
-> **Matching Code Example:** [`docs/examples/10_threads_actors_fault_tolerance.vex`](../examples/10_threads_actors_fault_tolerance.vex)
+> **Matching Code Example:** [`docs/examples/10_threads_actors_fault_tolerance.vir`](../examples/10_threads_actors_fault_tolerance.vir)
 
 ---
 
@@ -12,7 +12,7 @@ Modern multicore systems require concurrency models that eliminate data races, d
 - **Deadlocks & Inversions:** Inconsistent lock ordering causing full application freeze.
 - **State Corruption on Panic:** If a thread crashes while holding a lock, memory is left in an undefined state.
 
-Vex solves these problems by combining **Actor Isolation**, **Chase-Lev Work-Stealing Threads**, **Non-blocking Message Passing**, **Future Synchronization**, and **Erlang-Style Supervisor Boundaries**:
+Vira solves these problems by combining **Actor Isolation**, **Chase-Lev Work-Stealing Threads**, **Non-blocking Message Passing**, **Future Synchronization**, and **Erlang-Style Supervisor Boundaries**:
 
 ```
 +───────────────────────────────────────────────────────────────────────────────+
@@ -41,7 +41,7 @@ Vex solves these problems by combining **Actor Isolation**, **Chase-Lev Work-Ste
 
 ## 2. Defining an Actor
 
-An actor in Vex is declared with the `actor` keyword. Like structs, actors support 4-quadrant field encapsulation (`pub:`, `mut:`, `pub mut:`, or default private):
+An actor in Vira is declared with the `actor` keyword. Like structs, actors support 4-quadrant field encapsulation (`pub:`, `mut:`, `pub mut:`, or default private):
 
 ```vex
 pub actor ComputeNode {
@@ -227,7 +227,7 @@ println('Total batches completed on Node 1: ${n1.batches_completed}')
 Run the verified standalone program:
 
 ```powershell
-.\vex.exe run docs/examples/10_threads_actors_fault_tolerance.vex
+.\vira.exe run docs/examples/10_threads_actors_fault_tolerance.vir
 ```
 
 ### Terminal Output
@@ -252,9 +252,9 @@ Node 3 successfully processed retry batch after restart: 24576.00
 Sequential Mailbox for Node 1: run1=12288.00, run2=20480.00
 Total batches completed on Node 1: 3
 =================================================================
-   END OF CONCURRENCY DEMO (Review [vex_rt] Telemetry Below)     
+   END OF CONCURRENCY DEMO (Review [vira_rt] Telemetry Below)     
 =================================================================
-[vex_rt] pool_workers=4 | actor_tasks_run=7 | work_steals=7 | active_leaks=0 | total_freed=19
+[vira_rt] pool_workers=4 | actor_tasks_run=7 | work_steals=7 | active_leaks=0 | total_freed=19
 ```
 
 ### Key Telemetry Takeaways
@@ -267,7 +267,7 @@ Total batches completed on Node 1: 3
 
 ## 10. Summary & Cheat Sheet
 
-| Concurrency Need | Traditional C / C++ / Go | Vex Actor Model |
+| Concurrency Need | Traditional C / C++ / Go | Vira Actor Model |
 | :--- | :--- | :--- |
 | **Data Sharing** | Shared mutable pointers with `mutex` | Completely isolated actor state |
 | **Message Dispatch** | Channel buffering or thread pools | Native `<-` operator returning `Future[T]` |

@@ -4,7 +4,7 @@ import (
 	"strings"
 )
 
-// Format formats a Vex source code string according to standard style guidelines.
+// Format formats a Vira source code string according to standard style guidelines.
 func Format(src string) string {
 	lines := strings.Split(src, "\n")
 	var result []string

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vexlang/vex/internal/formatter"
+	"github.com/viralang/vira/internal/formatter"
 )
 
 func TestFormatBasicIndentation(t *testing.T) {

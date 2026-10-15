@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vexlang/vex/internal/token"
+	"github.com/viralang/vira/internal/token"
 )
 
 // ANSI color codes for terminal diagnostics
@@ -17,7 +17,7 @@ const (
 	colorYellow = "\033[33m"
 )
 
-// File indexes a .vex source file's newline offsets for O(log N) span-to-line resolution.
+// File indexes a .vir source file's newline offsets for O(log N) span-to-line resolution.
 type File struct {
 	Filename   string
 	Content    string

@@ -23,10 +23,10 @@ type Target struct {
 }
 
 var targets = []Target{
-	{OS: "windows", Arch: "amd64", ExeName: "vex.exe", Archive: "zip"},
-	{OS: "linux", Arch: "amd64", ExeName: "vex", Archive: "tar.gz"},
-	{OS: "darwin", Arch: "arm64", ExeName: "vex", Archive: "tar.gz"},
-	{OS: "darwin", Arch: "amd64", ExeName: "vex", Archive: "tar.gz"},
+	{OS: "windows", Arch: "amd64", ExeName: "vira.exe", Archive: "zip"},
+	{OS: "linux", Arch: "amd64", ExeName: "vira", Archive: "tar.gz"},
+	{OS: "darwin", Arch: "arm64", ExeName: "vira", Archive: "tar.gz"},
+	{OS: "darwin", Arch: "amd64", ExeName: "vira", Archive: "tar.gz"},
 }
 
 func main() {
@@ -36,10 +36,10 @@ func main() {
 		fatal("failed to create dist directory: %v", err)
 	}
 
-	fmt.Printf("=== Packaging Vex Programming Language [%s] ===\n\n", version)
+	fmt.Printf("=== Packaging Vira Programming Language [%s] ===\n\n", version)
 
 	for _, tgt := range targets {
-		targetName := fmt.Sprintf("vex-%s-%s-%s", version, tgt.OS, tgt.Arch)
+		targetName := fmt.Sprintf("vira-%s-%s-%s", version, tgt.OS, tgt.Arch)
 		fmt.Printf("Building %s (%s/%s)...\n", targetName, tgt.OS, tgt.Arch)
 
 		tempDir, err := os.MkdirTemp("", targetName+"-*")
@@ -54,7 +54,7 @@ func main() {
 
 		outBinary := filepath.Join(binDir, tgt.ExeName)
 
-		// 1. Cross-compile Vex binary
+		// 1. Cross-compile Vira binary
 		cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", outBinary, "./cmd/vex")
 		cmd.Env = append(os.Environ(),
 			"GOOS="+tgt.OS,

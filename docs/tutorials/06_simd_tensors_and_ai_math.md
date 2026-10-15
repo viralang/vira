@@ -1,7 +1,7 @@
 # Tutorial 6: First-Class AI Tensors & SIMD Acceleration
 
 > **Difficulty:** Intermediate  
-> **Matching Code Example:** [`docs/examples/06_simd_tensors.vex`](../examples/06_simd_tensors.vex)
+> **Matching Code Example:** [`docs/examples/06_simd_tensors.vir`](../examples/06_simd_tensors.vir)
 
 ---
 
@@ -9,7 +9,7 @@
 
 Most general-purpose programming languages treat matrix math and tensor operations as third-party library extensions (e.g. NumPy, PyTorch).
 
-Vex integrates **2D numerical tensors directly into the language syntax and type system**:
+Vira integrates **2D numerical tensors directly into the language syntax and type system**:
 - Native `tensor[f32]` and `tensor[bf16]` types
 - First-class matrix multiplication operator (`@`)
 - Automatic hardware SIMD vectorization (AVX2, FMA, ARM NEON)
@@ -50,7 +50,7 @@ If the inner dimensions mismatch, the compiler raises a compile-time semantic er
 
 ## 4. Hardware SIMD Backends
 
-The Vex single-header runtime (`vex_rt.h`) automatically vectorizes `@` based on target architecture:
+The Vira single-header runtime (`vira_rt.h`) automatically vectorizes `@` based on target architecture:
 
 ### 1. x86_64 AVX2 + FMA (256-bit Vector Registers)
 - Employs 8-wide single-precision float vectors (`__m256`).
@@ -100,7 +100,7 @@ All intermediate matrices (`w1`, `x`, `y1`, `w2`, `y2`) are automatically freed 
 ## 7. Running the Code
 
 ```powershell
-.\vex.exe run docs/examples/06_simd_tensors.vex
+.\vira.exe run docs/examples/06_simd_tensors.vir
 ```
 
 Expected output:
@@ -115,9 +115,9 @@ TensorSum(X): 8192.00
 TensorSum(Y = W @ X): 262144.00
 === 4. MULTI-LAYER TENSOR FORWARD PASS ===
 Layer 2 Output Sum: 1677714.75
-[vex_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vex_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
-[vex_rt] active_leaks=0 | total_freed=9
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
+[vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
+[vira_rt] active_leaks=0 | total_freed=9
 ```
 
 ---

@@ -1,16 +1,16 @@
-# Vex Programming Language - Windows Automated Installer & Dependency Resolver
+# Vira Programming Language - Windows Automated Installer & Dependency Resolver
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
 
 $VexVersion = "v0.5.5"
-$InstallDir = "$env:USERPROFILE\.vex"
+$InstallDir = "$env:USERPROFILE\.vir"
 $BinDir     = "$InstallDir\bin"
 $RuntimeDir = "$InstallDir\runtime"
 $LibDir     = "$InstallDir\lib"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   Vex Programming Language - Windows Installer ($VexVersion)" -ForegroundColor Cyan
+Write-Host "   Vira Programming Language - Windows Installer ($VexVersion)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -20,44 +20,44 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LibDir | Out-Null
 
-# 2. Locate or Download vex.exe
-Write-Host "[2/5] Installing Vex compiler binary..." -ForegroundColor Yellow
+# 2. Locate or Download vira.exe
+Write-Host "[2/5] Installing Vira compiler binary..." -ForegroundColor Yellow
 $SourceExe = $null
 
-if (Test-Path ".\vex.exe") {
-    $SourceExe = ".\vex.exe"
-} elseif (Test-Path ".\bin\vex.exe") {
-    $SourceExe = ".\bin\vex.exe"
-} elseif (Test-Path "..\vex.exe") {
-    $SourceExe = "..\vex.exe"
+if (Test-Path ".\vira.exe") {
+    $SourceExe = ".\vira.exe"
+} elseif (Test-Path ".\bin\vira.exe") {
+    $SourceExe = ".\bin\vira.exe"
+} elseif (Test-Path "..\vira.exe") {
+    $SourceExe = "..\vira.exe"
 } elseif (Test-Path ".\dist\vex-$VexVersion-windows-amd64.zip") {
     Expand-Archive -Path ".\dist\vex-$VexVersion-windows-amd64.zip" -DestinationPath "$env:TEMP\vex-dist" -Force
-    $SourceExe = (Get-ChildItem -Path "$env:TEMP\vex-dist" -Filter "vex.exe" -Recurse).FullName
+    $SourceExe = (Get-ChildItem -Path "$env:TEMP\vex-dist" -Filter "vira.exe" -Recurse).FullName
 }
 
 if ($SourceExe) {
-    Copy-Item -Path $SourceExe -Destination "$BinDir\vex.exe" -Force
+    Copy-Item -Path $SourceExe -Destination "$BinDir\vira.exe" -Force
     Write-Host "  ✓ Installed local binary from $SourceExe" -ForegroundColor Green
 } else {
-    Write-Host "  = Downloading vex.exe ($VexVersion)..." -ForegroundColor Gray
-    $DownloadUrl = "https://github.com/micromax/vex/releases/download/$VexVersion/vex-$VexVersion-windows-amd64.zip"
+    Write-Host "  = Downloading vira.exe ($VexVersion)..." -ForegroundColor Gray
+    $DownloadUrl = "https://github.com/viralang/vira/releases/download/$VexVersion/vex-$VexVersion-windows-amd64.zip"
     $ZipPath = "$env:TEMP\vex-install.zip"
     try {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath -UseBasicParsing
         Expand-Archive -Path $ZipPath -DestinationPath "$env:TEMP\vex-extract" -Force
-        Copy-Item -Path "$env:TEMP\vex-extract\*\bin\vex.exe" -Destination "$BinDir\vex.exe" -Force
+        Copy-Item -Path "$env:TEMP\vex-extract\*\bin\vira.exe" -Destination "$BinDir\vira.exe" -Force
         Remove-Item -Force $ZipPath
         Remove-Item -Recurse -Force "$env:TEMP\vex-extract"
-        Write-Host "  ✓ Downloaded and installed vex.exe" -ForegroundColor Green
+        Write-Host "  ✓ Downloaded and installed vira.exe" -ForegroundColor Green
     } catch {
         Write-Warning "Failed to download remote binary: $_"
-        Write-Host "  = If building from source, run: go build -o $BinDir\vex.exe .\cmd\vex" -ForegroundColor Yellow
+        Write-Host "  = If building from source, run: go build -o $BinDir\vira.exe .\cmd\vex" -ForegroundColor Yellow
     }
 }
 
 # 3. Copy Runtime Headers
 Write-Host "[3/5] Deploying runtime & GUI headers..." -ForegroundColor Yellow
-if (Test-Path ".\runtime\vex_rt.h") {
+if (Test-Path ".\runtime\vira_rt.h") {
     Copy-Item -Path ".\runtime\*.h" -Destination $RuntimeDir -Force
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } else {
@@ -97,7 +97,7 @@ if (-not $CompilerFound) {
 
 if (-not $CompilerFound) {
     Write-Host "  ! No C99 compiler found in PATH." -ForegroundColor Yellow
-    Write-Host "    Vex compiles to optimized native C99/SIMD code and requires GCC or Clang." -ForegroundColor Gray
+    Write-Host "    Vira compiles to optimized native C99/SIMD code and requires GCC or Clang." -ForegroundColor Gray
     Write-Host "    Quick Fix Options:" -ForegroundColor Cyan
     Write-Host "      1. winget install -e --id GnuWin32.GCC" -ForegroundColor White
     Write-Host "      2. winget install -e --id LLVM.LLVM" -ForegroundColor White
@@ -119,11 +119,11 @@ if ($UserPath -notlike "*$BinDir*") {
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "  ✓ Vex was successfully installed to: $InstallDir" -ForegroundColor Green
+Write-Host "  ✓ Vira was successfully installed to: $InstallDir" -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Open a new terminal window" -ForegroundColor White
 Write-Host "  2. Verify:  vex -h" -ForegroundColor White
-Write-Host "  3. Run GUI: vex run examples\gui_demo.vex" -ForegroundColor White
+Write-Host "  3. Run GUI: vira run examples\gui_demo.vir" -ForegroundColor White
 Write-Host ""

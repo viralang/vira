@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vexlang/vex/internal/lsp"
+	"github.com/viralang/vira/internal/lsp"
 )
 
 func sendRPC(w *bytes.Buffer, method string, params interface{}, id interface{}) {
@@ -32,7 +32,7 @@ func TestLSPLifecycleAndDiagnostics(t *testing.T) {
 	// Send textDocument/didOpen with valid code
 	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri":  "file:///main.vex",
+			"uri":  "file:///main.vir",
 			"text": "module main\n\npub fn add(a int, b int) int {\n\treturn a + b\n}\n",
 		},
 	}, nil)
@@ -40,7 +40,7 @@ func TestLSPLifecycleAndDiagnostics(t *testing.T) {
 	// Send hover
 	sendRPC(&in, "textDocument/hover", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri": "file:///main.vex",
+			"uri": "file:///main.vir",
 		},
 		"position": map[string]interface{}{
 			"line":      2,
@@ -78,7 +78,7 @@ func TestLSPGotoDefinition(t *testing.T) {
 	code := "module main\n\npub struct Invoice {\n\tid string\n}\n\nfn main() {\n\tinv := Invoice{ id: '101' }\n\t_ := inv\n}\n"
 	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri":  "file:///main.vex",
+			"uri":  "file:///main.vir",
 			"text": code,
 		},
 	}, nil)
@@ -86,7 +86,7 @@ func TestLSPGotoDefinition(t *testing.T) {
 	// Jump to definition on `Invoice` at line 7, col 9
 	sendRPC(&in, "textDocument/definition", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri": "file:///main.vex",
+			"uri": "file:///main.vir",
 		},
 		"position": map[string]interface{}{
 			"line":      7,
@@ -102,7 +102,7 @@ func TestLSPGotoDefinition(t *testing.T) {
 	}
 
 	res := out.String()
-	if !strings.Contains(res, "file:///main.vex") {
+	if !strings.Contains(res, "file:///main.vir") {
 		t.Errorf("expected location containing URI in definition response: %s", res)
 	}
 	if !strings.Contains(res, "\"definitionProvider\":true") {
@@ -119,7 +119,7 @@ func TestLSPGotoDefinition_NotFoundReturnsNullResult(t *testing.T) {
 	code := "module main\n\nfn main() {\n}\n"
 	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri":  "file:///main.vex",
+			"uri":  "file:///main.vir",
 			"text": code,
 		},
 	}, nil)
@@ -127,7 +127,7 @@ func TestLSPGotoDefinition_NotFoundReturnsNullResult(t *testing.T) {
 	// Jump to definition on whitespace at line 0, col 0
 	sendRPC(&in, "textDocument/definition", map[string]interface{}{
 		"textDocument": map[string]interface{}{
-			"uri": "file:///main.vex",
+			"uri": "file:///main.vir",
 		},
 		"position": map[string]interface{}{
 			"line":      0,

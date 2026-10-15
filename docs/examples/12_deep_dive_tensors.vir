@@ -47,7 +47,7 @@ fn main() {
 	println('  W_output: (128 x 32) = 4,096 f32 elements')
 
 	println('--- 2. HARDWARE SIMD MATRIX MULTIPLICATION (@) ---')
-	// Vex compiles the '@' operator directly into AVX2+FMA or ARM NEON instructions
+	// Vira compiles the '@' operator directly into AVX2+FMA or ARM NEON instructions
 	// Executing 8 single-precision FMAs per clock cycle
 	hidden_activations := inputs @ w_hidden
 	output_logits := hidden_activations @ w_output
@@ -80,7 +80,7 @@ fn main() {
 
 	println('--- 4. MULTICORE PARALLEL SERVING WITH ACTORS (ZERO GIL) ---')
 	// Python/PyTorch is constrained by CPython's Global Interpreter Lock (GIL).
-	// Vex Actors run on native OS threads via Chase-Lev lock-free work stealing.
+	// Vira Actors run on native OS threads via Chase-Lev lock-free work stealing.
 	mut s1 := ModelServer{ server_id: 1, batches_served: 0 }
 	mut s2 := ModelServer{ server_id: 2, batches_served: 0 }
 	mut s3 := ModelServer{ server_id: 3, batches_served: 0 }
