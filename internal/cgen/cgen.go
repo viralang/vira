@@ -1053,6 +1053,26 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vira_gui_is_key_pressed(%s)", strings.Join(argStrs, ", "))
 		case "gui_frame_time":
 			return "vira_gui_frame_time()"
+		case "gui_vstack_begin":
+			return fmt.Sprintf("vira_gui_vstack_begin(%s)", strings.Join(argStrs, ", "))
+		case "gui_hstack_begin":
+			return fmt.Sprintf("vira_gui_hstack_begin(%s)", strings.Join(argStrs, ", "))
+		case "gui_stack_end":
+			return "vira_gui_stack_end()"
+		case "gui_spacing":
+			return fmt.Sprintf("vira_gui_spacing(%s)", strings.Join(argStrs, ", "))
+		case "gui_card_begin":
+			return fmt.Sprintf("vira_gui_card_begin(%s)", strings.Join(argStrs, ", "))
+		case "gui_card_end":
+			return "vira_gui_card_end()"
+		case "gui_btn":
+			return fmt.Sprintf("vira_gui_btn(%s)", strings.Join(argStrs, ", "))
+		case "gui_check":
+			return fmt.Sprintf("vira_gui_check(%s)", strings.Join(argStrs, ", "))
+		case "gui_slide":
+			return fmt.Sprintf("vira_gui_slide(%s)", strings.Join(argStrs, ", "))
+		case "gui_lbl":
+			return fmt.Sprintf("vira_gui_lbl(%s)", strings.Join(argStrs, ", "))
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

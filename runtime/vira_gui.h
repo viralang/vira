@@ -8,6 +8,27 @@
 #include <windowsx.h>
 #include <time.h>
 
+typedef enum {
+    VIRA_LAYOUT_NONE = 0,
+    VIRA_LAYOUT_VERTICAL,
+    VIRA_LAYOUT_HORIZONTAL
+} vira_layout_type_t;
+
+typedef struct {
+    vira_layout_type_t type;
+    int32_t x;
+    int32_t y;
+    int32_t cur_x;
+    int32_t cur_y;
+    int32_t width;
+    int32_t height;
+    int32_t spacing;
+    int32_t start_y;
+    int32_t is_card;
+} vira_layout_node_t;
+
+#define VIRA_MAX_LAYOUT_DEPTH 16
+
 typedef struct {
     HWND        hwnd;
     HDC         hdc_screen;
@@ -34,6 +55,10 @@ typedef struct {
     bool        keys_down[256];
     bool        keys_pressed[256];
     bool        keys_prev[256];
+
+    // Declarative Layout Cursor Stack
+    vira_layout_node_t layout_stack[VIRA_MAX_LAYOUT_DEPTH];
+    int32_t     layout_depth;
 } vira_gui_ctx_t;
 
 static vira_gui_ctx_t _vira_gui = {0};
@@ -151,6 +176,7 @@ static inline void vira_gui_set_target_fps(int32_t fps) {
 }
 
 static inline void vira_gui_begin(void) {
+    _vira_gui.layout_depth = 0;
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
@@ -428,6 +454,170 @@ static inline float vira_gui_frame_time(void) {
     return _vira_gui.delta_time;
 }
 
+// --- DECLARATIVE LAYOUT ENGINE (Auto-Layout Without Pixel Math) ---
+
+static inline vira_layout_node_t* _vira_gui_cur_layout(void) {
+    if (_vira_gui.layout_depth > 0) {
+        return &_vira_gui.layout_stack[_vira_gui.layout_depth - 1];
+    }
+    return NULL;
+}
+
+static inline void vira_gui_vstack_begin(int32_t x, int32_t y, int32_t width, int32_t spacing) {
+    if (_vira_gui.layout_depth >= VIRA_MAX_LAYOUT_DEPTH) return;
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    if (parent != NULL) {
+        if (x <= 0) x = parent->cur_x;
+        if (y <= 0) y = parent->cur_y;
+        if (width <= 0) width = parent->width;
+    }
+    vira_layout_node_t* node = &_vira_gui.layout_stack[_vira_gui.layout_depth++];
+    node->type = VIRA_LAYOUT_VERTICAL;
+    node->x = x;
+    node->y = y;
+    node->cur_x = x;
+    node->cur_y = y;
+    node->width = width > 0 ? width : 300;
+    node->height = 0;
+    node->spacing = spacing >= 0 ? spacing : 10;
+    node->start_y = y;
+    node->is_card = 0;
+}
+
+static inline void vira_gui_hstack_begin(int32_t height, int32_t spacing) {
+    if (_vira_gui.layout_depth >= VIRA_MAX_LAYOUT_DEPTH) return;
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    int32_t x = parent ? parent->cur_x : 20;
+    int32_t y = parent ? parent->cur_y : 20;
+    int32_t w = parent ? parent->width : 300;
+
+    vira_layout_node_t* node = &_vira_gui.layout_stack[_vira_gui.layout_depth++];
+    node->type = VIRA_LAYOUT_HORIZONTAL;
+    node->x = x;
+    node->y = y;
+    node->cur_x = x;
+    node->cur_y = y;
+    node->width = w;
+    node->height = height > 0 ? height : 36;
+    node->spacing = spacing >= 0 ? spacing : 10;
+    node->start_y = y;
+    node->is_card = 0;
+}
+
+static inline void vira_gui_stack_end(void) {
+    if (_vira_gui.layout_depth <= 0) return;
+    vira_layout_node_t closed = _vira_gui.layout_stack[--_vira_gui.layout_depth];
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    if (parent != NULL) {
+        if (parent->type == VIRA_LAYOUT_VERTICAL) {
+            int32_t consumed_h = (closed.type == VIRA_LAYOUT_VERTICAL) ? 
+                (closed.cur_y - closed.start_y) : closed.height;
+            parent->cur_y += consumed_h + parent->spacing;
+        } else if (parent->type == VIRA_LAYOUT_HORIZONTAL) {
+            int32_t consumed_w = closed.cur_x - closed.x;
+            parent->cur_x += consumed_w + parent->spacing;
+        }
+    }
+}
+
+static inline void vira_gui_spacing(int32_t px) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return;
+    if (node->type == VIRA_LAYOUT_VERTICAL) {
+        node->cur_y += px;
+    } else {
+        node->cur_x += px;
+    }
+}
+
+static inline void vira_gui_card_begin(vira_string title, int32_t width) {
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    int32_t x = parent ? parent->cur_x : 40;
+    int32_t y = parent ? parent->cur_y : 90;
+    int32_t w = width > 0 ? width : (parent ? parent->width : 340);
+
+    // Draw card panel container
+    vira_gui_draw_rect(x, y, w, 220, 0x1E1E2E);
+    if (title.len > 0) {
+        vira_gui_draw_text(title, x + 15, y + 12, 16, 0x89B4FA);
+    }
+
+    // Push internal vertical content stack with 15px padding
+    vira_gui_vstack_begin(x + 15, y + 42, w - 30, 10);
+    _vira_gui.layout_stack[_vira_gui.layout_depth - 1].is_card = 1;
+}
+
+static inline void vira_gui_card_end(void) {
+    vira_gui_stack_end();
+}
+
+static inline bool vira_gui_btn(vira_string label) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return false;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t w, h;
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        w = 140; // Default button width in HStack
+        h = node->height;
+        bool clicked = vira_gui_button(x, y, w, h, label);
+        node->cur_x += w + node->spacing;
+        return clicked;
+    } else {
+        w = node->width;
+        h = 36;
+        bool clicked = vira_gui_button(x, y, w, h, label);
+        node->cur_y += h + node->spacing;
+        return clicked;
+    }
+}
+
+static inline bool vira_gui_check(vira_string label, bool checked) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return checked;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t w = node->width;
+    int32_t h = (node->type == VIRA_LAYOUT_HORIZONTAL) ? node->height : 26;
+    bool result = vira_gui_checkbox(x, y, w, h, label, checked);
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += w + node->spacing;
+    } else {
+        node->cur_y += h + node->spacing;
+    }
+    return result;
+}
+
+static inline float vira_gui_slide(vira_string text_left, vira_string text_right, float val, float min_val, float max_val) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return val;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t w = node->width;
+    int32_t h = (node->type == VIRA_LAYOUT_HORIZONTAL) ? node->height : 25;
+    float result = vira_gui_slider(x, y, w, h, text_left, text_right, val, min_val, max_val);
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += w + node->spacing;
+    } else {
+        node->cur_y += h + node->spacing;
+    }
+    return result;
+}
+
+static inline void vira_gui_lbl(vira_string text) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t h = 22;
+    vira_gui_draw_text(text, x, y, 16, 0xCDD6F4);
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += text.len * 9 + node->spacing;
+    } else {
+        node->cur_y += h + node->spacing;
+    }
+}
+
 #else
 // Fallback for non-Windows platforms (POSIX/Linux/macOS)
 static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) { (void)width; (void)height; (void)title; }
@@ -450,6 +640,16 @@ static inline int32_t vira_gui_mouse_y(void) { return 0; }
 static inline bool vira_gui_is_mouse_down(int32_t button) { (void)button; return false; }
 static inline bool vira_gui_is_key_pressed(int32_t key) { (void)key; return false; }
 static inline float vira_gui_frame_time(void) { return 0.016f; }
+static inline void vira_gui_vstack_begin(int32_t x, int32_t y, int32_t width, int32_t spacing) { (void)x; (void)y; (void)width; (void)spacing; }
+static inline void vira_gui_hstack_begin(int32_t height, int32_t spacing) { (void)height; (void)spacing; }
+static inline void vira_gui_stack_end(void) {}
+static inline void vira_gui_spacing(int32_t px) { (void)px; }
+static inline void vira_gui_card_begin(vira_string title, int32_t width) { (void)title; (void)width; }
+static inline void vira_gui_card_end(void) {}
+static inline bool vira_gui_btn(vira_string label) { (void)label; return false; }
+static inline bool vira_gui_check(vira_string label, bool checked) { (void)label; return checked; }
+static inline float vira_gui_slide(vira_string text_left, vira_string text_right, float val, float min_val, float max_val) { (void)text_left; (void)text_right; (void)min_val; (void)max_val; return val; }
+static inline void vira_gui_lbl(vira_string text) { (void)text; }
 #endif
 
 #endif // VIRA_GUI_H

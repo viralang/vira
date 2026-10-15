@@ -548,6 +548,68 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeF32,
 	}
+
+	// Declarative Auto-Layout Engine Builtins
+	c.functions["gui_vstack_begin"] = &FnSig{
+		Name:       "gui_vstack_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: TypeInt}, {Name: "y", Type: TypeInt}, {Name: "width", Type: TypeInt}, {Name: "spacing", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_hstack_begin"] = &FnSig{
+		Name:       "gui_hstack_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "height", Type: TypeInt}, {Name: "spacing", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_stack_end"] = &FnSig{
+		Name:       "gui_stack_end",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_spacing"] = &FnSig{
+		Name:       "gui_spacing",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "px", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_card_begin"] = &FnSig{
+		Name:       "gui_card_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "title", Type: TypeString}, {Name: "width", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_card_end"] = &FnSig{
+		Name:       "gui_card_end",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_btn"] = &FnSig{
+		Name:       "gui_btn",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_check"] = &FnSig{
+		Name:       "gui_check",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}, {Name: "checked", Type: TypeBool}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_slide"] = &FnSig{
+		Name:       "gui_slide",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "text_left", Type: TypeString}, {Name: "text_right", Type: TypeString}, {Name: "val", Type: TypeF32}, {Name: "min_val", Type: TypeF32}, {Name: "max_val", Type: TypeF32}},
+		ReturnType: TypeF32,
+	}
+	c.functions["gui_lbl"] = &FnSig{
+		Name:       "gui_lbl",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "text", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
 }
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.
