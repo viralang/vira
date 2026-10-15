@@ -9,15 +9,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/vexlang/vex/internal/ast"
 	"github.com/vexlang/vex/internal/checker"
 	"github.com/vexlang/vex/internal/formatter"
 	"github.com/vexlang/vex/internal/parser"
 	"github.com/vexlang/vex/internal/source"
+	"github.com/vexlang/vex/internal/token"
 )
 
 type Server struct {
-	in  *bufio.Reader
-	out io.Writer
+	in   *bufio.Reader
+	out  io.Writer
 	docs map[string]string // URI -> document content
 }
 
@@ -34,8 +36,36 @@ type jsonrpcMessage struct {
 	ID      interface{}     `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
-	Result  interface{}     `json:"result,omitempty"`
-	Error   *jsonrpcError   `json:"error,omitempty"`
+}
+
+type jsonrpcResponse struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      interface{}   `json:"id"`
+	Result  interface{}   `json:"result"`
+	Error   *jsonrpcError `json:"error,omitempty"`
+}
+
+func (r jsonrpcResponse) MarshalJSON() ([]byte, error) {
+	if r.Error != nil {
+		return json.Marshal(struct {
+			JSONRPC string        `json:"jsonrpc"`
+			ID      interface{}   `json:"id"`
+			Error   *jsonrpcError `json:"error"`
+		}{
+			JSONRPC: "2.0",
+			ID:      r.ID,
+			Error:   r.Error,
+		})
+	}
+	return json.Marshal(struct {
+		JSONRPC string      `json:"jsonrpc"`
+		ID      interface{} `json:"id"`
+		Result  interface{} `json:"result"`
+	}{
+		JSONRPC: "2.0",
+		ID:      r.ID,
+		Result:  r.Result,
+	})
 }
 
 type jsonrpcError struct {
@@ -53,6 +83,11 @@ type Range struct {
 	End   Position `json:"end"`
 }
 
+type Location struct {
+	URI   string `json:"uri"`
+	Range Range  `json:"range"`
+}
+
 type Diagnostic struct {
 	Range    Range  `json:"range"`
 	Severity int    `json:"severity"` // 1 = Error, 2 = Warning, 3 = Info, 4 = Hint
@@ -64,6 +99,22 @@ type PublishDiagnosticsParams struct {
 	URI         string       `json:"uri"`
 	Diagnostics []Diagnostic `json:"diagnostics"`
 }
+
+func (p PublishDiagnosticsParams) MarshalJSON() ([]byte, error) {
+	type Alias PublishDiagnosticsParams
+	diagnostics := p.Diagnostics
+	if diagnostics == nil {
+		diagnostics = []Diagnostic{}
+	}
+	return json.Marshal(&struct {
+		Alias
+		Diagnostics []Diagnostic `json:"diagnostics"`
+	}{
+		Alias:       Alias(p),
+		Diagnostics: diagnostics,
+	})
+}
+
 
 func (s *Server) Run() error {
 	for {
@@ -107,9 +158,13 @@ func (s *Server) readMessage() (*jsonrpcMessage, error) {
 	return &msg, nil
 }
 
-func (s *Server) writeResponse(msg *jsonrpcMessage) {
-	msg.JSONRPC = "2.0"
-	bytes, _ := json.Marshal(msg)
+func (s *Server) writeResponse(id interface{}, result interface{}) {
+	resp := jsonrpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	}
+	bytes, _ := json.Marshal(resp)
 	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(bytes))
 	_, _ = io.WriteString(s.out, header)
 	_, _ = s.out.Write(bytes)
@@ -117,7 +172,11 @@ func (s *Server) writeResponse(msg *jsonrpcMessage) {
 
 func (s *Server) sendNotification(method string, params interface{}) {
 	pBytes, _ := json.Marshal(params)
-	msg := &jsonrpcMessage{
+	msg := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  pBytes,
@@ -133,8 +192,9 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 	case "initialize":
 		res := map[string]interface{}{
 			"capabilities": map[string]interface{}{
-				"textDocumentSync": 1, // Full document sync
-				"hoverProvider":    true,
+				"textDocumentSync":           1, // Full document sync
+				"hoverProvider":              true,
+				"definitionProvider":         true,
 				"documentFormattingProvider": true,
 			},
 			"serverInfo": map[string]string{
@@ -142,7 +202,19 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 				"version": "0.1.0",
 			},
 		}
-		s.writeResponse(&jsonrpcMessage{ID: msg.ID, Result: res})
+		s.writeResponse(msg.ID, res)
+
+	case "textDocument/definition":
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Position Position `json:"position"`
+		}
+		_ = json.Unmarshal(msg.Params, &params)
+		text := s.docs[params.TextDocument.URI]
+		loc := s.findDefinition(params.TextDocument.URI, text, params.Position)
+		s.writeResponse(msg.ID, loc)
 
 	case "textDocument/didOpen":
 		var params struct {
@@ -197,7 +269,7 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 				"newText": formatted,
 			},
 		}
-		s.writeResponse(&jsonrpcMessage{ID: msg.ID, Result: edit})
+		s.writeResponse(msg.ID, edit)
 
 	case "textDocument/hover":
 		var params struct {
@@ -215,10 +287,10 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 				"value": hoverText,
 			},
 		}
-		s.writeResponse(&jsonrpcMessage{ID: msg.ID, Result: res})
+		s.writeResponse(msg.ID, res)
 
 	case "shutdown":
-		s.writeResponse(&jsonrpcMessage{ID: msg.ID, Result: nil})
+		s.writeResponse(msg.ID, nil)
 
 	case "exit":
 		os.Exit(0)
@@ -226,7 +298,7 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 }
 
 func (s *Server) validateDocument(uri string, text string) {
-	var diagnostics []Diagnostic
+	diagnostics := make([]Diagnostic, 0)
 	f := source.New(uri, text)
 
 	p := parser.New(text)
@@ -301,4 +373,143 @@ func (s *Server) computeHover(text string, pos Position) string {
 		}
 	}
 	return "**Vex Language Symbol**\n\n*Type inference & definition ready.*"
+}
+
+func (s *Server) findDefinition(uri string, text string, pos Position) interface{} {
+	word := getWordAt(text, pos)
+	if word == "" {
+		return nil
+	}
+
+	p := parser.New(text)
+	astFile := p.ParseFile()
+	f := source.New(uri, text)
+
+	// 1. Search top-level declarations
+	for _, decl := range astFile.Decls {
+		switch d := decl.(type) {
+		case *ast.FnDecl:
+			if d.Name.Name == word {
+				loc := makeLocation(uri, f, d.Name.NamePos)
+				return loc
+			}
+			for _, param := range d.Params {
+				if param.Name.Name == word {
+					loc := makeLocation(uri, f, param.Name.NamePos)
+					return loc
+				}
+			}
+			if d.Body != nil {
+				if loc := findInBlock(uri, f, d.Body, word); loc != nil {
+					return *loc
+				}
+			}
+
+		case *ast.StructDecl:
+			if d.Name.Name == word {
+				loc := makeLocation(uri, f, d.Name.NamePos)
+				return loc
+			}
+			for _, field := range d.Fields {
+				if field.Name.Name == word {
+					loc := makeLocation(uri, f, field.Name.NamePos)
+					return loc
+				}
+			}
+
+		case *ast.InterfaceDecl:
+			if d.Name.Name == word {
+				loc := makeLocation(uri, f, d.Name.NamePos)
+				return loc
+			}
+			for _, method := range d.Methods {
+				if method.Name.Name == word {
+					loc := makeLocation(uri, f, method.Name.NamePos)
+					return loc
+				}
+			}
+			for _, field := range d.Fields {
+				if field.Name.Name == word {
+					loc := makeLocation(uri, f, field.Name.NamePos)
+					return loc
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func findInBlock(uri string, f *source.File, block *ast.BlockStmt, word string) *Location {
+	for _, stmt := range block.Stmts {
+		switch st := stmt.(type) {
+		case *ast.VarDeclStmt:
+			if st.Name.Name == word {
+				loc := makeLocation(uri, f, st.Name.NamePos)
+				return &loc
+			}
+		case *ast.IfStmt:
+			if st.Then != nil {
+				if loc := findInBlock(uri, f, st.Then, word); loc != nil {
+					return loc
+				}
+			}
+			if st.Else != nil {
+				if loc := findInBlock(uri, f, st.Else, word); loc != nil {
+					return loc
+				}
+			}
+		case *ast.ForStmt:
+			if st.Body != nil {
+				if loc := findInBlock(uri, f, st.Body, word); loc != nil {
+					return loc
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func makeLocation(uri string, f *source.File, span token.Span) Location {
+	startLine, startCol := f.Location(span.Start)
+	endLine, endCol := f.Location(span.End)
+	if endLine < startLine || (endLine == startLine && endCol <= startCol) {
+		endLine = startLine
+		endCol = startCol + 1
+	}
+	return Location{
+		URI: uri,
+		Range: Range{
+			Start: Position{Line: startLine - 1, Character: startCol - 1},
+			End:   Position{Line: endLine - 1, Character: endCol - 1},
+		},
+	}
+}
+
+func getWordAt(text string, pos Position) string {
+	lines := strings.Split(text, "\n")
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		return ""
+	}
+	line := lines[pos.Line]
+	if pos.Character < 0 || pos.Character > len(line) {
+		return ""
+	}
+
+	start := pos.Character
+	for start > 0 && isIdentChar(line[start-1]) {
+		start--
+	}
+	end := pos.Character
+	for end < len(line) && isIdentChar(line[end]) {
+		end++
+	}
+	if start >= end {
+		return ""
+	}
+	return line[start:end]
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }

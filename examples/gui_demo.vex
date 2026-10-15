@@ -1,0 +1,78 @@
+module main
+
+actor HeavyWorker {
+mut:
+	steps int = 0
+}
+
+fn (mut w HeavyWorker) step() int {
+	w.steps += 1
+	return w.steps
+}
+
+fn main() {
+	gui_init(800, 600, 'Vex Hardware-Accelerated GUI')
+	gui_set_target_fps(60)
+
+	mut worker := HeavyWorker{ steps: 0 }
+	mut count := 0
+	mut slider_val := 50.0f32
+	mut is_active := true
+
+	for !gui_should_close() {
+		// 1. Concurrent background actor dispatch
+		fut := worker <- step()
+		steps := fut.await() or { 0 }
+
+		// 2. Begin frame & clear canvas
+		gui_begin()
+		gui_clear(0x181825)
+
+		// 3. Draw Header
+		gui_draw_rect(0, 0, 800, 60, 0x1E1E2E)
+		gui_draw_text('Vex Real-Time Hardware GUI & Actor Dashboard', 20, 18, 22, 0xCDD6F4)
+		gui_draw_line(0, 60, 800, 60, 0x89B4FA)
+
+		// 4. Actor telemetry & metrics
+		gui_draw_rect(40, 90, 340, 120, 0x1E1E2E)
+		gui_draw_text('Background Actor Pool', 55, 105, 16, 0x89B4FA)
+		gui_draw_text('Total Worker Steps: ${steps}', 55, 135, 16, 0xA6E3A1)
+		gui_draw_text('Counter State: ${count}', 55, 165, 16, 0xF9E2AF)
+
+		// 5. Interactive controls
+		gui_draw_rect(420, 90, 340, 220, 0x1E1E2E)
+		gui_draw_text('Interactive Widgets', 435, 105, 16, 0x89B4FA)
+
+		if gui_button(435, 140, 140, 36, 'Increment') {
+			count += 1
+		}
+
+		if gui_button(595, 140, 140, 36, 'Reset') {
+			count = 0
+		}
+
+		is_active = gui_checkbox(435, 195, 200, 30, 'Enable Visual FX', is_active)
+
+		slider_val = gui_slider(435, 245, 300, 25, 'Radius: ', 'px', slider_val, 10.0f32, 100.0f32)
+
+		// 6. Dynamic rendering based on widget state
+		if is_active {
+			gui_draw_rect(40, 240, 340, 240, 0x1E1E2E)
+			gui_draw_text('Dynamic Canvas View', 55, 255, 16, 0x89B4FA)
+
+			// Draw circle centered with size controlled by slider
+			cx := 210
+			cy := 370
+			gui_draw_circle(cx, cy, slider_val, 0xF38BA8)
+			gui_draw_circle(cx, cy, 6.0f32, 0xFFFFFF)
+		}
+
+		// 7. Footer
+		dt := gui_frame_time()
+		gui_draw_text('Frame Time: ${dt}s • Double-Buffered 60 FPS • Zero GC', 20, 565, 14, 0x6C7086)
+
+		gui_end()
+	}
+
+	gui_close()
+}

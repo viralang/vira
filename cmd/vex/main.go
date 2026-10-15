@@ -19,6 +19,7 @@ import (
 	"github.com/vexlang/vex/internal/mod"
 	"github.com/vexlang/vex/internal/parser"
 	"github.com/vexlang/vex/internal/source"
+	vexrt "github.com/vexlang/vex/runtime"
 )
 
 const usageBanner = `Vex Programming Language Compiler (Stage-0 Toolchain)
@@ -635,23 +636,51 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		archFlag = "-march=x86-64-v3"
 	}
 
-	netLibs := []string{}
+	incFlags, libFlags, hasRaylib := resolveExternalLibPaths()
+
+	extraLibs := []string{}
+	staticFlags := []string{}
+
 	if goRuntime.GOOS == "windows" {
-		netLibs = append(netLibs, "-lws2_32")
+		staticFlags = append(staticFlags, "-static")
+		extraLibs = append(extraLibs, "-lws2_32", "-lgdi32", "-luser32", "-lwinmm", "-lopengl32")
+		if hasRaylib {
+			extraLibs = append(extraLibs, "-lraylib")
+		}
+	} else if goRuntime.GOOS == "linux" {
+		extraLibs = append(extraLibs, "-lm")
+		if hasRaylib {
+			extraLibs = append(extraLibs, "-lraylib", "-lGL", "-lX11", "-ldl", "-lrt")
+		}
+	} else if goRuntime.GOOS == "darwin" && hasRaylib {
+		extraLibs = append(extraLibs, "-lraylib", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
 	}
+
+	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
+	baseIncludes = append(baseIncludes, libFlags...)
 
 	if opts.prod {
 		modeDesc = "prod (-O3 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
+		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append(cFlags, baseIncludes...)
+		cFlags = append(cFlags, cFile, "-o", binFile)
+		cFlags = append(cFlags, extraLibs...)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
-		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
+		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
+		cFlags = append(cFlags, cFile, "-o", binFile)
+		cFlags = append(cFlags, extraLibs...)
 	} else if compiler == "tcc" {
 		modeDesc = "dev (TinyCC instant build)"
-		cFlags = append([]string{"-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
+		cFlags = append([]string{"-pthread"}, baseIncludes...)
+		cFlags = append(cFlags, cFile, "-o", binFile)
+		cFlags = append(cFlags, extraLibs...)
 	} else {
 		modeDesc = "dev (-O2 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-static", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}, netLibs...)
+		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append(cFlags, baseIncludes...)
+		cFlags = append(cFlags, cFile, "-o", binFile)
+		cFlags = append(cFlags, extraLibs...)
 	}
 
 	cmd := exec.Command(compiler, cFlags...)
@@ -666,6 +695,68 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	return compiler, modeDesc
 }
 
+func resolveExternalLibPaths() ([]string, []string, bool) {
+	var incPaths []string
+	var libPaths []string
+	hasRaylib := false
+
+	home, _ := os.UserHomeDir()
+	exe, _ := os.Executable()
+	exeDir := filepath.Dir(exe)
+
+	searchRoots := []string{
+		"vendor",
+		"lib",
+		filepath.Join(exeDir, "vendor"),
+		filepath.Join(exeDir, "lib"),
+	}
+	if home != "" {
+		searchRoots = append(searchRoots,
+			filepath.Join(home, ".vex", "lib"),
+			filepath.Join(home, ".vex", "vendor"),
+		)
+	}
+
+	for _, root := range searchRoots {
+		// Generic lib/include layout
+		inc := filepath.Join(root, "include")
+		lib := filepath.Join(root, "lib")
+		if info, err := os.Stat(inc); err == nil && info.IsDir() {
+			incPaths = append(incPaths, "-I"+inc)
+		}
+		if info, err := os.Stat(lib); err == nil && info.IsDir() {
+			libPaths = append(libPaths, "-L"+lib)
+		}
+
+		// Specific C libraries (Raylib, Raygui, Nuklear, SDL2)
+		for _, libName := range []string{"raylib", "raygui", "nuklear", "sdl2"} {
+			libInc := filepath.Join(root, libName, "include")
+			libDir := filepath.Join(root, libName, "lib")
+			if info, err := os.Stat(libInc); err == nil && info.IsDir() {
+				incPaths = append(incPaths, "-I"+libInc)
+			}
+			if info, err := os.Stat(libDir); err == nil && info.IsDir() {
+				libPaths = append(libPaths, "-L"+libDir)
+			}
+		}
+
+		// Check if raylib static library is present
+		for _, cand := range []string{
+			filepath.Join(root, "libraylib.a"),
+			filepath.Join(root, "raylib.lib"),
+			filepath.Join(root, "lib", "libraylib.a"),
+			filepath.Join(root, "raylib", "lib", "libraylib.a"),
+		} {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+				hasRaylib = true
+				break
+			}
+		}
+	}
+
+	return incPaths, libPaths, hasRaylib
+}
+
 func resolveRuntimeDir() string {
 	if info, err := os.Stat("runtime/vex_rt.h"); err == nil && !info.IsDir() {
 		return "runtime"
@@ -674,6 +765,26 @@ func resolveRuntimeDir() string {
 		cand := filepath.Join(filepath.Dir(exe), "runtime")
 		if info, err := os.Stat(filepath.Join(cand, "vex_rt.h")); err == nil && !info.IsDir() {
 			return cand
+		}
+	}
+
+	// Portable fallback: Extract embedded headers from vexrt.RuntimeFS to ~/.vex/runtime/
+	home, err := os.UserHomeDir()
+	if err == nil {
+		cacheDir := filepath.Join(home, ".vex", "runtime")
+		_ = os.MkdirAll(cacheDir, 0755)
+
+		entries, err := vexrt.RuntimeFS.ReadDir(".")
+		if err == nil && len(entries) > 0 {
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".h") {
+					data, err := vexrt.RuntimeFS.ReadFile(e.Name())
+					if err == nil {
+						_ = os.WriteFile(filepath.Join(cacheDir, e.Name()), data, 0644)
+					}
+				}
+			}
+			return cacheDir
 		}
 	}
 	return "runtime"

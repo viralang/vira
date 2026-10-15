@@ -1150,17 +1150,17 @@ static inline vex_string vex_json_get_str(vex_string json, vex_string key) {
     char search_quote[260];
     snprintf(search_quote, sizeof(search_quote), "\"%s\"", pattern);
     
-    char* found = strstr(hay, search_quote);
+    const char* found = strstr(hay, search_quote);
     if (!found) return vex_str_lit("", 0);
     
-    char* colon = strchr(found + strlen(search_quote), ':');
+    const char* colon = strchr(found + strlen(search_quote), ':');
     if (!colon) return vex_str_lit("", 0);
     
-    char* val_start = strchr(colon, '"');
+    const char* val_start = strchr(colon, '"');
     if (!val_start) return vex_str_lit("", 0);
     val_start++;
     
-    char* val_end = strchr(val_start, '"');
+    const char* val_end = strchr(val_start, '"');
     if (!val_end) return vex_str_lit("", 0);
     
     int val_len = (int)(val_end - val_start);
@@ -1179,10 +1179,10 @@ static inline int64_t vex_json_get_int(vex_string json, vex_string key) {
 
     const char* hay = (const char*)json.data;
     if (!hay) return 0;
-    char* found = strstr(hay, search_quote);
+    const char* found = strstr(hay, search_quote);
     if (!found) return 0;
 
-    char* colon = strchr(found + strlen(search_quote), ':');
+    const char* colon = strchr(found + strlen(search_quote), ':');
     if (!colon) return 0;
     colon++;
     while (*colon == ' ' || *colon == '\t') colon++;
@@ -1197,10 +1197,10 @@ static inline float vex_json_get_f32(vex_string json, vex_string key) {
 
     const char* hay = (const char*)json.data;
     if (!hay) return 0.0f;
-    char* found = strstr(hay, search_quote);
+    const char* found = strstr(hay, search_quote);
     if (!found) return 0.0f;
 
-    char* colon = strchr(found + strlen(search_quote), ':');
+    const char* colon = strchr(found + strlen(search_quote), ':');
     if (!colon) return 0.0f;
     colon++;
     while (*colon == ' ' || *colon == '\t') colon++;
@@ -1866,5 +1866,7 @@ static inline void vex_report_mem_stats(void) {
            (long long)__atomic_load_n(&_vex_total_heap_frees, __ATOMIC_RELAXED));
     fflush(stdout);
 }
+
+#include "vex_gui.h"
 
 #endif // VEX_RT_H

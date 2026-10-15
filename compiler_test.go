@@ -634,3 +634,78 @@ fn main() {
 	}
 }
 
+func TestNativeHardwareGUI(t *testing.T) {
+	guiSrc := `
+module main
+
+fn main() {
+	gui_init(640, 480, 'Test GUI')
+	gui_set_target_fps(60)
+
+	mut val := 10.0f32
+	mut active := true
+
+	if !gui_should_close() {
+		gui_begin()
+		gui_clear(0x181825)
+		gui_draw_text('Hello Vex GUI', 20, 20, 18, 0xFFFFFF)
+		gui_draw_rect(10, 10, 100, 50, 0x334455)
+		gui_draw_circle(200, 200, 25.0f32, 0x8899AA)
+		gui_draw_line(0, 0, 100, 100, 0xFF0000)
+
+		_ := gui_button(20, 100, 120, 30, 'Click Me')
+		val = gui_slider(20, 150, 200, 20, 'Min', 'Max', val, 0.0f32, 100.0f32)
+		active = gui_checkbox(20, 190, 150, 25, 'Option', active)
+
+		mx := gui_mouse_x()
+		my := gui_mouse_y()
+		_ := mx + my
+
+		gui_end()
+	}
+
+	gui_close()
+}
+`
+	p := parser.New(guiSrc)
+	astFile := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("parser errors in GUI test: %v", p.Errors())
+	}
+
+	chk := checker.New()
+	chk.CheckFile(astFile)
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("checker errors in GUI test: %v", chk.Errors())
+	}
+
+	af := autofree.New(chk)
+	af.AnalyzeFile(astFile)
+
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(astFile)
+
+	for _, expected := range []string{
+		"vex_gui_init",
+		"vex_gui_set_target_fps",
+		"vex_gui_should_close",
+		"vex_gui_begin",
+		"vex_gui_clear",
+		"vex_gui_draw_text",
+		"vex_gui_draw_rect",
+		"vex_gui_draw_circle",
+		"vex_gui_draw_line",
+		"vex_gui_button",
+		"vex_gui_slider",
+		"vex_gui_checkbox",
+		"vex_gui_mouse_x",
+		"vex_gui_mouse_y",
+		"vex_gui_end",
+		"vex_gui_close",
+	} {
+		if !strings.Contains(cCode, expected) {
+			t.Errorf("expected %s in emitted C code", expected)
+		}
+	}
+}
+

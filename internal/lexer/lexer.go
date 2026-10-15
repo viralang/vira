@@ -52,10 +52,22 @@ func (l *Lexer) Next() token.Token {
 		return l.makeTok(token.LookupIdent(lit), start, l.pos)
 	}
 
-	// 4. Numeric Literals (integers, floats, `_` digit separators, and precision suffixes)
+	// 4. Numeric Literals (integers, hex literals, floats, `_` digit separators, and precision suffixes)
 	if isDigit(ch) {
 		kind := token.TokInt
 		l.pos++
+		if ch == '0' && int(l.pos) < len(l.src) && (l.src[l.pos] == 'x' || l.src[l.pos] == 'X') {
+			l.pos++
+			for int(l.pos) < len(l.src) {
+				c := l.src[l.pos]
+				if isHexDigit(c) || c == '_' {
+					l.pos++
+				} else {
+					break
+				}
+			}
+			return l.makeTok(token.TokInt, start, l.pos)
+		}
 		for int(l.pos) < len(l.src) {
 			c := l.src[l.pos]
 			if isDigit(c) || c == '_' {
@@ -300,6 +312,10 @@ func isLetter(ch byte) bool {
 
 func isDigit(ch byte) bool {
 	return ch >= '0' && ch <= '9'
+}
+
+func isHexDigit(ch byte) bool {
+	return isDigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
 }
 
 func isIdentPart(ch byte) bool {

@@ -1013,6 +1013,46 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vex_tensor_embedding(%s)", strings.Join(argStrs, ", "))
 		case "sample_token":
 			return fmt.Sprintf("vex_sample_token(%s)", strings.Join(argStrs, ", "))
+		case "gui_init":
+			return fmt.Sprintf("vex_gui_init(%s)", strings.Join(argStrs, ", "))
+		case "gui_should_close":
+			return "vex_gui_should_close()"
+		case "gui_set_target_fps":
+			return fmt.Sprintf("vex_gui_set_target_fps(%s)", strings.Join(argStrs, ", "))
+		case "gui_begin":
+			return "vex_gui_begin()"
+		case "gui_end":
+			return "vex_gui_end()"
+		case "gui_close":
+			return "vex_gui_close()"
+		case "gui_clear":
+			return fmt.Sprintf("vex_gui_clear(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_text":
+			return fmt.Sprintf("vex_gui_draw_text(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_rect":
+			return fmt.Sprintf("vex_gui_draw_rect(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_circle":
+			return fmt.Sprintf("vex_gui_draw_circle(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_line":
+			return fmt.Sprintf("vex_gui_draw_line(%s)", strings.Join(argStrs, ", "))
+		case "gui_button":
+			return fmt.Sprintf("vex_gui_button(%s)", strings.Join(argStrs, ", "))
+		case "gui_slider":
+			return fmt.Sprintf("vex_gui_slider(%s)", strings.Join(argStrs, ", "))
+		case "gui_checkbox":
+			return fmt.Sprintf("vex_gui_checkbox(%s)", strings.Join(argStrs, ", "))
+		case "gui_label":
+			return fmt.Sprintf("vex_gui_label(%s)", strings.Join(argStrs, ", "))
+		case "gui_mouse_x":
+			return "vex_gui_mouse_x()"
+		case "gui_mouse_y":
+			return "vex_gui_mouse_y()"
+		case "gui_is_mouse_down":
+			return fmt.Sprintf("vex_gui_is_mouse_down(%s)", strings.Join(argStrs, ", "))
+		case "gui_is_key_pressed":
+			return fmt.Sprintf("vex_gui_is_key_pressed(%s)", strings.Join(argStrs, ", "))
+		case "gui_frame_time":
+			return "vex_gui_frame_time()"
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

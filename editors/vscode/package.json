@@ -2,11 +2,20 @@
   "name": "vex-language",
   "displayName": "Vex Programming Language",
   "description": "Rich language support, syntax highlighting, and LSP integration for the Vex Programming Language.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "vexlang",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/micromax/vex"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:vex"
+  ],
   "categories": [
     "Programming Languages",
     "Linters",
@@ -16,8 +25,13 @@
     "languages": [
       {
         "id": "vex",
-        "aliases": ["Vex", "vex"],
-        "extensions": [".vex"],
+        "aliases": [
+          "Vex",
+          "vex"
+        ],
+        "extensions": [
+          ".vex"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -27,6 +41,26 @@
         "scopeName": "source.vex",
         "path": "./syntaxes/vex.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "vex.restartServer",
+        "title": "Vex: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Vex Language Server",
+      "properties": {
+        "vex.compilerPath": {
+          "type": "string",
+          "default": "vex",
+          "description": "Path to the Vex compiler executable (defaults to 'vex' in PATH or ~/.vex/bin/vex)"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
   }
 }

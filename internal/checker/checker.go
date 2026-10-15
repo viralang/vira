@@ -374,6 +374,180 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "logits", Type: &TensorType{DType: TypeF32}}, {Name: "temperature", Type: TypeF32}},
 		ReturnType: TypeInt,
 	}
+
+	// Native Hardware GUI Engine Builtins
+	c.functions["gui_init"] = &FnSig{
+		Name:       "gui_init",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "width", Type: TypeInt}, {Name: "height", Type: TypeInt}, {Name: "title", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_should_close"] = &FnSig{
+		Name:       "gui_should_close",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_set_target_fps"] = &FnSig{
+		Name:       "gui_set_target_fps",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "fps", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_begin"] = &FnSig{
+		Name:       "gui_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_end"] = &FnSig{
+		Name:       "gui_end",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_close"] = &FnSig{
+		Name:       "gui_close",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_clear"] = &FnSig{
+		Name:       "gui_clear",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "hex_color", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_draw_text"] = &FnSig{
+		Name:  "gui_draw_text",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "text", Type: TypeString},
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "size", Type: TypeInt},
+			{Name: "hex_color", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_draw_rect"] = &FnSig{
+		Name:  "gui_draw_rect",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "hex_color", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_draw_circle"] = &FnSig{
+		Name:  "gui_draw_circle",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "cx", Type: TypeInt},
+			{Name: "cy", Type: TypeInt},
+			{Name: "radius", Type: TypeF32},
+			{Name: "hex_color", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_draw_line"] = &FnSig{
+		Name:  "gui_draw_line",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x1", Type: TypeInt},
+			{Name: "y1", Type: TypeInt},
+			{Name: "x2", Type: TypeInt},
+			{Name: "y2", Type: TypeInt},
+			{Name: "hex_color", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_button"] = &FnSig{
+		Name:  "gui_button",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "label", Type: TypeString},
+		},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_slider"] = &FnSig{
+		Name:  "gui_slider",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "text_left", Type: TypeString},
+			{Name: "text_right", Type: TypeString},
+			{Name: "val", Type: TypeF32},
+			{Name: "min_val", Type: TypeF32},
+			{Name: "max_val", Type: TypeF32},
+		},
+		ReturnType: TypeF32,
+	}
+	c.functions["gui_checkbox"] = &FnSig{
+		Name:  "gui_checkbox",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "label", Type: TypeString},
+			{Name: "checked", Type: TypeBool},
+		},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_label"] = &FnSig{
+		Name:  "gui_label",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "text", Type: TypeString},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_mouse_x"] = &FnSig{
+		Name:       "gui_mouse_x",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_mouse_y"] = &FnSig{
+		Name:       "gui_mouse_y",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_is_mouse_down"] = &FnSig{
+		Name:       "gui_is_mouse_down",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "button", Type: TypeInt}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_is_key_pressed"] = &FnSig{
+		Name:       "gui_is_key_pressed",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "key", Type: TypeInt}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_frame_time"] = &FnSig{
+		Name:       "gui_frame_time",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeF32,
+	}
 }
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.
