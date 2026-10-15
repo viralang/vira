@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vira Programming Language - Linux & macOS Automated Installer & Dependency Resolver
-# Usage: curl -fsSL https://viralang.org/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/scripts/install.sh | bash
 #    or: ./scripts/install.sh
 
 set -e
@@ -10,6 +10,7 @@ INSTALL_DIR="$HOME/.vir"
 BIN_DIR="$INSTALL_DIR/bin"
 RUNTIME_DIR="$INSTALL_DIR/runtime"
 LIB_DIR="$INSTALL_DIR/lib"
+EXAMPLES_DIR="$INSTALL_DIR/examples"
 
 BOLD="$(tput bold 2>/dev/null || echo '')"
 GREEN="$(tput setaf 2 2>/dev/null || echo '')"
@@ -43,83 +44,132 @@ echo "${YELLOW}[1/5] Platform detected:${RESET} $OS ($TARGET_ARCH)"
 
 # 2. Create Target Directories
 echo "${YELLOW}[2/5] Creating installation directories in $INSTALL_DIR...${RESET}"
-mkdir -p "$BIN_DIR" "$RUNTIME_DIR" "$LIB_DIR"
+mkdir -p "$BIN_DIR" "$RUNTIME_DIR" "$LIB_DIR" "$EXAMPLES_DIR"
 
 # 3. Install Compiler Binary
 echo "${YELLOW}[3/5] Installing Vira compiler binary...${RESET}"
 INSTALLED=0
 
-if [ -f "./vex" ]; then
-    cp "./vex" "$BIN_DIR/vex"
-    chmod +x "$BIN_DIR/vex"
-    echo "  ${GREEN}✓ Installed local binary from ./vex${RESET}"
-    INSTALLED=1
-elif [ -f "./bin/vex" ]; then
-    cp "./bin/vex" "$BIN_DIR/vex"
-    chmod +x "$BIN_DIR/vex"
-    echo "  ${GREEN}✓ Installed local binary from ./bin/vex${RESET}"
-    INSTALLED=1
-elif [ -f "../vex" ]; then
-    cp "../vex" "$BIN_DIR/vex"
-    chmod +x "$BIN_DIR/vex"
-    echo "  ${GREEN}✓ Installed local binary from ../vex${RESET}"
-    INSTALLED=1
-elif [ -f "./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
-    TMP_DIST="$(mktemp -d)"
-    tar -xzf "./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
-    cp "$TMP_DIST"/*/bin/vex "$BIN_DIR/vex"
-    chmod +x "$BIN_DIR/vex"
-    rm -rf "$TMP_DIST"
-    echo "  ${GREEN}✓ Installed from local package: ./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
-    INSTALLED=1
-elif [ -f "../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" ]; then
-    TMP_DIST="$(mktemp -d)"
-    tar -xzf "../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" -C "$TMP_DIST"
-    cp "$TMP_DIST"/*/bin/vex "$BIN_DIR/vex"
-    chmod +x "$BIN_DIR/vex"
-    rm -rf "$TMP_DIST"
-    echo "  ${GREEN}✓ Installed from local package: ../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz${RESET}"
-    INSTALLED=1
+# Check local compiled binaries
+for cand in "./vira" "./bin/vira" "../vira" "./vex" "./bin/vex" "../vex"; do
+    if [ -f "$cand" ]; then
+        cp "$cand" "$BIN_DIR/vira"
+        ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$BIN_DIR/vira" "$BIN_DIR/vex"
+        chmod +x "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
+        echo "  ${GREEN}✓ Installed local binary from $cand${RESET}"
+        INSTALLED=1
+        break
+    fi
+done
+
+# Check local release archives
+if [ $INSTALLED -eq 0 ]; then
+    for pkg in \
+        "./dist/vira-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" \
+        "../dist/vira-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" \
+        "./dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" \
+        "../dist/vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz"; do
+        if [ -f "$pkg" ]; then
+            TMP_DIST="$(mktemp -d)"
+            tar -xzf "$pkg" -C "$TMP_DIST"
+            found_bin="$(find "$TMP_DIST" -type f \( -name "vira" -o -name "vex" \) | head -n 1)"
+            if [ -n "$found_bin" ]; then
+                cp "$found_bin" "$BIN_DIR/vira"
+                ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$BIN_DIR/vira" "$BIN_DIR/vex"
+                chmod +x "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
+                echo "  ${GREEN}✓ Installed from local package: $pkg${RESET}"
+                INSTALLED=1
+            fi
+            rm -rf "$TMP_DIST"
+            [ $INSTALLED -eq 1 ] && break
+        fi
+    done
 fi
 
+# Download from GitHub Releases
 if [ $INSTALLED -eq 0 ]; then
-    TAR_NAME="vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz"
-    DOWNLOAD_URL="https://github.com/viralang/vira/releases/download/${VIRA_VERSION}/${TAR_NAME}"
+    DOWNLOAD_SUCCESS=0
     TMP_DIR="$(mktemp -d)"
 
-    echo "  = Downloading $TAR_NAME from GitHub..."
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/vex.tar.gz" || true
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$DOWNLOAD_URL" -O "$TMP_DIR/vex.tar.gz" || true
-    fi
+    for TAR_NAME in "vira-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz" "vex-${VIRA_VERSION}-${OS}-${TARGET_ARCH}.tar.gz"; do
+        DOWNLOAD_URL="https://github.com/viralang/vira/releases/download/${VIRA_VERSION}/${TAR_NAME}"
+        echo "  = Attempting download: $DOWNLOAD_URL"
 
-    if [ -f "$TMP_DIR/vex.tar.gz" ]; then
-        tar -xzf "$TMP_DIR/vex.tar.gz" -C "$TMP_DIR"
-        cp "$TMP_DIR"/*/bin/vex "$BIN_DIR/vex" 2>/dev/null || cp "$TMP_DIR/vex" "$BIN_DIR/vex"
-        chmod +x "$BIN_DIR/vex"
-        echo "  ${GREEN}✓ Downloaded and extracted vex binary${RESET}"
-    else
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/vira.tar.gz" 2>/dev/null || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q "$DOWNLOAD_URL" -O "$TMP_DIR/vira.tar.gz" 2>/dev/null || true
+        fi
+
+        if [ -s "$TMP_DIR/vira.tar.gz" ]; then
+            tar -xzf "$TMP_DIR/vira.tar.gz" -C "$TMP_DIR"
+            found_bin="$(find "$TMP_DIR" -type f \( -name "vira" -o -name "vex" \) | head -n 1)"
+            if [ -n "$found_bin" ]; then
+                cp "$found_bin" "$BIN_DIR/vira"
+                ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$BIN_DIR/vira" "$BIN_DIR/vex"
+                chmod +x "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
+                echo "  ${GREEN}✓ Downloaded and installed vira binary (${TAR_NAME})${RESET}"
+                DOWNLOAD_SUCCESS=1
+                INSTALLED=1
+                break
+            fi
+        fi
+    done
+    rm -rf "$TMP_DIR"
+
+    # Build from source via Go if binary download not available
+    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
         echo "  ${YELLOW}! Remote download not found. Attempting to build from source via Go...${RESET}"
         if command -v go >/dev/null 2>&1; then
-            go build -ldflags="-s -w" -o "$BIN_DIR/vex" ./cmd/vex
-            chmod +x "$BIN_DIR/vex"
-            echo "  ${GREEN}✓ Built vex binary from source via Go${RESET}"
-        else
+            if [ -d "./cmd/vira" ]; then
+                go build -ldflags="-s -w" -o "$BIN_DIR/vira" ./cmd/vira
+            elif [ -d "../cmd/vira" ]; then
+                go build -ldflags="-s -w" -o "$BIN_DIR/vira" ../cmd/vira
+            else
+                go install github.com/viralang/vira/cmd/vira@latest || true
+                if command -v vira >/dev/null 2>&1; then
+                    cp "$(command -v vira)" "$BIN_DIR/vira"
+                fi
+            fi
+
+            if [ -f "$BIN_DIR/vira" ]; then
+                ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$BIN_DIR/vira" "$BIN_DIR/vex"
+                chmod +x "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
+                echo "  ${GREEN}✓ Built and installed vira binary from source via Go${RESET}"
+                INSTALLED=1
+            fi
+        fi
+        if [ $INSTALLED -eq 0 ]; then
             echo "  ${YELLOW}! Please ensure 'vira' binary is placed in $BIN_DIR${RESET}"
         fi
     fi
-    rm -rf "$TMP_DIR"
 fi
 
-# 4. Copy Runtime Headers
+# 4. Copy Runtime Headers, Examples & Documentation
+echo "${YELLOW}[4/5] Deploying runtime headers and examples...${RESET}"
 if [ -d "./runtime" ]; then
     cp -r ./runtime/*.h "$RUNTIME_DIR/" 2>/dev/null || true
     echo "  ${GREEN}✓ Copied runtime headers to $RUNTIME_DIR${RESET}"
+elif [ -d "../runtime" ]; then
+    cp -r ../runtime/*.h "$RUNTIME_DIR/" 2>/dev/null || true
+    echo "  ${GREEN}✓ Copied runtime headers to $RUNTIME_DIR${RESET}"
+else
+    echo "  ${GREEN}✓ Embedded runtime headers will auto-extract on first run${RESET}"
 fi
 
+if [ -d "./examples" ]; then
+    cp -r ./examples/* "$EXAMPLES_DIR/" 2>/dev/null || true
+    echo "  ${GREEN}✓ Copied runnable examples to $EXAMPLES_DIR${RESET}"
+elif [ -d "../examples" ]; then
+    cp -r ../examples/* "$EXAMPLES_DIR/" 2>/dev/null || true
+    echo "  ${GREEN}✓ Copied runnable examples to $EXAMPLES_DIR${RESET}"
+fi
+
+[ -f "./LANGUAGE_GUIDE.md" ] && cp "./LANGUAGE_GUIDE.md" "$INSTALL_DIR/" 2>/dev/null || true
+[ -f "./README.md" ] && cp "./README.md" "$INSTALL_DIR/" 2>/dev/null || true
+
 # 5. Dependency Resolution (C Compiler & System Libraries)
-echo "${YELLOW}[4/5] Checking and resolving system dependencies...${RESET}"
+echo "${YELLOW}[5/5] Checking system dependencies & shell PATH...${RESET}"
 CC_FOUND=0
 for cc in gcc clang cc tcc; do
     if command -v "$cc" >/dev/null 2>&1; then
@@ -190,8 +240,7 @@ elif [ "$OS" = "darwin" ]; then
     echo "  ${GREEN}✓ Native macOS graphics frameworks available (Cocoa / OpenGL)${RESET}"
 fi
 
-# 6. Configure Shell PATH
-echo "${YELLOW}[5/5] Configuring shell PATH...${RESET}"
+# Configure Shell PATH
 PATH_LINE="export PATH=\"\$HOME/.vir/bin:\$PATH\""
 
 SHELL_PROFILES=()
@@ -221,6 +270,6 @@ echo "${GREEN}${BOLD}==========================================================$
 echo ""
 echo "${CYAN}Next steps:${RESET}"
 echo "  1. Reload shell:  ${BOLD}source ~/.bashrc${RESET} (or ${BOLD}source ~/.zshrc${RESET})"
-echo "  2. Verify:        ${BOLD}vex -h${RESET}"
+echo "  2. Verify:        ${BOLD}vira -h${RESET}"
 echo "  3. Run demo:      ${BOLD}vira run examples/gui_demo.vir${RESET}"
 echo ""

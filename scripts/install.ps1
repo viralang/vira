@@ -3,65 +3,146 @@
 
 $ErrorActionPreference = "Stop"
 
-$VexVersion = "v0.5.5"
-$InstallDir = "$env:USERPROFILE\.vir"
-$BinDir     = "$InstallDir\bin"
-$RuntimeDir = "$InstallDir\runtime"
-$LibDir     = "$InstallDir\lib"
+$ViraVersion = "v0.5.5"
+$InstallDir  = "$env:USERPROFILE\.vir"
+$BinDir      = "$InstallDir\bin"
+$RuntimeDir  = "$InstallDir\runtime"
+$LibDir      = "$InstallDir\lib"
+$ExamplesDir = "$InstallDir\examples"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   Vira Programming Language - Windows Installer ($VexVersion)" -ForegroundColor Cyan
+Write-Host "   Vira Programming Language - Windows Installer ($ViraVersion)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # 1. Create target directories
-Write-Host "[1/5] Creating installation directories..." -ForegroundColor Yellow
+Write-Host "[1/5] Creating installation directories in $InstallDir..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LibDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ExamplesDir | Out-Null
 
-# 2. Locate or Download vira.exe
+# 2. Locate, Extract or Download vira.exe
 Write-Host "[2/5] Installing Vira compiler binary..." -ForegroundColor Yellow
 $SourceExe = $null
 
-if (Test-Path ".\vira.exe") {
-    $SourceExe = ".\vira.exe"
-} elseif (Test-Path ".\bin\vira.exe") {
-    $SourceExe = ".\bin\vira.exe"
-} elseif (Test-Path "..\vira.exe") {
-    $SourceExe = "..\vira.exe"
-} elseif (Test-Path ".\dist\vex-$VexVersion-windows-amd64.zip") {
-    Expand-Archive -Path ".\dist\vex-$VexVersion-windows-amd64.zip" -DestinationPath "$env:TEMP\vex-dist" -Force
-    $SourceExe = (Get-ChildItem -Path "$env:TEMP\vex-dist" -Filter "vira.exe" -Recurse).FullName
+# Check local compiled binaries
+$LocalCandidates = @(
+    ".\vira.exe",
+    ".\bin\vira.exe",
+    "..\vira.exe",
+    ".\vex.exe",
+    ".\bin\vex.exe",
+    "..\vex.exe"
+)
+foreach ($cand in $LocalCandidates) {
+    if (Test-Path $cand) {
+        $SourceExe = (Resolve-Path $cand).Path
+        break
+    }
+}
+
+# Check local release packages
+if (-not $SourceExe) {
+    $LocalPackages = @(
+        ".\dist\vira-$ViraVersion-windows-amd64.zip",
+        "..\dist\vira-$ViraVersion-windows-amd64.zip",
+        ".\dist\vex-$ViraVersion-windows-amd64.zip",
+        "..\dist\vex-$ViraVersion-windows-amd64.zip"
+    )
+    foreach ($pkg in $LocalPackages) {
+        if (Test-Path $pkg) {
+            $TempDist = "$env:TEMP\vira-dist-$(Get-Random)"
+            Expand-Archive -Path $pkg -DestinationPath $TempDist -Force
+            $found = Get-ChildItem -Path $TempDist -Filter "vira.exe" -Recurse | Select-Object -First 1
+            if (-not $found) {
+                $found = Get-ChildItem -Path $TempDist -Filter "vex.exe" -Recurse | Select-Object -First 1
+            }
+            if ($found) {
+                $SourceExe = $found.FullName
+                break
+            }
+        }
+    }
 }
 
 if ($SourceExe) {
     Copy-Item -Path $SourceExe -Destination "$BinDir\vira.exe" -Force
+    Copy-Item -Path $SourceExe -Destination "$BinDir\vex.exe" -Force
     Write-Host "  ✓ Installed local binary from $SourceExe" -ForegroundColor Green
 } else {
-    Write-Host "  = Downloading vira.exe ($VexVersion)..." -ForegroundColor Gray
-    $DownloadUrl = "https://github.com/viralang/vira/releases/download/$VexVersion/vex-$VexVersion-windows-amd64.zip"
-    $ZipPath = "$env:TEMP\vex-install.zip"
-    try {
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath -UseBasicParsing
-        Expand-Archive -Path $ZipPath -DestinationPath "$env:TEMP\vex-extract" -Force
-        Copy-Item -Path "$env:TEMP\vex-extract\*\bin\vira.exe" -Destination "$BinDir\vira.exe" -Force
-        Remove-Item -Force $ZipPath
-        Remove-Item -Recurse -Force "$env:TEMP\vex-extract"
-        Write-Host "  ✓ Downloaded and installed vira.exe" -ForegroundColor Green
-    } catch {
-        Write-Warning "Failed to download remote binary: $_"
-        Write-Host "  = If building from source, run: go build -o $BinDir\vira.exe .\cmd\vex" -ForegroundColor Yellow
+    Write-Host "  = Downloading vira.exe ($ViraVersion)..." -ForegroundColor Gray
+    $Downloaded = $false
+    $DownloadUrls = @(
+        "https://github.com/viralang/vira/releases/download/$ViraVersion/vira-$ViraVersion-windows-amd64.zip",
+        "https://github.com/viralang/vira/releases/download/$ViraVersion/vex-$ViraVersion-windows-amd64.zip"
+    )
+    $ZipPath = "$env:TEMP\vira-install.zip"
+    $ExtractPath = "$env:TEMP\vira-extract-$(Get-Random)"
+
+    foreach ($url in $DownloadUrls) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $ZipPath -UseBasicParsing -TimeoutSec 30
+            if (Test-Path $ZipPath) {
+                Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+                $found = Get-ChildItem -Path $ExtractPath -Filter "vira.exe" -Recurse | Select-Object -First 1
+                if (-not $found) {
+                    $found = Get-ChildItem -Path $ExtractPath -Filter "vex.exe" -Recurse | Select-Object -First 1
+                }
+                if ($found) {
+                    Copy-Item -Path $found.FullName -Destination "$BinDir\vira.exe" -Force
+                    Copy-Item -Path $found.FullName -Destination "$BinDir\vex.exe" -Force
+                    Write-Host "  ✓ Downloaded and installed vira.exe" -ForegroundColor Green
+                    $Downloaded = $true
+                    break
+                }
+            }
+        } catch {
+            # Try next URL
+        } finally {
+            if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
+            if (Test-Path $ExtractPath) { Remove-Item -Recurse -Force $ExtractPath }
+        }
+    }
+
+    if (-not $Downloaded) {
+        Write-Warning "Could not download pre-built release package."
+        if (Get-Command go -ErrorAction SilentlyContinue) {
+            Write-Host "  = Building vira.exe from source via Go..." -ForegroundColor Cyan
+            go build -ldflags="-s -w" -o "$BinDir\vira.exe" .\cmd\vira
+            Copy-Item -Path "$BinDir\vira.exe" -Destination "$BinDir\vex.exe" -Force
+            Write-Host "  ✓ Built vira.exe from source via Go" -ForegroundColor Green
+        } else {
+            Write-Host "  ! Please build from source using: go build -o $BinDir\vira.exe .\cmd\vira" -ForegroundColor Yellow
+        }
     }
 }
 
-# 3. Copy Runtime Headers
-Write-Host "[3/5] Deploying runtime & GUI headers..." -ForegroundColor Yellow
+# 3. Copy Runtime Headers & Examples
+Write-Host "[3/5] Deploying runtime headers and examples..." -ForegroundColor Yellow
 if (Test-Path ".\runtime\vira_rt.h") {
     Copy-Item -Path ".\runtime\*.h" -Destination $RuntimeDir -Force
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
+} elseif (Test-Path "..\runtime\vira_rt.h") {
+    Copy-Item -Path "..\runtime\*.h" -Destination $RuntimeDir -Force
+    Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } else {
     Write-Host "  ✓ Embedded runtime headers will auto-extract on first run" -ForegroundColor Green
+}
+
+if (Test-Path ".\examples") {
+    Copy-Item -Path ".\examples\*" -Destination $ExamplesDir -Recurse -Force
+    Write-Host "  ✓ Copied runnable examples to $ExamplesDir" -ForegroundColor Green
+} elseif (Test-Path "..\examples") {
+    Copy-Item -Path "..\examples\*" -Destination $ExamplesDir -Recurse -Force
+    Write-Host "  ✓ Copied runnable examples to $ExamplesDir" -ForegroundColor Green
+}
+
+if (Test-Path ".\LANGUAGE_GUIDE.md") {
+    Copy-Item -Path ".\LANGUAGE_GUIDE.md" -Destination "$InstallDir\LANGUAGE_GUIDE.md" -Force
+}
+if (Test-Path ".\README.md") {
+    Copy-Item -Path ".\README.md" -Destination "$InstallDir\README.md" -Force
 }
 
 # 4. Dependency Resolution (C Compiler & System Graphics)
