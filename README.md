@@ -170,6 +170,7 @@ The repository includes 20 comprehensive step-by-step tutorials paired directly 
 | **18** | **Autograd & SafeTensors** | Advanced | [`18_autograd_and_safetensors.vir`](docs/examples/18_autograd_and_safetensors.vir) | [`18_autograd_and_safetensors.md`](docs/tutorials/18_autograd_and_safetensors.md) | Native zero-copy loading of Hugging Face `.safetensors`, SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), in-place SGD optimization. |
 | **19** | **Local LLM Engine (GGUF)** | Expert | [`19_local_llm_inference.vir`](docs/examples/19_local_llm_inference.vir) | [`20_gguf_llm_inference_engine.md`](docs/tutorials/20_gguf_llm_inference_engine.md) | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, RoPE embeddings, SwiGLU activations, Causal Self-Attention, token sampling. |
 | **20** | **Tooling, LSP & Packaging** | Beginner/Adv | `vira init`, `vex.mod`, `vira fmt` | [`19_tooling_lsp_and_package_management.md`](docs/tutorials/19_tooling_lsp_and_package_management.md) | Project scaffolding (`vira init`), manifest packages (`vex.mod`), code formatter (`vira fmt`), test runner (`vira test`), and Language Server (`vira lsp`). |
+| **21** | **Native Desktop GUI & Dashboards** | Intermediate/Adv | [`20_native_gui.vir`](docs/examples/20_native_gui.vir) / [`gui_demo.vir`](examples/gui_demo.vir) | [`21_native_gui_desktop_applications.md`](docs/tutorials/21_native_gui_desktop_applications.md) | Immediate-Mode GUI (IMGUI), double-buffered 60 FPS Win32/X11 rendering, interactive widgets (buttons, sliders, checkboxes), and non-blocking background actor dashboards. |
 
 ---
 
@@ -647,18 +648,32 @@ res := http_response(200, 'application/json', '{"status": "ok"}')
 
 ### Native Desktop GUI Engine
 
-Vira comes with a lightweight, cross-platform graphical canvas windowing engine (`runtime/vira_gui.h`):
+Vira comes with a lightweight, hardware-accelerated **Immediate-Mode GUI (IMGUI)** engine built directly into the standard runtime (`runtime/vira_gui.h`):
+
+<p align="center">
+  <img src="screenshout/vira-gui-example.png" alt="Vira Hardware-Accelerated GUI Dashboard" width="850" style="border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.5);">
+</p>
+
+#### Key Capabilities & Architecture:
+- **Immediate-Mode UI Paradigm:** Widgets (`gui_button`, `gui_slider`, `gui_checkbox`) handle layout, rendering, hover transitions, and user input in a single function call. No bloated retained-mode widget trees or stale callback states.
+- **Atomic Double-Buffering:** Memory device contexts (`hdc_mem` + `hbm_mem`) completely eliminate screen tearing and flickering via instantaneous `BitBlt` backbuffer swaps.
+- **Hardware Frame Limiter:** High-precision hardware timers (`QueryPerformanceCounter`) lock smooth, tear-free 60 FPS / 120 FPS animation loops while keeping idle CPU usage near 0%.
+- **Zero-Freeze Concurrent Actor Integration:** Dispatches compute-intensive tasks (AI tensor MatMul, LLM inference, networking, file I/O) to background **Chase-Lev work-stealing actors** (`actor`, `<-`, `Future[T]` `.await()`), keeping the UI responsive at 60 FPS with zero lag or GIL bottlenecks.
+- **Zero Garbage Collector Overhead:** Clean, deterministic LIFO memory management without pauses or memory leaks.
+
+#### Running the Native GUI Dashboard:
 
 ```powershell
 # Run the built-in desktop GUI demonstration
 .\vira.exe run examples/gui_demo.vir
+
+# Or build a standalone native executable
+.\vira.exe build -prod -o gui_demo.exe examples/gui_demo.vir
+.\gui_demo.exe
 ```
 
-Features:
-- Native Win32 windowing with double-buffered GDI rendering.
-- Linux X11/Xlib support with standard display protocols.
-- 60 FPS animation loop with customizable frame callbacks.
-- Vector graphics primitives: rectangles, circles, lines, and text rendering.
+> [!TIP]
+> Read the complete, comprehensive architectural guide in **[Tutorial 21: Native Desktop GUI Architecture, Immediate-Mode Rendering & Concurrent Actor Dashboards](docs/tutorials/21_native_gui_desktop_applications.md)**.
 
 ---
 

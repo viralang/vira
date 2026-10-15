@@ -38,6 +38,7 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`17_http_web_server_and_json.vir`](./17_http_web_server_and_json.vir)** | High-Performance HTTP 1.1 Web Engine & JSON Microservices | Fast JSON field parsing (`json_get_str`, `json_get_int`, `json_get_f32`), HTTP 1.1 response generation (`http_response`), actor-based request processing, and zero memory leaks. |
 | **[`18_autograd_and_safetensors.vir`](./18_autograd_and_safetensors.vir)** | Pure Vira Autograd Engine & Native SafeTensors Loader | Native zero-copy loading of Hugging Face `.safetensors` files (`safetensors_load`), SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), and hardware in-place SGD optimization (`tensor_sgd_step`). |
 | **[`19_local_llm_inference.vir`](./19_local_llm_inference.vir)** | Pure Vira Local LLM Inference Engine & GGUF Parser | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, Rotary Position Embeddings (RoPE), SwiGLU activations, Causal Self-Attention, and temperature-based token sampling. |
+| **[`20_native_gui.vir`](./20_native_gui.vir)** | Hardware-Accelerated Native GUI & Actor Dashboard | Immediate-Mode GUI (IMGUI), double-buffered 60 FPS Win32/X11 rendering, interactive widgets (buttons, sliders, checkboxes), and real-time concurrent background actor metrics. |
 
 ---
 
@@ -65,4 +66,5 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/17_http_web_server_and_json.vir
 .\vira.exe run docs/examples/18_autograd_and_safetensors.vir
 .\vira.exe run docs/examples/19_local_llm_inference.vir
+.\vira.exe run docs/examples/20_native_gui.vir
 ```
