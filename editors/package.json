@@ -1,0 +1,8 @@
+{
+  "name": "vira-editors",
+  "version": "0.1.1",
+  "private": true,
+  "scripts": {
+    "package": "npm --prefix vscode run package"
+  }
+}

@@ -61,7 +61,13 @@
       }
     }
   },
+  "scripts": {
+    "package": "vsce package --no-git-tag-version"
+  },
   "dependencies": {
     "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.1"
   }
 }
