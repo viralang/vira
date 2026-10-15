@@ -181,7 +181,7 @@ The repository includes 20 comprehensive step-by-step tutorials paired directly 
 
 Every Vira source file begins with a `module` declaration defining its namespace boundary:
 
-```vex
+```v
 module billing
 ```
 
@@ -193,7 +193,7 @@ Symbols prefixed with `pub` are visible outside the module; un-prefixed symbols 
 
 Bindings in Vira are **immutable by default**. To reassign a variable, declare it explicitly with `mut`:
 
-```vex
+```v
 // Immutable binding (cannot be reassigned)
 x := 10
 // x = 20  <-- Compile-time error: cannot reassign immutable variable 'x'
@@ -209,7 +209,7 @@ y = 20 // OK!
 
 The blank identifier `_` discards unused values or Result returns without polluting the scope:
 
-```vex
+```v
 _ := compute_heavy_task()
 ```
 
@@ -235,7 +235,7 @@ Multiple assignments to `_` in the same scope are valid and never trigger variab
 
 Strings support zero-cost `${...}` expression interpolation:
 
-```vex
+```v
 name := 'Alice'
 score := 98.5
 println('Player ${name} scored ${score}%!')
@@ -247,7 +247,7 @@ println('Player ${name} scored ${score}%!')
 
 Vira provides granular, 4-quadrant field encapsulation within a single struct definition:
 
-```vex
+```v
 pub struct Account {
     // 1. Private & Immutable (default): only accessible within this module; read-only
     secret_pin int
@@ -271,7 +271,7 @@ pub mut:
 
 1. A field in `pub:` can **never** be reassigned outside its defining module.
 2. A field in `mut:` or `pub mut:` can only be mutated if the enclosing struct instance is bound as `mut`:
-   ```vex
+   ```v
    acc := Account{ ... }
    acc.balance += 50 // ERROR: cannot mutate field on immutable binding 'acc'
 
@@ -285,7 +285,7 @@ pub mut:
 
 Vira replaces class inheritance with **struct embedding**. Fields and methods of the embedded struct are automatically promoted:
 
-```vex
+```v
 pub struct AuditMeta {
 pub:
     created_at i64
@@ -317,7 +317,7 @@ fn main() {
 
 Methods are declared with an explicit receiver before the function name:
 
-```vex
+```v
 // Immutable receiver (read-only; can be called on immutable or mutable bindings)
 pub fn (inv Invoice) summary() string {
     return 'Invoice #${inv.id}: ${inv.amount}'
@@ -335,7 +335,7 @@ pub fn (mut inv Invoice) apply_discount(percent f32) {
 
 Type-associated static constructor functions use the `TypeName.method_name` syntax:
 
-```vex
+```v
 pub fn Invoice.new(id string, amount i64) Invoice {
     return Invoice{
         AuditMeta: AuditMeta{ created_at: 1750000000, updated_at: 1750000000 },
@@ -356,7 +356,7 @@ inv := Invoice.new('inv_101', 5000)
 
 Interfaces define a set of methods that a type must implement. Methods requiring mutation use `mut:`:
 
-```vex
+```v
 pub interface Payable {
     summary() string
 mut:
@@ -372,7 +372,7 @@ Types do **not** declare `implements Payable`. If a struct provides the required
 
 Cast any satisfying struct to an interface to create a 16-byte fat pointer (`._object`, `._vtable`):
 
-```vex
+```v
 inv := Invoice.new('inv_9001', 15000)
 p := Payable(inv) // Boxes into dynamic interface fat-pointer
 
@@ -391,7 +391,7 @@ Vira eliminates unhandled runtime exceptions in favor of explicit, zero-cost `!T
 
 A function returning a Result indicates potential failure:
 
-```vex
+```v
 pub fn (mut inv Invoice) mark_paid() !string {
     if inv.amount <= 0 {
         return error('invalid invoice amount')
@@ -405,7 +405,7 @@ pub fn (mut inv Invoice) mark_paid() !string {
 
 Result values must be unwrapped at the call site. The `or { ... }` block executes only on error, exposing the error message via the implicit variable `err`:
 
-```vex
+```v
 msg := inv.mark_paid() or {
     eprintln('Failed to pay: ${err}')
     return
@@ -415,7 +415,7 @@ println(msg)
 
 Default fallback values can also be supplied directly:
 
-```vex
+```v
 val := risky_calc() or { 0.0 }
 ```
 
@@ -454,7 +454,7 @@ Run `vira check <file.vir>` to inspect the complete autofree escape analysis aud
 
 For high-throughput workloads, temporary batch allocations can be placed in a fast, 64-byte cache-aligned bump arena:
 
-```vex
+```v
 arena {
     t1 := tensor_fill(128, 128, 1.0)
     t2 := tensor_fill(128, 128, 2.0)
@@ -471,7 +471,7 @@ arena {
 
 Tensors are first-class primitives in Vira:
 
-```vex
+```v
 w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
 x := tensor_fill(64, 64, 2.0)
 ```
@@ -480,7 +480,7 @@ x := tensor_fill(64, 64, 2.0)
 
 The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
 
-```vex
+```v
 y := w @ x // Performs 64x64 @ 64x64 matmul
 total := tensor_sum(y)
 ```
@@ -499,7 +499,7 @@ The Vira runtime automatically selects the fastest available vector instructions
 
 Vira features a native Autograd backpropagation engine and zero-copy reader for Hugging Face `.safetensors` files:
 
-```vex
+```v
 // Load Hugging Face weights directly without Python
 weights := safetensors_load('model.safetensors', 'encoder.weight') or {
     panic('Failed to load weights: ${err}')
@@ -519,7 +519,7 @@ tensor_sgd_step(weights, grad_b, 0.01)
 
 Vira includes a native binary parser and execution runtime for quantized GGUF models:
 
-```vex
+```v
 // Initialize GGUF model parser (Q4_0 / Q8_0)
 model := gguf_load('llama-3.2-1b-instruct-q4_0.gguf') or {
     panic('Failed to open GGUF model: ${err}')
@@ -540,7 +540,7 @@ Vira features Erlang-inspired actor concurrency built for multicore machine lear
 
 An actor is declared with the `actor` keyword:
 
-```vex
+```v
 pub actor AIWorker {
 pub:
     id int
@@ -565,7 +565,7 @@ pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
 
 Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
 
-```vex
+```v
 mut w1 := AIWorker{ id: 1, batches_run: 0 }
 mut w2 := AIWorker{ id: 2, batches_run: 0 }
 
@@ -614,7 +614,7 @@ Vira provides native, hardware-level file operations returning zero-cost Result 
 | `append_file(path string, content string) !bool` | Appends content to the end of a file. |
 | `remove_file(path string) !bool` | Deletes the file from the filesystem. |
 
-```vex
+```v
 // Atomic write
 _ := write_file('log.txt', 'Pipeline started\n') or {
     eprintln('Write failed: ${err}')
@@ -635,7 +635,7 @@ println(data) // Buffer freed automatically at scope exit!
 
 Vira includes native primitives for building microservices:
 
-```vex
+```v
 // Parse JSON payloads with zero allocations
 payload := '{"model": "vira-7b", "batch_size": 32, "lr": 0.001}'
 model_name := json_get_str(payload, 'model') or { 'default' }
@@ -677,7 +677,7 @@ Vira comes with a lightweight, hardware-accelerated **Immediate-Mode GUI (IMGUI)
 ```
 
 #### Declarative Auto-Layout Example (Zero Coordinate Arguments!):
-```vex
+```v
 // Vertical Stack with auto-arranged cards, rows, and buttons
 gui_vstack_begin(420, 90, 340, 15)
     gui_card_begin('Interactive Control Center', 340)
@@ -734,7 +734,7 @@ error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated
 
 The following program combines all core language features: OOP composition, fat-pointer interfaces, SIMD tensors, work-stealing actor concurrency, and fault tolerance:
 
-```vex
+```v
 module billing
 
 // --- 1. OOP STRUCTS & COMPOSITION ---

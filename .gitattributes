@@ -1,0 +1,14 @@
+# 1. Tell GitHub Linguist to syntax-highlight .vir files and count them in the repo language bar
+*.vir linguist-detectable=true
+*.vir linguist-language=V
+
+# Also recognize .vex files
+*.vex linguist-detectable=true
+*.vex linguist-language=V
+
+# 2. Exclude generated C99 outputs, packages, and docs from skewing the language percentage bar
+build/** linguist-generated=true
+dist/** linguist-generated=true
+scratch/** linguist-generated=true
+*.md linguist-documentation=true
+docs/** linguist-documentation=true
