@@ -1,0 +1,23 @@
+module enterprise_app
+
+fn test_cluster_node_lifecycle() {
+	mut node := ClusterNode.new(99, 'test-node', 4)
+	if node.id != 99 {
+		panic('node id mismatch')
+	}
+	node.assign_job()
+	if node.assigned_tasks != 1 {
+		panic('task count mismatch')
+	}
+	println('✓ test_cluster_node_lifecycle passed')
+}
+
+fn test_simd_workload() {
+	mut worker := WorkerActor.new(1)
+	fut := worker <- execute_workload(1.0)
+	res := fut.await() or { 0.0 }
+	if res <= 0.0 {
+		panic('invalid tensor sum')
+	}
+	println('✓ test_simd_workload passed (sum=${res})')
+}

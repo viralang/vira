@@ -1,0 +1,26 @@
+module enterprise_app
+
+pub actor WorkerActor {
+pub:
+	worker_id int
+mut:
+	jobs_processed int
+}
+
+pub fn WorkerActor.new(id int) WorkerActor {
+	return WorkerActor{
+		worker_id: id,
+		jobs_processed: 0
+	}
+}
+
+pub fn (mut w WorkerActor) execute_workload(scale f32) f32 {
+	w.jobs_processed += 1
+
+	// Fast 64-byte aligned SIMD tensor matrix multiplication
+	weights := tensor_fill(32, 32, 0.5)
+	inputs := tensor_fill(32, 32, scale)
+	out := weights @ inputs
+
+	return tensor_sum(out)
+}

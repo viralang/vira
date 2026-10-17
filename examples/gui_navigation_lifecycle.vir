@@ -1,0 +1,166 @@
+module main
+
+// Vira Window Navigation & Lifecycle Demonstration
+// Demonstrates:
+// 1. Lifecycle: Window creation, event loop, close request interception (WM_CLOSE / WM_DELETE_WINDOW)
+// 2. Navigation: Multi-view Tab Navigation (gui_tab_item) with state routing
+// 3. Modals: Modal popups with dimmed backdrop (gui_modal_begin / gui_modal_end)
+// 4. Close Cancellation: gui_cancel_close() to prevent exit on unsaved work
+
+fn main() {
+	gui_init(920, 680, 'Vira Window Navigation & Lifecycle Manager')
+	gui_set_target_fps(60)
+
+	mut active_tab := 0 // 0 = Overview, 1 = Workloads, 2 = Logs
+	mut count := 0
+	mut progress_val := 0.65f32
+	mut node_name := 'ComputeCluster-Alpha'
+	mut is_dirty := true
+	mut show_exit_modal := false
+	mut show_reset_modal := false
+
+	for {
+		// Lifecycle: Intercept OS Close Request (Titlebar 'X' clicked)
+		if gui_should_close() {
+			if is_dirty {
+				gui_cancel_close()
+				show_exit_modal = true
+			} else {
+				break // Clean exit
+			}
+		}
+
+		gui_begin()
+		gui_clear(0x181825)
+
+		// Top Header with Navigation Tabs
+		gui_draw_rect(0, 0, 920, 60, 0x1E1E2E)
+		gui_draw_text('Vira Lifecycle & Navigation', 20, 18, 20, 0xCDD6F4)
+
+		if is_dirty {
+			gui_draw_badge(330, 18, 'UNSAVED CHANGES', 0x45475A, 0xF9E2AF)
+		} else {
+			gui_draw_badge(330, 18, 'SAVED & SYNCED', 0x2D4A3E, 0xA6E3A1)
+		}
+
+		// Navigation Tab Bar (HStack)
+		gui_vstack_begin(20, 75, 880, 15)
+			gui_hstack_begin(38, 8)
+				if gui_tab_item('Overview & Telemetry', active_tab == 0) {
+					active_tab = 0
+				}
+				if gui_tab_item('Workload Configuration', active_tab == 1) {
+					active_tab = 1
+				}
+				if gui_tab_item('System Audit Logs', active_tab == 2) {
+					active_tab = 2
+				}
+			gui_stack_end()
+
+			gui_separator()
+
+			// VIEW ROUTING: Render different screens based on active_tab
+			if active_tab == 0 {
+				// VIEW 1: Overview & Telemetry
+				gui_card_begin('Real-Time Telemetry Dashboard', 880)
+					gui_lbl('Active Cluster: ${node_name}')
+					gui_lbl('Processed Frames / Ticks: ${count}')
+					gui_lbl('Memory Status: Zero GC Pauses • 0 Heap Leaks')
+					gui_spacing(8)
+					gui_lbl('Workload Completion:')
+					gui_progress(progress_val)
+					gui_spacing(10)
+					gui_hstack_begin(36, 12)
+						if gui_btn('Trigger Frame Step (+1)') {
+							count += 1
+							is_dirty = true
+						}
+						if gui_btn('Request Reset') {
+							show_reset_modal = true
+						}
+					gui_stack_end()
+				gui_card_end()
+
+			} else if active_tab == 1 {
+				// VIEW 2: Workload Configuration
+				gui_card_begin('Node Configuration & Parameters', 880)
+					gui_lbl('Cluster Node Identifier:')
+					node_name = gui_input('Enter cluster name...', node_name)
+					gui_spacing(8)
+					gui_separator()
+					gui_lbl('Progress Target Ratio:')
+					progress_val = gui_slide('Target: ', '%', progress_val * 100.0f32, 0.0f32, 100.0f32) / 100.0f32
+					gui_spacing(10)
+					if gui_btn('Commit & Save Configuration') {
+						is_dirty = false
+					}
+				gui_card_end()
+
+			} else {
+				// VIEW 3: System Audit Logs
+				gui_card_begin('Lifecycle Event Log', 880)
+					gui_lbl('[INIT] Window created: Win32/X11 Native Subsystem')
+					gui_lbl('[POLL] Non-blocking OS event dispatch active')
+					gui_lbl('[SYNC] Double-buffered VSync locked to 60 FPS')
+					gui_lbl('[STATUS] Navigation tabs routing 3 distinct viewports')
+					gui_spacing(10)
+					if gui_btn('Clear Audit History') {
+						is_dirty = true
+					}
+				gui_card_end()
+			}
+		gui_stack_end()
+
+		// Footer Telemetry
+		dt := gui_frame_time()
+		gui_draw_text('Window: ${gui_window_width()}x${gui_window_height()} • Frame Time: ${dt}s • Double-Buffered', 20, 645, 14, 0x6C7086)
+
+		// -------------------------------------------------------------
+		// MODAL DIALOG 1: Confirm Reset
+		// -------------------------------------------------------------
+		if show_reset_modal {
+			gui_modal_begin('Confirm State Reset', 460, 200)
+				gui_lbl('Are you sure you want to reset cluster metrics?')
+				gui_lbl('All counter increments will return to zero.')
+				gui_separator()
+				gui_hstack_begin(36, 12)
+					if gui_btn('Yes, Reset (0)') {
+						count = 0
+						is_dirty = true
+						show_reset_modal = false
+					}
+					if gui_btn('Cancel') {
+						show_reset_modal = false
+					}
+				gui_stack_end()
+			gui_modal_end()
+		}
+
+		// -------------------------------------------------------------
+		// MODAL DIALOG 2: Intercepted Close Request (Unsaved Changes)
+		// -------------------------------------------------------------
+		if show_exit_modal {
+			gui_modal_begin('Unsaved Changes Detected', 480, 210)
+				gui_lbl('You have uncommitted modifications in your cluster.')
+				gui_lbl('Do you want to save your state before closing?')
+				gui_separator()
+				gui_hstack_begin(36, 12)
+					if gui_btn('Save & Exit') {
+						break // Exit main loop
+					}
+					if gui_btn('Discard & Exit') {
+						break // Exit main loop
+					}
+					if gui_btn('Keep Working') {
+						show_exit_modal = false // Cancel close!
+					}
+				gui_stack_end()
+			gui_modal_end()
+		}
+
+		gui_end()
+	}
+
+	gui_close()
+	println('Window lifecycle closed cleanly.')
+}

@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const version = "v0.5.5"
+const version = "v0.5.6"
 
 type Target struct {
 	OS      string

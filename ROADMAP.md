@@ -26,6 +26,8 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5.5] Tooling: fmt, test, lsp & vex.mod     ✅ COMPLETED
        │
+ [v0.5.6] Enterprise Scaffolding & GUI Engine   ✅ COMPLETED
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
  [v0.6] Phase 1: VexServe Web & LLM Streaming  ⏳ NEXT MILESTONE
@@ -73,6 +75,14 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **VS Code Extension (`editors/vscode/`):** Full extension package with syntax grammar, bracket matching, code snippets, and LSP client integration.
 - [x] **Package Manifest & Multi-File Projects (`vira init` & `vex.mod`):** Scaffolding and multi-file directory compilation into single unified binaries.
 - [x] **Curriculum & Documentation:** 19 runnable standalone examples and 20 step-by-step tutorials with verified 0 leaks.
+
+### 5. Enterprise Multi-Package Scaffolding & Declarative GUI Engine (v0.5.6)
+- [x] **Enterprise Multi-Package Scaffolding (`vira init`):** Modern project layout generation (`src/config/`, `src/models/`, `src/services/`, `tests/app_test.vir`, `vira.mod`, `README.md`, `.gitignore`).
+- [x] **Recursive Package Traversal:** Deep multi-directory compiler walking supporting arbitrary package hierarchies.
+- [x] **C Identifier Sanitization:** Robust module name mangling for numeric directory prefixes.
+- [x] **Integrated Test Harness:** Automatic project source resolution for unit test files with application `main()` isolation.
+- [x] **Declarative IMGUI Auto-Layout Engine:** Vertical stacks (`gui_vstack_begin`), horizontal stacks (`gui_hstack_begin`), auto-sized cards, text inputs, multi-tab routing, modal dialogs, and close interception.
+- [x] **Curriculum Expansion:** 23 runnable examples and 24 in-depth tutorials.
 
 ---
 

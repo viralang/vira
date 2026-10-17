@@ -37,6 +37,7 @@ Commands:
   lsp     Start the Vira Language Server (LSP) over stdin/stdout
   init    Initialize a new Vira project scaffold with vira.mod and src/
   demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
+  version Display compiler version and target platform
 
 Flags for 'vira build':
   -prod       Enable production optimizations (-O3 -march=native -flto)
@@ -81,12 +82,18 @@ func main() {
 		initCmd(os.Args[2:])
 	case "demo":
 		demoCmd()
+	case "version", "-v", "--version":
+		versionCmd()
 	case "-h", "--help", "help":
 		fmt.Print(usageBanner)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", subcmd, usageBanner)
 		os.Exit(1)
 	}
+}
+
+func versionCmd() {
+	fmt.Printf("Vira v0.5.6 (%s/%s)\n", goRuntime.GOOS, goRuntime.GOARCH)
 }
 
 // --- SUBCOMMAND 1: `vira run` ---
@@ -409,42 +416,187 @@ func initCmd(args []string) {
 	}
 	modName = strings.ReplaceAll(modName, "-", "_")
 	modName = strings.ReplaceAll(modName, " ", "_")
+	if len(modName) > 0 && modName[0] >= '0' && modName[0] <= '9' {
+		modName = "_" + modName
+	}
 
-	_ = os.MkdirAll(filepath.Join(targetDir, "src"), 0755)
+	// 1. Create modern directory layout
+	_ = os.MkdirAll(filepath.Join(targetDir, "src", "config"), 0755)
+	_ = os.MkdirAll(filepath.Join(targetDir, "src", "models"), 0755)
+	_ = os.MkdirAll(filepath.Join(targetDir, "src", "services"), 0755)
 	_ = os.MkdirAll(filepath.Join(targetDir, "tests"), 0755)
 
+	// 2. vira.mod
 	modContent := fmt.Sprintf(`module %s
 version 0.1.0
 license MIT
-description High-performance Vira application
+description Modern scalable Vira application
 `, modName)
 	_ = os.WriteFile(filepath.Join(targetDir, "vira.mod"), []byte(modContent), 0644)
 
-	mainContent := fmt.Sprintf(`module main
+	// 3. src/config/settings.vir
+	configContent := fmt.Sprintf(`module %s
+
+pub struct AppConfig {
+pub:
+	app_name string
+	version string
+	debug bool
+}
+
+pub fn AppConfig.default() AppConfig {
+	return AppConfig{
+		app_name: '%s',
+		version: '0.1.0',
+		debug: true
+	}
+}
+`, modName, name)
+	_ = os.WriteFile(filepath.Join(targetDir, "src", "config", "settings.vir"), []byte(configContent), 0644)
+
+	// 4. src/models/data.vir
+	modelContent := fmt.Sprintf(`module %s
+
+pub struct WorkItem {
+pub:
+	id int
+	title string
+mut:
+	completed bool
+}
+
+pub fn WorkItem.new(id int, title string) WorkItem {
+	return WorkItem{
+		id: id,
+		title: title,
+		completed: false
+	}
+}
+
+pub fn (mut w WorkItem) mark_done() {
+	w.completed = true
+}
+`, modName)
+	_ = os.WriteFile(filepath.Join(targetDir, "src", "models", "data.vir"), []byte(modelContent), 0644)
+
+	// 5. src/services/compute.vir
+	serviceContent := fmt.Sprintf(`module %s
+
+pub struct ComputeService {
+pub:
+	worker_id int
+}
+
+pub fn ComputeService.new(worker_id int) ComputeService {
+	return ComputeService{ worker_id: worker_id }
+}
+
+pub fn (s ComputeService) process(item WorkItem) string {
+	return 'Worker #${s.worker_id} processed: ${item.title}'
+}
+`, modName)
+	_ = os.WriteFile(filepath.Join(targetDir, "src", "services", "compute.vir"), []byte(serviceContent), 0644)
+
+	// 6. src/main.vir
+	mainContent := fmt.Sprintf(`module %s
 
 fn main() {
-	println('Welcome to %s powered by Vira!')
+	cfg := AppConfig.default()
+	println('=== ${cfg.app_name} (v${cfg.version}) ===')
+
+	mut task := WorkItem.new(101, 'Data Processing Batch')
+	service := ComputeService.new(1)
+
+	status_msg := service.process(task)
+	println(status_msg)
+
+	task.mark_done()
+	println('Task #${task.id} [${task.title}] completed: ${task.completed}')
 }
 `, modName)
 	_ = os.WriteFile(filepath.Join(targetDir, "src", "main.vir"), []byte(mainContent), 0644)
 
+	// 7. tests/app_test.vir
+	testContent := fmt.Sprintf(`module %s
+
+fn test_basic_pipeline() {
+	t := tensor_fill(16, 16, 1.0)
+	if tensor_sum(t) != 256.0 {
+		panic('tensor sum mismatch')
+	}
+	println('✓ test_basic_pipeline passed')
+}
+`, modName)
+	_ = os.WriteFile(filepath.Join(targetDir, "tests", "app_test.vir"), []byte(testContent), 0644)
+
+	// 8. README.md
+	readmeContent := fmt.Sprintf(`# %s
+
+A modern, scalable application built with the **Vira Programming Language**.
+
+## Project Architecture
+
+`+"```"+`
+%s/
+├── vira.mod               # Project manifest
+├── .gitignore             # Git ignore patterns
+├── README.md              # Documentation
+├── src/
+│   ├── main.vir           # Application entry point
+│   ├── config/
+│   │   └── settings.vir   # Environment & app configuration
+│   ├── models/
+│   │   └── data.vir       # 4-quadrant encapsulated domain models
+│   └── services/
+│       └── compute.vir    # Business logic & services
+└── tests/
+    └── app_test.vir       # Unit & integration test suite
+`+"```"+`
+
+## Running the Application
+
+`+"```bash"+`
+# Run directly
+vira run .
+
+# Run test suite
+vira test tests/
+
+# Build standalone production binary
+vira build -prod -o bin/%s .
+./bin/%s
+`+"```"+`
+`, name, name, name, name)
+	_ = os.WriteFile(filepath.Join(targetDir, "README.md"), []byte(readmeContent), 0644)
+
+	// 9. .gitignore
 	gitIgnore := `build/
 bin/
 *.exe
 *.o
 out.c
+.vir/
+.vira/
 `
 	_ = os.WriteFile(filepath.Join(targetDir, ".gitignore"), []byte(gitIgnore), 0644)
 
-	fmt.Printf("✓ Initialized new Vira project %q in %s/\n", name, targetDir)
-	fmt.Printf("  • vira.mod (package manifest)\n")
-	fmt.Printf("  • src/main.vir (entry point)\n")
-	fmt.Printf("  • .gitignore\n\n")
+	fmt.Printf("✓ Initialized modern Vira project %q in %s/\n", name, targetDir)
+	fmt.Printf("  ├── vira.mod (package manifest)\n")
+	fmt.Printf("  ├── .gitignore\n")
+	fmt.Printf("  ├── README.md\n")
+	fmt.Printf("  ├── src/\n")
+	fmt.Printf("  │   ├── main.vir (entry point)\n")
+	fmt.Printf("  │   ├── config/settings.vir\n")
+	fmt.Printf("  │   ├── models/data.vir\n")
+	fmt.Printf("  │   └── services/compute.vir\n")
+	fmt.Printf("  └── tests/\n")
+	fmt.Printf("      └── app_test.vir\n\n")
 	fmt.Printf("Next steps:\n")
 	if targetDir != "." {
 		fmt.Printf("  cd %s\n", targetDir)
 	}
-	fmt.Printf("  vira run src/main.vir\n")
+	fmt.Printf("  vira run .        # Run project\n")
+	fmt.Printf("  vira test tests/  # Run tests\n")
 }
 
 // --- SUBCOMMAND 9: `vira demo` ---
@@ -471,35 +623,58 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 
 	var vexFiles []string
 	if fi.IsDir() {
-		entries, err := os.ReadDir(targetPath)
-		if err != nil {
-			fatalIO(err)
-		}
-		for _, e := range entries {
-			isSource := (strings.HasSuffix(e.Name(), ".vir") || strings.HasSuffix(e.Name(), ".vex")) &&
-				!strings.HasSuffix(e.Name(), "_test.vir") && !strings.HasSuffix(e.Name(), "_test.vex")
-			if !e.IsDir() && isSource {
-				vexFiles = append(vexFiles, filepath.Join(targetPath, e.Name()))
+		_ = filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
 			}
-		}
-		if len(vexFiles) == 0 {
-			srcDir := filepath.Join(targetPath, "src")
-			if sfi, sErr := os.Stat(srcDir); sErr == nil && sfi.IsDir() {
-				sEntries, _ := os.ReadDir(srcDir)
-				for _, se := range sEntries {
-					isSource := (strings.HasSuffix(se.Name(), ".vir") || strings.HasSuffix(se.Name(), ".vex"))
-					if !se.IsDir() && isSource {
-						vexFiles = append(vexFiles, filepath.Join(srcDir, se.Name()))
-					}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" {
+					return filepath.SkipDir
 				}
+				return nil
 			}
-		}
+			isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
+				!strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
+			if isSource {
+				vexFiles = append(vexFiles, path)
+			}
+			return nil
+		})
 		if len(vexFiles) == 0 {
 			fmt.Fprintf(os.Stderr, "no .vir source files found in %s\n", targetPath)
 			os.Exit(1)
 		}
 	} else {
 		vexFiles = []string{targetPath}
+		if isTestMode {
+			if pRoot, _, pErr := mod.FindProjectRoot(filepath.Dir(targetPath)); pErr == nil && pRoot != "" {
+				var projSources []string
+				absTarget, _ := filepath.Abs(targetPath)
+				_ = filepath.Walk(pRoot, func(path string, info os.FileInfo, err error) error {
+					if err != nil || info.IsDir() {
+						if info != nil && info.IsDir() {
+							base := filepath.Base(path)
+							if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" {
+								return filepath.SkipDir
+							}
+						}
+						return nil
+					}
+					absPath, _ := filepath.Abs(path)
+					if absPath == absTarget {
+						return nil
+					}
+					isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
+						!strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
+					if isSource {
+						projSources = append(projSources, path)
+					}
+					return nil
+				})
+				vexFiles = append(projSources, targetPath)
+			}
+		}
 	}
 
 	var mergedDecls []ast.Decl
@@ -534,6 +709,10 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		for _, decl := range astFile.Decls {
 			if fn, ok := decl.(*ast.FnDecl); ok {
 				if fn.Name.Name == "main" {
+					if isTestMode && vFile != targetPath {
+						// Skip application entrypoint during tests so test runner main() is synthesized
+						continue
+					}
 					hasMain = true
 				} else if strings.HasPrefix(fn.Name.Name, "test_") {
 					testFnNames = append(testFnNames, fn.Name.Name)
@@ -635,32 +814,45 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	}
 
 	archFlag := "-march=native"
-	if goRuntime.GOARCH == "amd64" {
-		archFlag = "-march=x86-64-v3"
-	}
 
-	incFlags, libFlags, hasRaylib := resolveExternalLibPaths()
+	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths()
 
 	extraLibs := []string{}
 	staticFlags := []string{}
 
 	if goRuntime.GOOS == "windows" {
 		staticFlags = append(staticFlags, "-static")
-		extraLibs = append(extraLibs, "-lws2_32", "-lgdi32", "-luser32", "-lwinmm", "-lopengl32")
 		if hasRaylib {
-			extraLibs = append(extraLibs, "-lraylib")
+			if staticRaylibPath != "" {
+				extraLibs = append(extraLibs, staticRaylibPath)
+			} else {
+				extraLibs = append(extraLibs, "-lraylib")
+			}
 		}
+		extraLibs = append(extraLibs, "-lopengl32", "-lgdi32", "-luser32", "-lwinmm", "-lws2_32")
 	} else if goRuntime.GOOS == "linux" {
-		extraLibs = append(extraLibs, "-lm")
+		extraLibs = append(extraLibs, "-lX11")
 		if hasRaylib {
-			extraLibs = append(extraLibs, "-lraylib", "-lGL", "-lX11", "-ldl", "-lrt")
+			if staticRaylibPath != "" {
+				extraLibs = append(extraLibs, staticRaylibPath, "-lGL", "-ldl", "-lrt")
+			} else {
+				extraLibs = append(extraLibs, "-lraylib", "-lGL", "-ldl", "-lrt")
+			}
 		}
+		extraLibs = append(extraLibs, "-lm")
 	} else if goRuntime.GOOS == "darwin" && hasRaylib {
-		extraLibs = append(extraLibs, "-lraylib", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
+		if staticRaylibPath != "" {
+			extraLibs = append(extraLibs, staticRaylibPath, "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
+		} else {
+			extraLibs = append(extraLibs, "-lraylib", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
+		}
 	}
 
 	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
 	baseIncludes = append(baseIncludes, libFlags...)
+	if hasRaylib {
+		baseIncludes = append(baseIncludes, "-DVIRA_USE_RAYLIB")
+	}
 
 	if opts.prod {
 		modeDesc = "prod (-O3 " + archFlag + ")"
@@ -698,10 +890,11 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	return compiler, modeDesc
 }
 
-func resolveExternalLibPaths() ([]string, []string, bool) {
+func resolveExternalLibPaths() ([]string, []string, bool, string) {
 	var incPaths []string
 	var libPaths []string
 	hasRaylib := false
+	staticRaylibPath := ""
 
 	home, _ := os.UserHomeDir()
 	exe, _ := os.Executable()
@@ -709,57 +902,109 @@ func resolveExternalLibPaths() ([]string, []string, bool) {
 
 	searchRoots := []string{
 		"vendor",
-		"lib",
+		exeDir,
 		filepath.Join(exeDir, "vendor"),
-		filepath.Join(exeDir, "lib"),
 	}
 	if home != "" {
 		searchRoots = append(searchRoots,
-			filepath.Join(home, ".vira", "lib"),
-			filepath.Join(home, ".vira", "vendor"),
-			filepath.Join(home, ".vex", "lib"),
-			filepath.Join(home, ".vex", "vendor"),
+			filepath.Join(home, ".vira"),
+			filepath.Join(home, ".vir"),
+			filepath.Join(home, ".vex"),
+		)
+	}
+	if goRuntime.GOOS != "windows" {
+		searchRoots = append(searchRoots,
+			"/usr/local",
+			"/usr",
+			"/opt/homebrew",
 		)
 	}
 
+	seenInc := make(map[string]bool)
+	seenLib := make(map[string]bool)
+
+	addInc := func(p string) {
+		if !seenInc[p] {
+			seenInc[p] = true
+			incPaths = append(incPaths, "-I"+p)
+		}
+	}
+	addLib := func(p string) {
+		if !seenLib[p] {
+			seenLib[p] = true
+			libPaths = append(libPaths, "-L"+p)
+			if goRuntime.GOOS == "linux" {
+				libPaths = append(libPaths, "-Wl,-rpath,"+p)
+			}
+		}
+	}
+
 	for _, root := range searchRoots {
-		// Generic lib/include layout
+		// Generic include & lib directories
 		inc := filepath.Join(root, "include")
 		lib := filepath.Join(root, "lib")
+		lib64 := filepath.Join(root, "lib64")
+		libArch := filepath.Join(root, "lib", "x86_64-linux-gnu")
+
 		if info, err := os.Stat(inc); err == nil && info.IsDir() {
-			incPaths = append(incPaths, "-I"+inc)
+			addInc(inc)
 		}
 		if info, err := os.Stat(lib); err == nil && info.IsDir() {
-			libPaths = append(libPaths, "-L"+lib)
+			addLib(lib)
+		}
+		if info, err := os.Stat(lib64); err == nil && info.IsDir() {
+			addLib(lib64)
+		}
+		if info, err := os.Stat(libArch); err == nil && info.IsDir() {
+			addLib(libArch)
 		}
 
 		// Specific C libraries (Raylib, Raygui, Nuklear, SDL2)
 		for _, libName := range []string{"raylib", "raygui", "nuklear", "sdl2"} {
 			libInc := filepath.Join(root, libName, "include")
 			libDir := filepath.Join(root, libName, "lib")
+			vendorInc := filepath.Join(root, "vendor", libName, "include")
+			vendorLib := filepath.Join(root, "vendor", libName, "lib")
 			if info, err := os.Stat(libInc); err == nil && info.IsDir() {
-				incPaths = append(incPaths, "-I"+libInc)
+				addInc(libInc)
 			}
 			if info, err := os.Stat(libDir); err == nil && info.IsDir() {
-				libPaths = append(libPaths, "-L"+libDir)
+				addLib(libDir)
+			}
+			if info, err := os.Stat(vendorInc); err == nil && info.IsDir() {
+				addInc(vendorInc)
+			}
+			if info, err := os.Stat(vendorLib); err == nil && info.IsDir() {
+				addLib(vendorLib)
 			}
 		}
 
-		// Check if raylib static library is present
+		// Check if raylib static or shared library is present
 		for _, cand := range []string{
 			filepath.Join(root, "libraylib.a"),
 			filepath.Join(root, "raylib.lib"),
 			filepath.Join(root, "lib", "libraylib.a"),
+			filepath.Join(root, "lib", "libraylib.so"),
+			filepath.Join(root, "lib", "libraylib.dylib"),
+			filepath.Join(root, "lib64", "libraylib.a"),
+			filepath.Join(root, "lib", "x86_64-linux-gnu", "libraylib.a"),
+			filepath.Join(root, "lib", "x86_64-linux-gnu", "libraylib.so"),
 			filepath.Join(root, "raylib", "lib", "libraylib.a"),
+			filepath.Join(root, "vendor", "raylib", "lib", "libraylib.a"),
 		} {
 			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
 				hasRaylib = true
+				if strings.HasSuffix(cand, ".a") || strings.HasSuffix(cand, ".lib") {
+					if staticRaylibPath == "" {
+						staticRaylibPath = cand
+					}
+				}
 				break
 			}
 		}
 	}
 
-	return incPaths, libPaths, hasRaylib
+	return incPaths, libPaths, hasRaylib, staticRaylibPath
 }
 
 func resolveRuntimeDir() string {

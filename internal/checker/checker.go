@@ -518,6 +518,54 @@ func (c *Checker) registerBuiltins() {
 		},
 		ReturnType: TypeVoid,
 	}
+	c.functions["gui_text_input"] = &FnSig{
+		Name:  "gui_text_input",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "placeholder", Type: TypeString},
+			{Name: "text", Type: TypeString},
+		},
+		ReturnType: TypeString,
+	}
+	c.functions["gui_progress_bar"] = &FnSig{
+		Name:  "gui_progress_bar",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "percent", Type: TypeF32},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_radio_button"] = &FnSig{
+		Name:  "gui_radio_button",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "label", Type: TypeString},
+			{Name: "is_selected", Type: TypeBool},
+		},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_draw_badge"] = &FnSig{
+		Name:  "gui_draw_badge",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "text", Type: TypeString},
+			{Name: "hex_bg", Type: TypeInt},
+			{Name: "hex_fg", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
 	c.functions["gui_mouse_x"] = &FnSig{
 		Name:       "gui_mouse_x",
 		IsPub:      true,
@@ -608,6 +656,72 @@ func (c *Checker) registerBuiltins() {
 		Name:       "gui_lbl",
 		IsPub:      true,
 		Params:     []ParamInfo{{Name: "text", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_input"] = &FnSig{
+		Name:       "gui_input",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "placeholder", Type: TypeString}, {Name: "text", Type: TypeString}},
+		ReturnType: TypeString,
+	}
+	c.functions["gui_progress"] = &FnSig{
+		Name:       "gui_progress",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "percent", Type: TypeF32}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_radio"] = &FnSig{
+		Name:       "gui_radio",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}, {Name: "is_selected", Type: TypeBool}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_separator"] = &FnSig{
+		Name:       "gui_separator",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_badge"] = &FnSig{
+		Name:       "gui_badge",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "text", Type: TypeString}, {Name: "hex_bg", Type: TypeInt}, {Name: "hex_fg", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_cancel_close"] = &FnSig{
+		Name:       "gui_cancel_close",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_window_width"] = &FnSig{
+		Name:       "gui_window_width",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_window_height"] = &FnSig{
+		Name:       "gui_window_height",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_tab_item"] = &FnSig{
+		Name:       "gui_tab_item",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}, {Name: "is_active", Type: TypeBool}},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_modal_begin"] = &FnSig{
+		Name:       "gui_modal_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "title", Type: TypeString}, {Name: "width", Type: TypeInt}, {Name: "height", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_modal_end"] = &FnSig{
+		Name:       "gui_modal_end",
+		IsPub:      true,
+		Params:     []ParamInfo{},
 		ReturnType: TypeVoid,
 	}
 }

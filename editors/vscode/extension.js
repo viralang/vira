@@ -13,16 +13,18 @@ function resolveViraBinary() {
         return customPath;
     }
 
-    // Check user home default install directory (~/.vira/bin/vira or ~/.vex/bin/vex)
+    // Check user home default install directory (~/.vir/bin/vira, ~/.vira/bin/vira, or ~/.vex/bin/vex)
     const home = os.homedir();
     const isWin = os.platform() === 'win32';
-    const viraBinary = path.join(home, '.vira', 'bin', isWin ? 'vira.exe' : 'vira');
-    if (fs.existsSync(viraBinary)) {
-        return viraBinary;
-    }
-    const vexBinary = path.join(home, '.vex', 'bin', isWin ? 'vex.exe' : 'vex');
-    if (fs.existsSync(vexBinary)) {
-        return vexBinary;
+    const virCandidates = [
+        path.join(home, '.vir', 'bin', isWin ? 'vira.exe' : 'vira'),
+        path.join(home, '.vira', 'bin', isWin ? 'vira.exe' : 'vira'),
+        path.join(home, '.vex', 'bin', isWin ? 'vex.exe' : 'vex')
+    ];
+    for (const cand of virCandidates) {
+        if (fs.existsSync(cand)) {
+            return cand;
+        }
     }
 
     // Default to 'vira' in PATH
@@ -71,7 +73,7 @@ function activate(context) {
     // Start the client (spawns `vira lsp`)
     client.start().catch((err) => {
         vscode.window.showWarningMessage(
-            `Could not start Vira Language Server (${vexBin}): ${err.message}. Please install Vira or configure 'vira.compilerPath'.`
+            `Could not start Vira Language Server (${viraBin}): ${err.message}. Please install Vira or configure 'vira.compilerPath'.`
         );
     });
 }

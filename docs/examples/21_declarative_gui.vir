@@ -1,52 +1,65 @@
 module main
 
 // Vira Declarative Auto-Layout GUI Demonstration
-// Features: Vertical Stacks (VStack), Horizontal Rows (HStack), Auto-Cards,
-// and auto-positioned buttons, sliders, checkboxes, and labels without manual pixel math.
+// Demonstrates: Vertical Stacks (VStack), Horizontal Stacks (HStack), Auto-sized Cards,
+// Text Inputs (gui_input), Progress Bars (gui_progress), Radio Buttons (gui_radio),
+// Separators (gui_separator), Badges (gui_badge), Buttons (gui_btn), Sliders (gui_slide),
+// Checkboxes (gui_check), and Labels (gui_lbl) WITHOUT manual pixel math!
 
 fn main() {
-	gui_init(800, 600, 'Vira Declarative Auto-Layout Engine')
+	gui_init(900, 720, 'Vira Declarative Auto-Layout Engine')
 	gui_set_target_fps(60)
 
 	mut count := 0
 	mut slider_val := 45.0f32
 	mut is_active := true
+	mut node_name := 'ComputeNode-01'
+	mut mode := 0 // 0 = Standard, 1 = Turbo SIMD, 2 = Low Latency
 
 	for !gui_should_close() {
 		gui_begin()
 		gui_clear(0x181825)
 
-		// Header Section
-		gui_draw_rect(0, 0, 800, 60, 0x1E1E2E)
-		gui_draw_text('Vira Declarative Auto-Layout Engine', 20, 18, 22, 0xCDD6F4)
-		gui_draw_line(0, 60, 800, 60, 0x89B4FA)
+		// Top Header Banner
+		gui_draw_rect(0, 0, 900, 64, 0x1E1E2E)
+		gui_draw_text('Vira Declarative Auto-Layout Engine', 24, 18, 20, 0xCDD6F4)
+		gui_draw_badge(520, 20, 'ONLINE', 0x2D4A3E, 0xA6E3A1)
+		gui_draw_badge(620, 20, 'NATIVE GDI/X11', 0x313244, 0x89B4FA)
+		gui_draw_badge(790, 20, 'ZERO-LEAK', 0x45475A, 0xF9E2AF)
+		gui_draw_line(0, 64, 900, 64, 0x89B4FA)
 
 		// ==========================================================
-		// COLUMN 1: Telemetry & Canvas (NO MANUAL PIXEL COORDINATES!)
+		// COLUMN 1: System Telemetry & Canvas
 		// ==========================================================
-		gui_vstack_begin(40, 90, 340, 15)
-			gui_card_begin('System Telemetry Panel', 340)
+		gui_vstack_begin(30, 84, 400, 16)
+			gui_card_begin('System Telemetry Panel', 400)
+				gui_badge('ARCHITECTURE: C99 / NATIVE WIN32 & X11', 0x181825, 0x89B4FA)
+				gui_spacing(4)
 				gui_lbl('Engine: Double-Buffered Immediate Mode')
-				gui_lbl('Target FPS: 60 (Hardware-Locked)')
-				gui_lbl('Active Counter Value: ${count}')
+				gui_lbl('Target FPS: 60 (Hardware Timed)')
+				gui_lbl('Active Counter: ${count}')
 				gui_lbl('Circle Radius: ${slider_val}px')
+				gui_lbl('Assigned Node: ${node_name}')
+				gui_separator()
+				gui_lbl('Hardware Utilization:')
+				gui_progress(slider_val / 100.0f32)
 			gui_card_end()
 
 			if is_active {
-				gui_card_begin('Dynamic Canvas Viewport', 340)
+				gui_card_begin('Dynamic Canvas Viewport', 400)
 					gui_spacing(100)
-					gui_draw_circle(210, 360, slider_val, 0xF38BA8)
-					gui_draw_circle(210, 360, 6.0f32, 0xFFFFFF)
+					gui_draw_circle(215, 490, slider_val, 0xF38BA8)
+					gui_draw_circle(215, 490, 6.0f32, 0xFFFFFF)
 				gui_card_end()
 			}
 		gui_stack_end()
 
 		// ==========================================================
-		// COLUMN 2: Controls & Widgets (NO MANUAL PIXEL COORDINATES!)
+		// COLUMN 2: Interactive Controls & Workload Settings
 		// ==========================================================
-		gui_vstack_begin(420, 90, 340, 15)
-			gui_card_begin('Interactive Control Center', 340)
-				// 2-Column Horizontal Button Row (Auto-arranged!)
+		gui_vstack_begin(460, 84, 400, 16)
+			gui_card_begin('Interactive Control Center', 400)
+				// 2-Column Horizontal Button Row
 				gui_hstack_begin(36, 12)
 					if gui_btn('Increment (+1)') {
 						count += 1
@@ -56,17 +69,33 @@ fn main() {
 					}
 				gui_stack_end()
 
-				gui_spacing(10)
+				gui_spacing(6)
 				is_active = gui_check('Enable Dynamic Canvas FX', is_active)
 
-				gui_spacing(10)
-				slider_val = gui_slide('Radius: ', 'px', slider_val, 10.0f32, 100.0f32)
+				gui_spacing(6)
+				slider_val = gui_slide('Scale: ', 'px', slider_val, 10.0f32, 100.0f32)
+
+				gui_separator()
+				gui_lbl('Target Node Name (Editable Input):')
+				node_name = gui_input('Enter node name...', node_name)
+
+				gui_separator()
+				gui_lbl('Execution Mode Profile:')
+				if gui_radio('Standard Balanced (Single-Thread)', mode == 0) {
+					mode = 0
+				}
+				if gui_radio('High-Throughput (AVX2 / NEON SIMD)', mode == 1) {
+					mode = 1
+				}
+				if gui_radio('Low-Latency Actor Queue', mode == 2) {
+					mode = 2
+				}
 			gui_card_end()
 		gui_stack_end()
 
 		// Footer Telemetry
 		dt := gui_frame_time()
-		gui_draw_text('Frame Time: ${dt}s • 0 Heap Allocations • Zero GC', 20, 565, 14, 0x6C7086)
+		gui_draw_text('Frame Time: ${dt}s • 0 Heap Allocations • Zero GC Pauses • 16-level Layout Stack', 24, 680, 14, 0x6C7086)
 
 		gui_end()
 	}

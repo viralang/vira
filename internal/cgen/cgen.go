@@ -34,15 +34,32 @@ type actorMethodDispatchSpec struct {
 	Method *checker.FnSig
 }
 
-func New(chk *checker.Checker, af *autofree.Analyzer) *Generator {
-	cleanMod := chk.ModuleName()
-	cleanMod = strings.ReplaceAll(cleanMod, "/", "_")
-	cleanMod = strings.ReplaceAll(cleanMod, "\\", "_")
-	cleanMod = strings.ReplaceAll(cleanMod, "-", "_")
-	cleanMod = strings.ReplaceAll(cleanMod, ".", "_")
-	if cleanMod == "" {
-		cleanMod = "main"
+func sanitizeModName(mod string) string {
+	if mod == "" {
+		return "main"
 	}
+	var b strings.Builder
+	for i, r := range mod {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' {
+			b.WriteRune(r)
+		} else if r >= '0' && r <= '9' {
+			if i == 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	res := b.String()
+	if len(res) == 0 || (res[0] >= '0' && res[0] <= '9') {
+		res = "_" + res
+	}
+	return res
+}
+
+func New(chk *checker.Checker, af *autofree.Analyzer) *Generator {
+	cleanMod := sanitizeModName(chk.ModuleName())
 	return &Generator{
 		chk:          chk,
 		af:           af,
@@ -1028,7 +1045,13 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 		case "gui_clear":
 			return fmt.Sprintf("vira_gui_clear(%s)", strings.Join(argStrs, ", "))
 		case "gui_draw_text":
-			return fmt.Sprintf("vira_gui_draw_text(%s)", strings.Join(argStrs, ", "))
+			fnName := "vira_gui_draw_text"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_draw_text_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_draw_rect":
 			return fmt.Sprintf("vira_gui_draw_rect(%s)", strings.Join(argStrs, ", "))
 		case "gui_draw_circle":
@@ -1043,6 +1066,14 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vira_gui_checkbox(%s)", strings.Join(argStrs, ", "))
 		case "gui_label":
 			return fmt.Sprintf("vira_gui_label(%s)", strings.Join(argStrs, ", "))
+		case "gui_text_input":
+			return fmt.Sprintf("vira_gui_text_input(%s)", strings.Join(argStrs, ", "))
+		case "gui_progress_bar":
+			return fmt.Sprintf("vira_gui_progress_bar(%s)", strings.Join(argStrs, ", "))
+		case "gui_radio_button":
+			return fmt.Sprintf("vira_gui_radio_button(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_badge":
+			return fmt.Sprintf("vira_gui_draw_badge(%s)", strings.Join(argStrs, ", "))
 		case "gui_mouse_x":
 			return "vira_gui_mouse_x()"
 		case "gui_mouse_y":
@@ -1062,17 +1093,75 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 		case "gui_spacing":
 			return fmt.Sprintf("vira_gui_spacing(%s)", strings.Join(argStrs, ", "))
 		case "gui_card_begin":
-			return fmt.Sprintf("vira_gui_card_begin(%s)", strings.Join(argStrs, ", "))
+			fnName := "vira_gui_card_begin"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_card_begin_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_card_end":
 			return "vira_gui_card_end()"
 		case "gui_btn":
-			return fmt.Sprintf("vira_gui_btn(%s)", strings.Join(argStrs, ", "))
+			fnName := "vira_gui_btn"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_btn_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_check":
 			return fmt.Sprintf("vira_gui_check(%s)", strings.Join(argStrs, ", "))
 		case "gui_slide":
 			return fmt.Sprintf("vira_gui_slide(%s)", strings.Join(argStrs, ", "))
 		case "gui_lbl":
-			return fmt.Sprintf("vira_gui_lbl(%s)", strings.Join(argStrs, ", "))
+			fnName := "vira_gui_lbl"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_lbl_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_input":
+			return fmt.Sprintf("vira_gui_input(%s)", strings.Join(argStrs, ", "))
+		case "gui_progress":
+			return fmt.Sprintf("vira_gui_progress(%s)", strings.Join(argStrs, ", "))
+		case "gui_radio":
+			return fmt.Sprintf("vira_gui_radio(%s)", strings.Join(argStrs, ", "))
+		case "gui_separator":
+			return "vira_gui_separator()"
+		case "gui_badge":
+			fnName := "vira_gui_badge"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_badge_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_cancel_close":
+			return "vira_gui_cancel_close()"
+		case "gui_window_width":
+			return "vira_gui_window_width()"
+		case "gui_window_height":
+			return "vira_gui_window_height()"
+		case "gui_tab_item":
+			fnName := "vira_gui_tab_item"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_tab_item_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_modal_begin":
+			fnName := "vira_gui_modal_begin"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_modal_begin_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_modal_end":
+			return "vira_gui_modal_end()"
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

@@ -39,7 +39,9 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`18_autograd_and_safetensors.vir`](./18_autograd_and_safetensors.vir)** | Pure Vira Autograd Engine & Native SafeTensors Loader | Native zero-copy loading of Hugging Face `.safetensors` files (`safetensors_load`), SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), and hardware in-place SGD optimization (`tensor_sgd_step`). |
 | **[`19_local_llm_inference.vir`](./19_local_llm_inference.vir)** | Pure Vira Local LLM Inference Engine & GGUF Parser | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, Rotary Position Embeddings (RoPE), SwiGLU activations, Causal Self-Attention, and temperature-based token sampling. |
 | **[`20_native_gui.vir`](./20_native_gui.vir)** | Hardware-Accelerated Native GUI & Actor Dashboard | Immediate-Mode GUI (IMGUI), double-buffered 60 FPS Win32/X11 rendering, interactive widgets (buttons, sliders, checkboxes), and real-time concurrent background actor metrics. |
-| **[`21_declarative_gui.vir`](./21_declarative_gui.vir)** | Declarative GUI Auto-Layout Engine | Vertical Stacks (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
+| **[`21_declarative_gui.vir`](./21_declarative_gui.vir)** | Declarative GUI Auto-Layout Engine | Vertical Stacks (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, text inputs (`gui_input`), progress bars (`gui_progress`), radio buttons (`gui_radio`), separators, badges, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
+| **[`22_gui_navigation_lifecycle.vir`](./22_gui_navigation_lifecycle.vir)** | Window Navigation, Tabs, Modals & Lifecycle Control | Multi-tab bar routing (`gui_tab_item`), backdrop modal dialogs (`gui_modal_begin`/`gui_modal_end`), close interception (`gui_cancel_close`), viewport metrics (`gui_window_width`/`gui_window_height`), and zero-leak 60 FPS string interpolation. |
+| **[`23_multi_package_architecture.vir`](./23_multi_package_architecture.vir)** | Multi-Package Architecture & Scopes | Enterprise 5-tier lexical scoping, cross-package 4-quadrant encapsulation, actor pipelining, and zero-leak SIMD tensor computing. |
 
 ---
 
@@ -69,4 +71,6 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/19_local_llm_inference.vir
 .\vira.exe run docs/examples/20_native_gui.vir
 .\vira.exe run docs/examples/21_declarative_gui.vir
+.\vira.exe run docs/examples/22_gui_navigation_lifecycle.vir
+.\vira.exe run docs/examples/23_multi_package_architecture.vir
 ```

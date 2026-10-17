@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.5-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.6-blue.svg?style=flat-square" alt="Version"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.22+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
   <a href="#7-memory-management-deterministic-autofree--arenas"><img src="https://img.shields.io/badge/memory-deterministic_autofree_(no_GC)-orange.svg?style=flat-square" alt="Memory"></a>
@@ -129,7 +129,7 @@ vira <command> [flags] [arguments]
 | `check` | Run syntax validation, 4-quadrant type-checking & print autofree escape analysis | `vira check main.vir` |
 | `test` | Run all unit tests (`*_test.vir`) in a directory or project | `vira test ./tests` |
 | `fmt` | Format Vira source files in-place to canonical style | `vira fmt ./src` |
-| `init` | Scaffold a new Vira module with `vex.mod` and entry point | `vira init my_app` |
+| `init` | Scaffold a modern enterprise multi-package Vira project with `vira.mod`, `src/`, `tests/` | `vira init my_app` |
 | `lsp` | Start the Language Server Protocol daemon (stdio) for VS Code / IDEs | `vira lsp` |
 | `demo` | Compile and execute the built-in parallel AI actor demo | `vira demo` |
 | `version` | Display Vira toolchain version, build commit, and target platform | `vira version` |
@@ -171,7 +171,9 @@ The repository includes 20 comprehensive step-by-step tutorials paired directly 
 | **19** | **Local LLM Engine (GGUF)** | Expert | [`19_local_llm_inference.vir`](docs/examples/19_local_llm_inference.vir) | [`20_gguf_llm_inference_engine.md`](docs/tutorials/20_gguf_llm_inference_engine.md) | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, RoPE embeddings, SwiGLU activations, Causal Self-Attention, token sampling. |
 | **20** | **Tooling, LSP & Packaging** | Beginner/Adv | `vira init`, `vex.mod`, `vira fmt` | [`19_tooling_lsp_and_package_management.md`](docs/tutorials/19_tooling_lsp_and_package_management.md) | Project scaffolding (`vira init`), manifest packages (`vex.mod`), code formatter (`vira fmt`), test runner (`vira test`), and Language Server (`vira lsp`). |
 | **21** | **Native Desktop GUI & Dashboards** | Intermediate/Adv | [`20_native_gui.vir`](docs/examples/20_native_gui.vir) / [`gui_demo.vir`](examples/gui_demo.vir) | [`21_native_gui_desktop_applications.md`](docs/tutorials/21_native_gui_desktop_applications.md) | Immediate-Mode GUI (IMGUI), double-buffered 60 FPS Win32/X11 rendering, interactive widgets (buttons, sliders, checkboxes), and non-blocking background actor dashboards. |
-| **22** | **Declarative GUI Auto-Layout** | Intermediate/Adv | [`21_declarative_gui.vir`](docs/examples/21_declarative_gui.vir) / [`declarative_gui.vir`](examples/declarative_gui.vir) | [`22_declarative_gui_auto_layout.md`](docs/tutorials/22_declarative_gui_auto_layout.md) | Declarative layout cursor stack, vertical columns (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
+| **22** | **Declarative GUI Auto-Layout** | Intermediate/Adv | [`21_declarative_gui.vir`](docs/examples/21_declarative_gui.vir) / [`declarative_gui.vir`](examples/declarative_gui.vir) | [`22_declarative_gui_auto_layout.md`](docs/tutorials/22_declarative_gui_auto_layout.md) | Declarative layout cursor stack, vertical columns (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, text inputs (`gui_input`), progress bars (`gui_progress`), radio buttons (`gui_radio`), separators, badges, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
+| **23** | **GUI Navigation & Lifecycle** | Intermediate/Adv | [`22_gui_navigation_lifecycle.vir`](docs/examples/22_gui_navigation_lifecycle.vir) / [`gui_navigation_lifecycle.vir`](examples/gui_navigation_lifecycle.vir) | [`23_gui_window_navigation_and_lifecycle.md`](docs/tutorials/23_gui_window_navigation_and_lifecycle.md) | Multi-view routing, tab strips (`gui_tab_item`), modal dialogs (`gui_modal_begin`/`gui_modal_end`), and close request interception (`gui_cancel_close`). |
+| **24** | **Multi-Package Architecture & Scopes** | Intermediate/Adv | [`23_multi_package_architecture.vir`](docs/examples/23_multi_package_architecture.vir) / [`enterprise_multi_package`](examples/enterprise_multi_package/) | [`24_multi_package_architecture_and_scopes.md`](docs/tutorials/24_multi_package_architecture_and_scopes.md) | Scalable project structures (`src/config/`, `src/models/`, `src/services/`), recursive package compilation, 5-tier lexical scoping, 4-quadrant cross-package encapsulation, and zero-leak cross-package actors. |
 
 ---
 
@@ -907,10 +909,10 @@ The automated Go packager compiles and packages release bundles for Windows, Lin
 ```
 
 Generates compressed artifacts in `dist/`:
-- `vira-v0.5.5-windows-amd64.zip`
-- `vira-v0.5.5-linux-amd64.tar.gz`
-- `vira-v0.5.5-darwin-arm64.tar.gz`
-- `vira-v0.5.5-darwin-amd64.tar.gz`
+- `vira-v0.5.6-windows-amd64.zip`
+- `vira-v0.5.6-linux-amd64.tar.gz`
+- `vira-v0.5.6-darwin-arm64.tar.gz`
+- `vira-v0.5.6-darwin-amd64.tar.gz`
 
 ---
 

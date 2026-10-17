@@ -8,3 +8,6 @@ out.c
 editors/vscode/*.vsix
 editors/vscode/node_modules/
 .vscode/
+include/
+lib/
+/vira

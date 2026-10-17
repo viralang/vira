@@ -1,0 +1,35 @@
+module enterprise_app
+
+fn main() {
+	// 1. Initialize configuration from config package
+	mut cfg := AppConfig.new('Vira-Enterprise-Cluster', 'production', 8)
+	println('=== ${cfg.app_name} [env=${cfg.environment}] ===')
+	println('Worker Thread Pool: ${cfg.max_workers} cores | Debug: ${cfg.debug_mode}')
+
+	// 2. Initialize domain models from models package
+	mut node1 := ClusterNode.new(101, 'node-us-east-1a', 16)
+	mut node2 := ClusterNode.new(102, 'node-us-east-1b', 32)
+	node1.assign_job()
+	node2.assign_job()
+
+	println('--- Registered Cluster Nodes ---')
+	println('Node #${node1.id}: ${node1.hostname} (${node1.cores} cores, tasks=${node1.assigned_tasks})')
+	println('Node #${node2.id}: ${node2.hostname} (${node2.cores} cores, tasks=${node2.assigned_tasks})')
+
+	// 3. Dispatch parallel asynchronous workloads via Actor service
+	println('--- Asynchronous Multi-Core Actor Dispatch ---')
+	mut worker1 := WorkerActor.new(1)
+	mut worker2 := WorkerActor.new(2)
+
+	fut1 := worker1 <- execute_workload(1.5)
+	fut2 := worker2 <- execute_workload(2.0)
+
+	res1 := fut1.await() or { 0.0 }
+	res2 := fut2.await() or { 0.0 }
+
+	println('Worker #1 Tensor Sum: ${res1}')
+	println('Worker #2 Tensor Sum: ${res2}')
+
+	cfg.bump_reload()
+	println('Enterprise multi-package pipeline finished with zero memory leaks.')
+}

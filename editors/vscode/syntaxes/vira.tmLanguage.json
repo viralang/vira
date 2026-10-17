@@ -10,6 +10,7 @@
     { "include": "#quadrants" },
     { "include": "#operators" },
     { "include": "#numbers" },
+    { "include": "#gui" },
     { "include": "#functions" }
   ],
   "repository": {
@@ -170,11 +171,43 @@
         }
       ]
     },
+    "gui": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.gui.lifecycle.vira",
+          "match": "\\b(gui_init|gui_should_close|gui_cancel_close|gui_set_target_fps|gui_window_width|gui_window_height|gui_begin|gui_end|gui_close|gui_clear|gui_frame_time|gui_poll)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.layout.vira",
+          "match": "\\b(gui_vstack_begin|gui_hstack_begin|gui_stack_end|gui_spacing|gui_card_begin|gui_card_end|gui_separator|gui_badge)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.widgets.vira",
+          "match": "\\b(gui_btn|gui_check|gui_slide|gui_lbl|gui_input|gui_progress|gui_radio|gui_button|gui_slider|gui_checkbox|gui_label|gui_text_input|gui_progress_bar|gui_radio_button)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.navigation.vira",
+          "match": "\\b(gui_tab_item|gui_modal_begin|gui_modal_end)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.drawing.vira",
+          "match": "\\b(gui_draw_text|gui_draw_rect|gui_draw_circle|gui_draw_line|gui_draw_badge)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.input.vira",
+          "match": "\\b(gui_mouse_x|gui_mouse_y|gui_is_mouse_down|gui_is_key_pressed|gui_get_mouse_x|gui_get_mouse_y|gui_get_mouse_down|gui_get_char_pressed|gui_is_key_down)\\b"
+        },
+        {
+          "name": "support.function.builtin.gui.vira",
+          "match": "\\b(gui_[a-zA-Z0-9_]+)\\b"
+        }
+      ]
+    },
     "functions": {
       "patterns": [
         {
           "name": "support.function.builtin.vira",
-          "match": "\\b(println|eprintln|panic|file_exists|read_file|write_file|append_file|remove_file|time_now_ns|time_sleep_ms|arena_alloc|arena_reset|arena_free|tensor_fill|tensor_sum|tensor_relu|tensor_add|tensor_scale|tensor_load_bin|tensor_save_bin|safetensors_load|tensor_matmul_grad_b|tensor_relu_backward|tensor_sgd_step|gguf_load|gguf_tensor_dequant|rmsnorm|rope|swiglu|causal_self_attention|sample_argmax|sample_top_p|gui_init|gui_poll|gui_begin|gui_end|gui_close|gui_button|gui_slider|gui_checkbox|gui_label|gui_draw_rect|gui_draw_circle|gui_draw_line|gui_draw_text|gui_clear|gui_get_mouse_x|gui_get_mouse_y|gui_get_mouse_down|gui_get_char_pressed|gui_is_key_down|gui_vstack_begin|gui_hstack_begin|gui_stack_end|gui_spacing|gui_card_begin|gui_card_end|gui_btn|gui_check|gui_slide|gui_lbl)\\b"
+          "match": "\\b(println|eprintln|panic|file_exists|read_file|write_file|append_file|remove_file|net_listen|net_accept|net_read|net_write|net_close|http_response|json_get_str|json_get_int|json_get_f32|time_now_ns|time_sleep_ms|arena_alloc|arena_reset|arena_free|tensor_fill|tensor_sum|tensor_relu|tensor_add|tensor_scale|tensor_load_bin|tensor_save_bin|tensor_transpose|tensor_matmul_grad_a|tensor_matmul_grad_b|tensor_relu_backward|tensor_sgd_step|safetensors_load|gguf_load|gguf_load_tensor|gguf_tensor_dequant|tensor_rmsnorm|tensor_rope|tensor_silu|tensor_elemwise_mul|tensor_softmax|tensor_embedding|rmsnorm|rope|swiglu|causal_self_attention|sample_token|sample_argmax|sample_top_p|gui_init|gui_should_close|gui_cancel_close|gui_set_target_fps|gui_window_width|gui_window_height|gui_begin|gui_end|gui_close|gui_clear|gui_frame_time|gui_poll|gui_draw_text|gui_draw_rect|gui_draw_circle|gui_draw_line|gui_draw_badge|gui_button|gui_slider|gui_checkbox|gui_label|gui_text_input|gui_progress_bar|gui_radio_button|gui_mouse_x|gui_mouse_y|gui_is_mouse_down|gui_is_key_pressed|gui_get_mouse_x|gui_get_mouse_y|gui_get_mouse_down|gui_get_char_pressed|gui_is_key_down|gui_vstack_begin|gui_hstack_begin|gui_stack_end|gui_spacing|gui_card_begin|gui_card_end|gui_separator|gui_badge|gui_btn|gui_check|gui_slide|gui_lbl|gui_input|gui_progress|gui_radio|gui_tab_item|gui_modal_begin|gui_modal_end)\\b"
         },
         {
           "name": "entity.name.function.vira",

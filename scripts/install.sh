@@ -5,11 +5,12 @@
 
 set -e
 
-VIRA_VERSION="v0.5.5"
+VIRA_VERSION="v0.5.6"
 INSTALL_DIR="$HOME/.vir"
 BIN_DIR="$INSTALL_DIR/bin"
 RUNTIME_DIR="$INSTALL_DIR/runtime"
 LIB_DIR="$INSTALL_DIR/lib"
+INCLUDE_DIR="$INSTALL_DIR/include"
 EXAMPLES_DIR="$INSTALL_DIR/examples"
 
 BOLD="$(tput bold 2>/dev/null || echo '')"
@@ -44,7 +45,8 @@ echo "${YELLOW}[1/5] Platform detected:${RESET} $OS ($TARGET_ARCH)"
 
 # 2. Create Target Directories
 echo "${YELLOW}[2/5] Creating installation directories in $INSTALL_DIR...${RESET}"
-mkdir -p "$BIN_DIR" "$RUNTIME_DIR" "$LIB_DIR" "$EXAMPLES_DIR"
+mkdir -p "$BIN_DIR" "$RUNTIME_DIR" "$LIB_DIR" "$INCLUDE_DIR" "$EXAMPLES_DIR"
+mkdir -p "$HOME/.vira/bin" "$HOME/.vira/runtime" "$HOME/.vira/lib" "$HOME/.vira/include" 2>/dev/null || true
 
 # 3. Install Compiler Binary
 echo "${YELLOW}[3/5] Installing Vira compiler binary...${RESET}"
@@ -168,6 +170,14 @@ fi
 [ -f "./LANGUAGE_GUIDE.md" ] && cp "./LANGUAGE_GUIDE.md" "$INSTALL_DIR/" 2>/dev/null || true
 [ -f "./README.md" ] && cp "./README.md" "$INSTALL_DIR/" 2>/dev/null || true
 
+# Synchronize with ~/.vira for VS Code and language server tools
+if [ "$INSTALL_DIR" != "$HOME/.vira" ]; then
+    mkdir -p "$HOME/.vira/bin" "$HOME/.vira/runtime" 2>/dev/null || true
+    cp -f "$BIN_DIR/vira" "$HOME/.vira/bin/vira" 2>/dev/null || true
+    cp -f "$BIN_DIR/vex" "$HOME/.vira/bin/vex" 2>/dev/null || true
+    cp -rf "$RUNTIME_DIR"/*.h "$HOME/.vira/runtime/" 2>/dev/null || true
+fi
+
 # 5. Dependency Resolution (C Compiler & System Libraries)
 echo "${YELLOW}[5/5] Checking system dependencies & shell PATH...${RESET}"
 CC_FOUND=0
@@ -191,14 +201,15 @@ if [ $CC_FOUND -eq 0 ]; then
 
     if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO_CMD" ]; then
         if [ -f /etc/debian_version ] && command -v apt-get >/dev/null 2>&1; then
-            echo "  ${CYAN}= Installing gcc & libc6-dev via apt-get...${RESET}"
-            $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y --no-install-recommends gcc libc6-dev make >/dev/null 2>&1 || true
+            echo "  ${CYAN}= Installing gcc, make, X11 & OpenGL development packages via apt-get...${RESET}"
+            $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y --no-install-recommends \
+                gcc libc6-dev make libx11-dev libgl1-mesa-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev >/dev/null 2>&1 || true
         elif [ -f /etc/alpine-release ] && command -v apk >/dev/null 2>&1; then
-            echo "  ${CYAN}= Installing gcc & musl-dev via apk...${RESET}"
-            $SUDO_CMD apk add --no-cache gcc musl-dev make >/dev/null 2>&1 || true
+            echo "  ${CYAN}= Installing gcc, musl, X11 & mesa dev packages via apk...${RESET}"
+            $SUDO_CMD apk add --no-cache gcc musl-dev make libx11-dev mesa-dev >/dev/null 2>&1 || true
         elif command -v dnf >/dev/null 2>&1; then
-            echo "  ${CYAN}= Installing gcc via dnf...${RESET}"
-            $SUDO_CMD dnf install -y gcc glibc-devel make >/dev/null 2>&1 || true
+            echo "  ${CYAN}= Installing gcc, make, X11 & OpenGL dev packages via dnf...${RESET}"
+            $SUDO_CMD dnf install -y gcc glibc-devel make libX11-devel mesa-libGL-devel libXcursor-devel libXinerama-devel libXi-devel libXrandr-devel >/dev/null 2>&1 || true
         fi
 
         for cc in gcc clang cc tcc; do
@@ -215,33 +226,72 @@ if [ $CC_FOUND -eq 0 ]; then
         if [ "$OS" = "darwin" ]; then
             echo "    ${CYAN}Fix for macOS:${RESET} Run: xcode-select --install"
         elif [ -f /etc/debian_version ]; then
-            echo "    ${CYAN}Fix for Debian/Ubuntu:${RESET} sudo apt-get update && sudo apt-get install -y build-essential"
+            echo "    ${CYAN}Fix for Debian/Ubuntu:${RESET} sudo apt-get update && sudo apt-get install -y build-essential libx11-dev libgl1-mesa-dev"
         elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-            echo "    ${CYAN}Fix for Fedora/RHEL:${RESET} sudo dnf groupinstall \"Development Tools\""
+            echo "    ${CYAN}Fix for Fedora/RHEL:${RESET} sudo dnf groupinstall \"Development Tools\" && sudo dnf install -y libX11-devel mesa-libGL-devel"
         elif [ -f /etc/arch-release ]; then
-            echo "    ${CYAN}Fix for Arch Linux:${RESET} sudo pacman -S --needed base-devel"
+            echo "    ${CYAN}Fix for Arch Linux:${RESET} sudo pacman -S --needed base-devel libx11 mesa raylib"
         elif [ -f /etc/alpine-release ]; then
-            echo "    ${CYAN}Fix for Alpine Linux:${RESET} sudo apk add build-base"
+            echo "    ${CYAN}Fix for Alpine Linux:${RESET} sudo apk add build-base libx11-dev mesa-dev"
         fi
     fi
 fi
 
-# Check graphics libraries on Linux
-if [ "$OS" = "linux" ]; then
-    if ! ldconfig -p 2>/dev/null | grep -q "libX11.so" && [ ! -f /usr/lib/libX11.so ] && [ ! -f /usr/lib64/libX11.so ]; then
-        echo "  ${YELLOW}= Note for GUI apps on Linux:${RESET} Install X11/OpenGL development headers:"
-        echo "    Debian/Ubuntu: sudo apt-get install -y libx11-dev libgl1-mesa-dev"
-        echo "    Fedora/RHEL:   sudo dnf install -y libX11-devel mesa-libGL-devel"
-        echo "    Arch:          sudo pacman -S libx11 mesa"
-    else
-        echo "  ${GREEN}✓ Native graphics libraries detected (libX11 / OpenGL)${RESET}"
+# Configure GUI & Graphics Libraries (Raylib & OpenGL)
+echo "  ${YELLOW}= Configuring GUI & Graphics Libraries (Raylib)...${RESET}"
+HAS_RAYLIB=0
+for cand in \
+    "$LIB_DIR/libraylib.a" \
+    "$HOME/.vira/lib/libraylib.a" \
+    "/usr/lib/libraylib.a" \
+    "/usr/lib/libraylib.so" \
+    "/usr/local/lib/libraylib.a" \
+    "/usr/lib/x86_64-linux-gnu/libraylib.a" \
+    "/usr/lib/x86_64-linux-gnu/libraylib.so" \
+    "./lib/libraylib.a"; do
+    if [ -f "$cand" ]; then
+        echo "  ${GREEN}✓ Found Raylib graphics library:${RESET} $cand"
+        HAS_RAYLIB=1
+        break
     fi
-elif [ "$OS" = "darwin" ]; then
-    echo "  ${GREEN}✓ Native macOS graphics frameworks available (Cocoa / OpenGL)${RESET}"
+done
+
+if [ $HAS_RAYLIB -eq 0 ]; then
+    echo "  ${CYAN}= Downloading precompiled Raylib 5.0 for $OS ($TARGET_ARCH)...${RESET}"
+    RAYLIB_PKG=""
+    if [ "$OS" = "linux" ]; then
+        case "$TARGET_ARCH" in
+            amd64) RAYLIB_PKG="raylib-5.0_linux_amd64.tar.gz" ;;
+            arm64) RAYLIB_PKG="raylib-5.0_linux_arm64.tar.gz" ;;
+            *)     RAYLIB_PKG="raylib-5.0_linux_amd64.tar.gz" ;;
+        esac
+    elif [ "$OS" = "darwin" ]; then
+        RAYLIB_PKG="raylib-5.0_macos.tar.gz"
+    fi
+
+    if [ -n "$RAYLIB_PKG" ]; then
+        RAYLIB_URL="https://github.com/raysan5/raylib/releases/download/5.0/${RAYLIB_PKG}"
+        TMP_RAYLIB="$(mktemp -d)"
+        echo "  = Fetching: $RAYLIB_URL"
+        if curl -fsSL "$RAYLIB_URL" -o "$TMP_RAYLIB/raylib.tar.gz" 2>/dev/null || wget -q "$RAYLIB_URL" -O "$TMP_RAYLIB/raylib.tar.gz" 2>/dev/null; then
+            tar -xzf "$TMP_RAYLIB/raylib.tar.gz" -C "$TMP_RAYLIB"
+            EXTRACTED_DIR="$(find "$TMP_RAYLIB" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+            if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR/lib" ]; then
+                cp -r "$EXTRACTED_DIR/lib/"* "$LIB_DIR/" 2>/dev/null || true
+                cp -r "$EXTRACTED_DIR/include/"* "$INCLUDE_DIR/" 2>/dev/null || true
+                mkdir -p "$HOME/.vira/lib" "$HOME/.vira/include" 2>/dev/null || true
+                cp -r "$EXTRACTED_DIR/lib/"* "$HOME/.vira/lib/" 2>/dev/null || true
+                cp -r "$EXTRACTED_DIR/include/"* "$HOME/.vira/include/" 2>/dev/null || true
+                echo "  ${GREEN}✓ Successfully installed Raylib to $LIB_DIR and $INCLUDE_DIR${RESET}"
+                HAS_RAYLIB=1
+            fi
+        fi
+        rm -rf "$TMP_RAYLIB"
+    fi
 fi
 
 # Configure Shell PATH
-PATH_LINE="export PATH=\"\$HOME/.vir/bin:\$PATH\""
+PATH_LINE="export PATH=\"\$HOME/.vir/bin:\$HOME/.vira/bin:\$PATH\""
 
 SHELL_PROFILES=()
 [ -f "$HOME/.bashrc" ] && SHELL_PROFILES+=("$HOME/.bashrc")

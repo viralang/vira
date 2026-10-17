@@ -22,12 +22,12 @@ Vira adopts the **Actor Model of Concurrency**:
 
 Declare an actor using the `actor` keyword:
 
-```vex
+```vira
 pub actor WorkerNode {
 pub:
 	id int
 mut:
-	jobs_completed int = 0
+	jobs_completed int
 }
 
 pub fn (mut w WorkerNode) process_batch(workload_size int, trigger_fault bool) f32 {

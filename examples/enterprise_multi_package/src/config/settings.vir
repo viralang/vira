@@ -1,0 +1,36 @@
+module enterprise_app
+
+// 4-Quadrant Configuration Encapsulation
+pub struct AppConfig {
+	// 1. Private & Immutable: Internal secret salt
+	secret_salt string
+
+mut:
+	// 2. Private & Mutable: Track reload attempts
+	reload_count int
+
+pub:
+	// 3. Public & Read-Only: Exported immutable config properties
+	app_name string
+	environment string
+	max_workers int
+
+pub mut:
+	// 4. Public & Mutable: Hot-toggleable debug mode
+	debug_mode bool
+}
+
+pub fn AppConfig.new(app_name string, env string, workers int) AppConfig {
+	return AppConfig{
+		secret_salt: 'sec_vault_k98',
+		reload_count: 0,
+		app_name: app_name,
+		environment: env,
+		max_workers: workers,
+		debug_mode: true
+	}
+}
+
+pub fn (mut c AppConfig) bump_reload() {
+	c.reload_count += 1
+}

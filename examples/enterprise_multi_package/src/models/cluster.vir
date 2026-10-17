@@ -1,0 +1,29 @@
+module enterprise_app
+
+pub struct ClusterNode {
+pub:
+	id int
+	hostname string
+	cores int
+mut:
+	assigned_tasks int
+	is_online bool
+}
+
+pub fn ClusterNode.new(id int, hostname string, cores int) ClusterNode {
+	return ClusterNode{
+		id: id,
+		hostname: hostname,
+		cores: cores,
+		assigned_tasks: 0,
+		is_online: true
+	}
+}
+
+pub fn (mut c ClusterNode) assign_job() {
+	c.assigned_tasks += 1
+}
+
+pub fn (mut c ClusterNode) set_status(online bool) {
+	c.is_online = online
+}
