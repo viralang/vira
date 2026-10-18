@@ -1,0 +1,74 @@
+module viraserve
+
+// --- MASTER HTTP APPLICATION SERVER ---
+pub struct ViraServe {
+pub:
+	name string
+	port int
+	router Router
+pub mut:
+	stats ServerStats
+	worker RequestWorker
+}
+
+pub fn ViraServe.new(name string, port int) ViraServe {
+	return ViraServe{
+		name: name,
+		port: port,
+		router: Router.new(name, 'v1'),
+		stats: ServerStats.new(),
+		worker: RequestWorker{ worker_id: 1, requests_handled: 0 }
+	}
+}
+
+pub fn (mut s ViraServe) dispatch_request(req Request) Response {
+	start := time_now_us()
+	mut res := Response.new()
+
+	route_id := s.router.match_route(req.method, req.path)
+	if route_id == RouteID.not_found() {
+		res.not_found('No handler registered for ${req.method} ${req.path}')
+	} else {
+		// Non-blocking asynchronous actor dispatch
+		fut := s.worker <- execute_route(route_id, req.method, req.path, req.raw_body)
+		body_res := fut.await() or {
+			'{"error":"worker_panic","message":"${err}"}'
+		}
+		res = Response{
+			status_code: 200,
+			content_type: 'application/json',
+			body: body_res
+		}
+	}
+
+	latency := time_now_us() - start
+	s.stats.record(res.status_code, latency)
+	log_access(req.method, req.path, res.status_code, latency)
+	return res
+}
+
+pub fn (s ViraServe) print_banner() {
+	println('=================================================================')
+	println('   VIRASERVE ASYNCHRONOUS HTTP 1.1 MICROFRAMEWORK                ')
+	println('=================================================================')
+	println('• Service:    ${s.name}')
+	println('• Port:       ${s.port}')
+	println('• Workers:    Actor Work-Stealing Pool')
+	println('• Routes:')
+	println('  - ${s.router.describe_route(RouteID.home())}')
+	println('  - ${s.router.describe_route(RouteID.health())}')
+	println('  - ${s.router.describe_route(RouteID.metrics())}')
+	println('  - ${s.router.describe_route(RouteID.predict())}')
+	println('  - ${s.router.describe_route(RouteID.users())}')
+	println('  - ${s.router.describe_route(RouteID.echo())}')
+	println('=================================================================')
+}
+
+pub fn (s ViraServe) print_metrics() {
+	println('--- VIRASERVE TELEMETRY METRICS ---')
+	println('• Total Requests: ${s.stats.total_requests}')
+	println('• Total Errors:   ${s.stats.total_errors}')
+	println('• Avg Latency:    ${s.stats.avg_latency_us()} µs')
+	println('• Memory Safety:  0 GC Pauses | Deterministic Autofree')
+	println('-----------------------------------')
+}

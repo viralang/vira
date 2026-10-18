@@ -119,6 +119,9 @@ func ResolveImportCandidates(fileDir string, projectRoot string, impTarget strin
 		}
 		if mBytes, err := os.ReadFile(manifestPath); err == nil {
 			if m, err := mod.ParseManifest(string(mBytes)); err == nil {
+				if m.Module == impTarget || filepath.Base(m.Module) == impTarget {
+					candidates = append(candidates, filepath.Join(checkRoot, "src"), checkRoot)
+				}
 				for _, dep := range m.Dependencies {
 					depDir := PackageDestDir(filepath.Join(checkRoot, ".vira", "pkg"), dep.Path)
 					vendorDir := PackageDestDir(filepath.Join(checkRoot, "vendor"), dep.Path)

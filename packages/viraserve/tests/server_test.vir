@@ -1,0 +1,59 @@
+module main
+
+import "viraserve"
+
+fn main() {
+	println('=== 1. TESTING REQUEST & JSON PARSING ===')
+	req := Request.new('POST', '/test', '', '{"name":"vira_test","count":42,"rate":3.14}', 1)
+	if !req.is_post() {
+		panic('expected is_post to be true')
+	}
+	name := req.json_str('name')
+	if name != 'vira_test' {
+		panic('expected name to be vira_test')
+	}
+	count := req.json_int('count')
+	if count != 42 {
+		panic('expected count to be 42')
+	}
+	println('✓ Request & JSON field extraction passed')
+
+	println('=== 2. TESTING ROUTER MATCHING ===')
+	router := Router.new('test_router', 'v1')
+	if router.match_route('GET', '/') != RouteID.home() {
+		panic('expected RouteID.home')
+	}
+	if router.match_route('GET', '/health') != RouteID.health() {
+		panic('expected RouteID.health')
+	}
+	if router.match_route('POST', '/api/v1/predict') != RouteID.predict() {
+		panic('expected RouteID.predict')
+	}
+	if router.match_route('GET', '/invalid') != RouteID.not_found() {
+		panic('expected RouteID.not_found')
+	}
+	println('✓ Router route matching passed')
+
+	println('=== 3. TESTING RESPONSE BUILDER ===')
+	mut res := Response.new()
+	res.json('{"test":"ok"}')
+	if res.status_code != 200 {
+		panic('expected status 200')
+	}
+	res.not_found('item missing')
+	if res.status_code != 404 {
+		panic('expected status 404')
+	}
+	println('✓ Response builder & error formatting passed')
+
+	println('=== 4. TESTING FULL SERVER DISPATCH PIPELINE ===')
+	mut server := ViraServe.new('TestServer', 9000)
+	test_req := Request.new('GET', '/health', '', '', 2)
+	test_res := server.dispatch_request(test_req)
+	if test_res.status_code != 200 {
+		panic('expected 200 status from /health')
+	}
+	println('✓ Full server request dispatch passed')
+
+	println('ALL VIRASERVE UNIT TESTS PASSED!')
+}

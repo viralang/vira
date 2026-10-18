@@ -362,7 +362,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
-			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && g.af.StructNeedsFree[subSt.Name] {
+			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
 				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
 			}
 		}
@@ -385,7 +385,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
-			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && g.af.StructNeedsFree[subSt.Name] {
+			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
 				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
 			}
 		}
@@ -1316,7 +1316,7 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 		}
 	}
 
-	if g.activeArena != "" {
+	if g.activeArena != "" && !strings.Contains(g.activeArena, "isolated_heap") {
 		return fmt.Sprintf("vira_arena_str_format(%s, %q, %s)",
 			g.activeArena, fmtBuf.String(), strings.Join(cArgs, ", "))
 	}

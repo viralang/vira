@@ -776,6 +776,9 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				if !isTestMode && base == "tests" {
 					return filepath.SkipDir
 				}
+				if base == "examples" && !strings.HasSuffix(filepath.Clean(targetPath), "examples") {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
@@ -798,7 +801,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				}
 				if info.IsDir() {
 					base := filepath.Base(path)
-					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" {
+					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" || (base == "examples" && !strings.Contains(absTarget, string(filepath.Separator)+"examples"+string(filepath.Separator))) {
 						return filepath.SkipDir
 					}
 					return nil

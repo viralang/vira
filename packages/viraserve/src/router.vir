@@ -1,0 +1,69 @@
+module viraserve
+
+// Route IDs
+pub struct RouteID {}
+
+pub fn RouteID.not_found() int { return 0 }
+pub fn RouteID.home() int { return 1 }
+pub fn RouteID.health() int { return 2 }
+pub fn RouteID.metrics() int { return 3 }
+pub fn RouteID.predict() int { return 4 }
+pub fn RouteID.users() int { return 5 }
+pub fn RouteID.echo() int { return 6 }
+
+pub struct Router {
+pub:
+	service_name string
+	api_version string
+}
+
+pub fn Router.new(service_name string, api_version string) Router {
+	return Router{
+		service_name: service_name,
+		api_version: api_version
+	}
+}
+
+pub fn (r Router) match_route(method string, path string) int {
+	if method == 'GET' && path == '/' {
+		return RouteID.home()
+	}
+	if method == 'GET' && (path == '/health' || path == '/api/health') {
+		return RouteID.health()
+	}
+	if method == 'GET' && (path == '/metrics' || path == '/api/metrics') {
+		return RouteID.metrics()
+	}
+	if method == 'POST' && (path == '/predict' || path == '/v1/predict' || path == '/api/v1/predict') {
+		return RouteID.predict()
+	}
+	if (method == 'GET' || method == 'POST') && (path == '/users' || path == '/api/users') {
+		return RouteID.users()
+	}
+	if method == 'POST' && (path == '/echo' || path == '/api/echo') {
+		return RouteID.echo()
+	}
+	return RouteID.not_found()
+}
+
+pub fn (r Router) describe_route(route_id int) string {
+	if route_id == RouteID.home() {
+		return 'GET  /                   - Service Welcome & API discovery'
+	}
+	if route_id == RouteID.health() {
+		return 'GET  /health            - Cluster health & uptime probe'
+	}
+	if route_id == RouteID.metrics() {
+		return 'GET  /metrics           - Prometheus/Telemetry runtime metrics'
+	}
+	if route_id == RouteID.predict() {
+		return 'POST /api/v1/predict    - Asynchronous AI Model Inference Endpoint'
+	}
+	if route_id == RouteID.users() {
+		return 'REST /api/users         - User Profile & Entity Service'
+	}
+	if route_id == RouteID.echo() {
+		return 'POST /api/echo          - Request reflection and debugging'
+	}
+	return 'UNKNOWN'
+}

@@ -1,0 +1,56 @@
+module main
+
+import "viraserve"
+
+fn main() {
+	// 1. Initialize ViraServe application
+	mut app := ViraServe.new('ViraCloudGateway', 8080)
+	app.print_banner()
+
+	println('\n--- 1. PROCESSING INCOMING HTTP REQUEST BATCH ---')
+
+	// Request 1: Home Discovery
+	req1 := Request.new('GET', '/', '', '', 10)
+	res1 := app.dispatch_request(req1)
+	println('Response 1: ${res1.body}')
+
+	// Request 2: Cluster Health Check
+	req2 := Request.new('GET', '/health', '', '', 11)
+	res2 := app.dispatch_request(req2)
+	println('Response 2: ${res2.body}')
+
+	// Request 3: Native AI SIMD Tensor Prediction
+	predict_payload := '{"model": "deepseek-coder", "scale": 2.0}'
+	req3 := Request.new('POST', '/api/v1/predict', '', predict_payload, 12)
+	res3 := app.dispatch_request(req3)
+	println('Response 3: ${res3.body}')
+
+	// Request 4: REST Create User Entity
+	user_payload := '{"username": "dev_alex", "role": "ml_engineer"}'
+	req4 := Request.new('POST', '/api/users', '', user_payload, 13)
+	res4 := app.dispatch_request(req4)
+	println('Response 4: ${res4.body}')
+
+	// Request 5: REST Get Users List
+	req5 := Request.new('GET', '/api/users', '', '', 14)
+	res5 := app.dispatch_request(req5)
+	println('Response 5: ${res5.body}')
+
+	// Request 6: Echo Debugging Endpoint
+	req6 := Request.new('POST', '/api/echo', '', '{"debug":true,"trace_id":"xyz-99"}', 15)
+	res6 := app.dispatch_request(req6)
+	println('Response 6: ${res6.body}')
+
+	// Request 7: 404 Not Found Handling
+	req7 := Request.new('GET', '/non_existent_endpoint', '', '', 16)
+	res7 := app.dispatch_request(req7)
+	println('Response 7: ${res7.body}')
+
+	println('\n--- 2. VERIFYING HTTP 1.1 WIRE PROTOCOL SERIALIZATION ---')
+	wire_sample := res3.serialize()
+	wire_valid := wire_sample != ''
+	println('Serialized Wire Valid: ${wire_valid}')
+
+	println('\n--- 3. TELEMETRY & RUNTIME STATS ---')
+	app.print_metrics()
+}

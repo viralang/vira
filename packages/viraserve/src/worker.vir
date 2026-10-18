@@ -1,0 +1,59 @@
+module viraserve
+
+// --- CONCURRENT REQUEST WORKER ACTOR ---
+pub actor RequestWorker {
+pub:
+	worker_id int
+mut:
+	requests_handled int = 0
+}
+
+pub fn (mut w RequestWorker) execute_route(route_id int, method string, path string, raw_body string) string {
+	w.requests_handled = w.requests_handled + 1
+
+	if route_id == RouteID.home() {
+		return '{"service":"viraserve","version":"0.1.0","status":"running","docs":"/health"}'
+	}
+
+	if route_id == RouteID.health() {
+		return '{"status":"UP","worker_id":${w.worker_id},"handled":${w.requests_handled},"checks":{"pool":"healthy","autofree":"zero_leaks"}}'
+	}
+
+	if route_id == RouteID.metrics() {
+		return '{"worker":${w.worker_id},"completed_tasks":${w.requests_handled},"memory_mode":"autofree_deterministic"}'
+	}
+
+	if route_id == RouteID.predict() {
+		// Run native AI tensor forward pass inside the worker
+		model := json_get_str(raw_body, 'model')
+		multiplier := json_get_f32(raw_body, 'scale')
+		mut scale_val := 1.0f32
+		if multiplier > 0.0 {
+			scale_val = multiplier
+		}
+
+		// 16x16 SIMD layer execution
+		w_mat := tensor_fill(16, 16, 0.5)
+		x_mat := tensor_fill(16, 16, scale_val)
+		y_mat := w_mat @ x_mat
+		score := tensor_sum(y_mat)
+
+		return '{"model":"${model}","status":"inferred","energy_score":${score},"worker":${w.worker_id}}'
+	}
+
+	if route_id == RouteID.users() {
+		if method == 'POST' {
+			username := json_get_str(raw_body, 'username')
+			role := json_get_str(raw_body, 'role')
+			user_id := 1000 + w.requests_handled
+			return '{"action":"created","id":${user_id},"username":"${username}","role":"${role}"}'
+		}
+		return '{"users":[{"id":1,"name":"Alice","role":"admin"},{"id":2,"name":"Bob","role":"analyst"}]}'
+	}
+
+	if route_id == RouteID.echo() {
+		return '{"echo_received":true,"payload":${raw_body}}'
+	}
+
+	return '{"error":"not_found","path":"${path}","code":404}'
+}

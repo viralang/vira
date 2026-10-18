@@ -90,6 +90,11 @@ func (a *Analyzer) computeStructDestructors() {
 			if a.StructNeedsFree[name] {
 				continue
 			}
+			if st.IsActor {
+				a.StructNeedsFree[name] = true
+				changed = true
+				continue
+			}
 			for _, f := range st.Fields {
 				if ok, _ := a.typeNeedsCleanup(f.Type); ok {
 					a.StructNeedsFree[name] = true
@@ -272,8 +277,26 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.ReturnStmt:
-			// If returning a local variable (`return inv`), mark it as escaping so we don't free it!
-			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			// If returning an unassigned string interpolation (e.g. `return "hello ${x}"`),
+			// hoist it into a temporary variable so it is evaluated BEFORE unwinding scope destructors,
+			// preventing any use-after-free of interpolated variables!
+			if interp, ok := s.Value.(*ast.StringInterpExpr); ok {
+				a.tmpCounter++
+				tmpName := fmt.Sprintf("_vira_ret_str_%d", a.tmpCounter)
+				tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
+				varDecl := &ast.VarDeclStmt{
+					Name:     tmpIdent,
+					Value:    interp,
+					IsMut:    false,
+					StmtSpan: interp.Span(),
+				}
+				a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+				identExpr := &ast.IdentExpr{Ident: tmpIdent}
+				a.chk.ExprTypes[identExpr] = checker.TypeString
+
+				rewritten = append(rewritten, varDecl)
+				s.Value = identExpr
+			} else if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				if tv := scope.Find(ident.Ident.Name); tv != nil {
 					tv.State = StateEscapesViaReturn
 				}
