@@ -548,7 +548,22 @@ vira_string viraserve__RequestWorker_execute_route(viraserve__RequestWorker* w, 
     return _vira_ret_str_23;
 }
 
-int main(void) {
+#ifdef _WIN32
+#include <windows.h>
+static LONG WINAPI _crash_handler(EXCEPTION_POINTERS* ep) {
+    HMODULE hMod = GetModuleHandleA(NULL);
+    uintptr_t offset = (uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)hMod;
+    fprintf(stderr, "\n*** CRASH INTERCEPTED: Code=0x%08lX at RVA=0x%llX (Base=%p, Addr=%p) ***\n",
+            ep->ExceptionRecord->ExceptionCode, (unsigned long long)offset, (void*)hMod, ep->ExceptionRecord->ExceptionAddress);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+__attribute__((force_align_arg_pointer)) int main(void) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(_crash_handler);
+#endif
     viraserve__ViraServe app = viraserve__ViraServe_new(vira_str_lit("ViraCloudGateway", 16), 8080);
     viraserve__ViraServe_print_banner(&app);
     vira_println_temp(vira_str_lit("\\n--- 1. PROCESSING INCOMING HTTP REQUEST BATCH ---", 51));
