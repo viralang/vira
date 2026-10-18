@@ -4,7 +4,7 @@ module package_consumer_demo
 // Vira Package Management Demo
 // Demonstrates consuming an external package installed via:
 //   vira add C:/Users/hp/vira_test
-//   (or vira add github.com/<user>/vira_test)
+//   (or vira add github.com/micromax/vira_test)
 //
 // The compiler automatically resolves imports across:
 // 1. Current file directory
