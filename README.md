@@ -150,11 +150,10 @@ vira <command> [flags] [arguments]
 ---
 
 ## 4. Master Catalog: Tutorials & Runnable Examples Table
-
-The repository includes 25 comprehensive step-by-step tutorials paired directly with 24 standalone, self-contained runnable `.vir` example programs.
+The repository includes 26 comprehensive step-by-step tutorials paired directly with 27 standalone, self-contained runnable `.vir` example programs and benchmark suites.
 
 | # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
-| :-: | :--- | :-: | :--- | :--- | :--- |
+| :-: | :--- | :--- | :--- | :--- | :--- |
 | **01** | **Syntax & Basics** | Beginner | [`01_basics.vir`](docs/examples/01_basics.vir) | [`01_getting_started_and_basics.md`](docs/tutorials/01_getting_started_and_basics.md) | Immutability by default, `mut`, primitives (`int`, `i64`, `f32`, `bool`, `string`), string interpolation `${...}`, `if`/`else`, blank identifier `_`. |
 | **02** | **OOP & Encapsulation** | Intermediate | [`02_oop_composition.vir`](docs/examples/02_oop_composition.vir) | [`02_oop_and_4_quadrant_structs.md`](docs/tutorials/02_oop_and_4_quadrant_structs.md) | 4-quadrant struct access levels (`default`, `mut:`, `pub:`, `pub mut:`), struct embedding, promoted methods/fields, value vs pointer receivers. |
 | **03** | **Structural Interfaces** | Intermediate | [`03_interfaces.vir`](docs/examples/03_interfaces.vir) | [`03_interfaces_and_polymorphism.md`](docs/tutorials/03_interfaces_and_polymorphism.md) | Implicit interface satisfaction (no `implements` keyword), 16-byte fat-pointer boxing, dynamic polymorphic vtable dispatch, automatic destructor chaining. |
@@ -180,10 +179,14 @@ The repository includes 25 comprehensive step-by-step tutorials paired directly 
 | **23** | **GUI Navigation & Lifecycle** | Intermediate/Adv | [`22_gui_navigation_lifecycle.vir`](docs/examples/22_gui_navigation_lifecycle.vir) / [`gui_navigation_lifecycle.vir`](examples/gui_navigation_lifecycle.vir) | [`23_gui_window_navigation_and_lifecycle.md`](docs/tutorials/23_gui_window_navigation_and_lifecycle.md) | Multi-view routing, tab strips (`gui_tab_item`), modal dialogs (`gui_modal_begin`/`gui_modal_end`), and close request interception (`gui_cancel_close`). |
 | **24** | **Multi-Package Architecture & Scopes** | Intermediate/Adv | [`23_multi_package_architecture.vir`](docs/examples/23_multi_package_architecture.vir) / [`enterprise_multi_package`](examples/enterprise_multi_package/) | [`24_multi_package_architecture_and_scopes.md`](docs/tutorials/24_multi_package_architecture_and_scopes.md) | Scalable project structures (`src/config/`, `src/models/`, `src/services/`), recursive package compilation, 5-tier lexical scoping, 4-quadrant cross-package encapsulation, and zero-leak cross-package actors. |
 | **25** | **Native Package Management & Vendoring** | Intermediate/Adv | [`24_package_management_consumer.vir`](docs/examples/24_package_management_consumer.vir) | [`25_package_management_publishing_and_vendoring.md`](docs/tutorials/25_package_management_publishing_and_vendoring.md) | Decentralized package management, `vira add`, `vira install`, `vira remove`, `vira vendor`, cryptographic `vira.lock` SHA-256 tree hashing, GitHub publishing, and 6-tier import resolution. |
+| **26** | **Actor System Trade-offs & High-Concurrency Benchmarks** | Advanced/Expert | [`25_actors_banking_fault_tolerance.vir`](docs/examples/25_actors_banking_fault_tolerance.vir)<br>[`26_actors_worker_pool_fanout.vir`](docs/examples/26_actors_worker_pool_fanout.vir)<br>[`27_actors_ring_pipeline.vir`](docs/examples/27_actors_ring_pipeline.vir)<br>[`actor_stress_benchmark.vir`](examples/actor_stress_benchmark.vir) | [`26_actor_system_tradeoffs_and_benchmarks.md`](docs/tutorials/26_actor_system_tradeoffs_and_benchmarks.md) | High-concurrency actors (10,000+ per thread, ~64B/actor), Chase-Lev work-stealing, zero-leak temporary string autofree, panic isolation (`setjmp`/`longjmp`), `OneForOne` supervisor state rollback, actor ring benchmarks (1.6M+ hops/sec). |
 
 ---
 
 ## 5. Complete Language Guide & Syntax Breakdown
+
+> [!TIP]
+> For the complete function-by-function Standard Library reference covering all builtin types, tensor operations, file I/O, networking, and GUI functions, see [**`docs/BUILTINS_AND_API_REFERENCE.md`**](docs/BUILTINS_AND_API_REFERENCE.md).
 
 ### Modules & Visibility
 

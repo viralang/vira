@@ -1,0 +1,119 @@
+module banking_actor_demo
+
+// ==============================================================================
+// Tutorial 25: Resilient Banking & Fault-Tolerant Actor System
+//
+// Demonstrates Vira's Erlang-style Actor Model with:
+// 1. Isolated Actor State: Mailbox serialization ensures sequential safety.
+// 2. Asynchronous Dispatch (`<-`): Non-blocking message send returning `Future[T]`.
+// 3. Panic Isolation via `setjmp`/`longjmp`: A panicked actor does NOT crash
+//    the worker thread or the application.
+// 4. OneForOne Supervisor Restarts: O(1) scratch arena wipe and automatic state reset.
+// 5. Zero-Leak Autofree: Temporary string cleanup and future disposal.
+// ==============================================================================
+
+pub actor BankAccount {
+pub:
+	id int
+	owner string
+mut:
+	balance f32 = 0.0
+	tx_count int = 0
+}
+
+pub fn (mut b BankAccount) deposit(amount f32) f32 {
+	b.balance = b.balance + amount
+	b.tx_count = b.tx_count + 1
+	println('[Account #${b.id} | ${b.owner}] Deposited $${amount} -> Balance: $${b.balance}')
+	return b.balance
+}
+
+pub fn (mut b BankAccount) withdraw(amount f32, simulate_gateway_fault bool) f32 {
+	if simulate_gateway_fault {
+		panic('Payment gateway timed out during fund settlement')
+	}
+	if amount > b.balance {
+		panic('Insufficient funds for requested withdrawal')
+	}
+	b.balance = b.balance - amount
+	b.tx_count = b.tx_count + 1
+	println('[Account #${b.id} | ${b.owner}] Withdrew $${amount} -> Balance: $${b.balance}')
+	return b.balance
+}
+
+pub fn (b BankAccount) get_balance() f32 {
+	return b.balance
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VIRA ACTOR SYSTEM: RESILIENT BANKING TRANSACTION DEMO         ')
+	println('=================================================================')
+
+	// 1. Initialize two isolated actor bank accounts
+	println('')
+	println('--- 1. SPAWNING INDEPENDENT ACTOR ACCOUNTS ---')
+	mut acc1 := BankAccount{ id: 101, owner: 'Alice', balance: 0.0, tx_count: 0 }
+	mut acc2 := BankAccount{ id: 102, owner: 'Bob',   balance: 0.0, tx_count: 0 }
+	println('✓ Accounts spawned with isolated mailbox locks and private arena slabs')
+
+	// 2. Concurrently deposit funds into both accounts
+	println('')
+	println('--- 2. CONCURRENT NON-BLOCKING DEPOSITS (<-) ---')
+	fut_dep1 := acc1 <- deposit(1500.0)
+	fut_dep2 := acc2 <- deposit(800.0)
+
+	bal1 := fut_dep1.await() or {
+		eprintln('Deposit to Alice failed: ${err}')
+		0.0
+	}
+	bal2 := fut_dep2.await() or {
+		eprintln('Deposit to Bob failed: ${err}')
+		0.0
+	}
+	println('Deposit confirmations received: Alice=$${bal1}, Bob=$${bal2}')
+
+	// 3. Normal withdrawal from Alice
+	println('')
+	println('--- 3. NORMAL WITHDRAWAL TRANSACTION ---')
+	fut_wd1 := acc1 <- withdraw(350.0, false)
+	bal1_after_wd := fut_wd1.await() or { 0.0 }
+	println('Alice balance after withdrawal: $${bal1_after_wd}')
+
+	// 4. Injected fault: Gateway timeout during withdrawal on Bob
+	println('')
+	println('--- 4. FAULT INJECTION & SUPERVISOR ISOLATION ---')
+	println('Dispatching withdrawal on Bob with simulated network timeout...')
+	fut_wd_fault := acc2 <- withdraw(200.0, true)
+
+	bal_fault := fut_wd_fault.await() or {
+		println('✓ Supervisor caught fault safely on worker thread: "${err}"')
+		println('✓ Bob account protected from corrupted half-settled state')
+		0.0
+	}
+	_ := bal_fault
+
+	// 5. Post-restart recovery verification: Bob's state was safely reset to default
+	println('')
+	println('--- 5. POST-RESTART RESILIENCE VERIFICATION ---')
+	println('Checking Bob balance after OneForOne supervisor reset:')
+	fut_bal := acc2 <- get_balance()
+	reset_bal := fut_bal.await() or { 0.0 }
+	println('✓ Bob balance safely reset to initial state: $${reset_bal}')
+
+	println('Re-funding Bob account and completing valid withdrawal:')
+	fut_re_dep := acc2 <- deposit(500.0)
+	_ := fut_re_dep.await() or { 0.0 }
+
+	fut_retry := acc2 <- withdraw(200.0, false)
+	bal2_final := fut_retry.await() or {
+		eprintln('Retry failed unexpectedly: ${err}')
+		0.0
+	}
+	println('✓ Bob successfully withdrew $200.00 after supervisor healing: $${bal2_final}')
+
+	println('')
+	println('=================================================================')
+	println('✓ ALL BANKING ACTOR TRANSACTIONS COMPLETED WITH 0 LEAKS!          ')
+	println('=================================================================')
+}

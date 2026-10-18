@@ -68,6 +68,7 @@ type Analyzer struct {
 	StructNeedsFree map[string]bool
 	Reports         []*FnReport
 	arenaCounter    int
+	tmpCounter      int
 }
 
 func New(chk *checker.Checker) *Analyzer {
@@ -185,6 +186,9 @@ func (a *Analyzer) rewriteBlock(
 			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
 			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
 
+			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
+			rewritten = append(rewritten, preStmts...)
+
 			// 2. Register variable in current scope if its type owns heap memory
 			valType := a.chk.ExprTypes[s.Value]
 			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
@@ -203,10 +207,14 @@ func (a *Analyzer) rewriteBlock(
 				report.TrackedVars = append(report.TrackedVars, tv)
 			}
 			rewritten = append(rewritten, s)
+			rewritten = append(rewritten, postStmts...)
 
 		case *ast.AssignStmt:
 			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, false)
+			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
+			rewritten = append(rewritten, postStmts...)
 
 		case *ast.IfStmt:
 			thenScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
@@ -284,7 +292,10 @@ func (a *Analyzer) rewriteBlock(
 
 		case *ast.ExprStmt:
 			a.inspectExprMovesAndOrBlocks(s.Expr, scope, report)
+			preStmts, postStmts := a.hoistTemporaryStrings(s.Expr, scope, report, false)
+			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
+			rewritten = append(rewritten, postStmts...)
 
 		default:
 			rewritten = append(rewritten, s)
@@ -347,6 +358,154 @@ func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScop
 
 	case *ast.UnaryExpr:
 		a.inspectExprMovesAndOrBlocks(e.Expr, scope, report)
+	}
+}
+
+// hoistTemporaryStrings extracts unassigned temporary heap strings (e.g., *ast.StringInterpExpr
+// or *ast.CallExpr returning string passed as call arguments) into scoped synthetic variables,
+// injecting immediate statement-exit DeferFreeStmt cleanup for zero-leak memory management.
+func (a *Analyzer) hoistTemporaryStrings(
+	expr ast.Expr,
+	scope *LexicalScope,
+	report *FnReport,
+	isRootAssigned bool,
+) ([]ast.Stmt, []ast.Stmt) {
+	if scope.InArena || expr == nil {
+		return nil, nil
+	}
+
+	var preStmts []ast.Stmt
+	var postFrees []*ast.DeferFreeStmt
+
+	// If root expr itself is an unassigned StringInterpExpr (e.g. in ExprStmt: `'hello ${x}'`)
+	if !isRootAssigned {
+		if interp, ok := expr.(*ast.StringInterpExpr); ok {
+			a.tmpCounter++
+			tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
+			tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
+			varDecl := &ast.VarDeclStmt{
+				Name:     tmpIdent,
+				Value:    interp,
+				IsMut:    false,
+				StmtSpan: interp.Span(),
+			}
+			a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+			identExpr := &ast.IdentExpr{Ident: tmpIdent}
+			a.chk.ExprTypes[identExpr] = checker.TypeString
+
+			freeStmt := &ast.DeferFreeStmt{
+				VarName:  tmpName,
+				TypeName: "string",
+				Kind:     ast.CleanupString,
+				Reason:   "zero-leak temporary string statement cleanup",
+				StmtSpan: interp.Span(),
+			}
+			preStmts = append(preStmts, varDecl)
+			postFrees = append(postFrees, freeStmt)
+			report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+			return preStmts, []ast.Stmt{freeStmt}
+		}
+	}
+
+	a.walkAndHoistCallArgs(expr, &preStmts, &postFrees, report)
+
+	var postStmts []ast.Stmt
+	// LIFO cleanup
+	for i := len(postFrees) - 1; i >= 0; i-- {
+		postStmts = append(postStmts, postFrees[i])
+	}
+	return preStmts, postStmts
+}
+
+func (a *Analyzer) walkAndHoistCallArgs(
+	expr ast.Expr,
+	preStmts *[]ast.Stmt,
+	postFrees *[]*ast.DeferFreeStmt,
+	report *FnReport,
+) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		for i := range e.Args {
+			arg := &e.Args[i]
+			if arg.Expr == nil {
+				continue
+			}
+			// 1. Recursively walk nested subexpressions
+			a.walkAndHoistCallArgs(arg.Expr, preStmts, postFrees, report)
+
+			// 2. Hoist StringInterpExpr passed as argument
+			if interp, ok := arg.Expr.(*ast.StringInterpExpr); ok {
+				a.tmpCounter++
+				tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
+				tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
+				varDecl := &ast.VarDeclStmt{
+					Name:     tmpIdent,
+					Value:    interp,
+					IsMut:    false,
+					StmtSpan: interp.Span(),
+				}
+				a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+				identExpr := &ast.IdentExpr{Ident: tmpIdent}
+				a.chk.ExprTypes[identExpr] = checker.TypeString
+
+				freeStmt := &ast.DeferFreeStmt{
+					VarName:  tmpName,
+					TypeName: "string",
+					Kind:     ast.CleanupString,
+					Reason:   "zero-leak temporary string argument cleanup",
+					StmtSpan: interp.Span(),
+				}
+				*preStmts = append(*preStmts, varDecl)
+				*postFrees = append(*postFrees, freeStmt)
+				report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+				arg.Expr = identExpr
+			} else if callArg, isCall := arg.Expr.(*ast.CallExpr); isCall {
+				// 3. Hoist CallExpr returning string passed as argument
+				retType := a.chk.ExprTypes[callArg]
+				if retType != nil && retType.Equals(checker.TypeString) {
+					a.tmpCounter++
+					tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
+					tmpIdent := ast.Ident{Name: tmpName, NamePos: callArg.Span()}
+					varDecl := &ast.VarDeclStmt{
+						Name:     tmpIdent,
+						Value:    callArg,
+						IsMut:    false,
+						StmtSpan: callArg.Span(),
+					}
+					a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+					identExpr := &ast.IdentExpr{Ident: tmpIdent}
+					a.chk.ExprTypes[identExpr] = checker.TypeString
+
+					freeStmt := &ast.DeferFreeStmt{
+						VarName:  tmpName,
+						TypeName: "string",
+						Kind:     ast.CleanupString,
+						Reason:   "zero-leak temporary string call argument cleanup",
+						StmtSpan: callArg.Span(),
+					}
+					*preStmts = append(*preStmts, varDecl)
+					*postFrees = append(*postFrees, freeStmt)
+					report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+					arg.Expr = identExpr
+				}
+			}
+		}
+		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
+			a.walkAndHoistCallArgs(sel.Left, preStmts, postFrees, report)
+		}
+
+	case *ast.BinaryExpr:
+		a.walkAndHoistCallArgs(e.Left, preStmts, postFrees, report)
+		a.walkAndHoistCallArgs(e.Right, preStmts, postFrees, report)
+
+	case *ast.UnaryExpr:
+		a.walkAndHoistCallArgs(e.Expr, preStmts, postFrees, report)
+
+	case *ast.SelectorExpr:
+		a.walkAndHoistCallArgs(e.Left, preStmts, postFrees, report)
 	}
 }
 

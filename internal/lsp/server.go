@@ -1193,7 +1193,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		})
 	}
 
-	for _, bi := range []string{"println", "print", "tensor_fill", "tensor_scale", "tensor_sum", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
+	for _, bi := range []string{"println", "print", "time_now_us", "time_now_ms", "tensor_fill", "tensor_scale", "tensor_sum", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
 		items = append(items, CompletionItem{
 			Label:  bi,
 			Kind:   3, // Function

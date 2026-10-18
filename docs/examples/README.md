@@ -43,6 +43,9 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`22_gui_navigation_lifecycle.vir`](./22_gui_navigation_lifecycle.vir)** | Window Navigation, Tabs, Modals & Lifecycle Control | Multi-tab bar routing (`gui_tab_item`), backdrop modal dialogs (`gui_modal_begin`/`gui_modal_end`), close interception (`gui_cancel_close`), viewport metrics (`gui_window_width`/`gui_window_height`), and zero-leak 60 FPS string interpolation. |
 | **[`23_multi_package_architecture.vir`](./23_multi_package_architecture.vir)** | Multi-Package Architecture & Scopes | Enterprise 5-tier lexical scoping, cross-package 4-quadrant encapsulation, actor pipelining, and zero-leak SIMD tensor computing. |
 | **[`24_package_management_consumer.vir`](./24_package_management_consumer.vir)** | Native Package Management & Vendoring | Consuming external packages (`import "vira_test"`), Vec2 arithmetic, structured logging, offline vendoring, and lockfile reproducibility. |
+| **[`25_actors_banking_fault_tolerance.vir`](./25_actors_banking_fault_tolerance.vir)** | Resilient Banking & Fault-Tolerant Actors | Erlang-style fault containment, OneForOne supervisor state reset, panic isolation (`setjmp`/`longjmp`), and transaction retry with 0 memory leaks. |
+| **[`26_actors_worker_pool_fanout.vir`](./26_actors_worker_pool_fanout.vir)** | Matrix Compute Worker Pool & Fan-Out/Fan-In | Parallel tensor fan-out (`<-`), Chase-Lev multicore work-stealing, work-helping `.await()`, and zero-leak O(1) private actor scratch arenas. |
+| **[`27_actors_ring_pipeline.vir`](./27_actors_ring_pipeline.vir)** | Chained Actor Pipeline & Token Passing | High-throughput sequential and interleaved token passing across independent pipeline stages, mailbox serialization, and 0 memory leaks. |
 
 ---
 

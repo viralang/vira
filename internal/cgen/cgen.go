@@ -979,6 +979,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "panic":
 			return fmt.Sprintf("vira_panic(%s)", strings.Join(argStrs, ", "))
+		case "time_now_us":
+			return "vira_time_now_us()"
+		case "time_now_ms":
+			return "vira_time_now_ms()"
 		case "tensor_fill":
 			arenaArg := "NULL"
 			if g.activeArena != "" {

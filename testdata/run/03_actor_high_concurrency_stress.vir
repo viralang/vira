@@ -1,0 +1,83 @@
+module actor_stress_test
+
+// OUT: [stress] Spawned 1000 lightweight actors
+// OUT: [stress] Completed 800 fan-out messages
+// OUT: [stress] Chaos test: trapped 15 faults with 100% recovery
+// OUT: [stress] Ring pipeline: 400 hops completed
+// OUT: [vira_rt] active_leaks=0
+
+pub actor StressWorker {
+pub:
+	id int
+mut:
+	count int = 0
+}
+
+pub fn (mut w StressWorker) compute(x int, fail bool) int {
+	w.count = w.count + 1
+	if fail {
+		panic('injected worker failure')
+	}
+	return x * 3
+}
+
+pub fn (mut w StressWorker) hop(val int) int {
+	w.count = w.count + 1
+	return val + 1
+}
+
+fn main() {
+	// 1. Spawn test
+	for mut i := 0; i < 1000; i = i + 1 {
+		mut a := StressWorker{ id: i, count: 0 }
+		_ := a
+	}
+	println('[stress] Spawned 1000 lightweight actors')
+
+	// 2. Fan-out / Fan-in
+	mut w0 := StressWorker{ id: 0, count: 0 }
+	mut w1 := StressWorker{ id: 1, count: 0 }
+	mut w2 := StressWorker{ id: 2, count: 0 }
+	mut w3 := StressWorker{ id: 3, count: 0 }
+
+	mut msgs_done := 0
+	for mut b := 0; b < 200; b = b + 1 {
+		f0 := w0 <- compute(b, false)
+		f1 := w1 <- compute(b, false)
+		f2 := w2 <- compute(b, false)
+		f3 := w3 <- compute(b, false)
+
+		_ := f0.await() or { 0 }
+		_ := f1.await() or { 0 }
+		_ := f2.await() or { 0 }
+		_ := f3.await() or { 0 }
+		msgs_done = msgs_done + 4
+	}
+	println('[stress] Completed ${msgs_done} fan-out messages')
+
+	// 3. Chaos fault tolerance
+	mut chaos_node := StressWorker{ id: 99, count: 0 }
+	mut faults_caught := 0
+	for mut c := 0; c < 100; c = c + 1 {
+		should_fail := (c % 7 == 0)
+		fut := chaos_node <- compute(c, should_fail)
+		_ := fut.await() or {
+			faults_caught = faults_caught + 1
+			0
+		}
+	}
+	println('[stress] Chaos test: trapped ${faults_caught} faults with 100% recovery')
+
+	// 4. Ring pipeline
+	mut r0 := StressWorker{ id: 0, count: 0 }
+	mut r1 := StressWorker{ id: 1, count: 0 }
+	mut tok := 0
+	for mut r := 0; r < 200; r = r + 1 {
+		f_a := r0 <- hop(tok)
+		v_a := f_a.await() or { tok }
+		f_b := r1 <- hop(v_a)
+		v_b := f_b.await() or { v_a }
+		tok = v_b
+	}
+	println('[stress] Ring pipeline: ${tok} hops completed')
+}

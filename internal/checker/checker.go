@@ -133,6 +133,18 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "msg", Type: TypeString}},
 		ReturnType: TypeVoid,
 	}
+	c.functions["time_now_us"] = &FnSig{
+		Name:       "time_now_us",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeI64,
+	}
+	c.functions["time_now_ms"] = &FnSig{
+		Name:       "time_now_ms",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeI64,
+	}
 	c.functions["tensor_fill"] = &FnSig{
 		Name:  "tensor_fill",
 		IsPub: true,

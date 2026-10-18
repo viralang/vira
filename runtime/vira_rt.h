@@ -149,6 +149,10 @@ static inline vira_arena vira_arena_init(size_t capacity) {
 }
 
 static inline void* vira_arena_alloc(vira_arena* a, size_t size) {
+    if (a->buf == NULL) {
+        size_t initial_cap = (size < 65536) ? 65536 : ((size + 4095) & ~(size_t)4095);
+        *a = vira_arena_init(initial_cap);
+    }
     // 64-byte alignment guarantees AVX-512 / AVX2 / NEON aligned vector loads
     uintptr_t base    = (uintptr_t)a->buf + a->offset;
     uintptr_t aligned = (base + 63) & ~(uintptr_t)63;
@@ -549,7 +553,7 @@ static inline void vira_actor_ctx_init(vira_actor_ctx* ctx, int32_t id, const ch
     ctx->state          = VIRA_ACTOR_RUNNING;
     ctx->restarts       = 0;
     ctx->max_restarts   = max_restarts;
-    ctx->isolated_heap  = vira_arena_init(256 * 1024); // 256 KB SIMD-aligned scratch arena per actor
+    ctx->isolated_heap  = (vira_arena){ .buf = NULL, .cap = 0, .offset = 0 }; // Lazy SIMD-aligned scratch arena per actor
     ctx->last_error     = vira_str_lit("", 0);
     ctx->in_actor       = false;
     ctx->mailbox_lock   = 0;
@@ -571,9 +575,9 @@ static inline void vira_panic(vira_string msg) {
 }
 
 // --- CHASE-LEV STYLE LOCK-FREE WORK-STEALING DEQUE ---
-#define VIRA_WS_CAP  256
+#define VIRA_WS_CAP  65536
 #define VIRA_WS_MASK (VIRA_WS_CAP - 1)
-#define VIRA_MAX_WORKERS 8
+#define VIRA_MAX_WORKERS 32
 
 typedef void (*vira_task_fn)(void* env);
 
@@ -789,6 +793,25 @@ static inline void vira_eprintln_temp(vira_string s) {
         free((void*)s.data);
         _vira_record_free();
     }
+}
+
+static inline int64_t vira_time_now_us(void) {
+#if defined(_WIN32)
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init) { QueryPerformanceFrequency(&freq); init = 1; }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (int64_t)((counter.QuadPart * 1000000LL) / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000LL + (int64_t)(ts.tv_nsec / 1000LL);
+#endif
+}
+
+static inline int64_t vira_time_now_ms(void) {
+    return vira_time_now_us() / 1000LL;
 }
 
 // ============================================================================

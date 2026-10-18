@@ -198,6 +198,115 @@ fn main() {
 	}
 }
 
+func TestZeroLeakTemporaryStringAutofree(t *testing.T) {
+	src := `
+module temp_str_test
+
+pub struct Logger {
+pub:
+	prefix string
+}
+
+pub fn (l Logger) log(msg string) {
+	println('[${l.prefix}] ${msg}')
+}
+
+fn emit_event(source string, payload string) {
+	println('event: ${source} -> ${payload}')
+}
+
+fn main() {
+	l := Logger{ prefix: 'Telemetry' }
+	
+	id := 42
+	temp := 98.6
+	emit_event('sensor_${id}', 'temperature_${temp}')
+
+	status := 'ONLINE'
+	l.log('Service status is ${status}')
+
+	println('Done testing temporary strings: ${id}')
+}
+`
+	p := parser.New(src)
+	astFile := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("parse errors: %v", p.Errors())
+	}
+
+	chk := checker.New()
+	chk.CheckFile(astFile)
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("semantic errors: %v", chk.Errors())
+	}
+
+	af := autofree.New(chk)
+	af.AnalyzeFile(astFile)
+
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(astFile)
+
+	// Verify generated C contains injected frees for temporary strings
+	if !strings.Contains(cCode, "vira_str_free(&_vira_tmp_str_") {
+		t.Fatalf("expected generated C code to contain vira_str_free(&_vira_tmp_str_...), got:\n%s", cCode)
+	}
+
+	// Discover host C compiler
+	var cCompiler string
+	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+		if _, err := exec.LookPath(cand); err == nil {
+			cCompiler = cand
+			break
+		}
+	}
+	if cCompiler == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				cCompiler = cand
+			}
+		}
+	}
+	if cCompiler == "" {
+		t.Skip("C compiler not available, skipping native run")
+		return
+	}
+
+	runtimeDir, err := filepath.Abs("runtime")
+	if err != nil {
+		t.Fatalf("failed to resolve runtime dir: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	cFile := filepath.Join(tmpDir, "out.c")
+	binFile := filepath.Join(tmpDir, "app")
+	if os.PathSeparator == '\\' {
+		binFile += ".exe"
+	}
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("write C file: %v", err)
+	}
+
+	cFlags := []string{"-std=c99", "-O2", "-march=native", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+	buildCmd := exec.Command(cCompiler, cFlags...)
+	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("C99 compilation failed (%v):\n%s\nGenerated C99:\n%s", err, string(buildOut), cCode)
+	}
+
+	runCmd := exec.Command(binFile)
+	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+	rawOut, err := runCmd.CombinedOutput()
+	outStr := string(rawOut)
+	if err != nil {
+		t.Fatalf("binary execution failed (%v):\n%s", err, outStr)
+	}
+
+	if !strings.Contains(outStr, "[vira_rt] active_leaks=0") {
+		t.Fatalf("expected 0 active leaks, got output:\n%s", outStr)
+	}
+}
+
 // --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vir`) ---
 
 func TestEndToEndGoldenAndSanitizers(t *testing.T) {
