@@ -1,0 +1,21 @@
+module DateTime
+
+// --- 1. REUSABLE EMBEDDED BASE STRUCT ---
+// Defined in a separate file to demonstrate modular composition via `import`.
+pub struct Timestamp {
+pub:
+	created_at i64
+pub mut:
+	updated_at i64
+	rand i64
+}
+
+// Promoted method available to any struct embedding Timestamp
+pub fn (mut t Timestamp) touch() {
+	t.updated_at = 1760000000
+}
+
+pub fn (mut t Timestamp) rand(){
+
+	t.rand = 1212123312
+}

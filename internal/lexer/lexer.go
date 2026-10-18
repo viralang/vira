@@ -6,6 +6,7 @@ type Lexer struct {
 	src         string
 	pos         uint32
 	inString    bool
+	quoteChar   byte     // '\'' or '"'
 	pendingBeg  bool     // true right after hitting `${` inside a string
 	interpDepth uint8    // current nesting depth of `${ ... }`
 	braceStack  [8]uint8 // tracks inner `{` braces inside each `${ ... }` level
@@ -93,8 +94,9 @@ func (l *Lexer) Next() token.Token {
 		return l.makeTok(kind, start, l.pos)
 	}
 
-	// 5. Single-quoted string literals with `${...}` interpolation
-	if ch == '\'' {
+	// 5. String literals ('...' or "...") with optional ${...} interpolation
+	if ch == '\'' || ch == '"' {
+		l.quoteChar = ch
 		return l.scanStringSegment(true)
 	}
 
@@ -214,11 +216,11 @@ func (l *Lexer) Next() token.Token {
 	}
 }
 
-// scanStringSegment scans either a complete string or a segment up to `${` or `'`.
+// scanStringSegment scans either a complete string or a segment up to `${` or matching quote.
 func (l *Lexer) scanStringSegment(isFirst bool) token.Token {
 	start := l.pos
 	if isFirst {
-		l.pos++ // skip opening '\''
+		l.pos++ // skip opening quote
 	}
 
 	for int(l.pos) < len(l.src) {
@@ -236,8 +238,8 @@ func (l *Lexer) scanStringSegment(isFirst bool) token.Token {
 			}
 			return l.makeTok(kind, start, l.pos)
 		}
-		if ch == '\'' {
-			l.pos++ // consume closing '\''
+		if ch == l.quoteChar {
+			l.pos++ // consume closing quote
 			l.inString = false
 			kind := token.TokStrEnd
 			if isFirst {

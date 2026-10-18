@@ -709,3 +709,106 @@ fn main() {
 	}
 }
 
+// --- 11. IMPORT PARSING & DYNAMIC FILE RESOLUTION TESTS ---
+
+func TestImportParsing(t *testing.T) {
+	src := `
+module test_imports
+
+import (
+	math_util
+	"services/compute.vir"
+	'config/settings.vir'
+)
+
+import helpers
+
+fn main() {
+	println('ok')
+}
+`
+	p := parser.New(src)
+	f := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("unexpected parser errors: %v", p.Errors())
+	}
+
+	expectedImports := []string{
+		"math_util",
+		"services/compute.vir",
+		"config/settings.vir",
+		"helpers",
+	}
+
+	if len(f.Imports) != len(expectedImports) {
+		t.Fatalf("expected %d imports, got %d", len(expectedImports), len(f.Imports))
+	}
+
+	for i, want := range expectedImports {
+		if f.Imports[i].Name != want {
+			t.Errorf("import[%d] mismatch: got %q, want %q", i, f.Imports[i].Name, want)
+		}
+	}
+}
+
+func TestDynamicImportAndCircularResolution(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vira_import_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	subDir := filepath.Join(tmpDir, "utils")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("failed to create sub dir: %v", err)
+	}
+
+	// Helper file that also imports main.vir (circular import verification)
+	mathFile := filepath.Join(subDir, "math.vir")
+	mathSrc := `
+module calc_app
+
+import "../main.vir"
+
+pub fn calc_sum(a int, b int) int {
+	return a + b
+}
+`
+	if err := os.WriteFile(mathFile, []byte(mathSrc), 0644); err != nil {
+		t.Fatalf("failed to write math.vir: %v", err)
+	}
+
+	// Main file importing utils/math.vir
+	mainFile := filepath.Join(tmpDir, "main.vir")
+	mainSrc := `
+module calc_app
+
+import "utils/math.vir"
+
+fn main() {
+	ans := calc_sum(20, 22)
+	println('Computed Sum: ${ans}')
+}
+`
+	if err := os.WriteFile(mainFile, []byte(mainSrc), 0644); err != nil {
+		t.Fatalf("failed to write main.vir: %v", err)
+	}
+
+	viraBin, err := filepath.Abs("vira.exe")
+	if err != nil {
+		t.Fatalf("failed to get absolute path to vira: %v", err)
+	}
+
+	cmd := exec.Command(viraBin, "run", mainFile)
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to run dynamically imported program: %v\nOutput: %s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "Computed Sum: 42") {
+		t.Errorf("expected 'Computed Sum: 42' in output, got:\n%s", outStr)
+	}
+}
+

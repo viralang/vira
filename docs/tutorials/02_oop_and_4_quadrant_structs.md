@@ -1,7 +1,7 @@
 # Tutorial 2: OOP, 4-Quadrant Structs & Composition
 
 > **Difficulty:** Intermediate  
-> **Matching Code Example:** [`docs/examples/02_oop_composition.vir`](../examples/02_oop_composition.vir)
+> **Matching Code Example:** [`docs/examples/02_oop_composition.vir`](../examples/02_oop_composition.vir) & [`docs/examples/02_timestamp.vir`](../examples/02_timestamp.vir)
 
 ---
 
@@ -48,11 +48,15 @@ pub mut:
 
 ---
 
-## 3. Struct Embedding & Composition
+## 3. Struct Embedding & Modular Composition via `import`
 
-Vira uses struct embedding instead of class inheritance. When you embed a struct, all of its fields and methods are automatically promoted to the outer struct:
+Vira uses struct embedding instead of class inheritance. To support scalable codebase architectures, embedded models can either be declared locally or imported from separate module files using `import`.
+
+### 1. Reusable Base Model (`docs/examples/02_timestamp.vir`)
 
 ```vex
+module oop_demo
+
 pub struct Timestamp {
 pub:
 	created_at i64
@@ -63,21 +67,44 @@ pub mut:
 pub fn (mut t Timestamp) touch() {
 	t.updated_at = 1760000000
 }
+```
+
+### 2. Importing and Embedding (`docs/examples/02_oop_composition.vir`)
+
+When you import and embed a struct, all of its fields and methods are automatically promoted to the outer struct:
+
+```vex
+module oop_demo
+
+// Import reusable base struct from companion file
+import "02_timestamp.vir"
 
 pub struct UserProfile {
-	Timestamp // Embedded!
+	Timestamp            // Embedded struct: promoted fields & methods
+	hashed_pw string     // 1. Private & Immutable
+mut:
+	login_attempts int   // 2. Private & Mutable
 pub:
-	username string
+	username string      // 3. Public & Read-Only
+	email string
+pub mut:
+	is_active bool       // 4. Public & Mutable
+	score int
 }
 ```
 
-Calling promoted methods or fields is completely transparent:
+Calling promoted methods or fields across imported modules is completely transparent:
 
 ```vex
-mut user := UserProfile{ ... }
-user.touch()                  // Dispatches to embedded Timestamp.touch()
+mut user := UserProfile.new('alice', 'alice@vira.dev', 'secret')
+user.touch()                  // Dispatches to promoted Timestamp.touch()!
 println('${user.updated_at}') // Reads promoted field Timestamp.updated_at
 ```
+
+> [!NOTE]
+> **Compiler Ordering Under the Hood:**  
+> When `02_oop_composition.vir` imports `02_timestamp.vir`, the Vira compiler discovers the dependency, merges the ASTs, and uses **topological struct sorting** to ensure `Timestamp` is fully defined before `UserProfile` in the lowered C99 translation unit.
+
 
 ---
 

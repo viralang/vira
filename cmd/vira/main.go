@@ -621,7 +621,25 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		fatalIO(err)
 	}
 
-	var vexFiles []string
+	startDir := targetPath
+	if !fi.IsDir() {
+		startDir = filepath.Dir(targetPath)
+	}
+	pRoot, manifest, _ := mod.FindProjectRoot(startDir)
+
+	var fileQueue []string
+	visited := make(map[string]bool)
+
+	addFile := func(path string) bool {
+		abs, err := filepath.Abs(path)
+		if err != nil || visited[abs] {
+			return false
+		}
+		visited[abs] = true
+		fileQueue = append(fileQueue, abs)
+		return true
+	}
+
 	if fi.IsDir() {
 		_ = filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -632,49 +650,49 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" {
 					return filepath.SkipDir
 				}
+				if !isTestMode && base == "tests" {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
 				!strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
 			if isSource {
-				vexFiles = append(vexFiles, path)
+				addFile(path)
 			}
 			return nil
 		})
-		if len(vexFiles) == 0 {
+		if len(fileQueue) == 0 {
 			fmt.Fprintf(os.Stderr, "no .vir source files found in %s\n", targetPath)
 			os.Exit(1)
 		}
 	} else {
-		vexFiles = []string{targetPath}
-		if isTestMode {
-			if pRoot, _, pErr := mod.FindProjectRoot(filepath.Dir(targetPath)); pErr == nil && pRoot != "" {
-				var projSources []string
-				absTarget, _ := filepath.Abs(targetPath)
-				_ = filepath.Walk(pRoot, func(path string, info os.FileInfo, err error) error {
-					if err != nil || info.IsDir() {
-						if info != nil && info.IsDir() {
-							base := filepath.Base(path)
-							if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" {
-								return filepath.SkipDir
-							}
-						}
-						return nil
-					}
-					absPath, _ := filepath.Abs(path)
-					if absPath == absTarget {
-						return nil
-					}
-					isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
-						!strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
-					if isSource {
-						projSources = append(projSources, path)
+		absTarget, _ := filepath.Abs(targetPath)
+		if pRoot != "" {
+			_ = filepath.Walk(pRoot, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+				if info.IsDir() {
+					base := filepath.Base(path)
+					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" {
+						return filepath.SkipDir
 					}
 					return nil
-				})
-				vexFiles = append(projSources, targetPath)
-			}
+				}
+				absPath, _ := filepath.Abs(path)
+				if absPath == absTarget {
+					return nil
+				}
+				isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
+					!strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
+				if isSource {
+					addFile(path)
+				}
+				return nil
+			})
 		}
+		addFile(targetPath)
 	}
 
 	var mergedDecls []ast.Decl
@@ -683,7 +701,8 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 	var testFnNames []string
 	hasMain := false
 
-	for _, vFile := range vexFiles {
+	for i := 0; i < len(fileQueue); i++ {
+		vFile := fileQueue[i]
 		rawBytes, err := os.ReadFile(vFile)
 		if err != nil {
 			fatalIO(err)
@@ -706,6 +725,63 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 			firstMod = astFile.Module
 		}
 
+		// Resolve explicit import declarations dynamically
+		vDir := filepath.Dir(vFile)
+		for _, imp := range astFile.Imports {
+			impTarget := imp.Name
+			var candidates []string
+
+			// 1. Relative to importing file
+			candidates = append(candidates,
+				filepath.Join(vDir, impTarget),
+				filepath.Join(vDir, impTarget+".vir"),
+				filepath.Join(vDir, impTarget+".vex"),
+			)
+
+			// 2. Relative to project root
+			if pRoot != "" {
+				candidates = append(candidates,
+					filepath.Join(pRoot, "src", impTarget),
+					filepath.Join(pRoot, "src", impTarget+".vir"),
+					filepath.Join(pRoot, "src", impTarget+".vex"),
+					filepath.Join(pRoot, impTarget),
+					filepath.Join(pRoot, impTarget+".vir"),
+					filepath.Join(pRoot, impTarget+".vex"),
+				)
+			}
+
+			found := false
+			for _, cand := range candidates {
+				cStat, cErr := os.Stat(cand)
+				if cErr == nil {
+					if cStat.IsDir() {
+						_ = filepath.Walk(cand, func(subPath string, subInfo os.FileInfo, err error) error {
+							if err == nil && !subInfo.IsDir() {
+								if strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex") {
+									addFile(subPath)
+									found = true
+								}
+							}
+							return nil
+						})
+						if found {
+							break
+						}
+					} else {
+						if strings.HasSuffix(cand, ".vir") || strings.HasSuffix(cand, ".vex") {
+							addFile(cand)
+							found = true
+							break
+						}
+					}
+				}
+			}
+			if !found {
+				fmt.Fprintln(os.Stderr, srcFile.FormatDiagnostic("IMPORT", fmt.Sprintf("cannot find imported file or package '%s'", impTarget), imp.NamePos))
+				os.Exit(1)
+			}
+		}
+
 		for _, decl := range astFile.Decls {
 			if fn, ok := decl.(*ast.FnDecl); ok {
 				if fn.Name.Name == "main" {
@@ -722,11 +798,8 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		}
 	}
 
-	if root, manifest, err := mod.FindProjectRoot(targetPath); err == nil && manifest != nil {
-		_ = root
-		if manifest.Module != "" {
-			firstMod.Name = manifest.Module
-		}
+	if manifest != nil && manifest.Module != "" {
+		firstMod.Name = manifest.Module
 	}
 	if firstMod.Name == "" {
 		firstMod.Name = "main"

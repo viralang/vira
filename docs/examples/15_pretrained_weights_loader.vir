@@ -83,7 +83,7 @@ pub fn (mut s PretrainedInferenceActor) predict(inputs tensor[f32]) f32 {
 
 fn main() {
 	println('=================================================================')
-	println('   VEX PRETRAINED WEIGHT LOADER & PYTORCH INTEROPERABILITY       ')
+	println('   Vira PRETRAINED WEIGHT LOADER & PYTORCH INTEROPERABILITY       ')
 	println('=================================================================')
 
 	println('--- 1. INGESTING RAW IEEE 754 BINARY WEIGHTS (ZERO-COPY DMA) ---')

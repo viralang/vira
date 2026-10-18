@@ -20,7 +20,7 @@ All examples can be executed directly using the `vex` compiler CLI:
 | File | Topic & Focus Area | Features Demonstrated |
 | :--- | :--- | :--- |
 | **[`01_basics.vir`](./01_basics.vir)** | Syntax, Variables & Control Flow | Immutability by default, `mut`, primitives (`int`, `i64`, `f32`, `bool`, `string`), string interpolation `${...}`, `if`/`else`, and blank identifier `_`. |
-| **[`02_oop_composition.vir`](./02_oop_composition.vir)** | OOP, Encapsulation & Embedding | 4-quadrant struct access levels (`default`, `mut:`, `pub:`, `pub mut:`), composition via struct embedding, promoted methods/fields, and value vs mutable pointer receivers. |
+| **[`02_oop_composition.vir`](./02_oop_composition.vir)** / **[`02_timestamp.vir`](./02_timestamp.vir)** | OOP, Encapsulation & Modular Composition | 4-quadrant struct access levels (`default`, `mut:`, `pub:`, `pub mut:`), modular multi-file composition via `import`, struct embedding with promoted methods/fields, and value vs mutable pointer receivers. |
 | **[`03_interfaces.vir`](./03_interfaces.vir)** | Structural Interfaces & VTables | Implicit interface satisfaction (no `implements` keyword), 16-byte fat-pointer boxing (`._object`, `._vtable`), dynamic polymorphic dispatch, and automatic destructor chaining. |
 | **[`04_result_handling.vir`](./04_result_handling.vir)** | Zero-Cost Error Handling | Result types (`!T`), `return error('...')`, mandatory unwrap blocks `or { ... }`, default fallbacks, and compile-time unhandled error prevention. |
 | **[`05_arenas_and_autofree.vir`](./05_arenas_and_autofree.vir)** | Deterministic Memory Management | Static LIFO scope-exit autofree without a GC, and high-performance 64-byte aligned bump arenas (`arena { ... }`) with O(1) bulk slab teardown. |

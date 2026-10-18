@@ -1,35 +1,31 @@
 module oop_demo
 
-// --- 1. EMBEDDED BASE STRUCT ---
-pub struct Timestamp {
-pub:
-	created_at i64
-pub mut:
-	updated_at i64
-}
+// Import the reusable Timestamp base struct from companion file
+import  (
+	"02_timestamp.vir"
 
-pub fn (mut t Timestamp) touch() {
-	t.updated_at = 1760000000
-}
+)
 
 // --- 2. 4-QUADRANT ENCAPSULATED STRUCT ---
 pub struct UserProfile {
-	Timestamp            // Embedded struct: promoted fields & methods
-	hashed_pw string     // 1. Private & Immutable: module-only, cannot be changed
-mut:
-	login_attempts int   // 2. Private & Mutable: module-only, mutable
+
 pub:
-	username string      // 3. Public & Read-Only: readable by everyone, immutable
+	date Timestamp // Embedded struct: promoted fields & methods
+	hashed_pw string // 1. Private & Immutable: module-only, cannot be changed
+mut:
+	login_attempts int // 2. Private & Mutable: module-only, mutable
+pub:
+	username string // 3. Public & Read-Only: readable by everyone, immutable
 	email string
 pub mut:
-	is_active bool       // 4. Public & Mutable: readable and mutable by everyone
+	is_active bool // 4. Public & Mutable: readable and mutable by everyone
 	score int
 }
 
 // --- 3. STATIC FACTORY CONSTRUCTOR ---
 pub fn UserProfile.new(username string, email string, secret string) UserProfile {
 	return UserProfile{
-		Timestamp: Timestamp{
+		date : Timestamp{
 			created_at: 1750000000,
 			updated_at: 1750000000
 		},
@@ -49,22 +45,27 @@ pub fn (u UserProfile) display() string {
 
 pub fn (mut u UserProfile) award_points(points int) {
 	u.score = u.score + points
-	u.touch() // Calls promoted method from embedded Timestamp!
+	u.date.touch() // Calls promoted method from embedded Timestamp!
+	u.date.rand()
 }
 
 fn main() {
-	println('=== 1. STATIC FACTORY CONSTRUCTOR ===')
-	mut user := UserProfile.new('alice', 'alice@vira.dev', 'sha256_hash_here')
-	println(user.display())
+	arena{
+		println('=== 1. STATIC FACTORY CONSTRUCTOR ===')
+		mut user := UserProfile.new('alice', 'alice@vira.dev', 'sha256_hash_here')
+		println(user.display())
 
-	println('=== 2. PROMOTED FIELDS & METHODS (STRUCT EMBEDDING) ===')
-	println('Initial timestamp: ${user.updated_at}')
-	user.award_points(50)
-	println('Updated timestamp after touch(): ${user.updated_at}')
-	println(user.display())
+		println('=== 2. PROMOTED FIELDS & METHODS (STRUCT EMBEDDING) ===')
+		println('Initial timestamp: ${user.date.updated_at}')
+		user.award_points(50)
+		println('Updated timestamp after touch(): ${user.date.updated_at}')
+		println(user.display())
+		println('Updated timestamp after rand(): ${user.date.rand}')
+		println(user.display())
+		println('=== 3. 4-QUADRANT MUTABILITY ===')
+		// user.is_active is 'pub mut:' so anyone can modify it on a 'mut' binding
+		user.is_active = false
+		println('User active status toggled: ${user.is_active}')
+	}
 
-	println('=== 3. 4-QUADRANT MUTABILITY ===')
-	// user.is_active is 'pub mut:' so anyone can modify it on a 'mut' binding
-	user.is_active = false
-	println('User active status toggled: ${user.is_active}')
 }

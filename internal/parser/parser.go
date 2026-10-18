@@ -96,7 +96,34 @@ func (p *Parser) ParseFile() *ast.File {
 
 	for p.cur.Kind == token.TokImport {
 		p.advance()
-		file.Imports = append(file.Imports, p.parseIdent())
+		if p.cur.Kind == token.TokLParen {
+			p.advance()
+			for p.cur.Kind != token.TokRParen && p.cur.Kind != token.TokEOF {
+				if p.cur.Kind == token.TokString {
+					tok := p.advance()
+					raw := tok.Lexeme(p.src)
+					file.Imports = append(file.Imports, ast.Ident{
+						Name:    strings.Trim(raw, "'\""),
+						NamePos: tok.Span,
+					})
+				} else if p.cur.Kind == token.TokIdent {
+					file.Imports = append(file.Imports, p.parseIdent())
+				} else {
+					p.errorf(p.cur.Span, "expected import target identifier or string, got %s", p.cur.Kind)
+					p.advance()
+				}
+			}
+			p.expect(token.TokRParen)
+		} else if p.cur.Kind == token.TokString {
+			tok := p.advance()
+			raw := tok.Lexeme(p.src)
+			file.Imports = append(file.Imports, ast.Ident{
+				Name:    strings.Trim(raw, "'\""),
+				NamePos: tok.Span,
+			})
+		} else {
+			file.Imports = append(file.Imports, p.parseIdent())
+		}
 	}
 
 	for p.cur.Kind != token.TokEOF {

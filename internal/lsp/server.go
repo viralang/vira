@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/viralang/vira/internal/ast"
 	"github.com/viralang/vira/internal/checker"
 	"github.com/viralang/vira/internal/formatter"
+	"github.com/viralang/vira/internal/mod"
 	"github.com/viralang/vira/internal/parser"
 	"github.com/viralang/vira/internal/source"
 	"github.com/viralang/vira/internal/token"
@@ -115,6 +118,89 @@ func (p PublishDiagnosticsParams) MarshalJSON() ([]byte, error) {
 	})
 }
 
+type CompletionItem struct {
+	Label         string `json:"label"`
+	Kind          int    `json:"kind"` // 2=Method, 3=Function, 5=Field, 6=Variable, 7=Class/Struct, 14=Keyword
+	Detail        string `json:"detail,omitempty"`
+	Documentation string `json:"documentation,omitempty"`
+}
+
+type DocumentSymbol struct {
+	Name           string           `json:"name"`
+	Detail         string           `json:"detail,omitempty"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []DocumentSymbol `json:"children,omitempty"`
+}
+
+type ImportedDoc struct {
+	Path       string
+	URI        string
+	SourceFile *source.File
+	AST        *ast.File
+}
+
+func uriToPath(uri string) string {
+	if decoded, err := url.PathUnescape(uri); err == nil {
+		uri = decoded
+	}
+
+	p := uri
+	if strings.HasPrefix(p, "file:///") {
+		p = strings.TrimPrefix(p, "file:///")
+	} else if strings.HasPrefix(p, "file://") {
+		p = strings.TrimPrefix(p, "file://")
+	}
+
+	// On Windows, strip leading slash before drive letter e.g. "/c:/..." or "/C:/..."
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	if len(p) >= 2 && p[1] == ':' {
+		return filepath.Clean(filepath.FromSlash(p))
+	}
+
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return filepath.Clean(filepath.FromSlash(p))
+}
+
+func pathToURI(p string) string {
+	clean := filepath.ToSlash(filepath.Clean(p))
+	if len(clean) >= 2 && clean[1] == ':' {
+		return "file:///" + clean
+	}
+	if !strings.HasPrefix(clean, "/") {
+		return "file:///" + clean
+	}
+	return "file://" + clean
+}
+
+func normalizeURI(uri string) string {
+	return pathToURI(uriToPath(uri))
+}
+
+func (s *Server) getDocumentText(uri string) string {
+	norm := normalizeURI(uri)
+	if txt, ok := s.docs[norm]; ok {
+		return txt
+	}
+	if txt, ok := s.docs[uri]; ok {
+		return txt
+	}
+	for dURI, dt := range s.docs {
+		if strings.EqualFold(normalizeURI(dURI), norm) {
+			return dt
+		}
+	}
+	diskPath := uriToPath(norm)
+	if data, err := os.ReadFile(diskPath); err == nil {
+		return string(data)
+	}
+	return ""
+}
 
 func (s *Server) Run() error {
 	for {
@@ -196,10 +282,14 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 				"hoverProvider":              true,
 				"definitionProvider":         true,
 				"documentFormattingProvider": true,
+				"completionProvider": map[string]interface{}{
+					"triggerCharacters": []string{".", ":"},
+				},
+				"documentSymbolProvider": true,
 			},
 			"serverInfo": map[string]string{
 				"name":    "vexls",
-				"version": "0.1.0",
+				"version": "0.1.2",
 			},
 		}
 		s.writeResponse(msg.ID, res)
@@ -212,9 +302,35 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 			Position Position `json:"position"`
 		}
 		_ = json.Unmarshal(msg.Params, &params)
-		text := s.docs[params.TextDocument.URI]
+		text := s.getDocumentText(params.TextDocument.URI)
 		loc := s.findDefinition(params.TextDocument.URI, text, params.Position)
 		s.writeResponse(msg.ID, loc)
+
+	case "textDocument/completion":
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Position Position `json:"position"`
+		}
+		_ = json.Unmarshal(msg.Params, &params)
+		text := s.getDocumentText(params.TextDocument.URI)
+		items := s.computeCompletions(params.TextDocument.URI, text, params.Position)
+		s.writeResponse(msg.ID, map[string]interface{}{
+			"isIncomplete": false,
+			"items":        items,
+		})
+
+	case "textDocument/documentSymbol":
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+		}
+		_ = json.Unmarshal(msg.Params, &params)
+		text := s.getDocumentText(params.TextDocument.URI)
+		symbols := s.computeDocumentSymbols(params.TextDocument.URI, text)
+		s.writeResponse(msg.ID, symbols)
 
 	case "textDocument/didOpen":
 		var params struct {
@@ -224,6 +340,8 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 			} `json:"textDocument"`
 		}
 		_ = json.Unmarshal(msg.Params, &params)
+		normURI := normalizeURI(params.TextDocument.URI)
+		s.docs[normURI] = params.TextDocument.Text
 		s.docs[params.TextDocument.URI] = params.TextDocument.Text
 		s.validateDocument(params.TextDocument.URI, params.TextDocument.Text)
 
@@ -239,6 +357,8 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 		_ = json.Unmarshal(msg.Params, &params)
 		if len(params.ContentChanges) > 0 {
 			newText := params.ContentChanges[len(params.ContentChanges)-1].Text
+			normURI := normalizeURI(params.TextDocument.URI)
+			s.docs[normURI] = newText
 			s.docs[params.TextDocument.URI] = newText
 			s.validateDocument(params.TextDocument.URI, newText)
 		}
@@ -250,7 +370,7 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 			} `json:"textDocument"`
 		}
 		_ = json.Unmarshal(msg.Params, &params)
-		text := s.docs[params.TextDocument.URI]
+		text := s.getDocumentText(params.TextDocument.URI)
 		formatted := formatter.Format(text)
 
 		lines := strings.Split(text, "\n")
@@ -279,8 +399,8 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 			Position Position `json:"position"`
 		}
 		_ = json.Unmarshal(msg.Params, &params)
-		text := s.docs[params.TextDocument.URI]
-		hoverText := s.computeHover(text, params.Position)
+		text := s.getDocumentText(params.TextDocument.URI)
+		hoverText := s.computeHover(params.TextDocument.URI, text, params.Position)
 		res := map[string]interface{}{
 			"contents": map[string]string{
 				"kind":  "markdown",
@@ -295,6 +415,155 @@ func (s *Server) handleMessage(msg *jsonrpcMessage) {
 	case "exit":
 		os.Exit(0)
 	}
+}
+
+func (s *Server) loadDoc(cleanPath string) *ImportedDoc {
+	candURI := pathToURI(cleanPath)
+	var text string
+
+	if openText, ok := s.docs[candURI]; ok {
+		text = openText
+	} else if openText, ok := s.docs[normalizeURI(candURI)]; ok {
+		text = openText
+	} else {
+		norm := normalizeURI(candURI)
+		for dURI, dt := range s.docs {
+			if strings.EqualFold(normalizeURI(dURI), norm) {
+				text = dt
+				break
+			}
+		}
+	}
+
+	if text == "" {
+		if data, err := os.ReadFile(cleanPath); err == nil {
+			text = string(data)
+		} else {
+			return nil
+		}
+	}
+
+	p := parser.New(text)
+	impAST := p.ParseFile()
+	srcFile := source.New(candURI, text)
+
+	return &ImportedDoc{
+		Path:       cleanPath,
+		URI:        candURI,
+		SourceFile: srcFile,
+		AST:        impAST,
+	}
+}
+
+// resolveImports discovers and parses all files imported by astFile (recursively).
+func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
+	var results []ImportedDoc
+	if astFile == nil {
+		return results
+	}
+
+	rootPath := uriToPath(uri)
+	fileDir := filepath.Dir(rootPath)
+	pRoot, _, _ := mod.FindProjectRoot(fileDir)
+
+	visited := make(map[string]bool)
+	visited[filepath.Clean(rootPath)] = true
+
+	type workItem struct {
+		filePath string
+		ast      *ast.File
+	}
+
+	workList := []workItem{{filePath: rootPath, ast: astFile}}
+
+	for len(workList) > 0 {
+		curr := workList[0]
+		workList = workList[1:]
+
+		cDir := filepath.Dir(curr.filePath)
+
+		for _, imp := range curr.ast.Imports {
+			impTarget := imp.Name
+			var candidates []string
+
+			// 1. Relative to importing file
+			candidates = append(candidates,
+				filepath.Join(cDir, impTarget),
+				filepath.Join(cDir, impTarget+".vir"),
+				filepath.Join(cDir, impTarget+".vex"),
+			)
+
+			// 2. Relative to project root
+			if pRoot != "" {
+				candidates = append(candidates,
+					filepath.Join(pRoot, "src", impTarget),
+					filepath.Join(pRoot, "src", impTarget+".vir"),
+					filepath.Join(pRoot, "src", impTarget+".vex"),
+					filepath.Join(pRoot, impTarget),
+					filepath.Join(pRoot, impTarget+".vir"),
+					filepath.Join(pRoot, impTarget+".vex"),
+				)
+			}
+
+			for _, cand := range candidates {
+				cleanCand := filepath.Clean(cand)
+				if visited[cleanCand] {
+					continue
+				}
+
+				cStat, cErr := os.Stat(cleanCand)
+				if cErr == nil && cStat.IsDir() {
+					visited[cleanCand] = true
+					_ = filepath.Walk(cleanCand, func(subPath string, subInfo os.FileInfo, err error) error {
+						if err == nil && !subInfo.IsDir() && (strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex")) {
+							cleanSub := filepath.Clean(subPath)
+							if !visited[cleanSub] {
+								visited[cleanSub] = true
+								doc := s.loadDoc(cleanSub)
+								if doc != nil {
+									results = append(results, *doc)
+									workList = append(workList, workItem{filePath: cleanSub, ast: doc.AST})
+								}
+							}
+						}
+						return nil
+					})
+					break
+				}
+
+				doc := s.loadDoc(cleanCand)
+				if doc != nil {
+					visited[cleanCand] = true
+					results = append(results, *doc)
+					workList = append(workList, workItem{filePath: cleanCand, ast: doc.AST})
+					break
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+func belongsToFile(sp token.Span, file *ast.File) bool {
+	if file == nil {
+		return false
+	}
+	if sp.Start >= file.Module.NamePos.Start && sp.End <= file.Module.NamePos.End {
+		return true
+	}
+	for _, imp := range file.Imports {
+		if sp.Start >= imp.NamePos.Start && sp.End <= imp.NamePos.End {
+			return true
+		}
+	}
+	for _, d := range file.Decls {
+		dSpan := d.Span()
+		if sp.Start >= dSpan.Start && sp.End <= dSpan.End {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) validateDocument(uri string, text string) {
@@ -322,12 +591,46 @@ func (s *Server) validateDocument(uri string, text string) {
 			})
 		}
 	} else {
-		chk := checker.New()
-		chk.CheckFile(astFile)
-		if semErrs := chk.Errors(); len(semErrs) > 0 {
-			for _, se := range semErrs {
-				startLine, startCol := f.Location(se.Span.Start)
-				endLine, endCol := f.Location(se.Span.End)
+		// Check for missing/unresolved imports and report diagnostic errors
+		docFileDir := filepath.Dir(uriToPath(uri))
+		docPRoot, _, _ := mod.FindProjectRoot(docFileDir)
+		for _, imp := range astFile.Imports {
+			impTarget := imp.Name
+			var candList []string
+			candList = append(candList,
+				filepath.Join(docFileDir, impTarget),
+				filepath.Join(docFileDir, impTarget+".vir"),
+				filepath.Join(docFileDir, impTarget+".vex"),
+			)
+			if docPRoot != "" {
+				candList = append(candList,
+					filepath.Join(docPRoot, "src", impTarget),
+					filepath.Join(docPRoot, "src", impTarget+".vir"),
+					filepath.Join(docPRoot, "src", impTarget+".vex"),
+					filepath.Join(docPRoot, impTarget),
+					filepath.Join(docPRoot, impTarget+".vir"),
+					filepath.Join(docPRoot, impTarget+".vex"),
+				)
+			}
+			foundImp := false
+			for _, c := range candList {
+				candURI := pathToURI(filepath.Clean(c))
+				if _, ok := s.docs[candURI]; ok {
+					foundImp = true
+					break
+				}
+				if _, ok := s.docs[normalizeURI(candURI)]; ok {
+					foundImp = true
+					break
+				}
+				if _, err := os.Stat(c); err == nil {
+					foundImp = true
+					break
+				}
+			}
+			if !foundImp {
+				startLine, startCol := f.Location(imp.NamePos.Start)
+				endLine, endCol := f.Location(imp.NamePos.End)
 				if endLine < startLine || (endLine == startLine && endCol <= startCol) {
 					endLine = startLine
 					endCol = startCol + 1
@@ -338,9 +641,49 @@ func (s *Server) validateDocument(uri string, text string) {
 						End:   Position{Line: endLine - 1, Character: endCol - 1},
 					},
 					Severity: 1,
-					Source:   "vira checker",
-					Message:  se.Msg,
+					Source:   "vira import",
+					Message:  fmt.Sprintf("cannot find imported file or package '%s'", impTarget),
 				})
+			}
+		}
+
+		// Include imported files so imported structs, methods & types are recognized without false errors
+		imported := s.resolveImports(uri, astFile)
+		var mergedDecls []ast.Decl
+		for _, imp := range imported {
+			mergedDecls = append(mergedDecls, imp.AST.Decls...)
+		}
+		mergedDecls = append(mergedDecls, astFile.Decls...)
+
+		mergedAst := &ast.File{
+			Module:   astFile.Module,
+			Imports:  astFile.Imports,
+			Decls:    mergedDecls,
+			FileSpan: astFile.FileSpan,
+		}
+
+		chk := checker.New()
+		chk.CheckFile(mergedAst)
+		if semErrs := chk.Errors(); len(semErrs) > 0 {
+			for _, se := range semErrs {
+				// Only publish diagnostics that belong to the active document being validated
+				if belongsToFile(se.Span, astFile) {
+					startLine, startCol := f.Location(se.Span.Start)
+					endLine, endCol := f.Location(se.Span.End)
+					if endLine < startLine || (endLine == startLine && endCol <= startCol) {
+						endLine = startLine
+						endCol = startCol + 1
+					}
+					diagnostics = append(diagnostics, Diagnostic{
+						Range: Range{
+							Start: Position{Line: startLine - 1, Character: startCol - 1},
+							End:   Position{Line: endLine - 1, Character: endCol - 1},
+						},
+						Severity: 1,
+						Source:   "vira checker",
+						Message:  se.Msg,
+					})
+				}
 			}
 		}
 	}
@@ -351,8 +694,162 @@ func (s *Server) validateDocument(uri string, text string) {
 	})
 }
 
-func (s *Server) computeHover(text string, pos Position) string {
+func (s *Server) computeHover(uri string, text string, pos Position) string {
 	word := getWordAt(text, pos)
+	if word == "" {
+		return ""
+	}
+
+	p := parser.New(text)
+	astFile := p.ParseFile()
+
+	// 1. Check local declarations
+	if h := formatDeclHover(astFile, word, ""); h != "" {
+		return h
+	}
+
+	// 2. Check imported files
+	imported := s.resolveImports(uri, astFile)
+	for _, impDoc := range imported {
+		originName := filepath.Base(impDoc.Path)
+		if h := formatDeclHover(impDoc.AST, word, originName); h != "" {
+			return h
+		}
+	}
+
+	// 3. Fallback to builtins, keywords, operators
+	return s.computeBuiltinHover(text, pos, word)
+}
+
+func formatTypeExpr(t ast.TypeExpr) string {
+	if t == nil {
+		return "void"
+	}
+	switch v := t.(type) {
+	case *ast.IdentType:
+		if len(v.TypeParams) > 0 {
+			var params []string
+			for _, p := range v.TypeParams {
+				params = append(params, formatTypeExpr(p))
+			}
+			return fmt.Sprintf("%s[%s]", v.Name.Name, strings.Join(params, ", "))
+		}
+		return v.Name.Name
+	case *ast.ResultType:
+		if v.Inner == nil {
+			return "!"
+		}
+		return "!" + formatTypeExpr(v.Inner)
+	case *ast.OptionType:
+		return "?" + formatTypeExpr(v.Inner)
+	case *ast.RefType:
+		if v.IsMut {
+			return "&mut " + formatTypeExpr(v.Inner)
+		}
+		return "&" + formatTypeExpr(v.Inner)
+	default:
+		return "unknown"
+	}
+}
+
+func getEmbedInfo(emb ast.TypeExpr) (string, token.Span) {
+	if it, ok := emb.(*ast.IdentType); ok {
+		return it.Name.Name, it.Name.NamePos
+	}
+	if emb != nil {
+		return formatTypeExpr(emb), emb.Span()
+	}
+	return "", token.Span{}
+}
+
+func formatDeclHover(astFile *ast.File, word string, originFile string) string {
+	if astFile == nil {
+		return ""
+	}
+
+	originNote := ""
+	if originFile != "" {
+		originNote = fmt.Sprintf(" *(imported from `%s`)*", originFile)
+	}
+
+	for _, decl := range astFile.Decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			if d.Name.Name == word {
+				kindStr := "struct"
+				if d.IsActor {
+					kindStr = "actor"
+				}
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("### `%s %s`%s\n\n", kindStr, d.Name.Name, originNote))
+				if len(d.Embeds) > 0 {
+					sb.WriteString("**Embedded Structs (Promoted):**\n")
+					for _, emb := range d.Embeds {
+						embName, _ := getEmbedInfo(emb)
+						sb.WriteString(fmt.Sprintf("- `%s`\n", embName))
+					}
+					sb.WriteString("\n")
+				}
+				if len(d.Fields) > 0 {
+					sb.WriteString("**Fields:**\n")
+					for _, f := range d.Fields {
+						accessStr := f.Access.String()
+						sb.WriteString(fmt.Sprintf("- `%s`: `%s` (%s)\n", f.Name.Name, formatTypeExpr(f.Type), accessStr))
+					}
+				}
+				return sb.String()
+			}
+
+		case *ast.FnDecl:
+			if d.Name.Name == word {
+				var sb strings.Builder
+				receiverStr := ""
+				if d.Receiver != nil {
+					mutStr := ""
+					if d.Receiver.IsMut {
+						mutStr = "mut "
+					}
+					receiverStr = fmt.Sprintf("(%s%s %s) ", mutStr, d.Receiver.Name.Name, formatTypeExpr(d.Receiver.Type))
+				} else if d.StaticType != nil {
+					receiverStr = fmt.Sprintf("%s.", d.StaticType.Name)
+				}
+				retStr := ""
+				if d.ReturnType != nil {
+					retStr = " " + formatTypeExpr(d.ReturnType)
+				}
+				var params []string
+				for _, p := range d.Params {
+					mutStr := ""
+					if p.IsMut {
+						mutStr = "mut "
+					}
+					params = append(params, fmt.Sprintf("%s%s %s", mutStr, p.Name.Name, formatTypeExpr(p.Type)))
+				}
+				sb.WriteString(fmt.Sprintf("### `fn %s%s(%s)%s`%s\n\n", receiverStr, d.Name.Name, strings.Join(params, ", "), retStr, originNote))
+				if d.Receiver != nil {
+					sb.WriteString(fmt.Sprintf("Method on `%s`.\n", formatTypeExpr(d.Receiver.Type)))
+				}
+				return sb.String()
+			}
+
+		case *ast.InterfaceDecl:
+			if d.Name.Name == word {
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("### `interface %s`%s\n\n", d.Name.Name, originNote))
+				if len(d.Methods) > 0 {
+					sb.WriteString("**Methods:**\n")
+					for _, m := range d.Methods {
+						sb.WriteString(fmt.Sprintf("- `fn %s(...)`\n", m.Name.Name))
+					}
+				}
+				return sb.String()
+			}
+		}
+	}
+	return ""
+}
+
+func (s *Server) computeBuiltinHover(text string, pos Position, word string) string {
 	switch word {
 	case "actor":
 		return "**Vira Actor Keyword**\n\nDefines an isolated, concurrent message-passing entity managed by a lock-free work-stealing pool and supervised for fault tolerance."
@@ -439,59 +936,393 @@ func (s *Server) findDefinition(uri string, text string, pos Position) interface
 	astFile := p.ParseFile()
 	f := source.New(uri, text)
 
-	// 1. Search top-level declarations
+	// Check if cursor is on an import target itself
+	lines := strings.Split(text, "\n")
+	if pos.Line >= 0 && pos.Line < len(lines) {
+		line := lines[pos.Line]
+		if strings.Contains(line, "import") {
+			imported := s.resolveImports(uri, astFile)
+			for _, impDoc := range imported {
+				base := filepath.Base(impDoc.Path)
+				if strings.Contains(line, base) || (len(impDoc.AST.Module.Name) > 0 && strings.Contains(line, impDoc.AST.Module.Name)) {
+					return Location{
+						URI: impDoc.URI,
+						Range: Range{
+							Start: Position{Line: 0, Character: 0},
+							End:   Position{Line: 0, Character: 0},
+						},
+					}
+				}
+			}
+		}
+	}
+
+	// 1. Search local declarations in current file
+	if loc := searchASTForWord(uri, f, astFile, word); loc != nil {
+		return *loc
+	}
+
+	// 2. Search imported files
+	imported := s.resolveImports(uri, astFile)
+	for _, impDoc := range imported {
+		if loc := searchASTForWord(impDoc.URI, impDoc.SourceFile, impDoc.AST, word); loc != nil {
+			return *loc
+		}
+	}
+
+	return nil
+}
+
+func searchASTForWord(uri string, f *source.File, astFile *ast.File, word string) *Location {
+	if astFile == nil {
+		return nil
+	}
+
 	for _, decl := range astFile.Decls {
 		switch d := decl.(type) {
 		case *ast.FnDecl:
 			if d.Name.Name == word {
 				loc := makeLocation(uri, f, d.Name.NamePos)
-				return loc
+				return &loc
 			}
 			for _, param := range d.Params {
 				if param.Name.Name == word {
 					loc := makeLocation(uri, f, param.Name.NamePos)
-					return loc
+					return &loc
 				}
 			}
 			if d.Body != nil {
 				if loc := findInBlock(uri, f, d.Body, word); loc != nil {
-					return *loc
+					return loc
 				}
 			}
 
 		case *ast.StructDecl:
 			if d.Name.Name == word {
 				loc := makeLocation(uri, f, d.Name.NamePos)
-				return loc
+				return &loc
 			}
 			for _, field := range d.Fields {
 				if field.Name.Name == word {
 					loc := makeLocation(uri, f, field.Name.NamePos)
-					return loc
+					return &loc
 				}
 			}
 
 		case *ast.InterfaceDecl:
 			if d.Name.Name == word {
 				loc := makeLocation(uri, f, d.Name.NamePos)
-				return loc
+				return &loc
 			}
 			for _, method := range d.Methods {
 				if method.Name.Name == word {
 					loc := makeLocation(uri, f, method.Name.NamePos)
-					return loc
+					return &loc
 				}
 			}
 			for _, field := range d.Fields {
 				if field.Name.Name == word {
 					loc := makeLocation(uri, f, field.Name.NamePos)
-					return loc
+					return &loc
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+func (s *Server) computeCompletions(uri string, text string, pos Position) []CompletionItem {
+	var items []CompletionItem
+
+	lines := strings.Split(text, "\n")
+	if pos.Line < 0 || pos.Line >= len(lines) {
+		return items
+	}
+	line := lines[pos.Line]
+	if pos.Character > len(line) {
+		pos.Character = len(line)
+	}
+
+	p := parser.New(text)
+	astFile := p.ParseFile()
+	imported := s.resolveImports(uri, astFile)
+
+	allDecls := append([]ast.Decl{}, astFile.Decls...)
+	declOrigins := make(map[ast.Decl]string)
+	for _, impDoc := range imported {
+		for _, decl := range impDoc.AST.Decls {
+			allDecls = append(allDecls, decl)
+			declOrigins[decl] = filepath.Base(impDoc.Path)
+		}
+	}
+
+	findStruct := func(name string) *ast.StructDecl {
+		for _, decl := range allDecls {
+			if sd, ok := decl.(*ast.StructDecl); ok && sd.Name.Name == name {
+				return sd
+			}
+		}
+		return nil
+	}
+
+	// Case 1: Member completion after '.'
+	prefix := line[:pos.Character]
+	if strings.HasSuffix(prefix, ".") {
+		identEnd := len(prefix) - 1
+		identStart := identEnd
+		for identStart > 0 && isIdentChar(prefix[identStart-1]) {
+			identStart--
+		}
+		receiverIdent := prefix[identStart:identEnd]
+
+		// 1A. Static methods on struct name
+		if sd := findStruct(receiverIdent); sd != nil {
+			for _, decl := range allDecls {
+				if fn, ok := decl.(*ast.FnDecl); ok && fn.StaticType != nil && fn.StaticType.Name == receiverIdent {
+					items = append(items, CompletionItem{
+						Label:         fn.Name.Name,
+						Kind:          2, // Method
+						Detail:        fmt.Sprintf("static fn %s.%s(...)", receiverIdent, fn.Name.Name),
+						Documentation: "Static constructor / factory method",
+					})
+				}
+			}
+			return items
+		}
+
+		// 1B. Inferred type for local variables
+		var inferredType string
+		for _, l := range lines {
+			lTrim := strings.TrimSpace(l)
+			if strings.Contains(lTrim, receiverIdent) && strings.Contains(lTrim, ":=") {
+				for _, decl := range allDecls {
+					if sd, ok := decl.(*ast.StructDecl); ok {
+						if strings.Contains(lTrim, sd.Name.Name+".new") || strings.Contains(lTrim, sd.Name.Name+"{") {
+							inferredType = sd.Name.Name
+							break
+						}
+					}
+				}
+			}
+			if inferredType != "" {
+				break
+			}
+		}
+
+		if inferredType == "" {
+			for _, decl := range astFile.Decls {
+				if fn, ok := decl.(*ast.FnDecl); ok && fn.Receiver != nil && fn.Receiver.Name.Name == receiverIdent {
+					if it, ok := fn.Receiver.Type.(*ast.IdentType); ok {
+						inferredType = it.Name.Name
+						break
+					}
+				}
+			}
+		}
+
+		if inferredType != "" {
+			var addStructMembers func(sd *ast.StructDecl, isPromoted bool)
+			addStructMembers = func(sd *ast.StructDecl, isPromoted bool) {
+				if sd == nil {
+					return
+				}
+				origin := declOrigins[sd]
+				promotedNote := ""
+				if isPromoted {
+					promotedNote = fmt.Sprintf(" (promoted from %s)", sd.Name.Name)
+				} else if origin != "" {
+					promotedNote = fmt.Sprintf(" (from %s)", origin)
+				}
+
+				// Fields
+				for _, f := range sd.Fields {
+					items = append(items, CompletionItem{
+						Label:         f.Name.Name,
+						Kind:          5, // Field
+						Detail:        fmt.Sprintf("%s: %s%s", f.Name.Name, formatTypeExpr(f.Type), promotedNote),
+						Documentation: fmt.Sprintf("Struct field [%s]", f.Access.String()),
+					})
+				}
+
+				// Methods having this struct as receiver
+				for _, decl := range allDecls {
+					if fn, ok := decl.(*ast.FnDecl); ok && fn.Receiver != nil {
+						if it, ok := fn.Receiver.Type.(*ast.IdentType); ok && it.Name.Name == sd.Name.Name {
+							items = append(items, CompletionItem{
+								Label:         fn.Name.Name,
+								Kind:          2, // Method
+								Detail:        fmt.Sprintf("fn (%s) %s(...)%s", it.Name.Name, fn.Name.Name, promotedNote),
+								Documentation: "Receiver method",
+							})
+						}
+					}
+				}
+
+				// Embedded structs
+				for _, emb := range sd.Embeds {
+					embName, _ := getEmbedInfo(emb)
+					if embSd := findStruct(embName); embSd != nil {
+						addStructMembers(embSd, true)
+					}
+				}
+			}
+
+			if targetSd := findStruct(inferredType); targetSd != nil {
+				addStructMembers(targetSd, false)
+				return items
+			}
+		}
+	}
+
+	// Case 2: General completion
+	for _, decl := range allDecls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			origin := declOrigins[d]
+			detail := "struct"
+			if d.IsActor {
+				detail = "actor"
+			}
+			if origin != "" {
+				detail += fmt.Sprintf(" (from %s)", origin)
+			}
+			items = append(items, CompletionItem{
+				Label:  d.Name.Name,
+				Kind:   7, // Class/Struct
+				Detail: detail,
+			})
+		case *ast.FnDecl:
+			if d.Receiver == nil && d.StaticType == nil {
+				origin := declOrigins[d]
+				detail := "function"
+				if origin != "" {
+					detail += fmt.Sprintf(" (from %s)", origin)
+				}
+				items = append(items, CompletionItem{
+					Label:  d.Name.Name,
+					Kind:   3, // Function
+					Detail: detail,
+				})
+			}
+		}
+	}
+
+	for _, kw := range []string{"module", "import", "pub", "mut", "fn", "struct", "actor", "interface", "return", "if", "else", "for", "arena", "true", "false"} {
+		items = append(items, CompletionItem{
+			Label:  kw,
+			Kind:   14, // Keyword
+			Detail: "keyword",
+		})
+	}
+
+	for _, bi := range []string{"println", "print", "tensor_fill", "tensor_scale", "tensor_sum", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
+		items = append(items, CompletionItem{
+			Label:  bi,
+			Kind:   3, // Function
+			Detail: "builtin",
+		})
+	}
+
+	return items
+}
+
+func (s *Server) computeDocumentSymbols(uri string, text string) []DocumentSymbol {
+	symbols := make([]DocumentSymbol, 0)
+	p := parser.New(text)
+	astFile := p.ParseFile()
+	f := source.New(uri, text)
+
+	makeRange := func(span token.Span) Range {
+		sl, sc := f.Location(span.Start)
+		el, ec := f.Location(span.End)
+		if el < sl || (el == sl && ec <= sc) {
+			el = sl
+			ec = sc + 1
+		}
+		return Range{
+			Start: Position{Line: sl - 1, Character: sc - 1},
+			End:   Position{Line: el - 1, Character: ec - 1},
+		}
+	}
+
+	for _, imp := range astFile.Imports {
+		rng := makeRange(imp.NamePos)
+		symbols = append(symbols, DocumentSymbol{
+			Name:           "import " + imp.Name,
+			Kind:           3, // Namespace
+			Range:          rng,
+			SelectionRange: rng,
+		})
+	}
+
+	for _, decl := range astFile.Decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			rng := makeRange(d.DeclSpan)
+			selRng := makeRange(d.Name.NamePos)
+			kind := 23 // Struct
+			var children []DocumentSymbol
+			for _, field := range d.Fields {
+				fRng := makeRange(field.Name.NamePos)
+				children = append(children, DocumentSymbol{
+					Name:           field.Name.Name,
+					Detail:         formatTypeExpr(field.Type),
+					Kind:           8, // Field
+					Range:          fRng,
+					SelectionRange: fRng,
+				})
+			}
+			for _, emb := range d.Embeds {
+				embName, embPos := getEmbedInfo(emb)
+				eRng := makeRange(embPos)
+				children = append(children, DocumentSymbol{
+					Name:           embName,
+					Detail:         "embed",
+					Kind:           8,
+					Range:          eRng,
+					SelectionRange: eRng,
+				})
+			}
+			symbols = append(symbols, DocumentSymbol{
+				Name:           d.Name.Name,
+				Kind:           kind,
+				Range:          rng,
+				SelectionRange: selRng,
+				Children:       children,
+			})
+
+		case *ast.FnDecl:
+			rng := makeRange(d.DeclSpan)
+			selRng := makeRange(d.Name.NamePos)
+			kind := 12 // Function
+			name := d.Name.Name
+			if d.Receiver != nil {
+				kind = 6 // Method
+				name = fmt.Sprintf("(%s) %s", formatTypeExpr(d.Receiver.Type), d.Name.Name)
+			} else if d.StaticType != nil {
+				name = fmt.Sprintf("%s.%s", d.StaticType.Name, d.Name.Name)
+			}
+			symbols = append(symbols, DocumentSymbol{
+				Name:           name,
+				Kind:           kind,
+				Range:          rng,
+				SelectionRange: selRng,
+			})
+
+		case *ast.InterfaceDecl:
+			rng := makeRange(d.DeclSpan)
+			selRng := makeRange(d.Name.NamePos)
+			symbols = append(symbols, DocumentSymbol{
+				Name:           d.Name.Name,
+				Kind:           11, // Interface
+				Range:          rng,
+				SelectionRange: selRng,
+			})
+		}
+	}
+
+	return symbols
 }
 
 func findInBlock(uri string, f *source.File, block *ast.BlockStmt, word string) *Location {
@@ -567,3 +1398,4 @@ func getWordAt(text string, pos Position) string {
 func isIdentChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
+
