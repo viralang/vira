@@ -42,6 +42,7 @@ All examples can be executed directly using the `vex` compiler CLI:
 | **[`21_declarative_gui.vir`](./21_declarative_gui.vir)** | Declarative GUI Auto-Layout Engine | Vertical Stacks (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, text inputs (`gui_input`), progress bars (`gui_progress`), radio buttons (`gui_radio`), separators, badges, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
 | **[`22_gui_navigation_lifecycle.vir`](./22_gui_navigation_lifecycle.vir)** | Window Navigation, Tabs, Modals & Lifecycle Control | Multi-tab bar routing (`gui_tab_item`), backdrop modal dialogs (`gui_modal_begin`/`gui_modal_end`), close interception (`gui_cancel_close`), viewport metrics (`gui_window_width`/`gui_window_height`), and zero-leak 60 FPS string interpolation. |
 | **[`23_multi_package_architecture.vir`](./23_multi_package_architecture.vir)** | Multi-Package Architecture & Scopes | Enterprise 5-tier lexical scoping, cross-package 4-quadrant encapsulation, actor pipelining, and zero-leak SIMD tensor computing. |
+| **[`24_package_management_consumer.vir`](./24_package_management_consumer.vir)** | Native Package Management & Vendoring | Consuming external packages (`import "vira_test"`), Vec2 arithmetic, structured logging, offline vendoring, and lockfile reproducibility. |
 
 ---
 
@@ -73,4 +74,5 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/21_declarative_gui.vir
 .\vira.exe run docs/examples/22_gui_navigation_lifecycle.vir
 .\vira.exe run docs/examples/23_multi_package_architecture.vir
+.\vira.exe run docs/examples/24_package_management_consumer.vir
 ```

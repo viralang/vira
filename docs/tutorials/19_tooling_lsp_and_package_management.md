@@ -26,14 +26,17 @@ my_service/
 └── tests/           # Unit and integration test suite
 ```
 
-### The `vex.mod` Manifest
-The `vex.mod` file defines project metadata:
+### The `vira.mod` Manifest
+The `vira.mod` file defines project metadata and dependencies:
 ```ini
 module my_service
 version 0.1.0
 license MIT
 description High-performance Vira application
 ```
+
+> [!TIP]
+> For a comprehensive guide on building, publishing, versioning, lockfiles (`vira.lock`), and air-gapped vendoring (`vira vendor`), see **[Tutorial 25: Native Package Management, Publishing & Air-Gapped Vendoring](./25_package_management_publishing_and_vendoring.md)**.
 
 ---
 

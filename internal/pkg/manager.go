@@ -90,32 +90,38 @@ func ResolveImportCandidates(fileDir string, projectRoot string, impTarget strin
 	}
 
 	// 2. Project root relative paths
-	if projectRoot != "" {
+	checkRoot := projectRoot
+	if checkRoot == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			checkRoot = cwd
+		}
+	}
+	if checkRoot != "" {
 		candidates = append(candidates,
-			filepath.Join(projectRoot, "src", impTarget),
-			filepath.Join(projectRoot, "src", impTarget+".vir"),
-			filepath.Join(projectRoot, "src", impTarget+".vex"),
-			filepath.Join(projectRoot, impTarget),
-			filepath.Join(projectRoot, impTarget+".vir"),
-			filepath.Join(projectRoot, impTarget+".vex"),
-			filepath.Join(projectRoot, "vendor", impTarget),
-			filepath.Join(projectRoot, "vendor", impTarget+".vir"),
-			filepath.Join(projectRoot, "vendor", impTarget+".vex"),
-			filepath.Join(projectRoot, ".vira", "pkg", impTarget),
-			filepath.Join(projectRoot, ".vira", "pkg", impTarget+".vir"),
-			filepath.Join(projectRoot, ".vira", "pkg", impTarget+".vex"),
+			filepath.Join(checkRoot, "src", impTarget),
+			filepath.Join(checkRoot, "src", impTarget+".vir"),
+			filepath.Join(checkRoot, "src", impTarget+".vex"),
+			filepath.Join(checkRoot, impTarget),
+			filepath.Join(checkRoot, impTarget+".vir"),
+			filepath.Join(checkRoot, impTarget+".vex"),
+			filepath.Join(checkRoot, "vendor", impTarget),
+			filepath.Join(checkRoot, "vendor", impTarget+".vir"),
+			filepath.Join(checkRoot, "vendor", impTarget+".vex"),
+			filepath.Join(checkRoot, ".vira", "pkg", impTarget),
+			filepath.Join(checkRoot, ".vira", "pkg", impTarget+".vir"),
+			filepath.Join(checkRoot, ".vira", "pkg", impTarget+".vex"),
 		)
 
 		// Check manifest dependencies for matches by base name or subpath
-		manifestPath := filepath.Join(projectRoot, "vira.mod")
+		manifestPath := filepath.Join(checkRoot, "vira.mod")
 		if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
-			manifestPath = filepath.Join(projectRoot, "vex.mod")
+			manifestPath = filepath.Join(checkRoot, "vex.mod")
 		}
 		if mBytes, err := os.ReadFile(manifestPath); err == nil {
 			if m, err := mod.ParseManifest(string(mBytes)); err == nil {
 				for _, dep := range m.Dependencies {
-					depDir := PackageDestDir(filepath.Join(projectRoot, ".vira", "pkg"), dep.Path)
-					vendorDir := PackageDestDir(filepath.Join(projectRoot, "vendor"), dep.Path)
+					depDir := PackageDestDir(filepath.Join(checkRoot, ".vira", "pkg"), dep.Path)
+					vendorDir := PackageDestDir(filepath.Join(checkRoot, "vendor"), dep.Path)
 					if filepath.Base(dep.Path) == impTarget || strings.HasSuffix(filepath.ToSlash(dep.Path), "/"+impTarget) {
 						candidates = append(candidates, vendorDir, depDir)
 					}

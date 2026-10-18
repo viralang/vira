@@ -1,0 +1,41 @@
+module vira_test
+
+// Logger provides structured prefix-tagged logging.
+pub struct Logger {
+pub:
+	tag string
+pub mut:
+	counter int
+}
+
+// Logger.new creates a new logger instance with the given tag.
+pub fn Logger.new(tag string) Logger {
+	return Logger{
+		tag: tag,
+		counter: 0
+	}
+}
+
+// info logs an informational message.
+pub fn (mut l Logger) info(msg string) {
+	l.counter = l.counter + 1
+	println('[INFO] [${l.tag}] #${l.counter}: ${msg}')
+}
+
+// ok logs a success message.
+pub fn (mut l Logger) ok(msg string) {
+	l.counter = l.counter + 1
+	println('[ OK ] [${l.tag}] #${l.counter}: ${msg}')
+}
+
+// warn logs a warning message.
+pub fn (mut l Logger) warn(msg string) {
+	l.counter = l.counter + 1
+	println('[WARN] [${l.tag}] #${l.counter}: ${msg}')
+}
+
+// error logs an error message.
+pub fn (mut l Logger) error(msg string) {
+	l.counter = l.counter + 1
+	println('[ERR ] [${l.tag}] #${l.counter}: ${msg}')
+}

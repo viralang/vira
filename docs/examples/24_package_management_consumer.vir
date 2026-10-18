@@ -1,0 +1,52 @@
+module package_consumer_demo
+
+// ==============================================================================
+// Vira Package Management Demo
+// Demonstrates consuming an external package installed via:
+//   vira add C:/Users/hp/vira_test
+//   (or vira add github.com/<user>/vira_test)
+//
+// The compiler automatically resolves imports across:
+// 1. Current file directory
+// 2. Project src/ directory
+// 3. Project root directory
+// 4. Vendored dependencies:   ./vendor/<package>
+// 5. Local project cache:     ./.vira/pkg/<package>
+// 6. Global toolchain cache:  ~/.vir/pkg/<package>
+// ==============================================================================
+
+import "vira_test"
+
+fn main() {
+	// 1. Instantiate the imported Logger from `vira_test`
+	mut log := Logger.new('ConsumerApp')
+	log.info('External package successfully imported and initialized!')
+
+	// 2. Perform 2D Vector operations using `vira_test.Vec2`
+	v1 := Vec2.new(10.0, 20.0)
+	v2 := Vec2.new(5.0, 15.0)
+
+	sum := v1.add(v2)
+	scaled := sum.scale(2.0)
+	dot_prod := v1.dot(v2)
+
+	log.ok('Vector math results:')
+	println('  • v1:       (${v1.x}, ${v1.y})')
+	println('  • v2:       (${v2.x}, ${v2.y})')
+	println('  • v1 + v2:  (${sum.x}, ${sum.y})')
+	println('  • scaled:   (${scaled.x}, ${scaled.y})')
+	println('  • dot prod: ${dot_prod}')
+
+	// 3. Use numeric utilities from `vira_test`
+	raw_speed := 165
+	bounded_speed := clamp(raw_speed, 0, 100)
+	min_val := min_int(45, 90)
+	max_val := max_int(45, 90)
+
+	log.info('Numeric utility results:')
+	println('  • clamp(165, 0, 100) = ${bounded_speed}')
+	println('  • min_int(45, 90)    = ${min_val}')
+	println('  • max_int(45, 90)    = ${max_val}')
+
+	log.ok('All external package capabilities verified successfully!')
+}

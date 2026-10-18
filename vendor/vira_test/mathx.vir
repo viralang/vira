@@ -1,0 +1,28 @@
+module vira_test
+
+// clamp restricts val to the [min_val, max_val] interval.
+pub fn clamp(val int, min_val int, max_val int) int {
+	if val < min_val {
+		return min_val
+	}
+	if val > max_val {
+		return max_val
+	}
+	return val
+}
+
+// min_int returns the smaller of two integers.
+pub fn min_int(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// max_int returns the larger of two integers.
+pub fn max_int(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

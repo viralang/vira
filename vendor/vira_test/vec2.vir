@@ -1,0 +1,45 @@
+module vira_test
+
+// Vec2 represents a 2-dimensional floating point vector.
+pub struct Vec2 {
+pub:
+	x f64
+	y f64
+}
+
+// Vec2.new constructs a new Vec2.
+pub fn Vec2.new(x f64, y f64) Vec2 {
+	return Vec2{
+		x: x,
+		y: y
+	}
+}
+
+// add returns the vector sum of v and other.
+pub fn (v Vec2) add(other Vec2) Vec2 {
+	return Vec2{
+		x: v.x + other.x,
+		y: v.y + other.y
+	}
+}
+
+// sub returns the vector difference (v - other).
+pub fn (v Vec2) sub(other Vec2) Vec2 {
+	return Vec2{
+		x: v.x - other.x,
+		y: v.y - other.y
+	}
+}
+
+// scale scales the vector by a scalar factor.
+pub fn (v Vec2) scale(factor f64) Vec2 {
+	return Vec2{
+		x: v.x * factor,
+		y: v.y * factor
+	}
+}
+
+// dot calculates the scalar dot product of two vectors.
+pub fn (v Vec2) dot(other Vec2) f64 {
+	return (v.x * other.x) + (v.y * other.y)
+}

@@ -798,7 +798,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				}
 				if info.IsDir() {
 					base := filepath.Base(path)
-					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" {
+					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" {
 						return filepath.SkipDir
 					}
 					return nil
