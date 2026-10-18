@@ -46,6 +46,7 @@
    - [Native File I/O Operations](#native-file-io-operations)
    - [High-Performance HTTP 1.1 Web Server & Fast JSON](#high-performance-http-11-web-server--fast-json)
    - [Native Desktop GUI Engine](#native-desktop-gui-engine)
+   - [Native Package Management & Air-Gapped Vendoring](#native-package-management--air-gapped-vendoring)
    - [Rust/V-Style Diagnostic Engine](#rustv-style-diagnostic-engine)
 6. [Complete End-to-End Production Program](#6-complete-end-to-end-production-program)
 7. [VS Code Extension & LSP Integration](#7-vs-code-extension--lsp-integration)
@@ -130,6 +131,10 @@ vira <command> [flags] [arguments]
 | `test` | Run all unit tests (`*_test.vir`) in a directory or project | `vira test ./tests` |
 | `fmt` | Format Vira source files in-place to canonical style | `vira fmt ./src` |
 | `init` | Scaffold a modern enterprise multi-package Vira project with `vira.mod`, `src/`, `tests/` | `vira init my_app` |
+| `add` | Add and download a package dependency (local or Git repository) | `vira add github.com/user/pkg@v1.0.0` |
+| `install` | Install and verify all dependencies declared in `vira.mod` and `vira.lock` | `vira install` |
+| `remove` | Remove a package dependency from manifest, lockfile, and cache | `vira remove github.com/user/pkg` |
+| `vendor` | Vendor all dependencies into `./vendor` for air-gapped offline builds | `vira vendor` |
 | `lsp` | Start the Language Server Protocol daemon (stdio) for VS Code / IDEs | `vira lsp` |
 | `demo` | Compile and execute the built-in parallel AI actor demo | `vira demo` |
 | `version` | Display Vira toolchain version, build commit, and target platform | `vira version` |
@@ -146,7 +151,7 @@ vira <command> [flags] [arguments]
 
 ## 4. Master Catalog: Tutorials & Runnable Examples Table
 
-The repository includes 20 comprehensive step-by-step tutorials paired directly with 19 standalone, self-contained runnable `.vir` example programs.
+The repository includes 25 comprehensive step-by-step tutorials paired directly with 24 standalone, self-contained runnable `.vir` example programs.
 
 | # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
 | :-: | :--- | :-: | :--- | :--- | :--- |
@@ -174,6 +179,7 @@ The repository includes 20 comprehensive step-by-step tutorials paired directly 
 | **22** | **Declarative GUI Auto-Layout** | Intermediate/Adv | [`21_declarative_gui.vir`](docs/examples/21_declarative_gui.vir) / [`declarative_gui.vir`](examples/declarative_gui.vir) | [`22_declarative_gui_auto_layout.md`](docs/tutorials/22_declarative_gui_auto_layout.md) | Declarative layout cursor stack, vertical columns (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, text inputs (`gui_input`), progress bars (`gui_progress`), radio buttons (`gui_radio`), separators, badges, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
 | **23** | **GUI Navigation & Lifecycle** | Intermediate/Adv | [`22_gui_navigation_lifecycle.vir`](docs/examples/22_gui_navigation_lifecycle.vir) / [`gui_navigation_lifecycle.vir`](examples/gui_navigation_lifecycle.vir) | [`23_gui_window_navigation_and_lifecycle.md`](docs/tutorials/23_gui_window_navigation_and_lifecycle.md) | Multi-view routing, tab strips (`gui_tab_item`), modal dialogs (`gui_modal_begin`/`gui_modal_end`), and close request interception (`gui_cancel_close`). |
 | **24** | **Multi-Package Architecture & Scopes** | Intermediate/Adv | [`23_multi_package_architecture.vir`](docs/examples/23_multi_package_architecture.vir) / [`enterprise_multi_package`](examples/enterprise_multi_package/) | [`24_multi_package_architecture_and_scopes.md`](docs/tutorials/24_multi_package_architecture_and_scopes.md) | Scalable project structures (`src/config/`, `src/models/`, `src/services/`), recursive package compilation, 5-tier lexical scoping, 4-quadrant cross-package encapsulation, and zero-leak cross-package actors. |
+| **25** | **Native Package Management & Vendoring** | Intermediate/Adv | [`24_package_management_consumer.vir`](docs/examples/24_package_management_consumer.vir) | [`25_package_management_publishing_and_vendoring.md`](docs/tutorials/25_package_management_publishing_and_vendoring.md) | Decentralized package management, `vira add`, `vira install`, `vira remove`, `vira vendor`, cryptographic `vira.lock` SHA-256 tree hashing, GitHub publishing, and 6-tier import resolution. |
 
 ---
 
@@ -701,6 +707,19 @@ gui_stack_end()
 > [!TIP]
 > - **[Tutorial 21: Native Desktop GUI Architecture & Concurrent Dashboards](docs/tutorials/21_native_gui_desktop_applications.md)** covers window lifecycles, GDI/X11 double-buffering, and background actor streaming.
 > - **[Tutorial 22: Declarative GUI Auto-Layout Engine: VStacks, HStacks & Cards](docs/tutorials/22_declarative_gui_auto_layout.md)** covers auto-layout stacks, auto-widgets, and zero-math UI design.
+
+---
+
+### Native Package Management & Air-Gapped Vendoring
+
+Vira features a built-in decentralized, Git-first package management system:
+- **`vira add <package[@version]>`**: Adds dependencies from Git (e.g. `github.com/user/pkg@v1.0.0`) or local directories (e.g. `C:/Users/hp/vira_test`).
+- **Cryptographic Lockfiles (`vira.lock`):** Generates deterministic SHA-256 tree hashes for all dependencies, guaranteeing supply-chain security and bit-exact reproducibility.
+- **Air-Gapped Vendoring (`vira vendor`):** Deep-copies all dependencies into `./vendor/` for 100% offline, zero-network production builds.
+- **`vira install` / `vira remove`**: Deterministic dependency verification and clean unlinking.
+
+> [!TIP]
+> See **[Tutorial 25: Native Package Management, Publishing & Air-Gapped Vendoring](docs/tutorials/25_package_management_publishing_and_vendoring.md)** and matching runnable example **[`24_package_management_consumer.vir`](docs/examples/24_package_management_consumer.vir)**.
 
 ---
 

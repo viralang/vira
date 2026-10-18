@@ -28,6 +28,8 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5.6] Enterprise Scaffolding & GUI Engine   ✅ COMPLETED
        │
+ [v0.5.7] Package Manager, Lockfiles & Vendoring✅ COMPLETED
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
  [v0.6] Phase 1: VexServe Web & LLM Streaming  ⏳ NEXT MILESTONE
@@ -83,6 +85,15 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Integrated Test Harness:** Automatic project source resolution for unit test files with application `main()` isolation.
 - [x] **Declarative IMGUI Auto-Layout Engine:** Vertical stacks (`gui_vstack_begin`), horizontal stacks (`gui_hstack_begin`), auto-sized cards, text inputs, multi-tab routing, modal dialogs, and close interception.
 - [x] **Curriculum Expansion:** 23 runnable examples and 24 in-depth tutorials.
+
+### 6. Native Package Management, Deterministic Lockfiles & Vendoring (v0.5.7)
+- [x] **Git-Native Package Management (`vira add`):** Direct Git cloning (`github.com/user/pkg[@version]`) and local directory dependency linking with path traversal protection.
+- [x] **Cryptographic Deterministic Lockfile (`vira.lock`):** Full directory tree SHA-256 tree hashing (`ComputeDirChecksum`) guaranteeing supply chain integrity and reproducible bit-exact builds.
+- [x] **Dependency Restoration (`vira install` / `vira get`):** Verifies checksum integrity against `vira.lock` and restores missing dependencies.
+- [x] **Clean Dependency Removal (`vira remove`):** Cleanly unlinks packages from `vira.mod`, `vira.lock`, and the `.vira/pkg` cache.
+- [x] **Air-Gapped Offline Vendoring (`vira vendor`):** Deep copying of dependencies into `./vendor` for 100% offline, zero-internet compilations.
+- [x] **Unified 6-Tier Import Resolution:** Identical import lookup order across both the compiler (`cmd/vira/main.go`) and Language Server (`internal/lsp/server.go`) (file dir → `src/` → root → `vendor/` → `.vira/pkg/` → `~/.vir/pkg/`).
+- [x] **Curriculum & Verification:** Added [Tutorial 25: Native Package Management, Publishing & Air-Gapped Vendoring](docs/tutorials/25_package_management_publishing_and_vendoring.md) and runnable example [24_package_management_consumer.vir](docs/examples/24_package_management_consumer.vir) with verified 0 leaks.
 
 ---
 
@@ -171,13 +182,15 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 
 ---
 
-### 📦 Phase 5: Package Registry & Ecosystem Maturity (v1.0)
+### 📦 Phase 5: Production Registry & Ecosystem Maturity (v1.0)
 *Target: Production readiness and distributed developer tooling.*
 
-- [ ] **Package Management CLI:**
-  - Dependency fetching via Git repositories (`vex get github.com/user/pkg`).
-  - Deterministic lockfile generation (`vex.lock`) with cryptographic hash verification.
-- [ ] **Documentation Generator (`vex doc`):**
+- [x] **Package Management CLI & Lockfiles (Completed in v0.5.7):**
+  - Dependency fetching via Git repositories and local paths (`vira add github.com/user/pkg`).
+  - Deterministic lockfile generation (`vira.lock`) with cryptographic SHA-256 tree hash verification.
+  - Air-gapped offline vendoring (`vira vendor`).
+  - See [Tutorial 25: Native Package Management, Publishing & Air-Gapped Vendoring](docs/tutorials/25_package_management_publishing_and_vendoring.md).
+- [ ] **Documentation Generator (`vira doc`):**
   - Extract docstrings and type signatures from `.vir` source code and generate browsable, search-indexed static HTML documentation sites.
 - [ ] **Standard Library Expansion:**
   - Cryptography (`crypto/sha256`, `crypto/aes`).

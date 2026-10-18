@@ -13,9 +13,9 @@ Beginner                           Intermediate                               Ad
    │                                     │                                        │
    ├── [1. Basics & Control Flow]        ├── [3. Interfaces & Polymorphism]       ├── [5. Autofree & Bump Arenas]
    │                                     │                                        │
-   └── [2. 4-Quadrant Structs & OOP]     └── [4. Error Handling & Results]        ├── [6. SIMD Tensors & Math]
-                                                                                  │
-                                                                                  ├── [7. Actors & Supervision]
+   └── [2. 4-Quadrant Structs & OOP]     ├── [4. Error Handling & Results]        ├── [6. SIMD Tensors & Math]
+                                         │                                        │
+                                         └── [25. Package Management & Vendoring] ├── [7. Actors & Supervision]
                                                                                   │
                                                                                   └── [8. Production Systems]
 ```
