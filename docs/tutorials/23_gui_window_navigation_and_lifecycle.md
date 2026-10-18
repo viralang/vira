@@ -62,7 +62,7 @@ In standard applications, clicking the titlebar `X` button instantly destroys th
 
 Vira provides `gui_cancel_close()` to intercept and abort an OS termination request:
 
-```vex
+```v
 mut is_dirty := true
 mut show_exit_modal := false
 
@@ -120,7 +120,7 @@ Immediate-mode GUI makes view routing simple, clean, and declarative. Because th
 
 Use `gui_tab_item(label, is_active)` inside an `HStack` to build modern horizontal navigation bars:
 
-```vex
+```v
 mut active_tab := 0 // 0 = Telemetry, 1 = Settings, 2 = Logs
 
 gui_hstack_begin(38, 8)
@@ -151,7 +151,7 @@ if active_tab == 0 {
 
 Divide the window horizontally into a left sidebar navigation rail and a right dynamic content viewport:
 
-```vex
+```v
 // LEFT SIDEBAR (Navigation Rail)
 gui_vstack_begin(20, 80, 200, 10)
     gui_card_begin('Navigation', 200)
@@ -182,7 +182,7 @@ Modal dialogs must:
 2. Dim the underlying application with a dark backdrop (`0x0C0C14`).
 3. Center a focused dialog card on the screen.
 
-```vex
+```v
 if show_reset_modal {
     gui_modal_begin('Confirm State Reset', 460, 200)
         gui_lbl('Are you sure you want to reset cluster metrics?')
@@ -206,7 +206,7 @@ if show_reset_modal {
 ## 5. Zero-Leak Guarantee for Dynamic String Interpolation
 
 In interactive dashboards, text labels and telemetry strings are dynamically formatted every frame:
-```vex
+```v
 gui_lbl('Active Counter: ${count}')
 gui_lbl('Assigned Node: ${node_name}')
 gui_draw_text('FPS: ${fps} • Frame Time: ${dt}s', 20, 600, 14, 0x6C7086)
@@ -230,7 +230,7 @@ This guarantees **`active_leaks = 0`** even after running for hours or days!
 
 Here is the complete source code from [`examples/gui_navigation_lifecycle.vir`](../../examples/gui_navigation_lifecycle.vir):
 
-```vex
+```v
 module main
 
 // Vira Window Navigation & Lifecycle Demonstration

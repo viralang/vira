@@ -20,7 +20,7 @@ Vira replaces exceptions with **mandatory, zero-cost `!T` Result types**:
 
 Prefix a return type with an exclamation mark (`!`) to indicate that the function returns a Result:
 
-```vex
+```v
 pub fn (mut a BankAccount) withdraw(amount i64) !i64 {
 	if amount <= 0 {
 		return error('withdrawal amount must be greater than zero')
@@ -41,7 +41,7 @@ The built-in `error('...')` function constructs an error Result with the provide
 
 When calling a function that returns `!T`, you must provide an `or { ... }` block to handle potential failure:
 
-```vex
+```v
 new_bal := acc.withdraw(15000) or {
 	eprintln('Unexpected failure: ${err}')
 	return
@@ -57,7 +57,7 @@ Inside the `or { ... }` block, the error message returned by `error('...')` is a
 
 If you do not want to exit early, you can return a fallback value directly from the `or { ... }` block:
 
-```vex
+```v
 // If withdraw() fails, failed_bal will be set to 0
 failed_bal := acc.withdraw(999999) or {
 	println('Caught business logic error: ${err}')
@@ -67,7 +67,7 @@ failed_bal := acc.withdraw(999999) or {
 
 You can also return an existing variable or computed expression:
 
-```vex
+```v
 zero_bal := acc.withdraw(0) or {
 	println('Validation rejected: ${err}')
 	acc.balance // Retain current balance as fallback
@@ -80,7 +80,7 @@ zero_bal := acc.withdraw(0) or {
 
 If you attempt to call a function returning `!T` without an `or { ... }` block:
 
-```vex
+```v
 bad := acc.withdraw(500) // ERROR!
 ```
 

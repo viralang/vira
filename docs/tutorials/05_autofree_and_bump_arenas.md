@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-One of Vex's core breakthroughs is **deterministic automatic memory management without a garbage collector**.
+One of Vira's core breakthroughs is **deterministic automatic memory management without a garbage collector**.
 
 Traditional approaches force developers to choose between:
 - **Manual Management (C/C++):** Maximum speed, but high risk of use-after-free bugs, double frees, and memory leaks.
@@ -26,7 +26,7 @@ During compilation (Phase 3), the Vira **Static Escape Analyzer** evaluates the 
 2. **Escape Analysis:** Analyzes if the variable escapes the current stack frame (e.g. through a `return` statement or by being stored inside another container).
 3. **LIFO Destructor Injection:** If the variable does not escape, the compiler injects deterministic cleanup calls right before block and function exits in strict **Last-In, First-Out (LIFO)** order.
 
-```vex
+```v
 fn simulate_standard_autofree() {
 	r1 := ReportRecord{ tag: 'batch_alpha', value: 100 }
 	r2 := ReportRecord{ tag: 'batch_beta', value: 200 }
@@ -84,7 +84,7 @@ For high-throughput loops, neural net forward passes, or temporary batch computa
 
 Vira provides native **bump arenas**:
 
-```vex
+```v
 arena {
 	t1 := tensor_fill(32, 32, 1.5)
 	t2 := tensor_fill(32, 32, 2.0)
@@ -123,4 +123,4 @@ Both memory domains completed with zero memory leaks
 
 ## Next Steps
 
-Proceed to [**Tutorial 6: First-Class AI Tensors & SIMD Acceleration**](./06_simd_tensors_and_ai_math.md) to explore Vex's native matrix math capabilities.
+Proceed to [**Tutorial 6: First-Class AI Tensors & SIMD Acceleration**](./06_simd_tensors_and_ai_math.md) to explore Vira's native matrix math capabilities.

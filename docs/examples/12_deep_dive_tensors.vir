@@ -32,7 +32,7 @@ pub fn (mut s ModelServer) forward_pass(multiplier f32) f32 {
 
 fn main() {
 	println('=================================================================')
-	println('   VEX FIRST-CLASS AI TENSORS & SIMD ACCELERATION DEEP DIVE      ')
+	println('   VIRA FIRST-CLASS AI TENSORS & SIMD ACCELERATION DEEP DIVE      ')
 	println('=================================================================')
 
 	println('--- 1. FIRST-CLASS TENSOR CREATION & MEMORY ALIGNMENT ---')

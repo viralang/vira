@@ -22,7 +22,7 @@ In this tutorial, you will learn:
 
 Interfaces declare method signatures that implementors must provide. If a method modifies state, mark it with `mut:`:
 
-```vex
+```v
 pub interface Notifier {
 	channel_name() string
 	send(recipient string, body string) string
@@ -35,7 +35,7 @@ pub interface Notifier {
 
 Structs implement interfaces simply by defining the corresponding receiver methods:
 
-```vex
+```v
 pub struct EmailService {
 pub:
 	smtp_host string
@@ -71,7 +71,7 @@ Neither `EmailService` nor `WebhookService` contains an `implements Notifier` cl
 
 To utilize runtime polymorphism, box a satisfying struct instance into an interface value:
 
-```vex
+```v
 email := EmailService{ smtp_host: 'smtp.vir.internal:587' }
 webhook := WebhookService{ endpoint: 'https://api.vir.dev/events' }
 
@@ -91,7 +91,7 @@ An interface value in Vira is a 16-byte fat pointer consisting of two 64-bit add
 ```
 
 When you invoke a method on an interface variable:
-```vex
+```v
 println(n1.channel_name())
 ```
 The Vira compiler generates a direct vtable dereference in C99:
@@ -142,4 +142,4 @@ Triggered webhook for slack_bot with payload "All deployment checks passed"
 
 ## Next Steps
 
-Proceed to [**Tutorial 4: Error Handling with Results (`!T`)**](./04_error_handling_and_results.md) to master Vex's zero-cost, unignorable error handling paradigm.
+Proceed to [**Tutorial 4: Error Handling with Results (`!T`)**](./04_error_handling_and_results.md) to master Vira's zero-cost, unignorable error handling paradigm.

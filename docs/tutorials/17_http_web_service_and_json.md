@@ -1,10 +1,10 @@
-# Tutorial 17: High-Performance HTTP 1.1 Web Services & Fast JSON in Vex
+# Tutorial 17: High-Performance HTTP 1.1 Web Services & Fast JSON in Vira
 
 Building scalable, low-latency microservices for AI model serving and distributed backends requires two foundational pillars:
 1. **Zero-overhead HTTP/1.1 networking primitives** running on top of non-blocking OS sockets.
 2. **Deterministic, zero-leak memory management** with lock-free actor task scheduling across CPU cores.
 
-In this tutorial, you will master Vex's built-in HTTP and JSON standard library capabilities, learn how to build production-grade REST APIs, and integrate concurrent AI inference workers with guaranteed zero memory leaks (`active_leaks=0`).
+In this tutorial, you will master Vira's built-in HTTP and JSON standard library capabilities, learn how to build production-grade REST APIs, and integrate concurrent AI inference workers with guaranteed zero memory leaks (`active_leaks=0`).
 
 ---
 
@@ -18,7 +18,7 @@ Vira standard library provides fast, zero-allocation field parsers for JSON payl
 | `json_get_int(json, key)` | `i64` | Extracts 64-bit integer matching `"key": 123` |
 | `json_get_f32(json, key)` | `f32` | Extracts 32-bit float matching `"key": 0.75` |
 
-```vex
+```v
 raw_payload := '{"model": "deepseek-coder", "max_tokens": 2048, "temp": 0.7}'
 
 model_name := json_get_str(raw_payload, 'model')
@@ -28,7 +28,7 @@ temperature := json_get_f32(raw_payload, 'temp')
 println('Model: ${model_name}, Max Tokens: ${tokens}, Temp: ${temperature}')
 ```
 
-All extracted string values are automatically tracked by Vex's static escape analyzer and deterministically reclaimed at scope exit without garbage collection pauses.
+All extracted string values are automatically tracked by Vira's static escape analyzer and deterministically reclaimed at scope exit without garbage collection pauses.
 
 ---
 
@@ -36,7 +36,7 @@ All extracted string values are automatically tracked by Vex's static escape ana
 
 Construct standard HTTP/1.1 compliant responses with status codes, content-type headers, and content-length calculation in a single native call:
 
-```vex
+```v
 body := '{"status": "ready", "inference_latency_ms": 1.45}'
 response := http_response(200, 'application/json', body)
 ```
@@ -55,7 +55,7 @@ Connection: close
 
 ## 3. Architecture: Actor-Driven Microservices
 
-In Vex, HTTP endpoints delegate computationally intensive operations (such as neural network inference or database queries) to isolated `actor` instances over asynchronous message channels:
+In Vira, HTTP endpoints delegate computationally intensive operations (such as neural network inference or database queries) to isolated `actor` instances over asynchronous message channels:
 
 ```mermaid
 sequenceDiagram
@@ -80,7 +80,7 @@ sequenceDiagram
 
 Here is the complete source code from [docs/examples/17_http_web_server_and_json.vir](file:///c:/Users/hp/vex/docs/examples/17_http_web_server_and_json.vir):
 
-```vex
+```v
 module main
 
 pub actor InferenceWorker {

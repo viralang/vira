@@ -37,7 +37,7 @@ Because Vira uses **strict IEEE 754 single-precision floating point representati
 
 ## 2. Exporting Weights from PyTorch (Python)
 
-In PyTorch, a linear layer stores its weight matrix in transposed shape `(out_features, in_features)` to compute $Y = X W^T + b$. In standard linear algebra and Vex, matrix multiplication is formulated as $X @ W$.
+In PyTorch, a linear layer stores its weight matrix in transposed shape `(out_features, in_features)` to compute $Y = X W^T + b$. In standard linear algebra and Vira, matrix multiplication is formulated as $X @ W$.
 
 The reference export script [`scripts/export_pytorch_model.py`](../../scripts/export_pytorch_model.py) trains or initializes a 3-layer MLP and exports contiguous binary weights:
 
@@ -88,14 +88,14 @@ python scripts/export_pytorch_model.py
 
 ---
 
-## 3. Ingesting Pretrained Weights in Vex
+## 3. Ingesting Pretrained Weights in Vira
 
 Vira provides native binary tensor I/O primitives:
 - `tensor_load_bin(rows, cols, path) !tensor[f32]`: Loads binary floats directly into an aligned tensor with Result error handling.
 - `tensor_save_bin(tensor, path) !bool`: Dumps tensor weights to disk in standard IEEE 754 binary format.
 
 ### Defining the Pretrained Model Container
-```vex
+```v
 pub struct PretrainedModel {
 pub:
 	name string
@@ -145,7 +145,7 @@ pub fn PretrainedModel.load(model_dir string) !PretrainedModel {
 
 During inference, intermediate matrix activations ($Z_1, A_1, Z_2, A_2$) are allocated in an isolated bump arena:
 
-```vex
+```v
 pub fn (model PretrainedModel) forward(inputs tensor[f32]) f32 {
 	mut output_metric := 0.0f32
 	arena {
@@ -174,10 +174,10 @@ pub fn (model PretrainedModel) forward(inputs tensor[f32]) f32 {
 
 ## 5. Bidirectional Portability: Saving Weights Back to Python
 
-When fine-tuning weights or training adapters in Vex, you can export the modified tensors back to disk using `tensor_save_bin`:
+When fine-tuning weights or training adapters in Vira, you can export the modified tensors back to disk using `tensor_save_bin`:
 
-```vex
-// Save updated weights from Vex
+```v
+// Save updated weights from Vira
 _ := tensor_save_bin(model.w1, 'models/exported_w1_from_vex.bin') or {
     eprintln('Failed to save tensor binary: ${err}')
     return
@@ -189,7 +189,7 @@ In Python, PyTorch can consume the Vira checkpoint immediately using `np.fromfil
 import numpy as np
 import torch
 
-# Load binary weights produced by Vex
+# Load binary weights produced by Vira
 w1_loaded = np.fromfile("models/exported_w1_from_vex.bin", dtype=np.float32).reshape(16, 32)
 torch_weight = torch.from_numpy(w1_loaded).t().contiguous()
 print("Successfully loaded Vira checkpoint into PyTorch tensor:", torch_weight.shape)
@@ -208,7 +208,7 @@ Execute the complete verification pipeline:
 ### Execution Output & Verification
 ```
 =================================================================
-   VEX PRETRAINED WEIGHT LOADER & PYTORCH INTEROPERABILITY       
+   VIRA PRETRAINED WEIGHT LOADER & PYTORCH INTEROPERABILITY       
 =================================================================
 --- 1. INGESTING RAW IEEE 754 BINARY WEIGHTS (ZERO-COPY DMA) ---
 Successfully loaded pretrained model: "SmallPretrainedMLP (PyTorch Export)"

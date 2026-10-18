@@ -21,7 +21,7 @@ Vira integrates **2D numerical tensors directly into the language syntax and typ
 
 Create 2D tensors using the built-in `tensor_fill` primitive:
 
-```vex
+```v
 // Allocate a 64x64 matrix filled with 0.50
 w := tensor_fill(64, 64, 0.50)
 
@@ -35,9 +35,9 @@ Tensors store data in a contiguous 64-byte aligned memory slab, enabling vector 
 
 ## 3. Matrix Multiplication with the `@` Operator
 
-In Vex, matrix multiplication is an infix binary operator:
+In Vira, matrix multiplication is an infix binary operator:
 
-```vex
+```v
 y := w @ x
 ```
 
@@ -69,7 +69,7 @@ The Vira single-header runtime (`vira_rt.h`) automatically vectorizes `@` based 
 
 Calculate aggregate statistics using built-in reduction primitives:
 
-```vex
+```v
 sum_w := tensor_sum(w) // Sums all 4,096 elements
 sum_y := tensor_sum(y) // Sums the dot-product output
 ```
@@ -80,7 +80,7 @@ sum_y := tensor_sum(y) // Sums the dot-product output
 
 You can chain tensor operations to implement neural network layers:
 
-```vex
+```v
 // Layer 1
 w1 := tensor_fill(64, 64, 0.50)
 x  := tensor_fill(64, 64, 2.00)

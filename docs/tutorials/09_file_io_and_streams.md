@@ -9,7 +9,7 @@
 
 Input/Output (I/O) is a critical pillar of systems programming, data engineering, and machine learning pipelines. 
 
-In Vex, I/O operations are designed around three principles:
+In Vira, I/O operations are designed around three principles:
 1. **Safety & Zero-Cost Result Handling:** All mutating or fallible operations return `!bool` or `!string`. I/O failures cannot be ignored.
 2. **Automatic Buffer Reclaim:** File reading allocates native heap buffers that are tracked and reclaimed deterministically by the **Autofree engine** without manual `free()` calls and without garbage collection.
 3. **Concurrency Compatibility:** File buffers can be seamlessly dispatched across multi-threaded **Actors** over lock-free work-stealing deques.
@@ -36,9 +36,9 @@ Vira provides native, hardware-accelerated file primitives:
 
 `write_file` opens or truncates a file in binary mode (`"wb"`), writing the buffer atomically:
 
-```vex
+```v
 test_file := 'config.json'
-content := '{"server": "vex.internal", "workers": 4}\n'
+content := '{"server": "vira.internal", "workers": 4}\n'
 
 _ := write_file(test_file, content) or {
 	eprintln('Failed to write file: ${err}')
@@ -50,7 +50,7 @@ _ := write_file(test_file, content) or {
 
 `append_file` opens a file in append mode (`"ab"`), preserving existing content:
 
-```vex
+```v
 log_line := '[AUDIT] Job dispatched at timestamp 1760000000\n'
 
 _ := append_file(test_file, log_line) or {
@@ -70,7 +70,7 @@ When you read a file with `read_file(path)`, the Vira runtime:
 4. Records the allocation in the telemetry counters (`_vira_record_alloc()`).
 5. Returns a `Result_string` containing the unescaped UTF-8 string.
 
-```vex
+```v
 data := read_file('config.json') or {
 	eprintln('Failed to read config: ${err}')
 	return
@@ -94,7 +94,7 @@ This guarantees that file buffers never leak memory, even when reading gigabytes
 
 To delete a file, invoke `remove_file(path)`:
 
-```vex
+```v
 _ := remove_file('config.json') or {
 	eprintln('Could not delete file: ${err}')
 	return
@@ -108,9 +108,9 @@ println('File exists after deletion: ${exists}') // prints false
 
 ## 6. Advanced Pattern: Concurrent I/O + Actor Processing
 
-You can combine File I/O with Vex's **Actor Concurrency** to build parallel log or dataset processing pipelines:
+You can combine File I/O with Vira's **Actor Concurrency** to build parallel log or dataset processing pipelines:
 
-```vex
+```v
 module log_processor
 
 pub actor LogWorker {

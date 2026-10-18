@@ -19,7 +19,7 @@ Vira combines expressive, clean syntax with zero-overhead C99 emission. Unlike l
 
 Conditions in Vira do not require parentheses around the test expression, but braces `{ ... }` around the body are mandatory:
 
-```vex
+```v
 fn classify_temperature(temp f32) string {
 	if temp >= 95.0 {
 		return 'CRITICAL_OVERHEAT'
@@ -48,7 +48,7 @@ Vira unifies all iteration patterns under the `for` keyword.
 ### Form 1: 3-Part C-Style Loop
 Used for counted iterations over intervals:
 
-```vex
+```v
 mut sum_squares := 0
 for mut i := 1; i <= 6; i += 1 {
 	sq := i * i
@@ -64,7 +64,7 @@ for mut i := 1; i <= 6; i += 1 {
 ### Form 2: Condition-Only Loop (While-Style)
 Used when iteration continues until a dynamic condition becomes false:
 
-```vex
+```v
 fn compute_collatz_steps(start_n int) int {
 	mut n := start_n
 	mut steps := 0
@@ -83,7 +83,7 @@ fn compute_collatz_steps(start_n int) int {
 ### Form 3: Infinite Loop with `break` and `continue`
 Used for stream processors, event loops, or retry mechanisms:
 
-```vex
+```v
 mut stream_tick := 0
 mut accepted_packets := 0
 for {
@@ -125,7 +125,7 @@ Operate on `int`, `f32`, and `f64`:
 ### Compound Assignment Operators
 Modify a mutable variable in-place:
 
-```vex
+```v
 mut accumulator := 100
 accumulator += 50   // 150
 accumulator -= 25   // 125
@@ -155,7 +155,7 @@ Short-circuiting boolean operations:
 | `\|\|` | Logical OR | `is_warning \|\| is_critical` |
 | `!` | Logical NOT (unary prefix) | `!is_critical` |
 
-```vex
+```v
 is_online := node.has_flag(flag_online)
 is_critical := node.has_flag(flag_critical)
 is_stable := is_online && (!is_critical)
@@ -173,7 +173,7 @@ Perform bit-level manipulation on integer values:
 | `>>` | Bitwise Shift Right | `32 >> 2` (evaluates to `8`) |
 
 #### Practical Bitmask Example:
-```vex
+```v
 pub fn (mut node TelemetryNode) update_flag(flag int, enable bool) {
 	if enable {
 		node.status_flags = node.status_flags | flag
@@ -228,7 +228,7 @@ Execute the verified example:
 ### Execution Output
 ```
 =================================================================
-   VEX CONTROL FLOW, LOOPS & OPERATORS DEMONSTRATION             
+   VIRA CONTROL FLOW, LOOPS & OPERATORS DEMONSTRATION             
 =================================================================
 --- 1. BRANCHING & MULTI-WAY IF / ELSE-IF / ELSE ---
 Thermal reading: 82.50C -> Classification: WARNING_HOT

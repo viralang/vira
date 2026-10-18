@@ -60,7 +60,7 @@ fn compute_collatz_steps(start_n int) int {
 
 fn main() {
 	println('=================================================================')
-	println('   VEX CONTROL FLOW, LOOPS & OPERATORS DEMONSTRATION             ')
+	println('   VIRA CONTROL FLOW, LOOPS & OPERATORS DEMONSTRATION             ')
 	println('=================================================================')
 
 	println('--- 1. BRANCHING & MULTI-WAY IF / ELSE-IF / ELSE ---')

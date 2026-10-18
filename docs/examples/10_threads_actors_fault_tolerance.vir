@@ -27,7 +27,7 @@ pub fn (mut node ComputeNode) compute_batch(multiplier f32, force_fault bool) f3
 
 fn main() {
 	println('=================================================================')
-	println('   VEX MULTICORE WORK-STEALING ACTORS & SUPERVISOR DEMO          ')
+	println('   VIRA MULTICORE WORK-STEALING ACTORS & SUPERVISOR DEMO          ')
 	println('=================================================================')
 
 	println('--- 1. INITIALIZING INDEPENDENT ACTOR NODES ---')

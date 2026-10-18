@@ -7,7 +7,7 @@
 
 ## 1. Overview & Setup
 
-Welcome to the Vira programming language! In this tutorial, you will learn the foundational syntax and concepts of Vex:
+Welcome to the Vira programming language! In this tutorial, you will learn the foundational syntax and concepts of Vira:
 - How to declare and structure Vira source modules
 - Variables, immutability by default, and the `mut` keyword
 - Primitive data types
@@ -21,19 +21,19 @@ Welcome to the Vira programming language! In this tutorial, you will learn the f
 
 Every Vira source file begins with a `module` declaration defining the namespace boundary:
 
-```vex
+```v
 module basics
 ```
 
-In Vex, symbols marked with `pub` are visible outside the module; any symbol without `pub` remains strictly module-private.
+In Vira, symbols marked with `pub` are visible outside the module; any symbol without `pub` remains strictly module-private.
 
 ---
 
 ## 3. Variables & Immutability
 
-In Vex, all variable bindings are **immutable by default**. This eliminates accidental reassignments and data races in concurrent code.
+In Vira, all variable bindings are **immutable by default**. This eliminates accidental reassignments and data races in concurrent code.
 
-```vex
+```v
 // Immutable binding (value cannot change)
 company_name := 'VexCorp'
 established := 2026
@@ -44,7 +44,7 @@ established := 2026
 
 To allow a variable to be reassigned, declare it explicitly with the `mut` keyword:
 
-```vex
+```v
 // Mutable binding
 mut current_headcount := 42
 current_headcount = current_headcount + 5 // OK!
@@ -72,7 +72,7 @@ Vira provides explicit, hardware-sized scalar types:
 
 Vira supports string interpolation without runtime string concatenation libraries or heap overhead for literals:
 
-```vex
+```v
 user := 'Alice'
 score := 98
 println('User @${user} scored ${score} points!')
@@ -84,7 +84,7 @@ println('User @${user} scored ${score} points!')
 
 Conditions in `if` statements must evaluate strictly to a `bool`. Parentheses around the condition are optional:
 
-```vex
+```v
 fn calculate_bonus(base i64, bonus_cents i64, is_top_performer bool) i64 {
 	if is_top_performer {
 		return base + bonus_cents
@@ -100,7 +100,7 @@ fn calculate_bonus(base i64, bonus_cents i64, is_top_performer bool) i64 {
 
 The blank identifier `_` is used to discard values without compiler warnings or symbol table pollution:
 
-```vex
+```v
 _ := calculate_bonus(50000, 10000, false)
 _ := 'discarded string'
 ```
@@ -136,4 +136,4 @@ Blank identifier discards values cleanly without warnings
 
 ## Next Steps
 
-Proceed to [**Tutorial 2: OOP, 4-Quadrant Structs & Composition**](./02_oop_and_4_quadrant_structs.md) to learn how to model real-world domain logic with Vex's struct encapsulation and composition system.
+Proceed to [**Tutorial 2: OOP, 4-Quadrant Structs & Composition**](./02_oop_and_4_quadrant_structs.md) to learn how to model real-world domain logic with Vira's struct encapsulation and composition system.

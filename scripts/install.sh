@@ -5,7 +5,7 @@
 
 set -e
 
-VIRA_VERSION="v0.5.6"
+VIRA_VERSION="v0.5.8"
 INSTALL_DIR="$HOME/.vir"
 BIN_DIR="$INSTALL_DIR/bin"
 RUNTIME_DIR="$INSTALL_DIR/runtime"

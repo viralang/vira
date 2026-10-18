@@ -36,9 +36,9 @@ Vira solves this by combining **first-class tensor SIMD primitives**, **zero-all
 
 ## 2. Defining the Neural Network Model
 
-In Vex, a Multi-Layer Perceptron (MLP) classifier is defined by encapsulating weights and biases inside an immutable struct:
+In Vira, a Multi-Layer Perceptron (MLP) classifier is defined by encapsulating weights and biases inside an immutable struct:
 
-```vex
+```v
 // Model weights for a 3-layer MLP classifier:
 // Input (64) -> Hidden 1 (128) -> Hidden 2 (64) -> Output Logits (10)
 pub struct NeuralNetWeights {
@@ -66,7 +66,7 @@ Vira provides hardware-accelerated tensor primitives out of the box:
 
 The CPU engine executes the forward pass on host vector registers inside an ultra-fast $O(1)$ bump arena:
 
-```vex
+```v
 pub struct CpuInferenceEngine {
 pub:
 	device_name string
@@ -109,7 +109,7 @@ pub fn (mut cpu CpuInferenceEngine) forward(inputs tensor[f32]) f32 {
 
 Discrete GPUs are managed as **Supervised Actors**. Each actor encapsulates a GPU device queue and stream:
 
-```vex
+```v
 pub actor GpuInferenceEngine {
 pub:
 	gpu_id int
@@ -150,13 +150,13 @@ pub fn (mut gpu GpuInferenceEngine) forward(inputs tensor[f32], force_vram_oom b
 ### Erlang-Style Fault Isolation for GPU OOM
 In standard Python or C++ inference servers, an unhandled CUDA OOM crash calls `abort()` and **kills the entire web service**.
 
-In Vex:
+In Vira:
 1. The GPU worker thread's supervisor traps the `panic()` inside a `setjmp` recovery boundary.
 2. The actor's scratch memory slab is reset in $O(1)$ without memory leaks.
 3. The supervisor applies a `OneForOne` restart policy and returns a typed error `Result{ .is_err = true }` to the caller.
 4. The caller gracefully falls back to the **Host CPU SIMD Engine**, guaranteeing **100% service uptime**:
 
-```vex
+```v
 gpu1_output := fut_gpu1.await() or {
     println('Supervisor intercepted GPU error -> "${err}"')
     println('Gracefully rerouting batch to CPU fallback engine!')
@@ -170,7 +170,7 @@ gpu1_output := fut_gpu1.await() or {
 
 Because Vira uses strict IEEE 754 single-precision floating point representations and contiguous 64-byte aligned memory layouts, the CPU SIMD execution and GPU device compute stream produce **identical mathematical activations**:
 
-```vex
+```v
 if cpu_output == gpu0_output {
     println('SUCCESS: CPU SIMD and GPU Compute outputs match with exact numerical parity!')
 }
@@ -189,7 +189,7 @@ Run the neural network CPU vs. GPU inference example:
 ### Execution Output & Telemetry
 ```
 =================================================================
-   VEX AI NEURAL NETWORK: CPU SIMD VS GPU STREAM ACCELERATION    
+   VIRA AI NEURAL NETWORK: CPU SIMD VS GPU STREAM ACCELERATION    
 =================================================================
 --- 1. NEURAL NETWORK WEIGHT INITIALIZATION (MLP 64 -> 128 -> 64 -> 10) ---
 Model Architecture:

@@ -3,7 +3,7 @@
 In [Tutorial 21](21_native_gui_desktop_applications.md), you learned the fundamentals of Vira's native Immediate-Mode GUI (IMGUI) engine: window lifecycle, double-buffering, performance counters, and basic shape rendering.
 
 However, in primitive immediate-mode interfaces, developers often have to manually calculate `(x, y, width, height)` coordinates for every button, label, and card:
-```vex
+```v
 // The tedious manual way:
 gui_draw_rect(40, 90, 340, 120, 0x1E1E2E)
 gui_draw_text('Title', 55, 105, 16, 0x89B4FA)
@@ -105,7 +105,7 @@ Unlike primitive widgets that require manual `(x, y, width, height)` calculation
 - In a `VStack`: Automatically stretches to full container width with 36px height.
 - In a `HStack`: Divides space evenly across the row (140px default).
 - Returns `true` on the single frame clicked:
-```vex
+```v
 if gui_btn('Increment (+1)') {
     count += 1
 }
@@ -114,14 +114,14 @@ if gui_btn('Increment (+1)') {
 #### 2. Checkbox: `gui_check(label string, checked bool) bool`
 - Auto-positions vertically with hover animations and a Catppuccin green active indicator (`0xA6E3A1`).
 - Returns the updated boolean:
-```vex
+```v
 is_active = gui_check('Enable Dynamic Canvas FX', is_active)
 ```
 
 #### 3. Draggable Slider: `gui_slide(left string, right string, val f32, min f32, max f32) f32`
 - Auto-positions track bar, draggable thumb knob, and left/right labels.
 - Returns the updated clamped floating-point value:
-```vex
+```v
 slider_val = gui_slide('Scale: ', 'px', slider_val, 10.0f32, 100.0f32)
 ```
 
@@ -129,7 +129,7 @@ slider_val = gui_slide('Scale: ', 'px', slider_val, 10.0f32, 100.0f32)
 - Provides an editable single-line text box with mouse focus, cursor blinking (`|`), ASCII typing, and Backspace handling.
 - **Zero Heap Allocations:** Backed by static internal buffers so typing at 60 FPS produces 0 GC garbage and 0 heap leaks.
 - Returns the updated string:
-```vex
+```v
 mut node_name := 'ComputeNode-01'
 node_name = gui_input('Enter node name...', node_name)
 ```
@@ -137,14 +137,14 @@ node_name = gui_input('Enter node name...', node_name)
 #### 5. Progress Bar: `gui_progress(percent f32)`
 - Visual progress bar with animated Catppuccin green fill (`0xA6E3A1`) and centered percentage readout (e.g. `75%`).
 - Takes a float between `0.0` and `1.0` (or `0.0` to `100.0`):
-```vex
+```v
 gui_progress(slider_val / 100.0f32)
 ```
 
 #### 6. Radio Button: `gui_radio(label string, is_selected bool) bool`
 - Clean circular radio button selector with hover animations and Catppuccin blue ring highlight (`0x89B4FA`).
 - Returns `true` if clicked to select this option:
-```vex
+```v
 if gui_radio('High-Throughput (AVX2 SIMD)', mode == 1) {
     mode = 1
 }
@@ -152,20 +152,20 @@ if gui_radio('High-Throughput (AVX2 SIMD)', mode == 1) {
 
 #### 7. Section Divider: `gui_separator()`
 - Draws a subtle 1px divider line (`0x313244`) spanning the active container width (or height in an HStack) with automatic vertical spacing:
-```vex
+```v
 gui_separator()
 ```
 
 #### 8. Status Badge / Tag: `gui_badge(text string, hex_bg int, hex_fg int)`
 - Renders a compact, rounded status tag with custom background and foreground colors:
-```vex
+```v
 gui_badge('ONLINE', 0x2D4A3E, 0xA6E3A1) // Green success badge
 gui_badge('STANDBY', 0x313244, 0x89B4FA) // Blue info badge
 ```
 
 #### 9. Text Label: `gui_lbl(text string)`
 - Renders text at the current cursor and advances `cur_y` by 22px:
-```vex
+```v
 gui_lbl('Active Counter: ${count}')
 ```
 
@@ -193,7 +193,7 @@ For canvas overlays, HUDs, games, or custom absolute positioning, each widget al
 Look how much simpler, cleaner, and less error-prone the declarative auto-layout style is:
 
 ### Before: Imperative Manual Coordinates
-```vex
+```v
 // Requires tedious manual calculation of every coordinate:
 gui_draw_rect(420, 90, 340, 360, 0x1E1E2E)
 gui_draw_text('Interactive Widgets', 435, 105, 16, 0x89B4FA)
@@ -207,7 +207,7 @@ node_name = gui_text_input(435, 290, 300, 34, 'Node name...', node_name)
 ```
 
 ### After: Declarative Auto-Layout
-```vex
+```v
 // Clean, hierarchical, and ZERO manual coordinates:
 gui_vstack_begin(460, 84, 400, 16)
     gui_card_begin('Interactive Control Center', 400)
@@ -236,7 +236,7 @@ gui_stack_end()
 
 Here is the complete source code from [`examples/declarative_gui.vir`](../../examples/declarative_gui.vir) and [`docs/examples/21_declarative_gui.vir`](../examples/21_declarative_gui.vir):
 
-```vex
+```v
 module main
 
 // Vira Declarative Auto-Layout GUI Demonstration

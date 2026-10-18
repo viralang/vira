@@ -29,7 +29,7 @@ Hugging Face's SafeTensors is an open, secure binary serialization format design
 +-------------------------------------------------------------------+
 ```
 
-In Vex, `safetensors_load(path, tensor_name)`:
+In Vira, `safetensors_load(path, tensor_name)`:
 1. Reads the 8-byte header size $N$.
 2. Parses the JSON metadata to extract `"shape"` and `"data_offsets"`.
 3. Seeks directly to `8 + N + offset_begin`.
@@ -62,8 +62,8 @@ For $A = \text{ReLU}(Z)$, the upstream gradient flows only through positive elem
 
 $$\frac{\partial \mathcal{L}}{\partial Z_i} = \begin{cases} \Delta_i & \text{if } Z_i > 0 \\ 0 & \text{otherwise} \end{cases}$$
 
-In Vex:
-```vex
+In Vira:
+```v
 relu_grad := tensor_relu_backward(input_z, grad_out)
 ```
 On AVX2 hardware, this executes using SIMD vector comparison (`_mm256_cmp_ps(..., _CMP_GT_OQ)`) and bitwise masking (`_mm256_and_ps`) processing 8 floats per CPU cycle.
@@ -73,7 +73,7 @@ Parameters are updated in-place using fused vector subtraction:
 
 $$W \leftarrow W - \eta \cdot \nabla_W \mathcal{L}$$
 
-```vex
+```v
 tensor_sgd_step(mut w, grad_w, 0.05)
 ```
 
@@ -83,7 +83,7 @@ tensor_sgd_step(mut w, grad_w, 0.05)
 
 Here is the source code from [docs/examples/18_autograd_and_safetensors.vir](file:///c:/Users/hp/vex/docs/examples/18_autograd_and_safetensors.vir):
 
-```vex
+```v
 module main
 
 fn main() {

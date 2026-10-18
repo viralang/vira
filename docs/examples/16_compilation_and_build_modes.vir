@@ -35,7 +35,7 @@ pub fn compute_workload(iterations int) f32 {
 
 fn main() {
 	println('=================================================================')
-	println('   VEX COMPILATION, BUILD MODES & DEPLOYMENT TELEMETRY           ')
+	println('   VIRA COMPILATION, BUILD MODES & DEPLOYMENT TELEMETRY           ')
 	println('=================================================================')
 
 	config := ServiceConfig.default_config()

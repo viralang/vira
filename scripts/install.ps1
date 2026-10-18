@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$ViraVersion = "v0.5.6"
+$ViraVersion = "v0.5.8"
 $InstallDir  = "$env:USERPROFILE\.vir"
 $BinDir      = "$InstallDir\bin"
 $RuntimeDir  = "$InstallDir\runtime"

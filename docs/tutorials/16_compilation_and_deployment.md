@@ -11,7 +11,7 @@ Vira employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather 
 
 ```
 +───────────────────────────────────────────────────────────────────────────────+
-│                         VEX COMPILATION PIPELINE                              │
+│                         VIRA COMPILATION PIPELINE                              │
 │                                                                               │
 │  [1] Source Code (.vir)                                                       │
 │          │                                                                    │
@@ -45,7 +45,7 @@ Vira employs a **multi-stage Ahead-Of-Time (AOT) compilation pipeline**. Rather 
 
 ## 2. The 4 Primary CLI Commands
 
-The `vex` command-line tool provides four specialized subcommands for development, building, auditing, and inspecting code:
+The `vira` command-line tool provides four specialized subcommands for development, building, auditing, and inspecting code:
 
 ```
 vira <command> [flags] <file.vir>
@@ -195,7 +195,7 @@ WORKDIR /app
 COPY . .
 
 # Build Vira compiler
-RUN go build -o /usr/local/bin/vex ./cmd/vex
+RUN go build -o /usr/local/bin/vira ./cmd/vira
 
 # Compile Vira application in production mode
 RUN vira build -prod -o /app/server docs/examples/16_compilation_and_build_modes.vir
@@ -237,7 +237,7 @@ Let's compile and run the companion example [`docs/examples/16_compilation_and_b
 ### Output:
 ```
 =================================================================
-   VEX COMPILATION, BUILD MODES & DEPLOYMENT TELEMETRY           
+   VIRA COMPILATION, BUILD MODES & DEPLOYMENT TELEMETRY           
 =================================================================
 Service Identity:
   Name            : VexProductionService

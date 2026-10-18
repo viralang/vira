@@ -51,7 +51,7 @@ pub fn (mut worker DeviceQueueWorker) execute_kernel(batch_multiplier f32, force
 	worker.jobs_dispatched = worker.jobs_dispatched + 1
 
 	// In real GPU runtimes, a kernel launch crash (CUDA OOM, illegal address)
-	// would abort the process. In Vex, the supervisor boundary intercepts the fault,
+	// would abort the process. In Vira, the supervisor boundary intercepts the fault,
 	// wipes the actor's scratch memory in O(1), and protects the host application.
 	if force_oom {
 		panic('CUDA_ERROR_OUT_OF_MEMORY: device memory allocation failed on Device #${worker.device_id}')
@@ -71,7 +71,7 @@ pub fn (mut worker DeviceQueueWorker) execute_kernel(batch_multiplier f32, force
 
 fn main() {
 	println('=================================================================')
-	println('   VEX HETEROGENEOUS HARDWARE ACCELERATION & GPU COMPUTING       ')
+	println('   VIRA HETEROGENEOUS HARDWARE ACCELERATION & GPU COMPUTING       ')
 	println('=================================================================')
 
 	println('--- 1. ACCELERATOR PROFILES & ZERO-COPY BUFFER ALIGNMENT ---')

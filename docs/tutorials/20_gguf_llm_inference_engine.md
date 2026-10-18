@@ -2,7 +2,7 @@
 
 Running large language models (LLMs) locally has become the standard for private, low-latency AI applications. However, existing frameworks typically rely on massive C++ codebases (like `llama.cpp`) or heavy Python runtimes with PyTorch dependencies.
 
-In this tutorial, you will explore **Vex's native, zero-dependency Local LLM Inference Engine**:
+In this tutorial, you will explore **Vira's native, zero-dependency Local LLM Inference Engine**:
 1. **Native GGUF v2/v3 binary parser:** Reads quantized model files directly into 64-byte aligned SIMD memory without external C/C++ or Python dependencies.
 2. **Support for model quantization formats:** F32, F16, Q8_0 (8-bit quantization), and Q4_0 (4-bit quantization).
 3. **Hardware SIMD Transformer operators:**
@@ -43,7 +43,7 @@ GGUF (GPT-Generated Unified Format) is the open binary format powering modern lo
 +-------------------------------------------------------------------------+
 ```
 
-In Vex, `gguf_load_tensor(path, tensor_name)`:
+In Vira, `gguf_load_tensor(path, tensor_name)`:
 1. Validates the `GGUF` magic and version.
 2. Traverses metadata and extracts architecture configuration.
 3. Finds the matching tensor entry in the info table.
@@ -52,7 +52,7 @@ In Vex, `gguf_load_tensor(path, tensor_name)`:
 
 ---
 
-## 2. Transformer Architecture in Vex
+## 2. Transformer Architecture in Vira
 
 A LLaMA / Qwen / SmolLM transformer block executes the following sequence:
 
@@ -79,8 +79,8 @@ graph TD
 ### 1. RMSNorm (Root Mean Square Layer Normalization)
 $$\text{RMSNorm}(x)_i = \frac{x_i}{\sqrt{\frac{1}{d}\sum_{j=1}^d x_j^2 + \epsilon}} \cdot \gamma_i$$
 
-In Vex:
-```vex
+In Vira:
+```v
 h1 := tensor_rmsnorm(h_embed, attn_norm, 0.00001)
 ```
 On x86-64, this executes using AVX2+FMA vector instructions (`_mm256_fmadd_ps`, `_mm256_mul_ps`) normalizing 8 floats per cycle.
@@ -90,8 +90,8 @@ Rotates pairs of coordinates in the query and key vectors by positional angles:
 
 $$\begin{bmatrix} q_{2i}' \\ q_{2i+1}' \end{bmatrix} = \begin{bmatrix} \cos(pos \cdot \theta) & -\sin(pos \cdot \theta) \\ \sin(pos \cdot \theta) & \cos(pos \cdot \theta) \end{bmatrix} \begin{bmatrix} q_{2i} \\ q_{2i+1} \end{bmatrix}$$
 
-In Vex:
-```vex
+In Vira:
+```v
 q := tensor_rope(q_proj, pos, 10000.0)
 k := tensor_rope(k_proj, pos, 10000.0)
 ```
@@ -99,8 +99,8 @@ k := tensor_rope(k_proj, pos, 10000.0)
 ### 3. SwiGLU Feed-Forward Network
 $$\text{SwiGLU}(x) = (\text{SiLU}(x @ W_{\text{gate}}) \odot (x @ W_{\text{up}})) @ W_{\text{down}}$$
 
-In Vex:
-```vex
+In Vira:
+```v
 gate := tensor_silu(h2 @ w_gate)
 up := h2 @ w_up
 ffn_mid := tensor_elemwise_mul(gate, up)
@@ -113,7 +113,7 @@ ffn_out := ffn_mid @ w_down
 
 Here is the complete source code from [docs/examples/19_local_llm_inference.vir](file:///c:/Users/hp/vex/docs/examples/19_local_llm_inference.vir):
 
-```vex
+```v
 module main
 
 fn vocab_decode(id int) string {
@@ -130,7 +130,7 @@ fn vocab_decode(id int) string {
 		return 'AI'
 	}
 	if id == 7 {
-		return 'Vex'
+		return 'Vira'
 	}
 	return '<token>'
 }
@@ -212,7 +212,7 @@ fn main() {
 	}
 
 	println('=== 3. COMPLETED INFERENCE SEQUENCE ===')
-	println('Text: "The future of AI Vex"')
+	println('Text: "The future of AI Vira"')
 }
 ```
 
@@ -240,9 +240,9 @@ Prompt token: #3 -> "The"
 Generated step 0: token_id=4 ("future")
 Generated step 1: token_id=5 ("of")
 Generated step 2: token_id=6 ("AI")
-Generated step 3: token_id=7 ("Vex")
+Generated step 3: token_id=7 ("Vira")
 === 3. COMPLETED INFERENCE SEQUENCE ===
-Text: "The future of AI Vex"
+Text: "The future of AI Vira"
 [vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
 [vira_rt] pool_workers=0 | actor_tasks_run=0 | work_steals=0
 [vira_rt] active_leaks=0 | total_freed=109

@@ -1,7 +1,7 @@
 # Tutorial 19: Developer Tooling, LSP, VS Code Extension & Package Management
 
 A modern language needs a world-class developer experience. The Vira toolchain comes out of the box with zero-dependency built-in developer tools:
-1. **Package Management & Project Scaffolding:** `vira init`, `vex.mod`, and multi-file compilation.
+1. **Package Management & Project Scaffolding:** `vira init`, `vira.mod`, and multi-file compilation.
 2. **Deterministic Code Formatter:** `vira fmt`.
 3. **Built-in Unit Testing Framework:** `vira test`.
 4. **Language Server Protocol (LSP):** `vira lsp`.
@@ -9,7 +9,7 @@ A modern language needs a world-class developer experience. The Vira toolchain c
 
 ---
 
-## 1. Project Initialization & `vex.mod`
+## 1. Project Initialization & `vira.mod`
 
 To scaffold a new Vira project:
 ```bash
@@ -19,7 +19,7 @@ vira init my_service
 This creates the canonical Vira project structure:
 ```
 my_service/
-├── vex.mod          # Package manifest (module, version, license)
+├── vira.mod          # Package manifest (module, version, license)
 ├── .gitignore       # Pre-configured ignores for build/ and binaries
 ├── src/
 │   └── main.vir     # Application entry point
@@ -54,7 +54,7 @@ vira build -prod -o bin/my_service my_service/
 
 During compilation:
 1. Vira scans the directory and parses all `.vir` files into ASTs.
-2. The module name is validated against `vex.mod`.
+2. The module name is validated against `vira.mod`.
 3. All structs, interfaces, functions, and actors are registered in a single unified symbol table.
 4. Static escape analysis (Autofree) injects deterministic LIFO destructors across all files.
 5. Emits optimized C99 and links into a native standalone executable.
@@ -95,10 +95,10 @@ vira test tests/
 vira test tests/math_test.vir
 ```
 
-### Writing Tests in Vex
+### Writing Tests in Vira
 Any function prefixed with `test_` is treated as a test case:
 
-```vex
+```v
 module main
 
 fn test_tensor_addition() {
@@ -148,9 +148,9 @@ vira lsp
 The official Vira VS Code extension is located in [editors/vscode](file:///c:/Users/hp/vex/editors/vscode):
 
 ### Files
-- [package.json](file:///c:/Users/hp/vex/editors/vscode/package.json): Extension manifest declaring language `vex` and command bindings.
+- [package.json](file:///c:/Users/hp/vex/editors/vscode/package.json): Extension manifest declaring language `vira` and command bindings.
 - [language-configuration.json](file:///c:/Users/hp/vex/editors/vscode/language-configuration.json): Bracket matching, comment toggling (`//`), and auto-closing pairs.
-- [syntaxes/vex.tmLanguage.json](file:///c:/Users/hp/vex/editors/vscode/syntaxes/vex.tmLanguage.json): TextMate syntax grammar highlighting keywords (`actor`, `arena`, `tensor`), quadrants (`pub:`, `mut:`), operators (`@`, `<-`), and built-ins.
+- [syntaxes/vira.tmLanguage.json](file:///c:/Users/hp/vex/editors/vscode/syntaxes/vira.tmLanguage.json): TextMate syntax grammar highlighting keywords (`actor`, `arena`, `tensor`), quadrants (`pub:`, `mut:`), operators (`@`, `<-`), and built-ins.
 
 ### Installing in VS Code
 Copy or symlink the folder to your VS Code extensions directory:

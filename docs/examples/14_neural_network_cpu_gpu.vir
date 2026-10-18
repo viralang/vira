@@ -92,7 +92,7 @@ pub fn (mut gpu GpuInferenceEngine) forward(inputs tensor[f32], force_vram_oom b
 
 fn main() {
 	println('=================================================================')
-	println('   VEX AI NEURAL NETWORK: CPU SIMD VS GPU STREAM ACCELERATION    ')
+	println('   VIRA AI NEURAL NETWORK: CPU SIMD VS GPU STREAM ACCELERATION    ')
 	println('=================================================================')
 
 	println('--- 1. NEURAL NETWORK WEIGHT INITIALIZATION (MLP 64 -> 128 -> 64 -> 10) ---')

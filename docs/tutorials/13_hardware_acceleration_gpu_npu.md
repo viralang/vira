@@ -72,9 +72,9 @@ On modern unified architectures, the CPU and GPU share the same physical memory 
 - CPU vector units (ARM NEON) and GPU compute kernels can read and write the **exact same memory buffer** with zero transfer latency.
 
 ### 3. Erlang-Style Fault Containment for GPU OOM
-In Vex, GPU device offloading is managed by **Supervised Actors**:
+In Vira, GPU device offloading is managed by **Supervised Actors**:
 
-```vex
+```v
 pub actor DeviceQueueWorker {
 pub:
 	device_id int
@@ -123,7 +123,7 @@ When a GPU worker runs out of memory, **only that worker's task is failed**; the
 
 Vira integrates device execution with its native non-blocking send (`<-`) and work-stealing scheduler:
 
-```vex
+```v
 mut gpu_node_0 := DeviceQueueWorker{ device_id: 0, target_hardware: 'GPU_CUDA', jobs_dispatched: 0 }
 mut gpu_node_1 := DeviceQueueWorker{ device_id: 1, target_hardware: 'GPU_CUDA', jobs_dispatched: 0 }
 mut npu_node   := DeviceQueueWorker{ device_id: 2, target_hardware: 'NPU_ACCEL', jobs_dispatched: 0 }
@@ -145,7 +145,7 @@ res_gpu1 := fut_gpu1.await() or {
 res_npu := fut_npu.await() or { 0.0 }
 ```
 
-While the host thread waits for the GPU kernel to finish via `.await()`, Vex's Chase-Lev scheduler does not put the thread to sleep; instead, it steals and runs other CPU tasks while the GPU compute queue drains.
+While the host thread waits for the GPU kernel to finish via `.await()`, Vira's Chase-Lev scheduler does not put the thread to sleep; instead, it steals and runs other CPU tasks while the GPU compute queue drains.
 
 ---
 
@@ -172,7 +172,7 @@ Run the verified heterogeneous acceleration example:
 ### Execution Output
 ```
 =================================================================
-   VEX HETEROGENEOUS HARDWARE ACCELERATION & GPU COMPUTING       
+   VIRA HETEROGENEOUS HARDWARE ACCELERATION & GPU COMPUTING       
 =================================================================
 --- 1. ACCELERATOR PROFILES & ZERO-COPY BUFFER ALIGNMENT ---
 Detected Hardware Compute Targets:
@@ -203,7 +203,7 @@ GPU Device #1 recovered after supervisor restart: 6553.61
 
 ## 7. The Vira Hardware Acceleration Roadmap
 
-Vex's hardware roadmap is structured in three progressive tiers:
+Vira's hardware roadmap is structured in three progressive tiers:
 
 ```
 Tier 1: Host SIMD (Current)      Tier 2: Zero-Copy C-ABI (Current)    Tier 3: Native Device Directives (Roadmap)

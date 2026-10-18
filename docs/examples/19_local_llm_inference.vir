@@ -8,9 +8,9 @@ module main
 // OUT: Generated step 0: token_id=4 ("future")
 // OUT: Generated step 1: token_id=5 ("of")
 // OUT: Generated step 2: token_id=6 ("AI")
-// OUT: Generated step 3: token_id=7 ("Vex")
+// OUT: Generated step 3: token_id=7 ("Vira")
 // OUT: === 3. COMPLETED INFERENCE SEQUENCE ===
-// OUT: Text: "The future of AI Vex"
+// OUT: Text: "The future of AI Vira"
 // OUT: [vira_rt] active_leaks=0
 
 fn vocab_decode(id int) string {
@@ -27,7 +27,7 @@ fn vocab_decode(id int) string {
 		return 'AI'
 	}
 	if id == 7 {
-		return 'Vex'
+		return 'Vira'
 	}
 	return '<token>'
 }
@@ -62,7 +62,7 @@ fn main() {
 	println('Prompt token: #${cur_token} -> "${vocab_decode(cur_token)}"')
 
 	mut pos := 0
-	for pos < 4 {
+	for pos < 14 {
 		// 1. Token Embedding Lookup
 		h_embed := tensor_embedding(token_emb, cur_token)
 
@@ -109,5 +109,5 @@ fn main() {
 	}
 
 	println('=== 3. COMPLETED INFERENCE SEQUENCE ===')
-	println('Text: "The future of AI Vex"')
+	println('Text: "The future of AI Vira"')
 }

@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-In this capstone tutorial, you will assemble all of Vex's core features into a unified, production-ready AI batch inference pipeline:
+In this capstone tutorial, you will assemble all of Vira's core features into a unified, production-ready AI batch inference pipeline:
 - Struct embedding for telemetry and audit tracking
 - Structural interfaces for polymorphic job reporting
 - Multi-threaded actors for parallel model inference
@@ -52,7 +52,7 @@ In this capstone tutorial, you will assemble all of Vex's core features into a u
 ## 3. Core Implementation Highlights
 
 ### 1. Embedded Telemetry
-```vex
+```v
 pub struct MetricHeader {
 pub:
 	timestamp i64
@@ -71,7 +71,7 @@ pub mut:
 ```
 
 ### 2. Interface Boxing
-```vex
+```v
 pub interface Auditable {
 	job_summary() string
 }
@@ -86,7 +86,7 @@ println(audit.job_summary())
 ```
 
 ### 3. Actor SIMD Forward Pass
-```vex
+```v
 pub actor InferenceEngine {
 pub:
 	model_id string

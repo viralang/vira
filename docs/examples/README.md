@@ -2,7 +2,7 @@
 
 This directory contains standalone, self-contained, runnable `.vir` example programs covering every feature and pattern in the language.
 
-All examples can be executed directly using the `vex` compiler CLI:
+All examples can be executed directly using the `vira` compiler CLI:
 
 ```powershell
 # Run directly

@@ -16,7 +16,7 @@ Vira solves these problems by combining **Actor Isolation**, **Chase-Lev Work-St
 
 ```
 +───────────────────────────────────────────────────────────────────────────────+
-│                               VEX RUNTIME POOL                                │
+│                               VIRA RUNTIME POOL                                │
 │                                                                               │
 │  Worker Thread 0       Worker Thread 1       Worker Thread 2   Worker Thread 3│
 │   [Chase-Lev Deque]     [Chase-Lev Deque]     [Chase-Lev Deque] [Chase-Lev Deque]
@@ -43,7 +43,7 @@ Vira solves these problems by combining **Actor Isolation**, **Chase-Lev Work-St
 
 An actor in Vira is declared with the `actor` keyword. Like structs, actors support 4-quadrant field encapsulation (`pub:`, `mut:`, `pub mut:`, or default private):
 
-```vex
+```v
 pub actor ComputeNode {
 pub:
 	node_id int
@@ -68,7 +68,7 @@ When you declare `actor ComputeNode`, the C99 backend emits:
 
 Methods on actors take a receiver (`(mut node ComputeNode)`). Inside an actor method, you can allocate local objects, perform SIMD matrix mathematics, and update internal state safely:
 
-```vex
+```v
 pub fn (mut node ComputeNode) compute_batch(multiplier f32, force_fault bool) f32 {
 	node.batches_completed = node.batches_completed + 1
 
@@ -93,9 +93,9 @@ Because actor state is completely isolated, **no other thread can inspect or mut
 
 ## 4. Asynchronous Message Passing (`<-`)
 
-In Vex, you interact with an actor by sending messages using the asynchronous arrow operator (`<-`):
+In Vira, you interact with an actor by sending messages using the asynchronous arrow operator (`<-`):
 
-```vex
+```v
 mut n1 := ComputeNode{ node_id: 1, batches_completed: 0, is_degraded: false }
 mut n2 := ComputeNode{ node_id: 2, batches_completed: 0, is_degraded: false }
 mut n3 := ComputeNode{ node_id: 3, batches_completed: 0, is_degraded: false }
@@ -118,9 +118,9 @@ fut4 := n4 <- compute_batch(4.0, false)
 
 ## 5. Synchronization with Futures (`.await()`)
 
-To synchronize and collect results (Fan-In), invoke `.await()` on the `Future` handle. In Vex, `.await()` returns a Result type (`!T`), requiring unwrap handling with `or { ... }`:
+To synchronize and collect results (Fan-In), invoke `.await()` on the `Future` handle. In Vira, `.await()` returns a Result type (`!T`), requiring unwrap handling with `or { ... }`:
 
-```vex
+```v
 res1 := fut1.await() or {
 	eprintln('Unexpected error on Node 1: ${err}')
 	0.0
@@ -143,7 +143,7 @@ If the awaited future has not yet finished when `.await()` is called:
 
 What happens when an actor panics? In languages like C++ or Go, an uncaught panic or segmentation fault terminates the entire process.
 
-In Vex, the runtime encapsulates actor execution within an **Erlang-style Supervisor Boundary**:
+In Vira, the runtime encapsulates actor execution within an **Erlang-style Supervisor Boundary**:
 
 ```
 [Worker Thread]
@@ -166,7 +166,7 @@ In Vex, the runtime encapsulates actor execution within an **Erlang-style Superv
 ### Handling Actor Crashes Gracefully
 Because `.await()` returns a Result, the panic message is surfaced directly into the `or { ... }` block as the implicit `err` variable:
 
-```vex
+```v
 res3 := fut3.await() or {
 	println('Supervisor trapped fault on Node 3 -> "${err}"')
 	0.0 // Default fallback keeps the pipeline running
@@ -184,7 +184,7 @@ Supervisor trapped fault on Node 3 -> "Node #3 thermal throttling / NaN anomaly"
 
 Because the supervisor wiped the actor's scratch memory in **O(1)** and reset its mailbox spinlock, the actor is immediately healthy and ready to accept new messages:
 
-```vex
+```v
 // Node 3 is fully operational; send a retry batch
 fut3_retry := n3 <- compute_batch(3.0, false)
 res3_recovered := fut3_retry.await() or {
@@ -205,7 +205,7 @@ Node 3 successfully processed retry batch after restart: 24576.00
 
 When multiple messages are sent to the **same** actor concurrently:
 
-```vex
+```v
 f_seq1 := n1 <- compute_batch(1.5, false)
 f_seq2 := n1 <- compute_batch(2.5, false)
 
@@ -233,7 +233,7 @@ Run the verified standalone program:
 ### Terminal Output
 ```
 =================================================================
-   VEX MULTICORE WORK-STEALING ACTORS & SUPERVISOR DEMO          
+   VIRA MULTICORE WORK-STEALING ACTORS & SUPERVISOR DEMO          
 =================================================================
 --- 1. INITIALIZING INDEPENDENT ACTOR NODES ---
 Nodes initialized with isolated mailboxes and private arena slabs

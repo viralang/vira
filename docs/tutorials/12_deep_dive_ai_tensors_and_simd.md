@@ -21,7 +21,7 @@ Vira treats **numerical tensors as first-class citizens directly in the compiler
 
 ## 2. In-Depth Language Comparison
 
-| Feature / Metric | **Vex** | **Python (PyTorch / NumPy)** | **Rust (`candle` / `tch-rs`)** | **C++ (`Eigen` / `BLAS`)** | **Mojo** | **Go** |
+| Feature / Metric | **Vira** | **Python (PyTorch / NumPy)** | **Rust (`candle` / `tch-rs`)** | **C++ (`Eigen` / `BLAS`)** | **Mojo** | **Go** |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Language Integration** | Native syntax (`tensor[f32]`, `@`) | Third-party library | Third-party crate | Third-party library / headers | Native structs + stdlib | Third-party slice math |
 | **Matrix Math Syntax** | `y := w @ x` | `y = w @ x` | `y = w.matmul(&x)?` | `y = w * x;` | `y = w @ x` | Loop or `mat.Mul(w, x)` |
@@ -55,7 +55,7 @@ Vira treats **numerical tensors as first-class citizens directly in the compiler
 Vira is designed from the hardware up to saturate modern CPU vector registers:
 
 ```
-                      VEX TENSOR MEMORY LAYOUT (64-BYTE ALIGNED)
+                      VIRA TENSOR MEMORY LAYOUT (64-BYTE ALIGNED)
   ┌─────────────────────────────────────────────────────────────────────────────┐
   │ [vira_f32: 0..7] │ [vira_f32: 8..15] │ [vira_f32: 16..23] │ [vira_f32: 24..31]  │
   └─────────────────────────────────────────────────────────────────────────────┘
@@ -85,7 +85,7 @@ If each matrix invokes `malloc()` and `free()`, memory fragmentation spikes and 
 
 Vira provides **Lexical Bump Arenas**:
 
-```vex
+```v
 arena {
     // Both intermediate activation matrices are allocated from a 1MB contiguous slab
     h1 := inputs @ weights.w1
@@ -113,9 +113,9 @@ arena {
 
 In Python, serving multiple concurrent model inference requests requires spawning multiple heavyweight OS processes (`multiprocessing`), duplicating model weights across gigabytes of RAM.
 
-In Vex, models are served using **lightweight Actors**:
+In Vira, models are served using **lightweight Actors**:
 
-```vex
+```v
 pub actor ModelServer {
 pub:
 	server_id int
@@ -139,7 +139,7 @@ pub fn (mut s ModelServer) forward_pass(multiplier f32) f32 {
 ```
 
 ### Parallel Multicore Fan-Out:
-```vex
+```v
 mut s1 := ModelServer{ server_id: 1, batches_served: 0 }
 mut s2 := ModelServer{ server_id: 2, batches_served: 0 }
 mut s3 := ModelServer{ server_id: 3, batches_served: 0 }
@@ -168,7 +168,7 @@ res4 := fut4.await() or { 0.0 }
 
 Let's examine the complete standalone program in [`docs/examples/12_deep_dive_tensors.vir`](../examples/12_deep_dive_tensors.vir):
 
-```vex
+```v
 module deep_dive_tensors
 
 pub struct MlpWeights {
@@ -253,7 +253,7 @@ To compile a production-ready, stripped standalone native binary:
 
 ```
 =================================================================
-   VEX FIRST-CLASS AI TENSORS & SIMD ACCELERATION DEEP DIVE      
+   VIRA FIRST-CLASS AI TENSORS & SIMD ACCELERATION DEEP DIVE      
 =================================================================
 --- 1. FIRST-CLASS TENSOR CREATION & MEMORY ALIGNMENT ---
 Allocated 64-byte aligned tensors:

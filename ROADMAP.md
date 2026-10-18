@@ -11,7 +11,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 * **Deterministic Resource Management:** Zero garbage collector overhead, zero hidden pauses, and zero memory leaks (`active_leaks=0`) via static scope escape analysis (Autofree) and 64-byte aligned bump arenas.
 * **First-Class AI Tensors:** Contiguous, cache-friendly tensor representations with built-in hardware SIMD vectorization (AVX2 + FMA, ARM NEON), native Hugging Face `.safetensors`, and GGUF v2/v3 local LLM inference with zero Python or C++ runtime dependencies.
 * **Erlang-Inspired Fault Tolerance:** Lightweight actor concurrency with Chase-Lev work-stealing and `OneForOne` supervisor containment that isolates failures without crashing the entire service.
-* **Modern Developer Tooling:** First-party CLI commands (`fmt`, `test`, `lsp`, `init`), package manifests (`vex.mod`), and native VS Code integration.
+* **Modern Developer Tooling:** First-party CLI commands (`fmt`, `test`, `lsp`, `init`), package manifests (`vira.mod`), and native VS Code integration.
 
 ---
 
@@ -24,7 +24,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5] AI Tensors, SafeTensors & GGUF LLM      ✅ COMPLETED
        │
- [v0.5.5] Tooling: fmt, test, lsp & vex.mod     ✅ COMPLETED
+ [v0.5.5] Tooling: fmt, test, lsp & vira.mod     ✅ COMPLETED
        │
  [v0.5.6] Enterprise Scaffolding & GUI Engine   ✅ COMPLETED
        │
@@ -77,7 +77,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Automated Test Runner (`vira test`):** Synthesizes isolated test harnesses, runs `*_test.vir` files, and automatically validates zero memory leaks (`active_leaks=0`).
 - [x] **Language Server Protocol (`vira lsp`):** Standard JSON-RPC 2.0 LSP server providing diagnostics, hover documentation, and on-save formatting.
 - [x] **VS Code Extension (`editors/vscode/`):** Full extension package with syntax grammar, bracket matching, code snippets, and LSP client integration.
-- [x] **Package Manifest & Multi-File Projects (`vira init` & `vex.mod`):** Scaffolding and multi-file directory compilation into single unified binaries.
+- [x] **Package Manifest & Multi-File Projects (`vira init` & `vira.mod`):** Scaffolding and multi-file directory compilation into single unified binaries.
 - [x] **Curriculum & Documentation:** 19 runnable standalone examples and 20 step-by-step tutorials with verified 0 leaks.
 
 ### 5. Enterprise Multi-Package Scaffolding & Declarative GUI Engine (v0.5.6)
@@ -138,18 +138,18 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 
 - [ ] **Native C Interoperability (`extern "C"`):**
   - Header declaration syntax for linking external C functions and structs directly:
-    ```vex
+    ```vira
     extern "C" {
         fn sqlite3_open(filename: string, db: &void) -> int
         fn sqlite3_exec(db: void, sql: string, callback: void, arg: void, errmsg: &string) -> int
     }
     ```
-  - Linking flags (`-l`, `-L`) integrated into `vex.mod` manifests.
+  - Linking flags (`-l`, `-L`) integrated into `vira.mod` manifests.
 - [ ] **Shared Dynamic Library Compilation (`vira build -shared`):**
   - Produce `.dll` (Windows), `.so` (Linux), and `.dylib` (macOS) shared libraries adhering to standard C-ABI calling conventions.
   - Automatic C header file (`.h`) generation matching exported public Vira functions.
 - [ ] **Python Interoperability / C-Extension Generator:**
-  - Tooling command `vex pybind` generating Python C-extension bindings with zero-copy NumPy / PyTorch tensor buffer interchange.
+  - Tooling command `vira pybind` generating Python C-extension bindings with zero-copy NumPy / PyTorch tensor buffer interchange.
   - Enables Python data science stacks to invoke Vira SIMD tensors and local GGUF models directly.
 
 ---
@@ -174,7 +174,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 
 - [ ] **Parametric Polymorphism (Generics):**
   - Type-parameterized structs and functions:
-    ```vex
+    ```vira
     struct RingBuffer[T] {
         items: []T
         head: int
@@ -186,7 +186,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
   - Monomorphized ahead-of-time code generation ensuring zero dynamic dispatch overhead for generic types.
 - [ ] **Exhaustive Pattern Matching (`match` expressions):**
   - Multi-branch pattern matching on primitive values, strings, Result unwrap, and discriminated unions:
-    ```vex
+    ```vira
     match status {
         200 => print("OK")
         404 => print("Not Found")
@@ -211,7 +211,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [ ] **Standard Library Expansion:**
   - Cryptography (`crypto/sha256`, `crypto/aes`).
   - Compression (`compress/gzip`, `compress/zstd`).
-  - High-precision timing and benchmarking harness (`vex bench`).
+  - High-precision timing and benchmarking harness (`vira bench`).
 - [ ] **v1.0 API Stability Guarantee:**
   - Syntax and ABI freeze with guaranteed backwards compatibility for all 1.x releases.
 

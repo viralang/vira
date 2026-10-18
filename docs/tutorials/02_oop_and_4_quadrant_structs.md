@@ -19,7 +19,7 @@ Object-Oriented Programming in Vira is designed to prevent data races and encaps
 
 In most languages, fields are either public or private. Vira introduces **4-quadrant field encapsulation**, decoupling visibility from mutability within a single struct definition:
 
-```vex
+```v
 pub struct UserProfile {
 	Timestamp            // Embedded struct (promoted)
 	hashed_pw string     // Quadrant 1: Private & Immutable (default)
@@ -54,7 +54,7 @@ Vira uses struct embedding instead of class inheritance. To support scalable cod
 
 ### 1. Reusable Base Model (`docs/examples/02_timestamp.vir`)
 
-```vex
+```v
 module oop_demo
 
 pub struct Timestamp {
@@ -73,7 +73,7 @@ pub fn (mut t Timestamp) touch() {
 
 When you import and embed a struct, all of its fields and methods are automatically promoted to the outer struct:
 
-```vex
+```v
 module oop_demo
 
 // Import reusable base struct from companion file
@@ -95,7 +95,7 @@ pub mut:
 
 Calling promoted methods or fields across imported modules is completely transparent:
 
-```vex
+```v
 mut user := UserProfile.new('alice', 'alice@vira.dev', 'secret')
 user.touch()                  // Dispatches to promoted Timestamp.touch()!
 println('${user.updated_at}') // Reads promoted field Timestamp.updated_at
@@ -114,7 +114,7 @@ Methods specify an explicit receiver parameter before the function name:
 
 ### Value Receiver (Read-Only)
 Called on both immutable and mutable instances:
-```vex
+```v
 pub fn (u UserProfile) display() string {
 	return 'User @${u.username} (${u.email}) [score=${u.score}]'
 }
@@ -122,7 +122,7 @@ pub fn (u UserProfile) display() string {
 
 ### Mutable Pointer Receiver
 Modifies the underlying struct; can **only** be invoked on instances declared with `mut`:
-```vex
+```v
 pub fn (mut u UserProfile) award_points(points int) {
 	u.score = u.score + points
 	u.touch()
@@ -130,7 +130,7 @@ pub fn (mut u UserProfile) award_points(points int) {
 ```
 
 If you try to call a mutable receiver method on an immutable binding, the compiler stops you:
-```vex
+```v
 user := UserProfile{ ... } // immutable!
 user.award_points(50)     // ERROR: cannot call mutable receiver method 'award_points()' on immutable binding 'user'
 ```
@@ -141,7 +141,7 @@ user.award_points(50)     // ERROR: cannot call mutable receiver method 'award_p
 
 To associate a static factory function with a struct, use `StructName.method_name`:
 
-```vex
+```v
 pub fn UserProfile.new(username string, email string, secret string) UserProfile {
 	return UserProfile{
 		Timestamp: Timestamp{ created_at: 1750000000, updated_at: 1750000000 },
@@ -155,7 +155,7 @@ pub fn UserProfile.new(username string, email string, secret string) UserProfile
 }
 
 // Invoke via:
-user := UserProfile.new('alice', 'alice@vex.dev', 'hash123')
+user := UserProfile.new('alice', 'alice@vira.dev', 'hash123')
 ```
 
 ---
@@ -169,11 +169,11 @@ user := UserProfile.new('alice', 'alice@vex.dev', 'hash123')
 Expected output:
 ```text
 === 1. STATIC FACTORY CONSTRUCTOR ===
-User @alice (alice@vex.dev) [score=100, active=true]
+User @alice (alice@vira.dev) [score=100, active=true]
 === 2. PROMOTED FIELDS & METHODS (STRUCT EMBEDDING) ===
 Initial timestamp: 1750000000
 Updated timestamp after touch(): 1760000000
-User @alice (alice@vex.dev) [score=150, active=true]
+User @alice (alice@vira.dev) [score=150, active=true]
 === 3. 4-QUADRANT MUTABILITY ===
 User active status toggled: false
 ```

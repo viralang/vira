@@ -53,7 +53,7 @@ Every actor automatically receives a dedicated mailbox spinlock and an isolated 
 
 Send messages to an actor asynchronously using the `<-` send operator:
 
-```vex
+```v
 mut node_a := WorkerNode{ id: 101, jobs_completed: 0 }
 mut node_b := WorkerNode{ id: 102, jobs_completed: 0 }
 
@@ -70,7 +70,7 @@ The calling thread does not block. The message is packaged into an envelope and 
 
 To retrieve the result of an actor call, invoke `.await()` on the returned `Future`:
 
-```vex
+```v
 score_a := fut_a.await() or {
 	eprintln('Node A unexpected error: ${err}')
 	0.0
@@ -109,7 +109,7 @@ When a worker thread panics (e.g. from a division by zero, invalid tensor dimens
 ### Trapping the Fault
 The supervisor logs the event to stdout and delivers the error message directly to the caller's `or { ... }` block:
 
-```vex
+```v
 score_b := fut_b.await() or {
 	println('Future caught supervised Node B fault: "${err}"')
 	0.0 // Graceful fallback!
@@ -119,7 +119,7 @@ score_b := fut_b.await() or {
 ### Automatic Recovery
 Because the actor was reset and its memory was cleared in O(1), the actor is immediately healthy and ready to accept subsequent jobs:
 
-```vex
+```v
 fut_b_retry := node_b <- process_batch(32, false)
 score_b_retry := fut_b_retry.await() or { 0.0 }
 ```
