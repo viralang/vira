@@ -16,6 +16,7 @@ import (
 	"github.com/viralang/vira/internal/formatter"
 	"github.com/viralang/vira/internal/mod"
 	"github.com/viralang/vira/internal/parser"
+	"github.com/viralang/vira/internal/pkg"
 	"github.com/viralang/vira/internal/source"
 	"github.com/viralang/vira/internal/token"
 )
@@ -484,26 +485,7 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 
 		for _, imp := range curr.ast.Imports {
 			impTarget := imp.Name
-			var candidates []string
-
-			// 1. Relative to importing file
-			candidates = append(candidates,
-				filepath.Join(cDir, impTarget),
-				filepath.Join(cDir, impTarget+".vir"),
-				filepath.Join(cDir, impTarget+".vex"),
-			)
-
-			// 2. Relative to project root
-			if pRoot != "" {
-				candidates = append(candidates,
-					filepath.Join(pRoot, "src", impTarget),
-					filepath.Join(pRoot, "src", impTarget+".vir"),
-					filepath.Join(pRoot, "src", impTarget+".vex"),
-					filepath.Join(pRoot, impTarget),
-					filepath.Join(pRoot, impTarget+".vir"),
-					filepath.Join(pRoot, impTarget+".vex"),
-				)
-			}
+			candidates := pkg.ResolveImportCandidates(cDir, pRoot, impTarget)
 
 			for _, cand := range candidates {
 				cleanCand := filepath.Clean(cand)
@@ -515,7 +497,17 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 				if cErr == nil && cStat.IsDir() {
 					visited[cleanCand] = true
 					_ = filepath.Walk(cleanCand, func(subPath string, subInfo os.FileInfo, err error) error {
-						if err == nil && !subInfo.IsDir() && (strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex")) {
+						if err != nil {
+							return nil
+						}
+						if subInfo.IsDir() {
+							if subInfo.Name() == "tests" || subInfo.Name() == ".git" {
+								return filepath.SkipDir
+							}
+							return nil
+						}
+						if (strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex")) &&
+							!strings.HasSuffix(subInfo.Name(), "_test.vir") && !strings.HasSuffix(subInfo.Name(), "_test.vex") {
 							cleanSub := filepath.Clean(subPath)
 							if !visited[cleanSub] {
 								visited[cleanSub] = true
@@ -596,22 +588,7 @@ func (s *Server) validateDocument(uri string, text string) {
 		docPRoot, _, _ := mod.FindProjectRoot(docFileDir)
 		for _, imp := range astFile.Imports {
 			impTarget := imp.Name
-			var candList []string
-			candList = append(candList,
-				filepath.Join(docFileDir, impTarget),
-				filepath.Join(docFileDir, impTarget+".vir"),
-				filepath.Join(docFileDir, impTarget+".vex"),
-			)
-			if docPRoot != "" {
-				candList = append(candList,
-					filepath.Join(docPRoot, "src", impTarget),
-					filepath.Join(docPRoot, "src", impTarget+".vir"),
-					filepath.Join(docPRoot, "src", impTarget+".vex"),
-					filepath.Join(docPRoot, impTarget),
-					filepath.Join(docPRoot, impTarget+".vir"),
-					filepath.Join(docPRoot, impTarget+".vex"),
-				)
-			}
+			candList := pkg.ResolveImportCandidates(docFileDir, docPRoot, impTarget)
 			foundImp := false
 			for _, c := range candList {
 				candURI := pathToURI(filepath.Clean(c))

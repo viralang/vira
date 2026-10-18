@@ -324,14 +324,14 @@ func TestLSPOOPCompositionExampleWithURLEncodedURI(t *testing.T) {
 		},
 	}, nil)
 
-	// Hover on Timestamp at line 7, col 2
+	// Hover on Timestamp at line 12, col 7
 	sendRPC(&in, "textDocument/hover", map[string]interface{}{
 		"textDocument": map[string]interface{}{
 			"uri": encodedURI,
 		},
 		"position": map[string]interface{}{
-			"line":      7,
-			"character": 2,
+			"line":      12,
+			"character": 7,
 		},
 	}, 2)
 

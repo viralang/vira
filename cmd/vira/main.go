@@ -18,6 +18,7 @@ import (
 	"github.com/viralang/vira/internal/lsp"
 	"github.com/viralang/vira/internal/mod"
 	"github.com/viralang/vira/internal/parser"
+	"github.com/viralang/vira/internal/pkg"
 	"github.com/viralang/vira/internal/source"
 	virart "github.com/viralang/vira/runtime"
 )
@@ -36,6 +37,10 @@ Commands:
   fmt     Format .vir source files according to official style rules
   lsp     Start the Vira Language Server (LSP) over stdin/stdout
   init    Initialize a new Vira project scaffold with vira.mod and src/
+  add     Add and download a package dependency (local or git)
+  install Install dependencies declared in vira.mod and vira.lock
+  remove  Remove a package dependency
+  vendor  Vendor all dependencies into ./vendor for offline/air-gapped builds
   demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
   version Display compiler version and target platform
 
@@ -80,6 +85,14 @@ func main() {
 		lspCmd()
 	case "init":
 		initCmd(os.Args[2:])
+	case "add":
+		addCmd(os.Args[2:])
+	case "install", "get":
+		installCmd(os.Args[2:])
+	case "remove":
+		removeCmd(os.Args[2:])
+	case "vendor":
+		vendorCmd(os.Args[2:])
 	case "demo":
 		demoCmd()
 	case "version", "-v", "--version":
@@ -613,6 +626,116 @@ func demoCmd() {
 	runCmd([]string{"-prod", demoFile})
 }
 
+// --- SUBCOMMAND 10: `vira add` ---
+
+func addCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: vira add <package[@version]> [version]")
+		os.Exit(1)
+	}
+
+	raw := args[0]
+	pkgPath := raw
+	version := "latest"
+	if idx := strings.Index(raw, "@"); idx != -1 {
+		pkgPath = raw[:idx]
+		version = raw[idx+1:]
+	} else if len(args) >= 2 {
+		version = args[1]
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatalIO(err)
+	}
+	root, _, err := mod.FindProjectRoot(cwd)
+	if err != nil {
+		root = cwd
+	}
+
+	mgr := pkg.NewManager()
+	fmt.Printf("Fetching package %s (%s)...\n", pkgPath, version)
+	locked, err := mgr.Add(root, pkgPath, version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ Added dependency %s (%s)\n", locked.Path, locked.Version)
+	fmt.Printf("  checksum: %s\n", locked.Checksum)
+}
+
+// --- SUBCOMMAND 11: `vira install` ---
+
+func installCmd(args []string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatalIO(err)
+	}
+	root, _, err := mod.FindProjectRoot(cwd)
+	if err != nil {
+		root = cwd
+	}
+
+	mgr := pkg.NewManager()
+	count, err := mgr.Install(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error installing dependencies: %v\n", err)
+		os.Exit(1)
+	}
+	if count == 0 {
+		fmt.Println("All dependencies are up to date.")
+	} else {
+		fmt.Printf("✓ Successfully installed %d package(s)\n", count)
+	}
+}
+
+// --- SUBCOMMAND 12: `vira remove` ---
+
+func removeCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: vira remove <package>")
+		os.Exit(1)
+	}
+	pkgPath := args[0]
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatalIO(err)
+	}
+	root, _, err := mod.FindProjectRoot(cwd)
+	if err != nil {
+		root = cwd
+	}
+
+	mgr := pkg.NewManager()
+	if err := mgr.Remove(root, pkgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "error removing dependency: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ Removed dependency %s\n", pkgPath)
+}
+
+// --- SUBCOMMAND 13: `vira vendor` ---
+
+func vendorCmd(args []string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatalIO(err)
+	}
+	root, _, err := mod.FindProjectRoot(cwd)
+	if err != nil {
+		root = cwd
+	}
+
+	mgr := pkg.NewManager()
+	count, err := mgr.Vendor(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error vendoring dependencies: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ Vendored %d package(s) into ./vendor\n", count)
+}
+
 // --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
 func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer) {
@@ -729,26 +852,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		vDir := filepath.Dir(vFile)
 		for _, imp := range astFile.Imports {
 			impTarget := imp.Name
-			var candidates []string
-
-			// 1. Relative to importing file
-			candidates = append(candidates,
-				filepath.Join(vDir, impTarget),
-				filepath.Join(vDir, impTarget+".vir"),
-				filepath.Join(vDir, impTarget+".vex"),
-			)
-
-			// 2. Relative to project root
-			if pRoot != "" {
-				candidates = append(candidates,
-					filepath.Join(pRoot, "src", impTarget),
-					filepath.Join(pRoot, "src", impTarget+".vir"),
-					filepath.Join(pRoot, "src", impTarget+".vex"),
-					filepath.Join(pRoot, impTarget),
-					filepath.Join(pRoot, impTarget+".vir"),
-					filepath.Join(pRoot, impTarget+".vex"),
-				)
-			}
+			candidates := pkg.ResolveImportCandidates(vDir, pRoot, impTarget)
 
 			found := false
 			for _, cand := range candidates {
@@ -756,11 +860,19 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				if cErr == nil {
 					if cStat.IsDir() {
 						_ = filepath.Walk(cand, func(subPath string, subInfo os.FileInfo, err error) error {
-							if err == nil && !subInfo.IsDir() {
-								if strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex") {
-									addFile(subPath)
-									found = true
+							if err != nil {
+								return nil
+							}
+							if subInfo.IsDir() {
+								if subInfo.Name() == "tests" || subInfo.Name() == ".git" {
+									return filepath.SkipDir
 								}
+								return nil
+							}
+							if (strings.HasSuffix(subInfo.Name(), ".vir") || strings.HasSuffix(subInfo.Name(), ".vex")) &&
+								!strings.HasSuffix(subInfo.Name(), "_test.vir") && !strings.HasSuffix(subInfo.Name(), "_test.vex") {
+								addFile(subPath)
+								found = true
 							}
 							return nil
 						})
