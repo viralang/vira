@@ -139,6 +139,8 @@ func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
 		return false, 0
 	case *checker.InterfaceType:
 		return true, ast.CleanupInterface
+	case *checker.SliceType:
+		return true, ast.CleanupSlice
 	default:
 		return false, 0
 	}
@@ -252,6 +254,11 @@ func (a *Analyzer) rewriteBlock(
 					}
 				}
 			}
+			a.rewriteBlock(s.Body, loopScope, false, report)
+			rewritten = append(rewritten, s)
+
+		case *ast.ForInStmt:
+			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
 			a.rewriteBlock(s.Body, loopScope, false, report)
 			rewritten = append(rewritten, s)
 

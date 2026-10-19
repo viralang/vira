@@ -106,7 +106,7 @@ func main() {
 }
 
 func versionCmd() {
-	fmt.Printf("Vira v0.5.8 (%s/%s)\n", goRuntime.GOOS, goRuntime.GOARCH)
+	fmt.Printf("Vira v0.5.9 (%s/%s)\n", goRuntime.GOOS, goRuntime.GOARCH)
 }
 
 // --- SUBCOMMAND 1: `vira run` ---

@@ -106,6 +106,16 @@ type RefType struct {
 func (t *RefType) Span() token.Span { return t.AmpPos }
 func (t *RefType) typeExprNode()    {}
 
+// ArrayType represents fixed-size `[N]T` (when Len != nil) or dynamic slice `[]T` (when Len == nil).
+type ArrayType struct {
+	LBracketPos token.Span
+	Len         Expr     // nil for slice `[]T`, constant integer expr for `[N]T`
+	Elem        TypeExpr // element type
+}
+
+func (t *ArrayType) Span() token.Span { return t.LBracketPos }
+func (t *ArrayType) typeExprNode()    {}
+
 // --- OOP & TOP-LEVEL DECLARATIONS ---
 
 // StructField represents a single field inside one of the 4 access quadrants.
@@ -260,6 +270,17 @@ type ForStmt struct {
 func (s *ForStmt) Span() token.Span { return s.StmtSpan }
 func (s *ForStmt) stmtNode()        {}
 
+// ForInStmt represents `for item in items { ... }`.
+type ForInStmt struct {
+	Var      Ident
+	Iter     Expr
+	Body     *BlockStmt
+	StmtSpan token.Span
+}
+
+func (s *ForInStmt) Span() token.Span { return s.StmtSpan }
+func (s *ForInStmt) stmtNode()        {}
+
 // BranchStmt represents `break` or `continue`.
 type BranchStmt struct {
 	Tok      token.Kind
@@ -290,6 +311,7 @@ const (
 	CleanupTensor                       // emits `vira_tensor_f32_free(&var);`
 	CleanupActor                        // emits `Module__Actor_autofree(&var);`
 	CleanupFuture                       // emits `vira_future_free(&var);`
+	CleanupSlice                        // emits slice destructor
 )
 
 func (k CleanupKind) String() string {
@@ -308,6 +330,8 @@ func (k CleanupKind) String() string {
 		return "actor_autofree"
 	case CleanupFuture:
 		return "vira_future_free"
+	case CleanupSlice:
+		return "slice_autofree"
 	default:
 		return "unknown_free"
 	}
@@ -418,3 +442,24 @@ type UnaryExpr struct {
 
 func (e *UnaryExpr) Span() token.Span { return e.UnarySpan }
 func (e *UnaryExpr) exprNode()        {}
+
+// IndexExpr represents `arr[index]`.
+type IndexExpr struct {
+	Left      Expr
+	Index     Expr
+	IndexSpan token.Span
+}
+
+func (e *IndexExpr) Span() token.Span { return e.IndexSpan }
+func (e *IndexExpr) exprNode()        {}
+
+// ArrayLitExpr represents `[1, 2, 3]` or typed `[]int{1, 2, 3}` or `[4]int{1, 2, 3, 4}`.
+type ArrayLitExpr struct {
+	Type    TypeExpr // optional explicit type (nil if inferred: `[1, 2, 3]`)
+	Elems   []Expr
+	LitSpan token.Span
+}
+
+func (e *ArrayLitExpr) Span() token.Span { return e.LitSpan }
+func (e *ArrayLitExpr) exprNode()        {}
+

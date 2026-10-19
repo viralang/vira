@@ -7,6 +7,7 @@
     { "include": "#strings" },
     { "include": "#imports" },
     { "include": "#keywords" },
+    { "include": "#collections" },
     { "include": "#types" },
     { "include": "#quadrants" },
     { "include": "#operators" },
@@ -128,8 +129,30 @@
         }
       ]
     },
+    "collections": {
+      "patterns": [
+        {
+          "name": "support.function.method.collection.vira",
+          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.variable.property.collection.vira",
+          "match": "(?<=\\.)(len|cap)\\b"
+        }
+      ]
+    },
     "types": {
       "patterns": [
+        {
+          "name": "meta.type.array.vira",
+          "match": "(\\[)\\s*([0-9_]*)\\s*(\\])\\s*([a-zA-Z0-9_]+)",
+          "captures": {
+            "1": { "name": "punctuation.bracket.square.vira" },
+            "2": { "name": "constant.numeric.integer.vira" },
+            "3": { "name": "punctuation.bracket.square.vira" },
+            "4": { "name": "entity.name.type.vira" }
+          }
+        },
         {
           "name": "entity.name.type.primitive.vira",
           "match": "\\b(int|i64|f32|f16|bf16|f64|bool|string|void)\\b"

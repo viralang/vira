@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.5.8)  
+> **Version:** Production Toolchain (v0.5.9)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 
@@ -155,6 +155,52 @@ Strings support zero-cost `${...}` expression interpolation:
 name := 'Alice'
 score := 98.5
 println('Player ${name} scored ${score}%!')
+```
+
+---
+
+### Native Collections: Fixed Arrays (`[N]T`) & Slices (`[]T`)
+
+Vira provides two first-class collection types designed with mechanical sympathy:
+
+#### Fixed-Size Stack Arrays (`[N]T`)
+Allocated entirely on the stack as value-type structs (`typedef struct { T data[N]; } vira_array_N_T;`), ensuring zero heap allocations and full value semantics:
+```v
+mut scores := [4]int{95, 88, 72, 91}
+scores[1] = 99
+println("scores.len = ${scores.len}") // 4
+println("scores[1] = ${scores[1]}")   // 99
+
+// Safe access with Result Monad fallback
+val := scores.get(10) or { -1 } // -1
+
+// Queries
+has := scores.contains(88) // true
+```
+
+#### Dynamic Growable Slices (`[]T`)
+Dynamic, contiguous heap arrays backed by `(data, len, cap, is_arena)` with amortized $2\times$ expansion and automatic deterministic deallocation via Autofree:
+```v
+mut items := [1, 2, 3]
+items.push(40)
+items.push(50)
+last := items.pop() // 50
+
+// Safe element lookup returning Result !T
+first := items.get(0) or { 0 }
+
+// Deep duplication & clear
+cloned := items.clone()
+items.clear()
+println("is_empty = ${items.is_empty()}") // true
+```
+
+#### Iteration (`for ... in`)
+Iterate cleanly through any array, slice, or string:
+```v
+for item in scores {
+    println("Score: ${item}")
+}
 ```
 
 ---

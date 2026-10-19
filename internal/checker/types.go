@@ -132,6 +132,31 @@ func (f *FutureType) Equals(other Type) bool {
 	return ok && f.Inner.Equals(o.Inner)
 }
 
+// ArrayType represents a fixed-size stack array `[N]T`.
+type ArrayType struct {
+	Len  int
+	Elem Type
+}
+
+func (a *ArrayType) String() string { return fmt.Sprintf("[%d]%s", a.Len, a.Elem) }
+
+func (a *ArrayType) Equals(other Type) bool {
+	o, ok := other.(*ArrayType)
+	return ok && a.Len == o.Len && a.Elem.Equals(o.Elem)
+}
+
+// SliceType represents a growable dynamic array / slice `[]T`.
+type SliceType struct {
+	Elem Type
+}
+
+func (s *SliceType) String() string { return fmt.Sprintf("[]%s", s.Elem) }
+
+func (s *SliceType) Equals(other Type) bool {
+	o, ok := other.(*SliceType)
+	return ok && s.Elem.Equals(o.Elem)
+}
+
 // FieldInfo stores resolved metadata for a struct or interface field.
 type FieldInfo struct {
 	Name       string

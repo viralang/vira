@@ -1,0 +1,105 @@
+module billing
+
+fn test_fixed_arrays() {
+	println("--- Testing Fixed Arrays ([N]T) ---")
+	mut arr := [4]int{10, 20, 30, 40}
+	println("arr.len = ${arr.len}")
+	println("arr[0] = ${arr[0]}")
+	println("arr[3] = ${arr[3]}")
+
+	arr[1] = 99
+	println("after arr[1] = 99: arr[1] = ${arr[1]}")
+
+	mut sum := 0
+	for x in arr {
+		sum = sum + x
+	}
+	println("sum of arr = ${sum}") // 10 + 99 + 30 + 40 = 179
+
+	val0 := arr.get(0) or { -1 }
+	println("arr.get(0) = ${val0}")
+
+	val_oob := arr.get(10) or { 999 }
+	println("arr.get(10) or { 999 } = ${val_oob}")
+
+	has30 := arr.contains(30)
+	has77 := arr.contains(77)
+	println("arr contains 30: ${has30}")
+	println("arr contains 77: ${has77}")
+	println("arr is_empty: ${arr.is_empty()}")
+}
+
+fn test_dynamic_slices() {
+	println("--- Testing Dynamic Slices ([]T) ---")
+	mut nums := [1, 2, 3]
+	println("nums.len = ${nums.len}")
+	println("nums[0] = ${nums[0]}")
+	println("nums[2] = ${nums[2]}")
+
+	nums.push(40)
+	nums.push(50)
+	println("after push: nums.len = ${nums.len}")
+	println("nums[3] = ${nums[3]}")
+	println("nums[4] = ${nums[4]}")
+
+	nums[1] = 88
+	println("after nums[1] = 88: nums[1] = ${nums[1]}")
+
+	popped := nums.pop()
+	println("popped = ${popped}")
+	println("nums.len after pop = ${nums.len}")
+
+	val1 := nums.get(1) or { -1 }
+	println("nums.get(1) = ${val1}")
+
+	val_oob := nums.get(99) or { 404 }
+	println("nums.get(99) or { 404 } = ${val_oob}")
+
+	cloned := nums.clone()
+	println("cloned.len = ${cloned.len}")
+	println("cloned contains 88: ${cloned.contains(88)}")
+
+	mut slice_sum := 0
+	for n in nums {
+		slice_sum = slice_sum + n
+	}
+	println("nums sum = ${slice_sum}") // 1 + 88 + 3 + 40 = 132
+
+	nums.clear()
+	println("after clear: is_empty = ${nums.is_empty()}, len = ${nums.len}")
+}
+
+fn test_string_slices() {
+	println("--- Testing String Slices ([]string) ---")
+	mut fruits := ["apple", "banana", "cherry"]
+	println("fruits.len = ${fruits.len}")
+	println("fruits[0] = ${fruits[0]}")
+	println("fruits[2] = ${fruits[2]}")
+
+	fruits.push("date")
+	println("after push: fruits.len = ${fruits.len}")
+
+	has_banana := fruits.contains("banana")
+	has_mango := fruits.contains("mango")
+	println("contains banana: ${has_banana}")
+	println("contains mango: ${has_mango}")
+
+	for f in fruits {
+		println("fruit: ${f}")
+	}
+
+	g0 := fruits.get(0) or { "missing" }
+	println("fruits.get(0) = ${g0}")
+	g_oob := fruits.get(100) or { "missing" }
+	println("fruits.get(100) or { missing } = ${g_oob}")
+
+	popped_fruit := fruits.pop()
+	println("popped_fruit = ${popped_fruit}")
+}
+
+fn main() {
+	test_fixed_arrays()
+	test_dynamic_slices()
+	test_string_slices()
+	println("All collection tests passed successfully!")
+}

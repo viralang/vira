@@ -32,6 +32,8 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5.8] Zero-Leak Autofree & Actor Benchmarks ✅ COMPLETED
        │
+ [v0.5.9] Native Collections: Arrays & Slices   ✅ COMPLETED
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
  [v0.6] Phase 1: VexServe Web & LLM Streaming  ⏳ NEXT MILESTONE
@@ -110,6 +112,15 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
   - Standalone benchmark [examples/actor_stress_benchmark.vir](examples/actor_stress_benchmark.vir) executing 10,000 actors spawned in 6 µs (10,000,000 spawns/sec), 4,000 async messages processed in 3.3 ms (1,000,000 msgs/sec), 15% random panic chaos injection with 100% recovery rate in 476 µs, and 10,000 ring hops in 5.1 ms (1,666,666 hops/sec) with verified `active_leaks=0`.
   - Added CI golden stress test [testdata/run/03_actor_high_concurrency_stress.vir](testdata/run/03_actor_high_concurrency_stress.vir).
   - Published comprehensive architectural study: [Tutorial 26: Actor System Architecture, Trade-Offs & High-Concurrency Benchmarks](docs/tutorials/26_actor_system_tradeoffs_and_benchmarks.md).
+
+### 8. Native Collections: Fixed Arrays, Dynamic Slices & LSP Tooling (v0.5.9)
+- [x] **Native Fixed Arrays (`[N]T`):** Stack-allocated, zero-overhead fixed-size contiguous arrays with compile-time size checking, zero-cost value semantics, and bounds validation.
+- [x] **Native Dynamic Slices (`[]T`):** Heap-backed, geometrically growing dynamically sized collections with automatic growth (`.push()`), shrinkage (`.pop()`), fast indexed access, and bounds protection.
+- [x] **Idiomatic Collection Iteration (`for item in collection`):** First-class for-in statement syntax compiling directly into zero-cost index-driven C loops without iterator heap allocations.
+- [x] **LIFO Zero-Leak Slice Autofree:** Compiler-driven `CleanupSlice` injection ensuring deterministic, leak-free deallocation of dynamic slice buffers when going out of scope (`active_leaks=0`).
+- [x] **Comprehensive Builtin Method Suite:** Native methods including `.len`, `.cap`, `.get(idx)` (monadic `!T`), `.set(idx, val)`, `.push(val)`, `.pop()`, `.clear()`, and `.copy()`.
+- [x] **Full Toolchain & Editor Integration:** VS Code TextMate grammar, snippets, LSP type formatting, member auto-completion, and hover documentation.
+- [x] **Tutorial & Examples:** [Tutorial 27: Native Collections — Arrays and Slices](docs/tutorials/27_native_collections_arrays_and_slices.md) and runnable example [28_native_collections.vir](docs/examples/28_native_collections.vir).
 
 ---
 

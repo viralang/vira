@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$ViraVersion = "v0.5.8"
+$ViraVersion = "v0.5.9"
 $InstallDir  = "$env:USERPROFILE\.vir"
 $BinDir      = "$InstallDir\bin"
 $RuntimeDir  = "$InstallDir\runtime"
@@ -24,6 +24,12 @@ New-Item -ItemType Directory -Force -Path $ExamplesDir | Out-Null
 
 # 2. Locate, Extract or Download vira.exe
 Write-Host "[2/5] Installing Vira compiler binary..." -ForegroundColor Yellow
+
+# Terminate any background instances (e.g., active LSP server) holding a file lock on $BinDir\vira.exe
+cmd.exe /c "taskkill /F /IM vira.exe >nul 2>&1"
+cmd.exe /c "taskkill /F /IM vex.exe >nul 2>&1"
+Start-Sleep -Milliseconds 300
+
 $SourceExe = $null
 
 # Check local compiled binaries
@@ -66,9 +72,36 @@ if (-not $SourceExe) {
     }
 }
 
+function Install-BinaryFile($src, $dst) {
+    if (Test-Path $dst) {
+        try {
+            Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop
+            return
+        } catch {
+            # File is locked by a running process (e.g. IDE LSP client).
+            # On NTFS, open executables can still be renamed, freeing up the target path.
+            $oldDst = "$dst.old"
+            if (Test-Path $oldDst) {
+                Remove-Item -Force $oldDst -ErrorAction SilentlyContinue
+            }
+            try {
+                Move-Item -Path $dst -Destination $oldDst -Force -ErrorAction Stop
+                Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop
+            } catch {
+                cmd.exe /c "taskkill /F /IM $(Split-Path $dst -Leaf) >nul 2>&1"
+                Start-Sleep -Milliseconds 250
+                Copy-Item -Path $src -Destination $dst -Force
+            }
+            Remove-Item -Force $oldDst -ErrorAction SilentlyContinue
+        }
+    } else {
+        Copy-Item -Path $src -Destination $dst -Force
+    }
+}
+
 if ($SourceExe) {
-    Copy-Item -Path $SourceExe -Destination "$BinDir\vira.exe" -Force
-    Copy-Item -Path $SourceExe -Destination "$BinDir\vex.exe" -Force
+    Install-BinaryFile -src $SourceExe -dst "$BinDir\vira.exe"
+    Install-BinaryFile -src $SourceExe -dst "$BinDir\vex.exe"
     Write-Host "  ✓ Installed local binary from $SourceExe" -ForegroundColor Green
 } else {
     Write-Host "  = Downloading vira.exe ($ViraVersion)..." -ForegroundColor Gray
@@ -90,8 +123,8 @@ if ($SourceExe) {
                     $found = Get-ChildItem -Path $ExtractPath -Filter "vex.exe" -Recurse | Select-Object -First 1
                 }
                 if ($found) {
-                    Copy-Item -Path $found.FullName -Destination "$BinDir\vira.exe" -Force
-                    Copy-Item -Path $found.FullName -Destination "$BinDir\vex.exe" -Force
+                    Install-BinaryFile -src $found.FullName -dst "$BinDir\vira.exe"
+                    Install-BinaryFile -src $found.FullName -dst "$BinDir\vex.exe"
                     Write-Host "  ✓ Downloaded and installed vira.exe" -ForegroundColor Green
                     $Downloaded = $true
                     break

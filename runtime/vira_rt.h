@@ -61,6 +61,9 @@ static inline void _vira_record_free(void) {
     __atomic_add_fetch(&_vira_total_heap_frees, 1, __ATOMIC_RELAXED);
 }
 
+typedef float    vira_f32;
+typedef uint16_t vira_bf16;
+
 // ============================================================================
 // 1. VEX STRING (16 BYTES: ZERO-ALLOC LITERALS + HEAP STRINGS)
 // ============================================================================
@@ -126,6 +129,198 @@ static inline void vira_str_free(vira_string* s) {
         s->is_lit = true;
         _vira_record_free();
     }
+}
+
+// ============================================================================
+// 1.5. VIRA DYNAMIC SLICE RUNTIME (`[]T`) & FIXED ARRAYS (`[N]T`)
+// ============================================================================
+
+static inline void vira_bounds_check(int32_t index, int32_t len, const char* file, int line) {
+    if (index < 0 || index >= len) {
+        fprintf(stderr, "%s:%d: vira panic: index out of bounds: index %d with len %d\n", file, line, index, len);
+        exit(1);
+    }
+}
+
+static inline void _vira_slice_grow(void** data_ptr, int32_t* cap_ptr, size_t elem_size, bool is_arena) {
+    int32_t old_cap = *cap_ptr;
+    int32_t new_cap = (old_cap <= 0) ? 4 : (old_cap * 2);
+    void* new_buf;
+    if (old_cap == 0 || *data_ptr == NULL) {
+        new_buf = malloc((size_t)new_cap * elem_size);
+        if (new_buf) _vira_record_alloc();
+    } else {
+        new_buf = realloc(*data_ptr, (size_t)new_cap * elem_size);
+    }
+    if (!new_buf) {
+        fprintf(stderr, "vira panic: out of memory growing slice buffer\n");
+        exit(1);
+    }
+    *data_ptr = new_buf;
+    *cap_ptr = new_cap;
+}
+
+static inline void _vira_slice_free_raw(void** data_ptr, int32_t* len_ptr, int32_t* cap_ptr, bool is_arena) {
+    if (data_ptr != NULL && *data_ptr != NULL && !is_arena) {
+        free(*data_ptr);
+        *data_ptr = NULL;
+        _vira_record_free();
+    }
+    if (len_ptr) *len_ptr = 0;
+    if (cap_ptr) *cap_ptr = 0;
+}
+
+#define VIRA_DEFINE_SLICE_TYPE(TYPE_NAME, C_TYPE) \
+typedef struct { \
+    C_TYPE* data; \
+    int32_t len; \
+    int32_t cap; \
+    bool    is_arena; \
+} vira_slice_##TYPE_NAME; \
+\
+static inline vira_slice_##TYPE_NAME vira_slice_##TYPE_NAME##_new(int32_t initial_cap) { \
+    vira_slice_##TYPE_NAME s = { .data = NULL, .len = 0, .cap = 0, .is_arena = false }; \
+    if (initial_cap > 0) { \
+        s.data = (C_TYPE*)malloc((size_t)initial_cap * sizeof(C_TYPE)); \
+        if (s.data) { s.cap = initial_cap; _vira_record_alloc(); } \
+    } \
+    return s; \
+} \
+\
+static inline void vira_slice_##TYPE_NAME##_push(vira_slice_##TYPE_NAME* s, C_TYPE val) { \
+    if (s->len >= s->cap) { \
+        _vira_slice_grow((void**)&s->data, &s->cap, sizeof(C_TYPE), s->is_arena); \
+    } \
+    s->data[s->len++] = val; \
+} \
+\
+static inline C_TYPE vira_slice_##TYPE_NAME##_pop(vira_slice_##TYPE_NAME* s) { \
+    if (s->len <= 0) { \
+        fprintf(stderr, "vira panic: pop from empty slice\n"); \
+        exit(1); \
+    } \
+    return s->data[--s->len]; \
+} \
+\
+static inline void vira_slice_##TYPE_NAME##_set(vira_slice_##TYPE_NAME* s, int32_t idx, C_TYPE val) { \
+    vira_bounds_check(idx, s->len, __FILE__, __LINE__); \
+    s->data[idx] = val; \
+} \
+\
+static inline void vira_slice_##TYPE_NAME##_clear(vira_slice_##TYPE_NAME* s) { \
+    s->len = 0; \
+} \
+\
+static inline bool vira_slice_##TYPE_NAME##_is_empty(const vira_slice_##TYPE_NAME* s) { \
+    return s->len == 0; \
+} \
+\
+static inline vira_slice_##TYPE_NAME vira_slice_##TYPE_NAME##_clone(const vira_slice_##TYPE_NAME* s) { \
+    vira_slice_##TYPE_NAME res = vira_slice_##TYPE_NAME##_new(s->len); \
+    if (s->len > 0 && s->data != NULL) { \
+        memcpy(res.data, s->data, (size_t)s->len * sizeof(C_TYPE)); \
+        res.len = s->len; \
+    } \
+    return res; \
+} \
+\
+static inline bool vira_slice_##TYPE_NAME##_contains(const vira_slice_##TYPE_NAME* s, C_TYPE val) { \
+    for (int32_t i = 0; i < s->len; i++) { \
+        if (s->data[i] == val) return true; \
+    } \
+    return false; \
+} \
+\
+static inline void vira_slice_##TYPE_NAME##_free(vira_slice_##TYPE_NAME* s) { \
+    _vira_slice_free_raw((void**)&s->data, &s->len, &s->cap, s->is_arena); \
+}
+
+VIRA_DEFINE_SLICE_TYPE(int, int32_t)
+VIRA_DEFINE_SLICE_TYPE(i64, int64_t)
+VIRA_DEFINE_SLICE_TYPE(f32, vira_f32)
+VIRA_DEFINE_SLICE_TYPE(f64, double)
+VIRA_DEFINE_SLICE_TYPE(bool, bool)
+
+static inline vira_string vira_str_char_at(vira_string s, int32_t idx) {
+    vira_bounds_check(idx, s.len, __FILE__, __LINE__);
+    return (vira_string){ .data = &s.data[idx], .len = 1, .is_lit = true };
+}
+
+// Slice for vira_string
+typedef struct {
+    vira_string* data;
+    int32_t      len;
+    int32_t      cap;
+    bool         is_arena;
+} vira_slice_string;
+
+static inline vira_slice_string vira_slice_string_new(int32_t initial_cap) {
+    vira_slice_string s = { .data = NULL, .len = 0, .cap = 0, .is_arena = false };
+    if (initial_cap > 0) {
+        s.data = (vira_string*)malloc((size_t)initial_cap * sizeof(vira_string));
+        if (s.data) { s.cap = initial_cap; _vira_record_alloc(); }
+    }
+    return s;
+}
+
+static inline void vira_slice_string_push(vira_slice_string* s, vira_string val) {
+    if (s->len >= s->cap) {
+        _vira_slice_grow((void**)&s->data, &s->cap, sizeof(vira_string), s->is_arena);
+    }
+    s->data[s->len++] = val;
+}
+
+static inline vira_string vira_slice_string_pop(vira_slice_string* s) {
+    if (s->len <= 0) {
+        fprintf(stderr, "vira panic: pop from empty slice\n");
+        exit(1);
+    }
+    return s->data[--s->len];
+}
+
+static inline void vira_slice_string_set(vira_slice_string* s, int32_t idx, vira_string val) {
+    vira_bounds_check(idx, s->len, __FILE__, __LINE__);
+    vira_str_free(&s->data[idx]);
+    s->data[idx] = val;
+}
+
+static inline void vira_slice_string_clear(vira_slice_string* s) {
+    for (int32_t i = 0; i < s->len; i++) {
+        vira_str_free(&s->data[i]);
+    }
+    s->len = 0;
+}
+
+static inline bool vira_slice_string_is_empty(const vira_slice_string* s) {
+    return s->len == 0;
+}
+
+static inline bool vira_slice_string_contains(const vira_slice_string* s, vira_string val) {
+    for (int32_t i = 0; i < s->len; i++) {
+        if (vira_str_eq(s->data[i], val)) return true;
+    }
+    return false;
+}
+
+static inline vira_slice_string vira_slice_string_clone(const vira_slice_string* s) {
+    vira_slice_string res = vira_slice_string_new(s->len);
+    for (int32_t i = 0; i < s->len; i++) {
+        vira_slice_string_push(&res, vira_str_clone(s->data[i]));
+    }
+    return res;
+}
+
+static inline void vira_slice_string_free(vira_slice_string* s) {
+    if (s->data != NULL && !s->is_arena) {
+        for (int32_t i = 0; i < s->len; i++) {
+            vira_str_free(&s->data[i]);
+        }
+        free(s->data);
+        s->data = NULL;
+        _vira_record_free();
+    }
+    s->len = 0;
+    s->cap = 0;
 }
 
 // ============================================================================
@@ -195,8 +390,6 @@ static inline void vira_arena_destroy(vira_arena* a) {
 // 3. AI TENSORS + HARDWARE SIMD (`AVX2` / `SSE2` / `ARM NEON`) `@` MATMUL
 // ============================================================================
 
-typedef float    vira_f32;
-typedef uint16_t vira_bf16;
 
 static inline const char* vira_simd_backend_name(void) {
 #if defined(__AVX2__)

@@ -1,0 +1,39 @@
+{
+  "For In Loop": {
+    "prefix": "forin",
+    "body": [
+      "for ${1:item} in ${2:items} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Iterate over an array, slice, or string collection"
+  },
+  "Fixed Array Declaration": {
+    "prefix": "arr",
+    "body": [
+      "mut ${1:arr} := [${2:4}]${3:int}{${4:10, 20, 30, 40}}"
+    ],
+    "description": "Fixed-size stack-allocated array [N]T"
+  },
+  "Dynamic Slice Declaration": {
+    "prefix": "slice",
+    "body": [
+      "mut ${1:items} := [${2:1, 2, 3}]"
+    ],
+    "description": "Growable dynamic slice []T"
+  },
+  "Slice Push": {
+    "prefix": "push",
+    "body": [
+      "${1:items}.push(${2:val})"
+    ],
+    "description": "Push element into dynamic slice"
+  },
+  "Collection Safe Get": {
+    "prefix": "getor",
+    "body": [
+      "${1:val} := ${2:items}.get(${3:index}) or { ${4:default_val} }"
+    ],
+    "description": "Safely read element by index with default fallback"
+  }
+}

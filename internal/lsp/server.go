@@ -703,6 +703,14 @@ func formatTypeExpr(t ast.TypeExpr) string {
 		return "void"
 	}
 	switch v := t.(type) {
+	case *ast.ArrayType:
+		if v.Len != nil {
+			if lit, ok := v.Len.(*ast.LiteralExpr); ok {
+				return fmt.Sprintf("[%s]%s", lit.Value, formatTypeExpr(v.Elem))
+			}
+			return fmt.Sprintf("[N]%s", formatTypeExpr(v.Elem))
+		}
+		return "[]" + formatTypeExpr(v.Elem)
 	case *ast.IdentType:
 		if len(v.TypeParams) > 0 {
 			var params []string
@@ -834,6 +842,26 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**Vira Bump Arena (`arena { ... }`)**\n\nAllocates intermediate objects and tensors inside an ultra-fast O(1) contiguous memory slab. Wiped instantly on block exit without `free()`."
 	case "tensor":
 		return "**Vira First-Class SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 2D tensor supporting hardware-accelerated matrix multiplication (`@`) and zero-copy DMA to GPUs."
+	case "push", "append":
+		return "**`slice.push(val: T)`**\n\nAppends an element to the dynamic slice with amortized O(1) geometric buffer expansion."
+	case "pop":
+		return "**`slice.pop() -> T`**\n\nRemoves and returns the last element of the slice. Panics if the slice is empty."
+	case "len":
+		return "**`collection.len -> int`**\n\nReturns the number of elements in the array or slice."
+	case "cap":
+		return "**`slice.cap -> int`**\n\nReturns the current allocated backing buffer capacity of the dynamic slice."
+	case "get":
+		return "**`collection.get(index: int) -> !T`**\n\nSafely retrieves element by index returning Result Monad `!T`. Handle with `or { default }` or propagate with `!`."
+	case "set":
+		return "**`slice.set(index: int, val: T)`**\n\nOverwrites element at index with runtime bounds checking."
+	case "clear":
+		return "**`slice.clear()`**\n\nCleans and resets length to 0, retaining backing capacity."
+	case "clone":
+		return "**`slice.clone() -> []T`**\n\nAllocates a fresh deep copy of the slice with an independent backing buffer."
+	case "contains":
+		return "**`collection.contains(val: T) -> bool`**\n\nReturns `true` if the specified value exists in the array or slice."
+	case "is_empty":
+		return "**`collection.is_empty() -> bool`**\n\nReturns `true` if the collection length is 0, otherwise `false`."
 	case "gui_init":
 		return "**`gui_init(width: int, height: int, title: string)`**\n\nInitializes a hardware-accelerated native window (Win32 GDI on Windows, X11 on Linux) with zero third-party dependencies."
 	case "gui_should_close":
@@ -1068,7 +1096,40 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 			return items
 		}
 
-		// 1B. Inferred type for local variables
+		// 1B. Check if receiver is an array or slice collection
+		for _, l := range lines {
+			lTrim := strings.TrimSpace(l)
+			if strings.Contains(lTrim, receiverIdent) && strings.Contains(lTrim, ":=") {
+				if strings.Contains(lTrim, "[") && strings.Contains(lTrim, "]") {
+					isFixedArray := false
+					for _, prim := range []string{"int", "i64", "f32", "f64", "bool", "string"} {
+						if strings.Contains(lTrim, "]"+prim+"{") {
+							isFixedArray = true
+							break
+						}
+					}
+					items = append(items,
+						CompletionItem{Label: "len", Kind: 10, Detail: "len: int", Documentation: "Length of the collection"},
+						CompletionItem{Label: "get", Kind: 2, Detail: "get(index: int) -> !T", Documentation: "Safely get element by index with Result !T fallback"},
+						CompletionItem{Label: "contains", Kind: 2, Detail: "contains(val: T) -> bool", Documentation: "Returns true if value exists in collection"},
+						CompletionItem{Label: "is_empty", Kind: 2, Detail: "is_empty() -> bool", Documentation: "Returns true if collection is empty"},
+					)
+					if !isFixedArray {
+						items = append(items,
+							CompletionItem{Label: "cap", Kind: 10, Detail: "cap: int", Documentation: "Allocated backing buffer capacity"},
+							CompletionItem{Label: "push", Kind: 2, Detail: "push(val: T)", Documentation: "Append element with geometric growth"},
+							CompletionItem{Label: "pop", Kind: 2, Detail: "pop() -> T", Documentation: "Remove and return the last element"},
+							CompletionItem{Label: "set", Kind: 2, Detail: "set(index: int, val: T)", Documentation: "Update element at index"},
+							CompletionItem{Label: "clear", Kind: 2, Detail: "clear()", Documentation: "Reset slice length to 0"},
+							CompletionItem{Label: "clone", Kind: 2, Detail: "clone() -> []T", Documentation: "Deep copy of the slice"},
+						)
+					}
+					return items
+				}
+			}
+		}
+
+		// 1C. Inferred type for local variables
 		var inferredType string
 		for _, l := range lines {
 			lTrim := strings.TrimSpace(l)

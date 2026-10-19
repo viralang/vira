@@ -2,7 +2,7 @@
   "name": "vira-language",
   "displayName": "Vira Programming Language",
   "description": "Rich language support, syntax highlighting, and LSP integration for the Vira Programming Language.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "viralang",
   "icon": "icon.png",
   "repository": {
@@ -19,7 +19,8 @@
   "categories": [
     "Programming Languages",
     "Linters",
-    "Formatters"
+    "Formatters",
+    "Snippets"
   ],
   "contributes": {
     "languages": [
@@ -41,6 +42,12 @@
         "language": "vira",
         "scopeName": "source.vira",
         "path": "./syntaxes/vira.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "vira",
+        "path": "./snippets/vira.json"
       }
     ],
     "commands": [

@@ -378,11 +378,24 @@ func (p *Parser) parseParamList() []ast.Param {
 
 func (p *Parser) isTypeStart(k token.Kind) bool {
 	return k == token.TokIdent || k == token.TokBang || k == token.TokQuestion || k == token.TokAmp ||
-		k == token.TokF32 || k == token.TokF16 || k == token.TokBF16 || k == token.TokTensor
+		k == token.TokF32 || k == token.TokF16 || k == token.TokBF16 || k == token.TokTensor || k == token.TokLBracket
 }
 
 func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	switch p.cur.Kind {
+	case token.TokLBracket:
+		lb := p.advance()
+		var lenExpr ast.Expr
+		if p.cur.Kind != token.TokRBracket {
+			lenExpr = p.parseExpr(0)
+		}
+		p.expect(token.TokRBracket)
+		elem := p.parseTypeExpr()
+		return &ast.ArrayType{
+			LBracketPos: lb.Span,
+			Len:         lenExpr,
+			Elem:        elem,
+		}
 	case token.TokBang:
 		bang := p.advance()
 		// Bare `!` void Result vs `!T`
@@ -538,7 +551,22 @@ func (p *Parser) parseStmt() ast.Stmt {
 		prevAllow := p.allowStructInit
 		p.allowStructInit = false
 
-		// 2. 3-part loop: `for mut i := 0; i < 10; i += 1 { ... }` or `for i := 0; ...`
+		// 2. For-in loop: `for item in items { ... }`
+		if p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokIn {
+			name := p.parseIdent()
+			p.advance() // consume `in`
+			iter := p.parseExpr(0)
+			p.allowStructInit = prevAllow
+			body := p.parseBlock()
+			return &ast.ForInStmt{
+				Var:      name,
+				Iter:     iter,
+				Body:     body,
+				StmtSpan: token.Span{Start: forTok.Span.Start, End: body.BlockSpan.End},
+			}
+		}
+
+		// 3. 3-part loop: `for mut i := 0; i < 10; i += 1 { ... }` or `for i := 0; ...`
 		if p.cur.Kind == token.TokMut || (p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokDeclAssign) {
 			initStmt := p.parseStmt()
 			p.expect(token.TokSemicolon)
@@ -638,6 +666,15 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 			}
 		case token.TokLParen:
 			left = p.parseCallExpr(left)
+		case token.TokLBracket:
+			p.advance()
+			idx := p.parseExpr(0)
+			rb := p.expect(token.TokRBracket)
+			left = &ast.IndexExpr{
+				Left:      left,
+				Index:     idx,
+				IndexSpan: token.Span{Start: left.Span().Start, End: rb.Span.End},
+			}
 		default:
 			opTok := p.advance()
 			right := p.parseExpr(prec)
@@ -696,6 +733,78 @@ func (p *Parser) parsePrefix() ast.Expr {
 			Op:        opTok.Kind,
 			Expr:      operand,
 			UnarySpan: token.Span{Start: opTok.Span.Start, End: operand.Span().End},
+		}
+
+	case token.TokLBracket:
+		lb := p.advance()
+		if p.cur.Kind == token.TokRBracket {
+			rb := p.advance()
+			if p.isTypeStart(p.cur.Kind) {
+				elemType := p.parseTypeExpr()
+				p.expect(token.TokLBrace)
+				var elems []ast.Expr
+				for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+					elems = append(elems, p.parseExpr(0))
+					if p.cur.Kind == token.TokComma {
+						p.advance()
+					}
+				}
+				rbrace := p.expect(token.TokRBrace)
+				return &ast.ArrayLitExpr{
+					Type: &ast.ArrayType{
+						LBracketPos: lb.Span,
+						Len:         nil,
+						Elem:        elemType,
+					},
+					Elems:   elems,
+					LitSpan: token.Span{Start: lb.Span.Start, End: rbrace.Span.End},
+				}
+			}
+			return &ast.ArrayLitExpr{
+				Elems:   nil,
+				LitSpan: token.Span{Start: lb.Span.Start, End: rb.Span.End},
+			}
+		}
+
+		firstExpr := p.parseExpr(0)
+		if p.cur.Kind == token.TokRBracket && p.isTypeStart(p.peek.Kind) {
+			p.advance()
+			elemType := p.parseTypeExpr()
+			p.expect(token.TokLBrace)
+			var elems []ast.Expr
+			for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+				elems = append(elems, p.parseExpr(0))
+				if p.cur.Kind == token.TokComma {
+					p.advance()
+				}
+			}
+			rbrace := p.expect(token.TokRBrace)
+			return &ast.ArrayLitExpr{
+				Type: &ast.ArrayType{
+					LBracketPos: lb.Span,
+					Len:         firstExpr,
+					Elem:        elemType,
+				},
+				Elems:   elems,
+				LitSpan: token.Span{Start: lb.Span.Start, End: rbrace.Span.End},
+			}
+		}
+
+		var elems []ast.Expr
+		elems = append(elems, firstExpr)
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+		for p.cur.Kind != token.TokRBracket && p.cur.Kind != token.TokEOF {
+			elems = append(elems, p.parseExpr(0))
+			if p.cur.Kind == token.TokComma {
+				p.advance()
+			}
+		}
+		rb := p.expect(token.TokRBracket)
+		return &ast.ArrayLitExpr{
+			Elems:   elems,
+			LitSpan: token.Span{Start: lb.Span.Start, End: rb.Span.End},
 		}
 
 	default:

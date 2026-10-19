@@ -18,11 +18,14 @@ type Generator struct {
 	activeArena string // non-empty inside arena { ... } or actor step
 	inMainFn    bool
 	curReceiver string // current receiver variable name if inside a method
+	curPtrParams map[string]bool // current mutable pointer parameter names in fn
 	usesGUI     bool   // true if any gui_* builtin is called in the file
 
 	resultTypes  map[string]checker.Type             // C Result name -> Inner Type
 	vtablePairs  map[string]vtablePair               // "Struct_Iface" -> pair metadata
 	actorSenders map[string]actorMethodDispatchSpec // "Actor_Method" -> supervisor wrapper
+	arrayTypes   map[string]*checker.ArrayType      // C Array name -> ArrayType
+	sliceTypes   map[string]*checker.SliceType      // C Slice name -> SliceType
 }
 
 type vtablePair struct {
@@ -68,6 +71,9 @@ func New(chk *checker.Checker, af *autofree.Analyzer) *Generator {
 		resultTypes:  make(map[string]checker.Type),
 		vtablePairs:  make(map[string]vtablePair),
 		actorSenders: make(map[string]actorMethodDispatchSpec),
+		curPtrParams: make(map[string]bool),
+		arrayTypes:   make(map[string]*checker.ArrayType),
+		sliceTypes:   make(map[string]*checker.SliceType),
 	}
 }
 
@@ -93,6 +99,16 @@ func (g *Generator) EmitFile(file *ast.File) string {
 		out.WriteString("#include \"vira_gui.h\"\n")
 	}
 	out.WriteString("\n")
+
+	// 0.5. Emit Fixed Array ([N]T) typedefs
+	if len(g.arrayTypes) > 0 {
+		out.WriteString("// --- 0.5 FIXED ARRAYS ([N]T) ---\n")
+		for cName, arr := range g.arrayTypes {
+			out.WriteString(fmt.Sprintf("#ifndef _%s_DEFINED\n#define _%s_DEFINED\n", cName, cName))
+			out.WriteString(fmt.Sprintf("typedef struct {\n    %s data[%d];\n} %s;\n#endif\n\n",
+				g.cType(arr.Elem), arr.Len, cName))
+		}
+	}
 
 	// 1. Emit Struct & Actor typedefs + _autofree & _reset helpers in topological dependency order
 	out.WriteString("// --- 1. STRUCTS, ACTORS & DETERMINISTIC DESTRUCTORS ---\n")
@@ -180,6 +196,15 @@ func (g *Generator) EmitFile(file *ast.File) string {
 // --- PRE-PASS: DISCOVER RESULTS, VTABLES, GUI USAGE & ACTOR DISPATCHES ---
 
 func (g *Generator) discoverCodegenRequirements(file *ast.File) {
+	for _, st := range g.chk.Structs() {
+		for _, f := range st.Fields {
+			if arr, ok := f.Type.(*checker.ArrayType); ok {
+				g.arrayTypes[g.cArrayName(arr)] = arr
+			} else if sl, ok := f.Type.(*checker.SliceType); ok {
+				g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+			}
+		}
+	}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FnDecl)
 		if !ok {
@@ -189,6 +214,19 @@ func (g *Generator) discoverCodegenRequirements(file *ast.File) {
 			retType := g.resolveCheckType(fn)
 			if res, isRes := retType.(*checker.ResultType); isRes {
 				g.resultTypes[g.cResultName(res.Inner)] = res.Inner
+			}
+			if arr, ok := retType.(*checker.ArrayType); ok {
+				g.arrayTypes[g.cArrayName(arr)] = arr
+			} else if sl, ok := retType.(*checker.SliceType); ok {
+				g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+			}
+		}
+		for _, p := range fn.Params {
+			pt := g.resolveParamType(fn, p.Name.Name)
+			if arr, ok := pt.(*checker.ArrayType); ok {
+				g.arrayTypes[g.cArrayName(arr)] = arr
+			} else if sl, ok := pt.(*checker.SliceType); ok {
+				g.sliceTypes[g.cSliceName(sl.Elem)] = sl
 			}
 		}
 		g.scanBlockRequirements(fn.Body)
@@ -220,6 +258,15 @@ func (g *Generator) scanBlockRequirements(b *ast.BlockStmt) {
 				g.scanBlockRequirements(&ast.BlockStmt{Stmts: []ast.Stmt{s.Post}})
 			}
 			g.scanBlockRequirements(s.Body)
+		case *ast.ForInStmt:
+			t := g.chk.ExprTypes[s.Iter]
+			if arr, ok := t.(*checker.ArrayType); ok {
+				g.arrayTypes[g.cArrayName(arr)] = arr
+			} else if sl, ok := t.(*checker.SliceType); ok {
+				g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+			}
+			g.scanExprRequirements(s.Iter)
+			g.scanBlockRequirements(s.Body)
 		case *ast.ArenaStmt:
 			g.scanBlockRequirements(s.Body)
 		case *ast.ExprStmt:
@@ -235,6 +282,25 @@ func (g *Generator) scanExprRequirements(expr ast.Expr) {
 	switch e := expr.(type) {
 	case *ast.UnaryExpr:
 		g.scanExprRequirements(e.Expr)
+	case *ast.IndexExpr:
+		t := g.chk.ExprTypes[e.Left]
+		if arr, ok := t.(*checker.ArrayType); ok {
+			g.arrayTypes[g.cArrayName(arr)] = arr
+		} else if sl, ok := t.(*checker.SliceType); ok {
+			g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+		}
+		g.scanExprRequirements(e.Left)
+		g.scanExprRequirements(e.Index)
+	case *ast.ArrayLitExpr:
+		t := g.chk.ExprTypes[e]
+		if arr, ok := t.(*checker.ArrayType); ok {
+			g.arrayTypes[g.cArrayName(arr)] = arr
+		} else if sl, ok := t.(*checker.SliceType); ok {
+			g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+		}
+		for _, el := range e.Elems {
+			g.scanExprRequirements(el)
+		}
 	case *ast.CallExpr:
 		if ident, ok := e.Callee.(*ast.IdentExpr); ok {
 			// Detect GUI builtin usage so #include "vira_gui.h" is emitted automatically
@@ -246,6 +312,20 @@ func (g *Generator) scanExprRequirements(expr ast.Expr) {
 				if st, ok := g.chk.ExprTypes[e.Args[0].Expr].(*checker.StructType); ok {
 					key := st.Name + "_" + iface.Name
 					g.vtablePairs[key] = vtablePair{Struct: st, Iface: iface}
+				}
+			}
+		}
+		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
+			recvType := g.chk.ExprTypes[sel.Left]
+			if sl, ok := recvType.(*checker.SliceType); ok {
+				g.sliceTypes[g.cSliceName(sl.Elem)] = sl
+				if sel.Field.Name == "get" {
+					g.resultTypes[g.cResultName(sl.Elem)] = sl.Elem
+				}
+			} else if arr, ok := recvType.(*checker.ArrayType); ok {
+				g.arrayTypes[g.cArrayName(arr)] = arr
+				if sel.Field.Name == "get" {
+					g.resultTypes[g.cResultName(arr.Elem)] = arr.Elem
 				}
 			}
 		}
@@ -362,6 +442,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
+				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
 			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
 				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
 			}
@@ -385,6 +467,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
+				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
 			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
 				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
 			}
@@ -622,6 +706,14 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 		g.curReceiver = ""
 	}
 
+	prevPtrParams := g.curPtrParams
+	g.curPtrParams = make(map[string]bool)
+	for _, p := range fn.Params {
+		if p.IsMut {
+			g.curPtrParams[p.Name.Name] = true
+		}
+	}
+
 	// If this is a method on an Actor, bind its isolated scratch arena automatically
 	prevArena := g.activeArena
 	if fn.Receiver != nil {
@@ -638,6 +730,7 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 
 	g.activeArena = prevArena
 	g.curReceiver = prevReceiver
+	g.curPtrParams = prevPtrParams
 }
 
 func (g *Generator) emitBlockStmts(out *strings.Builder, b *ast.BlockStmt, indent string, fnRet checker.Type) {
@@ -676,6 +769,21 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			indent, qual, g.cType(valType), s.Name.Name, g.emitExpr(s.Value)))
 
 	case *ast.AssignStmt:
+		if idxExpr, isIdx := s.Target.(*ast.IndexExpr); isIdx {
+			leftType := g.chk.ExprTypes[idxExpr.Left]
+			lenExpr := fmt.Sprintf("%s.len", g.emitLValue(idxExpr.Left))
+			if ident, ok := idxExpr.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				lenExpr = fmt.Sprintf("%s->len", g.emitLValue(idxExpr.Left))
+			}
+			if arr, ok := leftType.(*checker.ArrayType); ok {
+				lenExpr = fmt.Sprintf("%d", arr.Len)
+			}
+			out.WriteString(fmt.Sprintf("%svira_bounds_check(%s, %s, __FILE__, __LINE__);\n",
+				indent, g.emitExpr(idxExpr.Index), lenExpr))
+			if elemType := g.chk.ExprTypes[s.Target]; elemType != nil && elemType.Equals(checker.TypeString) {
+				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.emitLValue(s.Target)))
+			}
+		}
 		opStr := s.Op.String()
 		out.WriteString(fmt.Sprintf("%s%s %s %s;\n",
 			indent, g.emitLValue(s.Target), opStr, g.emitExpr(s.Value)))
@@ -726,6 +834,56 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			out.WriteString(fmt.Sprintf("%s}\n", indent))
 		}
 
+	case *ast.ForInStmt:
+		iterType := g.chk.ExprTypes[s.Iter]
+		var elemType checker.Type
+		var isFixedArray bool
+		var fixedLen int
+		if sl, ok := iterType.(*checker.SliceType); ok {
+			elemType = sl.Elem
+		} else if arr, ok := iterType.(*checker.ArrayType); ok {
+			elemType = arr.Elem
+			isFixedArray = true
+			fixedLen = arr.Len
+		} else if iterType != nil && iterType.Equals(checker.TypeString) {
+			elemType = checker.TypeString
+		}
+
+		tmpIter := g.nextTmp("iter")
+		tmpIdx := g.nextTmp("i")
+		iterVal := g.emitExpr(s.Iter)
+		if ident, ok := s.Iter.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+			iterVal = "(*" + ident.Ident.Name + ")"
+		}
+
+		out.WriteString(fmt.Sprintf("%s{\n", indent))
+		out.WriteString(fmt.Sprintf("%s    %s %s = %s;\n",
+			indent, g.cType(iterType), tmpIter, iterVal))
+
+		lenExpr := fmt.Sprintf("%s.len", tmpIter)
+		if isFixedArray {
+			lenExpr = fmt.Sprintf("%d", fixedLen)
+		}
+		out.WriteString(fmt.Sprintf("%s    for (int32_t %s = 0; %s < %s; %s++) {\n",
+			indent, tmpIdx, tmpIdx, lenExpr, tmpIdx))
+
+		elemExpr := fmt.Sprintf("%s.data[%s]", tmpIter, tmpIdx)
+		if iterType != nil && iterType.Equals(checker.TypeString) {
+			elemExpr = fmt.Sprintf("vira_str_char_at(%s, %s)", tmpIter, tmpIdx)
+		}
+		out.WriteString(fmt.Sprintf("%s        %s %s = %s;\n",
+			indent, g.cType(elemType), s.Var.Name, elemExpr))
+
+		g.emitBlockStmts(out, s.Body, indent+"        ", fnRet)
+		out.WriteString(fmt.Sprintf("%s    }\n", indent))
+
+		if _, isIdent := s.Iter.(*ast.IdentExpr); !isIdent {
+			if _, isSlice := iterType.(*checker.SliceType); isSlice {
+				out.WriteString(fmt.Sprintf("%s    %s_free(&%s);\n", indent, g.cSliceName(elemType), tmpIter))
+			}
+		}
+		out.WriteString(fmt.Sprintf("%s}\n", indent))
+
 	case *ast.BranchStmt:
 		if s.Tok == token.TokBreak {
 			out.WriteString(fmt.Sprintf("%sbreak;\n", indent))
@@ -758,6 +916,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			out.WriteString(fmt.Sprintf("%svira_arena_destroy(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
 		case ast.CleanupFuture:
 			out.WriteString(fmt.Sprintf("%svira_future_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
+		case ast.CleanupSlice:
+			sliceName := g.cSliceNameFromTypeName(s.TypeName)
+			out.WriteString(fmt.Sprintf("%s%s_free(&%s); // autofree: %s\n", indent, sliceName, s.VarName, s.Reason))
 		}
 
 	case *ast.ReturnStmt:
@@ -913,6 +1074,50 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 
 	case *ast.UnaryExpr:
 		return fmt.Sprintf("(%s%s)", e.Op.String(), g.emitExpr(e.Expr))
+
+	case *ast.IndexExpr:
+		leftType := g.chk.ExprTypes[e.Left]
+		if leftType != nil && leftType.Equals(checker.TypeString) {
+			return fmt.Sprintf("vira_str_char_at(%s, %s)", g.emitExpr(e.Left), g.emitExpr(e.Index))
+		}
+		lenExpr := fmt.Sprintf("%s.len", g.emitLValue(e.Left))
+		if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+			lenExpr = fmt.Sprintf("%s->len", g.emitLValue(e.Left))
+		}
+		if arr, ok := leftType.(*checker.ArrayType); ok {
+			lenExpr = fmt.Sprintf("%d", arr.Len)
+		}
+		return fmt.Sprintf("({ vira_bounds_check(%s, %s, __FILE__, __LINE__); %s; })",
+			g.emitExpr(e.Index), lenExpr, g.emitLValue(e))
+
+	case *ast.ArrayLitExpr:
+		t := g.chk.ExprTypes[e]
+		if arr, ok := t.(*checker.ArrayType); ok {
+			var elemStrs []string
+			for _, el := range e.Elems {
+				elemStrs = append(elemStrs, g.emitExpr(el))
+			}
+			cArr := g.cArrayName(arr)
+			if len(elemStrs) == 0 {
+				return fmt.Sprintf("(%s){0}", cArr)
+			}
+			return fmt.Sprintf("(%s){ .data = { %s } }", cArr, strings.Join(elemStrs, ", "))
+		}
+		if sl, ok := t.(*checker.SliceType); ok {
+			cSl := g.cSliceName(sl.Elem)
+			if len(e.Elems) == 0 {
+				return fmt.Sprintf("%s_new(0)", cSl)
+			}
+			var stmts []string
+			tmp := g.nextTmp("sl")
+			stmts = append(stmts, fmt.Sprintf("%s %s = %s_new(%d);", cSl, tmp, cSl, len(e.Elems)))
+			for i, el := range e.Elems {
+				stmts = append(stmts, fmt.Sprintf("%s.data[%d] = %s;", tmp, i, g.emitExpr(el)))
+			}
+			stmts = append(stmts, fmt.Sprintf("%s.len = %d;", tmp, len(e.Elems)))
+			stmts = append(stmts, tmp+";")
+			return fmt.Sprintf("({ %s })", strings.Join(stmts, " "))
+		}
 	}
 	return "0"
 }
@@ -933,6 +1138,29 @@ func (g *Generator) emitLValue(expr ast.Expr) string {
 	case *ast.IdentExpr:
 		return e.Ident.Name
 	case *ast.SelectorExpr:
+		leftType := g.chk.ExprTypes[e.Left]
+		if arr, isArr := leftType.(*checker.ArrayType); isArr {
+			if e.Field.Name == "len" || e.Field.Name == "cap" {
+				return fmt.Sprintf("%d", arr.Len)
+			}
+		}
+		if sl, isSlice := leftType.(*checker.SliceType); isSlice {
+			_ = sl
+			leftStr := g.emitLValue(e.Left)
+			sep := "."
+			if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				sep = "->"
+			}
+			if e.Field.Name == "len" {
+				return fmt.Sprintf("%s%slen", leftStr, sep)
+			}
+			if e.Field.Name == "cap" {
+				return fmt.Sprintf("%s%scap", leftStr, sep)
+			}
+		}
+		if leftType != nil && leftType.Equals(checker.TypeString) && e.Field.Name == "len" {
+			return fmt.Sprintf("%s.len", g.emitExpr(e.Left))
+		}
 		leftStr := g.emitLValue(e.Left)
 		sep := "."
 		if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
@@ -942,6 +1170,13 @@ func (g *Generator) emitLValue(expr ast.Expr) string {
 			return fmt.Sprintf("%s%s%s.%s", leftStr, sep, strings.Join(hops, "."), e.Field.Name)
 		}
 		return fmt.Sprintf("%s%s%s", leftStr, sep, e.Field.Name)
+	case *ast.IndexExpr:
+		leftStr := g.emitLValue(e.Left)
+		sep := "."
+		if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+			sep = "->"
+		}
+		return fmt.Sprintf("%s%sdata[%s]", leftStr, sep, g.emitExpr(e.Index))
 	default:
 		return g.emitExpr(expr)
 	}
@@ -951,9 +1186,19 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 	var argStrs []string
 	for _, arg := range call.Args {
 		if arg.IsMut {
-			argStrs = append(argStrs, "&"+g.emitLValue(arg.Expr))
+			if ident, ok := arg.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				argStrs = append(argStrs, ident.Ident.Name)
+			} else {
+				argStrs = append(argStrs, "&"+g.emitLValue(arg.Expr))
+			}
 		} else {
-			argStrs = append(argStrs, g.emitExpr(arg.Expr))
+			argVal := g.emitExpr(arg.Expr)
+			if ident, ok := arg.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				if _, isSt := g.chk.ExprTypes[arg.Expr].(*checker.StructType); isSt {
+					argVal = "*" + argVal
+				}
+			}
+			argStrs = append(argStrs, argVal)
 		}
 	}
 
@@ -1275,6 +1520,81 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			allArgs := append([]string{recvExpr + "._object"}, argStrs...)
 			return fmt.Sprintf("%s._vtable->%s(%s)", recvExpr, callee.Field.Name, strings.Join(allArgs, ", "))
 		}
+
+		// 5. Dynamic Slice receiver methods
+		if sl, isSlice := leftType.(*checker.SliceType); isSlice {
+			sliceTypeName := g.cSliceName(sl.Elem)
+			recvLValue := g.emitLValue(callee.Left)
+			isPtr := false
+			if ident, ok := callee.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				isPtr = true
+			}
+			recvPtr := "&" + recvLValue
+			if isPtr {
+				recvPtr = recvLValue
+			}
+			sep := "."
+			if isPtr {
+				sep = "->"
+			}
+
+			switch callee.Field.Name {
+			case "push", "append":
+				return fmt.Sprintf("%s_push(%s, %s)", sliceTypeName, recvPtr, argStrs[0])
+			case "pop":
+				return fmt.Sprintf("%s_pop(%s)", sliceTypeName, recvPtr)
+			case "set":
+				return fmt.Sprintf("%s_set(%s, %s, %s)", sliceTypeName, recvPtr, argStrs[0], argStrs[1])
+			case "clear":
+				return fmt.Sprintf("%s_clear(%s)", sliceTypeName, recvPtr)
+			case "clone":
+				return fmt.Sprintf("%s_clone(%s)", sliceTypeName, recvPtr)
+			case "contains":
+				return fmt.Sprintf("%s_contains(%s, %s)", sliceTypeName, recvPtr, argStrs[0])
+			case "is_empty":
+				return fmt.Sprintf("%s_is_empty(%s)", sliceTypeName, recvPtr)
+			case "len":
+				return fmt.Sprintf("%s%slen", recvLValue, sep)
+			case "cap":
+				return fmt.Sprintf("%s%scap", recvLValue, sep)
+			case "get":
+				cRes := g.cResultName(sl.Elem)
+				return fmt.Sprintf("({ const %s* _s = %s; int32_t _i = %s; (%s)(_i < 0 || _i >= _s->len ? (%s){ .is_err = true, .err = vira_str_lit(\"index out of bounds\", 19) } : (%s){ .is_err = false, .val = _s->data[_i] }); })",
+					sliceTypeName, recvPtr, argStrs[0], cRes, cRes, cRes)
+			}
+		}
+
+		// 6. Fixed Array receiver methods
+		if arr, isArr := leftType.(*checker.ArrayType); isArr {
+			cArr := g.cArrayName(arr)
+			recvLValue := g.emitLValue(callee.Left)
+			isPtr := false
+			if ident, ok := callee.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				isPtr = true
+			}
+			recvPtr := "&" + recvLValue
+			if isPtr {
+				recvPtr = recvLValue
+			}
+
+			switch callee.Field.Name {
+			case "len":
+				return fmt.Sprintf("%d", arr.Len)
+			case "is_empty":
+				return fmt.Sprintf("%t", arr.Len == 0)
+			case "contains":
+				cmp := fmt.Sprintf("_a->data[_i] == %s", argStrs[0])
+				if arr.Elem.Equals(checker.TypeString) {
+					cmp = fmt.Sprintf("vira_str_eq(_a->data[_i], %s)", argStrs[0])
+				}
+				return fmt.Sprintf("({ const %s* _a = %s; bool _found = false; for (int32_t _i = 0; _i < %d; _i++) { if (%s) { _found = true; break; } } _found; })",
+					cArr, recvPtr, arr.Len, cmp)
+			case "get":
+				cRes := g.cResultName(arr.Elem)
+				return fmt.Sprintf("({ const %s* _a = %s; int32_t _i = %s; (%s)(_i < 0 || _i >= %d ? (%s){ .is_err = true, .err = vira_str_lit(\"index out of bounds\", 19) } : (%s){ .is_err = false, .val = _a->data[_i] }); })",
+					cArr, recvPtr, argStrs[0], cRes, arr.Len, cRes, cRes)
+			}
+		}
 	}
 	return "0"
 }
@@ -1371,9 +1691,70 @@ func (g *Generator) cType(t checker.Type) string {
 		return g.cStructName(v.Name)
 	case *checker.ResultType:
 		return g.cResultName(v.Inner)
+	case *checker.SliceType:
+		name := g.cSliceName(v.Elem)
+		g.sliceTypes[name] = v
+		return name
+	case *checker.ArrayType:
+		name := g.cArrayName(v)
+		g.arrayTypes[name] = v
+		return name
 	default:
 		return "void"
 	}
+}
+
+func (g *Generator) cSliceName(elem checker.Type) string {
+	if elem == nil {
+		return "vira_slice_int"
+	}
+	switch v := elem.(type) {
+	case *checker.PrimitiveType:
+		switch v.Kind {
+		case checker.PrimInt:
+			return "vira_slice_int"
+		case checker.PrimI64:
+			return "vira_slice_i64"
+		case checker.PrimF32:
+			return "vira_slice_f32"
+		case checker.PrimF64:
+			return "vira_slice_f64"
+		case checker.PrimBool:
+			return "vira_slice_bool"
+		case checker.PrimString:
+			return "vira_slice_string"
+		}
+	case *checker.StructType:
+		return fmt.Sprintf("vira_slice_%s", g.cStructName(v.Name))
+	}
+	clean := strings.NewReplacer("[", "_", "]", "", " ", "_").Replace(elem.String())
+	return "vira_slice_" + clean
+}
+
+func (g *Generator) cSliceNameFromTypeName(tName string) string {
+	elem := strings.TrimPrefix(tName, "[]")
+	switch elem {
+	case "int":
+		return "vira_slice_int"
+	case "i64":
+		return "vira_slice_i64"
+	case "f32":
+		return "vira_slice_f32"
+	case "f64":
+		return "vira_slice_f64"
+	case "bool":
+		return "vira_slice_bool"
+	case "string":
+		return "vira_slice_string"
+	default:
+		return "vira_slice_" + g.cStructName(elem)
+	}
+}
+
+func (g *Generator) cArrayName(arr *checker.ArrayType) string {
+	elemName := g.cType(arr.Elem)
+	clean := strings.NewReplacer("*", "ptr_", " ", "_").Replace(elemName)
+	return fmt.Sprintf("vira_array_%d_%s", arr.Len, clean)
 }
 
 func (g *Generator) needsMutableAddressForCleanup(t checker.Type) bool {
@@ -1384,14 +1765,20 @@ func (g *Generator) needsMutableAddressForCleanup(t checker.Type) bool {
 		return true
 	}
 	switch t.(type) {
-	case *checker.StructType, *checker.InterfaceType, *checker.TensorType, *checker.FutureType:
+	case *checker.StructType, *checker.InterfaceType, *checker.TensorType, *checker.FutureType, *checker.SliceType:
 		return true
 	}
 	return false
 }
 
 func (g *Generator) isPointerReceiverVar(name string) bool {
-	return g.curReceiver != "" && name == g.curReceiver
+	if g.curReceiver != "" && name == g.curReceiver {
+		return true
+	}
+	if g.curPtrParams != nil && g.curPtrParams[name] {
+		return true
+	}
+	return false
 }
 
 func (g *Generator) resolveCheckType(fn *ast.FnDecl) checker.Type {

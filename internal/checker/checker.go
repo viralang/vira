@@ -1085,6 +1085,22 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 		}
 		c.checkBlock(s.Body, loopScope)
 
+	case *ast.ForInStmt:
+		iterType := c.checkExpr(s.Iter, scope)
+		var elemType Type = TypeVoid
+		if sl, ok := iterType.(*SliceType); ok {
+			elemType = sl.Elem
+		} else if arr, ok := iterType.(*ArrayType); ok {
+			elemType = arr.Elem
+		} else if iterType.Equals(TypeString) {
+			elemType = TypeString
+		} else {
+			c.errorf(s.Iter.Span(), "cannot iterate over type '%s' in for-in loop", iterType)
+		}
+		loopScope := NewScope(scope)
+		loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: elemType, IsMut: false, Span: s.Var.NamePos})
+		c.checkBlock(s.Body, loopScope)
+
 	case *ast.BranchStmt:
 		// break and continue are valid inside loops
 
@@ -1166,6 +1182,13 @@ func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span
 				// Allowed since rootSym.IsMut is true!
 			}
 		}
+
+	case *ast.IndexExpr:
+		rootSym := c.findRootSymbol(t.Left, scope)
+		if rootSym != nil && !rootSym.IsMut {
+			c.errorf(span, "cannot mutate element because array/slice binding '%s' is immutable (declare 'mut %s := ...')",
+				rootSym.Name, rootSym.Name)
+		}
 	}
 }
 
@@ -1175,6 +1198,8 @@ func (c *Checker) findRootSymbol(expr ast.Expr, scope *Scope) *VarSymbol {
 		sym, _ := scope.Lookup(e.Ident.Name)
 		return sym
 	case *ast.SelectorExpr:
+		return c.findRootSymbol(e.Left, scope)
+	case *ast.IndexExpr:
 		return c.findRootSymbol(e.Left, scope)
 	default:
 		return nil
@@ -1263,6 +1288,23 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 
 	case *ast.SelectorExpr:
 		leftType := c.checkExpr(e.Left, scope)
+		if sl, ok := leftType.(*SliceType); ok {
+			if e.Field.Name == "len" || e.Field.Name == "cap" {
+				return TypeInt
+			}
+			c.errorf(e.SelSpan, "slice '%s' has no field '%s' (use .len or methods like .push())", sl, e.Field.Name)
+			return TypeVoid
+		}
+		if arr, ok := leftType.(*ArrayType); ok {
+			if e.Field.Name == "len" || e.Field.Name == "cap" {
+				return TypeInt
+			}
+			c.errorf(e.SelSpan, "array '%s' has no field '%s' (use .len)", arr, e.Field.Name)
+			return TypeVoid
+		}
+		if leftType.Equals(TypeString) && e.Field.Name == "len" {
+			return TypeInt
+		}
 		if st, ok := leftType.(*StructType); ok {
 			finfo, path, ambig := st.LookupField(e.Field.Name)
 			if ambig {
@@ -1284,6 +1326,63 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			return TypeVoid
 		}
 		return TypeVoid
+
+	case *ast.IndexExpr:
+		leftType := c.checkExpr(e.Left, scope)
+		idxType := c.checkExpr(e.Index, scope)
+		if !idxType.Equals(TypeInt) && !idxType.Equals(TypeI64) {
+			c.errorf(e.IndexSpan, "index must be integer, got '%s'", idxType)
+		}
+		if sl, ok := leftType.(*SliceType); ok {
+			return sl.Elem
+		}
+		if arr, ok := leftType.(*ArrayType); ok {
+			return arr.Elem
+		}
+		if leftType.Equals(TypeString) {
+			return TypeString
+		}
+		c.errorf(e.IndexSpan, "cannot index value of type '%s'", leftType)
+		return TypeVoid
+
+	case *ast.ArrayLitExpr:
+		if e.Type != nil {
+			targetType := c.resolveTypeExpr(e.Type)
+			if arr, ok := targetType.(*ArrayType); ok {
+				if len(e.Elems) > arr.Len {
+					c.errorf(e.LitSpan, "too many elements in array literal: expected %d, got %d", arr.Len, len(e.Elems))
+				}
+				for _, el := range e.Elems {
+					elType := c.checkExpr(el, scope)
+					if !elType.Equals(arr.Elem) {
+						c.errorf(el.Span(), "mismatched element type in array literal: expected '%s', got '%s'", arr.Elem, elType)
+					}
+				}
+				return arr
+			}
+			if sl, ok := targetType.(*SliceType); ok {
+				for _, el := range e.Elems {
+					elType := c.checkExpr(el, scope)
+					if !elType.Equals(sl.Elem) {
+						c.errorf(el.Span(), "mismatched element type in slice literal: expected '%s', got '%s'", sl.Elem, elType)
+					}
+				}
+				return sl
+			}
+			c.errorf(e.LitSpan, "invalid array literal type '%s'", targetType)
+			return targetType
+		}
+		if len(e.Elems) == 0 {
+			return &SliceType{Elem: TypeInt}
+		}
+		firstElemType := c.checkExpr(e.Elems[0], scope)
+		for i := 1; i < len(e.Elems); i++ {
+			elType := c.checkExpr(e.Elems[i], scope)
+			if !elType.Equals(firstElemType) {
+				c.errorf(e.Elems[i].Span(), "mismatched element type in slice literal: expected '%s', got '%s'", firstElemType, elType)
+			}
+		}
+		return &SliceType{Elem: firstElemType}
 
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, scope)
@@ -1402,6 +1501,142 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					Params:     nil,
 					ReturnType: &ResultType{Inner: futType.Inner},
 					Span:       callee.SelSpan,
+				}
+			} else if sl, isSlice := recvType.(*SliceType); isSlice {
+				switch callee.Field.Name {
+				case "push", "append":
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method '%s()' on immutable slice '%s' (declare 'mut %s := ...')",
+							callee.Field.Name, rootSym.Name, rootSym.Name)
+					}
+					sig = &FnSig{
+						Name:       callee.Field.Name,
+						Params:     []ParamInfo{{Name: "item", Type: sl.Elem}},
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice." + callee.Field.Name
+				case "pop":
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method 'pop()' on immutable slice '%s' (declare 'mut %s := ...')",
+							rootSym.Name, rootSym.Name)
+					}
+					sig = &FnSig{
+						Name:       "pop",
+						Params:     nil,
+						ReturnType: sl.Elem,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.pop"
+				case "get":
+					sig = &FnSig{
+						Name:       "get",
+						Params:     []ParamInfo{{Name: "index", Type: TypeInt}},
+						ReturnType: &ResultType{Inner: sl.Elem},
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.get"
+				case "set":
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method 'set()' on immutable slice '%s' (declare 'mut %s := ...')",
+							rootSym.Name, rootSym.Name)
+					}
+					sig = &FnSig{
+						Name:       "set",
+						Params:     []ParamInfo{{Name: "index", Type: TypeInt}, {Name: "val", Type: sl.Elem}},
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.set"
+				case "clear":
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method 'clear()' on immutable slice '%s' (declare 'mut %s := ...')",
+							rootSym.Name, rootSym.Name)
+					}
+					sig = &FnSig{
+						Name:       "clear",
+						Params:     nil,
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.clear"
+				case "clone":
+					sig = &FnSig{
+						Name:       "clone",
+						Params:     nil,
+						ReturnType: sl,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.clone"
+				case "contains":
+					sig = &FnSig{
+						Name:       "contains",
+						Params:     []ParamInfo{{Name: "val", Type: sl.Elem}},
+						ReturnType: TypeBool,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.contains"
+				case "is_empty":
+					sig = &FnSig{
+						Name:       "is_empty",
+						Params:     nil,
+						ReturnType: TypeBool,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.is_empty"
+				case "len", "cap":
+					sig = &FnSig{
+						Name:       callee.Field.Name,
+						Params:     nil,
+						ReturnType: TypeInt,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice." + callee.Field.Name
+				default:
+					c.errorf(callee.SelSpan, "slice '%s' has no method '%s'", sl, callee.Field.Name)
+					return TypeVoid
+				}
+			} else if arr, isArr := recvType.(*ArrayType); isArr {
+				switch callee.Field.Name {
+				case "get":
+					sig = &FnSig{
+						Name:       "get",
+						Params:     []ParamInfo{{Name: "index", Type: TypeInt}},
+						ReturnType: &ResultType{Inner: arr.Elem},
+						Span:       callee.SelSpan,
+					}
+					callName = "array.get"
+				case "contains":
+					sig = &FnSig{
+						Name:       "contains",
+						Params:     []ParamInfo{{Name: "val", Type: arr.Elem}},
+						ReturnType: TypeBool,
+						Span:       callee.SelSpan,
+					}
+					callName = "array.contains"
+				case "is_empty":
+					sig = &FnSig{
+						Name:       "is_empty",
+						Params:     nil,
+						ReturnType: TypeBool,
+						Span:       callee.SelSpan,
+					}
+					callName = "array.is_empty"
+				case "len":
+					sig = &FnSig{
+						Name:       "len",
+						Params:     nil,
+						ReturnType: TypeInt,
+						Span:       callee.SelSpan,
+					}
+					callName = "array.len"
+				default:
+					c.errorf(callee.SelSpan, "array '%s' has no method '%s'", arr, callee.Field.Name)
+					return TypeVoid
 				}
 			} else if st, ok := recvType.(*StructType); ok {
 				// 3. Instance method, promoted method, or Actor `<-` message send
@@ -1693,6 +1928,23 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			Inner: c.resolveTypeExpr(t.Inner),
 			IsMut: t.IsMut,
 		}
+
+	case *ast.ArrayType:
+		elem := c.resolveTypeExpr(t.Elem)
+		if t.Len != nil {
+			if lit, ok := t.Len.(*ast.LiteralExpr); ok && lit.Kind == token.TokInt {
+				var n int
+				fmt.Sscanf(lit.Value, "%d", &n)
+				if n <= 0 {
+					c.errorf(t.LBracketPos, "array length must be positive, got %d", n)
+					n = 1
+				}
+				return &ArrayType{Len: n, Elem: elem}
+			}
+			c.errorf(t.LBracketPos, "array length must be a constant integer")
+			return &ArrayType{Len: 1, Elem: elem}
+		}
+		return &SliceType{Elem: elem}
 
 	default:
 		return TypeVoid
