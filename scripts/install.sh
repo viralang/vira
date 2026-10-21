@@ -3,9 +3,11 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/scripts/install.sh | bash
 #    or: ./scripts/install.sh
 
-set -e
-
-VIRA_VERSION="v0.5.9"
+DEFAULT_VERSION="v0.5.9"
+VIRA_VERSION="${1:-${VIRA_VERSION:-$DEFAULT_VERSION}}"
+if [[ "$VIRA_VERSION" != v* ]]; then
+    VIRA_VERSION="v$VIRA_VERSION"
+fi
 INSTALL_DIR="$HOME/.vir"
 BIN_DIR="$INSTALL_DIR/bin"
 RUNTIME_DIR="$INSTALL_DIR/runtime"

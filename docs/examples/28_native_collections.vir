@@ -4,35 +4,40 @@ module collections_demo
 // 1. Fixed-Size Stack Arrays ([N]T)
 // ============================================================================
 
+struct avlia {
+	name  string
+	age  int
+}
+
 fn demonstrate_fixed_arrays() {
-    println("=== 1. Fixed-Size Stack Arrays ([N]T) ===")
+	println("=== 1. Fixed-Size Stack Arrays ([N]T) ===")
 
-    // Initialized on stack, 0 heap allocations
-    mut scores := [4]int{95, 88, 72, 91}
-    println("Array size: scores.len = ${scores.len}")
-    println("Initial first element: scores[0] = ${scores[0]}")
+	// Initialized on stack, 0 heap allocations
+	mut scores := [4]int{95, 88, 72, 91}
+	println("Array size: scores.len = ${scores.len}")
+	println("Initial first element: scores[0] = ${scores[0]}")
 
-    // Mutable indexed assignment
-    scores[2] = 85
-    println("Updated scores[2] to ${scores[2]}")
+	// Mutable indexed assignment
+	scores[2] = 85
+	println("Updated scores[2] to ${scores[2]}")
 
-    // Safe retrieval via Result monad !T with `or {}` fallback
-    val_first := scores.get(0) or { 0 }
-    val_out_of_bounds := scores.get(99) or { -1 }
-    println("scores.get(0) = ${val_first}")
-    println("scores.get(99) or { -1 } = ${val_out_of_bounds}")
+	// Safe retrieval via Result monad !T with `or {}` fallback
+	val_first := scores.get(0) or { 0 }
+	val_out_of_bounds := scores.get(99) or { -1 }
+	println("scores.get(0) = ${val_first}")
+	println("scores.get(99) or { -1 } = ${val_out_of_bounds}")
 
-    // Fast queries
-    println("Contains 85: ${scores.contains(85)}")
-    println("Contains 100: ${scores.contains(100)}")
-    println("Is empty: ${scores.is_empty()}")
+	// Fast queries
+	println("Contains 85: ${scores.contains(85)}")
+	println("Contains 100: ${scores.contains(100)}")
+	println("Is empty: ${scores.is_empty()}")
 
-    // Clean for-in iteration
-    mut total := 0
-    for s in scores {
-        total = total + s
-    }
-    println("Total score sum: ${total}")
+	// Clean for-in iteration
+	mut total := 0
+	for s in scores {
+		total = total + s
+	}
+	println("Total score sum: ${total}")
 }
 
 // ============================================================================
@@ -40,40 +45,40 @@ fn demonstrate_fixed_arrays() {
 // ============================================================================
 
 fn demonstrate_dynamic_slices() {
-    println("\n=== 2. Dynamic Growable Slices ([]T) ===")
+	println("\n=== 2. Dynamic Growable Slices ([]T) ===")
 
-    // Inferred heap slice, managed with deterministic zero-leak Autofree
-    mut metrics := [10, 20, 30]
-    println("Initial slice: len = ${metrics.len}, cap = ${metrics.cap}")
+	// Inferred heap slice, managed with deterministic zero-leak Autofree
+	mut metrics := [10, 20, 30]
+	println("Initial slice: len = ${metrics.len}, cap = ${metrics.cap}")
 
-    // Amortized 2x geometric growth
-    metrics.push(40)
-    metrics.push(50)
-    println("After pushing 40 and 50: len = ${metrics.len}, cap = ${metrics.cap}")
+	// Amortized 2x geometric growth
+	metrics.push(40)
+	metrics.push(50)
+	println("After pushing 40 and 50: len = ${metrics.len}, cap = ${metrics.cap}")
 
-    // Mutable indexing
-    metrics[0] = 100
-    println("Updated metrics[0] = ${metrics[0]}")
+	// Mutable indexing
+	metrics[0] = 100
+	println("Updated metrics[0] = ${metrics[0]}")
 
-    // Pop the last element
-    last_item := metrics.pop()
-    println("Popped last element: ${last_item}, remaining len = ${metrics.len}")
+	// Pop the last element
+	last_item := metrics.pop()
+	println("Popped last element: ${last_item}, remaining len = ${metrics.len}")
 
-    // Deep clone with independent backing memory
-    cloned_metrics := metrics.clone()
-    println("Cloned slice len = ${cloned_metrics.len}")
-    println("Cloned contains 100: ${cloned_metrics.contains(100)}")
+	// Deep clone with independent backing memory
+	cloned_metrics := metrics.clone()
+	println("Cloned slice len = ${cloned_metrics.len}")
+	println("Cloned contains 100: ${cloned_metrics.contains(100)}")
 
-    // Loop through slice elements
-    mut running_sum := 0
-    for m in metrics {
-        running_sum = running_sum + m
-    }
-    println("Running sum of metrics: ${running_sum}")
+	// Loop through slice elements
+	mut running_sum := 0
+	for m in metrics {
+		running_sum = running_sum + m
+	}
+	println("Running sum of metrics: ${running_sum}")
 
-    // Clear elements
-    metrics.clear()
-    println("After clear(): is_empty = ${metrics.is_empty()}, len = ${metrics.len}")
+	// Clear elements
+	metrics.clear()
+	println("After clear(): is_empty = ${metrics.is_empty()}, len = ${metrics.len}")
 }
 
 // ============================================================================
@@ -81,33 +86,35 @@ fn demonstrate_dynamic_slices() {
 // ============================================================================
 
 fn demonstrate_string_slices() {
-    println("\n=== 3. String Collections ([]string) ===")
+	println("\n=== 3. String Collections ([]string) ===")
 
-    mut users := ["Alice", "Bob", "Charlie"]
-    users.push("Dave")
-    println("Active users count: ${users.len}")
+	mut users := ["Alice", "Bob", "Charlie"]
+	users.push("Dave")
+	println("Active users count: ${users.len}")
 
-    println("User search 'Bob': ${users.contains("Bob")}")
-    println("User search 'Eve': ${users.contains("Eve")}")
+	println("User search 'Bob': ${users.contains("Bob")}")
+	println("User search 'Eve': ${users.contains("Eve")}")
 
-    // Safe retrieval
-    admin := users.get(0) or { "Unknown" }
-    guest := users.get(42) or { "Guest" }
-    println("Admin user: ${admin}")
-    println("Guest fallback: ${guest}")
+	// Safe retrieval
+	admin := users.get(0) or { "Unknown" }
+	guest := users.get(42) or { "Guest" }
+	me := users.clone()
 
-    // Direct iteration
-    for u in users {
-        println("User logged in: ${u}")
-    }
+	println("Admin user: ${admin}")
+	println("Guest fallback: ${guest}")
 
-    popped_user := users.pop()
-    println("Removed user: ${popped_user}")
+	// Direct iteration
+	for u in users {
+		println("User logged in: ${u}")
+	}
+
+	popped_user := users.pop()
+	println("Removed user: ${popped_user}")
 }
 
 fn main() {
-    demonstrate_fixed_arrays()
-    demonstrate_dynamic_slices()
-    demonstrate_string_slices()
-    println("\nCollections demonstration finished cleanly with zero leaks!")
+	demonstrate_fixed_arrays()
+	demonstrate_dynamic_slices()
+	demonstrate_string_slices()
+	println("\nCollections demonstration finished cleanly with zero leaks!")
 }

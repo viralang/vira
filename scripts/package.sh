@@ -5,4 +5,4 @@
 set -e
 
 echo "Running Vira Cross-Platform Release Packager..."
-go run ./scripts/package.go
+go run ./scripts/package.go "$@"

@@ -2,4 +2,4 @@
 # Runs the automated Go packager to build releases for Windows, Linux, and macOS.
 
 Write-Host "Running Vira Cross-Platform Release Packager..." -ForegroundColor Cyan
-go run .\scripts\package.go
+go run .\scripts\package.go @args

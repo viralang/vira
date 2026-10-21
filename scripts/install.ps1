@@ -1,9 +1,14 @@
-# Vira Programming Language - Windows Automated Installer & Dependency Resolver
-# Usage: powershell -ExecutionPolicy Bypass -File install.ps1
+param(
+    [string]$Version = ""
+)
 
 $ErrorActionPreference = "Stop"
 
-$ViraVersion = "v0.5.9"
+$DefaultVersion = "v0.5.9"
+$ViraVersion = if ($Version) { $Version } elseif ($env:VIRA_VERSION) { $env:VIRA_VERSION } else { $DefaultVersion }
+if (-not $ViraVersion.StartsWith("v")) {
+    $ViraVersion = "v$ViraVersion"
+}
 $InstallDir  = "$env:USERPROFILE\.vir"
 $BinDir      = "$InstallDir\bin"
 $RuntimeDir  = "$InstallDir\runtime"

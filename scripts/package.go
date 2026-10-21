@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,9 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-)
 
-const version = "v0.5.9"
+	"github.com/viralang/vira/internal/version"
+)
 
 type Target struct {
 	OS      string
@@ -32,16 +33,28 @@ var targets = []Target{
 }
 
 func main() {
+	var verFlag string
+	flag.StringVar(&verFlag, "version", "", "Override version to package (default: from internal/version)")
+	flag.Parse()
+
+	ver := version.Version
+	if verFlag != "" {
+		ver = verFlag
+		if !strings.HasPrefix(ver, "v") {
+			ver = "v" + ver
+		}
+	}
+
 	start := time.Now()
 	distDir := "dist"
 	if err := os.MkdirAll(distDir, 0755); err != nil {
 		fatal("failed to create dist directory: %v", err)
 	}
 
-	fmt.Printf("=== Packaging Vira Programming Language [%s] ===\n\n", version)
+	fmt.Printf("=== Packaging Vira Programming Language [%s] ===\n\n", ver)
 
 	for _, tgt := range targets {
-		targetName := fmt.Sprintf("vira-%s-%s-%s", version, tgt.OS, tgt.Arch)
+		targetName := fmt.Sprintf("vira-%s-%s-%s", ver, tgt.OS, tgt.Arch)
 		fmt.Printf("Building %s (%s/%s)...\n", targetName, tgt.OS, tgt.Arch)
 
 		tempDir, err := os.MkdirTemp("", targetName+"-*")

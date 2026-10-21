@@ -21,6 +21,7 @@ import (
 	"github.com/viralang/vira/internal/parser"
 	"github.com/viralang/vira/internal/pkg"
 	"github.com/viralang/vira/internal/source"
+	"github.com/viralang/vira/internal/version"
 	stdpkg "github.com/viralang/vira/packages"
 	virart "github.com/viralang/vira/runtime"
 )
@@ -108,7 +109,7 @@ func main() {
 }
 
 func versionCmd() {
-	fmt.Printf("Vira v0.5.9 (%s/%s)\n", goRuntime.GOOS, goRuntime.GOARCH)
+	fmt.Printf("Vira %s (%s/%s)\n", version.Version, goRuntime.GOOS, goRuntime.GOARCH)
 }
 
 // --- SUBCOMMAND 1: `vira run` ---
