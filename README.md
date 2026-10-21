@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.9-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.10-blue.svg?style=flat-square" alt="Version"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.22+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
   <a href="#7-memory-management-deterministic-autofree--arenas"><img src="https://img.shields.io/badge/memory-deterministic_autofree_(no_GC)-orange.svg?style=flat-square" alt="Memory"></a>
@@ -935,10 +935,10 @@ The automated Go packager compiles and packages release bundles for Windows, Lin
 ```
 
 Generates compressed artifacts in `dist/`:
-- `vira-v0.5.9-windows-amd64.zip`
-- `vira-v0.5.9-linux-amd64.tar.gz`
-- `vira-v0.5.9-darwin-arm64.tar.gz`
-- `vira-v0.5.9-darwin-amd64.tar.gz`
+- `vira-v0.5.10-windows-amd64.zip`
+- `vira-v0.5.10-linux-amd64.tar.gz`
+- `vira-v0.5.10-darwin-arm64.tar.gz`
+- `vira-v0.5.10-darwin-amd64.tar.gz`
 
 ---
 
