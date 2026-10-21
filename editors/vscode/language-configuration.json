@@ -24,6 +24,6 @@
   ],
   "indentationRules": {
     "increaseIndentPattern": "^.*(\\{|\\(|\\[|:\\s*)$",
-    "decreaseIndentPattern": "^\\s*(\\}|\\)|\\])"
+    "decreaseIndentPattern": "^\\s*(\\}|\\)|\\]|case\\b.*:|default:)"
   }
 }

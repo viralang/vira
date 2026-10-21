@@ -408,3 +408,60 @@ func TestLSPPackageSiblingFiles_ResponseVir(t *testing.T) {
 		t.Errorf("expected clean diagnostics [] on response.vir, got: %s", res)
 	}
 }
+
+func TestLSPSwitchHoverModuleSymbolsAndCompletion(t *testing.T) {
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	sendRPC(&in, "initialize", map[string]interface{}{}, 1)
+
+	code := "module myapp\n\nimport http as web\n\nfn handle(code int) {\n\tswitch code {\n\tcase 200:\n\t\tdefault:\n\t}\n\tres := web.\n}\n"
+	uri := "file:///app/main.vir"
+
+	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
+		"textDocument": map[string]interface{}{
+			"uri":  uri,
+			"text": code,
+		},
+	}, nil)
+
+	// 1. Hover on `switch` at line 5, col 2
+	sendRPC(&in, "textDocument/hover", map[string]interface{}{
+		"textDocument": map[string]interface{}{
+			"uri": uri,
+		},
+		"position": map[string]interface{}{
+			"line":      5,
+			"character": 2,
+		},
+	}, 2)
+
+	// 2. Document symbols (must include `module myapp` and `import http as web`)
+	sendRPC(&in, "textDocument/documentSymbol", map[string]interface{}{
+		"textDocument": map[string]interface{}{
+			"uri": uri,
+		},
+	}, 3)
+
+	sendRPC(&in, "shutdown", map[string]interface{}{}, 4)
+
+	server := lsp.NewServer(&in, &out)
+	if err := server.Run(); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	res := out.String()
+
+	// Verify switch hover output
+	if !strings.Contains(res, "Vira Switch Statement") {
+		t.Errorf("expected hover response to contain 'Vira Switch Statement', got: %s", res)
+	}
+
+	// Verify document symbols
+	if !strings.Contains(res, "module myapp") {
+		t.Errorf("expected document symbols to include 'module myapp', got: %s", res)
+	}
+	if !strings.Contains(res, "import http as web") {
+		t.Errorf("expected document symbols to include 'import http as web', got: %s", res)
+	}
+}

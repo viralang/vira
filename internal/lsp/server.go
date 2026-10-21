@@ -930,6 +930,14 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**Vira Bump Arena (`arena { ... }`)**\n\nAllocates intermediate objects and tensors inside an ultra-fast O(1) contiguous memory slab. Wiped instantly on block exit without `free()`."
 	case "tensor":
 		return "**Vira First-Class SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 2D tensor supporting hardware-accelerated matrix multiplication (`@`) and zero-copy DMA to GPUs."
+	case "switch":
+		return "**Vira Switch Statement (`switch expr { case ... }`)**\n\nMulti-branch control flow evaluating integer, string, or boolean conditions with automatic break semantics."
+	case "case":
+		return "**Vira Switch Case Branch (`case val1, val2:`)**\n\nMatches one or more comma-separated values or boolean conditions. Breaks automatically upon branch completion."
+	case "default":
+		return "**Vira Switch Default Branch (`default:`)**\n\nFallback branch executed when no preceding `case` condition matches."
+	case "module":
+		return "**Vira Module Declaration (`module <name>`)**\n\nDeclares the primary package namespace for exported structs, interfaces, and functions, preventing cross-package naming collisions."
 	case "push", "append":
 		return "**`slice.push(val: T)`**\n\nAppends an element to the dynamic slice with amortized O(1) geometric buffer expansion."
 	case "pop":
@@ -1169,7 +1177,63 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		}
 		receiverIdent := prefix[identStart:identEnd]
 
-		// 1A. Static methods on struct name
+		// 1A. Module / Package Namespace Completion (e.g., 'http.' or 'net.')
+		for _, imp := range astFile.Imports {
+			cleanTarget := strings.Trim(imp.Name, `"`)
+			alias := imp.Alias
+			modName := filepath.Base(cleanTarget)
+			if alias == "" {
+				alias = modName
+			}
+			if receiverIdent == alias || receiverIdent == modName {
+				for _, impDoc := range imported {
+					docMod := impDoc.AST.Module.Name
+					if docMod == "" {
+						docMod = filepath.Base(filepath.Dir(impDoc.Path))
+						if docMod == "src" {
+							docMod = filepath.Base(filepath.Dir(filepath.Dir(impDoc.Path)))
+						}
+					}
+					if docMod == modName || (imp.Alias != "" && docMod == imp.Alias) || strings.Contains(filepath.ToSlash(impDoc.Path), "/"+cleanTarget+"/") {
+						origin := filepath.Base(impDoc.Path)
+						for _, decl := range impDoc.AST.Decls {
+							switch d := decl.(type) {
+							case *ast.StructDecl:
+								detail := "struct"
+								if d.IsActor {
+									detail = "actor"
+								}
+								detail += fmt.Sprintf(" (from %s)", origin)
+								items = append(items, CompletionItem{
+									Label:  d.Name.Name,
+									Kind:   7, // Class/Struct
+									Detail: detail,
+								})
+							case *ast.InterfaceDecl:
+								items = append(items, CompletionItem{
+									Label:  d.Name.Name,
+									Kind:   8, // Interface
+									Detail: fmt.Sprintf("interface (from %s)", origin),
+								})
+							case *ast.FnDecl:
+								if d.Receiver == nil && d.StaticType == nil {
+									items = append(items, CompletionItem{
+										Label:  d.Name.Name,
+										Kind:   3, // Function
+										Detail: fmt.Sprintf("function (from %s)", origin),
+									})
+								}
+							}
+						}
+					}
+				}
+				if len(items) > 0 {
+					return items
+				}
+			}
+		}
+
+		// 1B. Static methods on struct name
 		if sd := findStruct(receiverIdent); sd != nil {
 			for _, decl := range allDecls {
 				if fn, ok := decl.(*ast.FnDecl); ok && fn.StaticType != nil && fn.StaticType.Name == receiverIdent {
@@ -1334,7 +1398,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		}
 	}
 
-	for _, kw := range []string{"module", "import", "pub", "mut", "fn", "struct", "actor", "interface", "return", "if", "else", "for", "arena", "true", "false"} {
+	for _, kw := range []string{"module", "import", "pub", "mut", "fn", "struct", "actor", "interface", "return", "if", "else", "switch", "case", "default", "for", "arena", "true", "false"} {
 		items = append(items, CompletionItem{
 			Label:  kw,
 			Kind:   14, // Keyword
@@ -1372,10 +1436,24 @@ func (s *Server) computeDocumentSymbols(uri string, text string) []DocumentSymbo
 		}
 	}
 
+	if astFile.Module.Name != "" {
+		rng := makeRange(astFile.Module.NamePos)
+		symbols = append(symbols, DocumentSymbol{
+			Name:           "module " + astFile.Module.Name,
+			Kind:           2, // Module
+			Range:          rng,
+			SelectionRange: rng,
+		})
+	}
+
 	for _, imp := range astFile.Imports {
 		rng := makeRange(imp.NamePos)
+		name := "import " + imp.Path
+		if imp.Alias != "" {
+			name += " as " + imp.Alias
+		}
 		symbols = append(symbols, DocumentSymbol{
-			Name:           "import " + imp.Name,
+			Name:           name,
 			Kind:           3, // Namespace
 			Range:          rng,
 			SelectionRange: rng,

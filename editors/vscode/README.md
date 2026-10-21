@@ -7,21 +7,25 @@ Official Visual Studio Code and Cursor extension for the **Vira Programming Lang
 ## Features
 
 - **Syntax Highlighting:** Complete TextMate grammar (`vira.tmLanguage.json`) supporting all Vira language features:
-  - First-class `import` statements and module namespace paths
+  - First-class `import` statements, package aliases (`import ... as ...`), and module declarations (`module <name>`)
+  - Qualified type signatures (`pkg.Type`) and qualified static calls
+  - Multi-branch `switch`, `case`, and `default` control flow
   - 4-Quadrant mutability modifiers (`pub:`, `mut:`, `pub mut:`, `default:`)
+  - Native collections (`[N]T` stack arrays, `[]T` dynamic slices)
   - AI tensor primitives (`tensor[f32]`, `@` matrix multiplication)
   - Concurrency & Actor tokens (`actor`, `spawn`, `supervise`, `<-` message passing)
   - Memory management (`arena`)
   - String interpolation (`'Hello, ${name}!'`)
-  - Built-in tensor, GGUF/LLM, and native GUI API functions
+  - Built-in tensor, GGUF/LLM, standard library, and native GUI API functions
 - **Multi-File Import Resolution & Cross-File Navigation:**
-  - Understands `import "./file.vir"` and `import pkg`
+  - Understands `import "./file.vir"`, `import pkg`, and `import pkg as alias`
   - Cross-file symbol resolution eliminates false diagnostics
   - **Go to Definition (`F12`):** Jump directly from an imported symbol or embedded struct to its declaration file
-  - **Rich Hover Documentation:** Inspect struct quadrants, methods, embedded promotions, and source file origins
-  - **Smart Autocomplete & Dot Completion:** Trigger completion after `.` (e.g., `user.`) to see fields, methods, and promoted members from embedded structs across imported modules
-  - **Document Symbols & Outline:** Full breadcrumbs and symbol outline for structs, interfaces, methods, and embeds
-- **Language Configuration:** Automatic bracket matching, indent rules, surrounding pairs, and comment toggling (`//`, `/* */`).
+  - **Rich Hover Documentation:** Inspect struct quadrants, methods, embedded promotions, keywords, and source file origins
+  - **Smart Autocomplete & Dot Completion:** Trigger completion after `.` (e.g., `user.`, `slice.`, `net.`) to see fields, methods, module exports, and promoted members from embedded structs across imported modules
+  - **Document Symbols & Outline:** Full breadcrumbs and symbol outline for modules, imports, structs, interfaces, methods, and embeds
+- **Language Configuration:** Automatic bracket matching, smart case/default decrease indentation, surrounding pairs, and comment toggling (`//`, `/* */`).
+- **Snippets:** Built-in productivity snippets for loops (`forin`), collections (`arr`, `slice`, `push`, `getor`), control flow (`switch`), and modules (`mod`, `impas`).
 - **Language Server (LSP) Integration:** Real-time semantic diagnostics, error highlighting, and code formatting via `vira lsp` and `vira fmt`.
 - **GitHub Linguist Grammar:** Serves as the upstream grammar for GitHub syntax highlighting (see [LINGUIST.md](LINGUIST.md)).
 
@@ -34,13 +38,13 @@ Official Visual Studio Code and Cursor extension for the **Vira Programming Lang
 Run in your terminal:
 
 ```bash
-code --install-extension editors/vscode/vira-language-0.1.2.vsix
+code --install-extension editors/vscode/vira-language-0.1.6.vsix
 ```
 
 Or in Cursor:
 
 ```bash
-cursor --install-extension editors/vscode/vira-language-0.1.2.vsix
+cursor --install-extension editors/vscode/vira-language-0.1.6.vsix
 ```
 
 ### Option 2: Install from Source
