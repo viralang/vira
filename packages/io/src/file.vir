@@ -1,0 +1,107 @@
+module io
+
+@[intrinsic: 'vira_io_file_open']
+fn c_file_open(path string, mode string) i64
+
+@[intrinsic: 'vira_io_file_read']
+fn c_file_read(handle i64, mut buf []u8, max_len int) int
+
+@[intrinsic: 'vira_io_file_write']
+fn c_file_write(handle i64, buf []u8, len int) int
+
+@[intrinsic: 'vira_io_file_seek']
+fn c_file_seek(handle i64, offset i64, whence int) i64
+
+@[intrinsic: 'vira_io_file_flush']
+fn c_file_flush(handle i64) int
+
+@[intrinsic: 'vira_io_file_close']
+fn c_file_close(handle i64) int
+
+@[intrinsic: 'vira_io_file_size']
+fn c_file_size(handle i64) i64
+
+pub struct File {
+pub mut:
+	handle i64
+	path string
+	is_open bool
+}
+
+pub fn File.open(path string, mode string) !File {
+	h := c_file_open(path, mode)
+	if h == 0 {
+		return error('failed to open file')
+	}
+	return File{
+		handle: h,
+		path: path,
+		is_open: true,
+	}
+}
+
+pub fn (mut f File) read(mut buf []u8) !int {
+	if !f.is_open || f.handle == 0 {
+		return error('file is not open')
+	}
+	n := c_file_read(f.handle, mut buf, buf.cap)
+	return n
+}
+
+pub fn (mut f File) write(buf []u8) !int {
+	if !f.is_open || f.handle == 0 {
+		return error('file is not open')
+	}
+	n := c_file_write(f.handle, buf, buf.len)
+	return n
+}
+
+pub fn (mut f File) write_string(s string) !int {
+	b := s.bytes()
+	n := f.write(b) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut f File) seek(offset i64, whence int) !i64 {
+	if !f.is_open || f.handle == 0 {
+		return error('file is not open')
+	}
+	pos := c_file_seek(f.handle, offset, whence)
+	if pos < 0 {
+		return error('failed to seek file')
+	}
+	return pos
+}
+
+pub fn (mut f File) flush() !bool {
+	if !f.is_open || f.handle == 0 {
+		return error('file is not open')
+	}
+	res := c_file_flush(f.handle)
+	if res != 0 {
+		return error('failed to flush file')
+	}
+	return true
+}
+
+pub fn (mut f File) close() !bool {
+	if !f.is_open || f.handle == 0 {
+		return true
+	}
+	res := c_file_close(f.handle)
+	f.is_open = false
+	f.handle = 0
+	if res != 0 {
+		return error('failed to close file')
+	}
+	return true
+}
+
+pub fn (f File) size() i64 {
+	if !f.is_open || f.handle == 0 {
+		return 0
+	}
+	return c_file_size(f.handle)
+}

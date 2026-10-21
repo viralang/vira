@@ -1,5 +1,7 @@
 module viraserve
 
+import http
+
 // --- MASTER HTTP APPLICATION SERVER ---
 pub struct ViraServe {
 pub:
@@ -45,6 +47,18 @@ pub fn (mut s ViraServe) dispatch_request(req Request) Response {
 	s.stats.record(res.status_code, latency)
 	log_access(req.method, req.path, res.status_code, latency)
 	return res
+}
+
+pub fn (mut s ViraServe) serve_one(mut server http.HttpServer) !bool {
+	mut ctx := server.accept_request() or {
+		return error(err)
+	}
+	req := Request.new(ctx.req.method.clone(), ctx.req.path.clone(), ctx.req.query.clone(), ctx.req.body.clone(), 0)
+	res := s.dispatch_request(req)
+	n := ctx.respond(http.Response.with_status(res.status_code, res.body.clone())) or {
+		return error(err)
+	}
+	return n > 0
 }
 
 pub fn (s ViraServe) print_banner() {

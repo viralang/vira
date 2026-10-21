@@ -1,0 +1,68 @@
+module http
+
+pub struct Header {
+pub:
+	name string
+	value string
+}
+
+pub struct HeaderMap {
+pub mut:
+	entries []Header
+}
+
+pub fn HeaderMap.new() HeaderMap {
+	return HeaderMap{
+		entries: []Header{},
+	}
+}
+
+pub fn (mut h HeaderMap) set(name string, value string) {
+	lower_name := name.to_lower()
+	mut i := 0
+	for i < h.entries.len {
+		if h.entries[i].name.to_lower() == lower_name {
+			h.entries[i] = Header{ name: name.clone(), value: value.clone() }
+			return
+		}
+		i = i + 1
+	}
+	h.entries.push(Header{ name: name.clone(), value: value.clone() })
+}
+
+pub fn (h HeaderMap) get(name string) !string {
+	lower_name := name.to_lower()
+	mut i := 0
+	for i < h.entries.len {
+		if h.entries[i].name.to_lower() == lower_name {
+			return h.entries[i].value.clone()
+		}
+		i = i + 1
+	}
+	return error('header not found: ${name}')
+}
+
+pub fn (h HeaderMap) get_or(name string, fallback string) string {
+	res := h.get(name) or {
+		return fallback
+	}
+	return res
+}
+
+pub fn (h HeaderMap) contains(name string) bool {
+	res := h.get(name) or {
+		return false
+	}
+	return true
+}
+
+pub fn (h HeaderMap) format() string {
+	mut res := ''
+	mut i := 0
+	for i < h.entries.len {
+		entry := h.entries[i]
+		res = '${res}${entry.name}: ${entry.value}\r\n'
+		i = i + 1
+	}
+	return res
+}

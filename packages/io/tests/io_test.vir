@@ -1,0 +1,79 @@
+module main
+
+import io
+
+fn test_buffered_string_reader() {
+	content := 'first line\nsecond line\nthird line'
+	mut reader := BufReader.from_string(content)
+
+	line1 := reader.read_line() or { 'ERR' }
+	if line1 != 'first line' {
+		panic('expected first line')
+	}
+
+	line2 := reader.read_line() or { 'ERR' }
+	if line2 != 'second line' {
+		panic('expected second line')
+	}
+
+	line3 := reader.read_line() or { 'ERR' }
+	if line3 != 'third line' {
+		panic('expected third line')
+	}
+
+	eof_line := reader.read_line() or { 'EOF_OK' }
+	if eof_line != 'EOF_OK' {
+		panic('expected EOF')
+	}
+
+	println('✓ test_buffered_string_reader passed')
+}
+
+fn test_buffered_exact_and_all() {
+	text := 'HELLO WORLD OF VIRA'
+	mut r1 := BufReader.from_string(text)
+	exact := r1.read_exact(5) or { '' }
+	if exact != 'HELLO' {
+		panic('expected HELLO')
+	}
+	rem := r1.read_all()
+	if rem != ' WORLD OF VIRA' {
+		panic('expected remainder')
+	}
+	println('✓ test_buffered_exact_and_all passed')
+}
+
+fn test_file_streaming() {
+	tmp_path := 'scratch/temp_io_test.txt'
+	mut f_out := File.open(tmp_path, 'wb') or {
+		panic('failed to create temp file')
+	}
+	w_count := f_out.write_string('Line 1: Vira Native IO\nLine 2: Stream Protocol\n') or { 0 }
+	if w_count <= 0 {
+		panic('failed to write file content')
+	}
+	f_out.close() or { panic('failed to close file') }
+
+	mut f_in := File.open(tmp_path, 'rb') or {
+		panic('failed to open temp file for reading')
+	}
+	mut buf_r := BufReader.new(f_in)
+	l1 := buf_r.read_line() or { '' }
+	if l1 != 'Line 1: Vira Native IO' {
+		panic('mismatched l1 from file')
+	}
+	l2 := buf_r.read_line() or { '' }
+	if l2 != 'Line 2: Stream Protocol' {
+		panic('mismatched l2 from file')
+	}
+	buf_r.close() or { panic('failed to close buf reader') }
+
+	println('✓ test_file_streaming passed')
+}
+
+fn main() {
+	test_buffered_string_reader()
+	test_buffered_exact_and_all()
+	test_file_streaming()
+	println('=== All packages/io tests PASSED ===')
+}

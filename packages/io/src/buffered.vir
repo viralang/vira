@@ -1,0 +1,120 @@
+module io
+
+@[intrinsic: 'vira_slice_u8_new']
+fn c_slice_u8_new(cap int) []u8
+
+pub struct BufReader {
+pub mut:
+	file File
+	buf []u8
+	pos int
+	len int
+	from_file bool
+}
+
+pub fn BufReader.new(f File) BufReader {
+	return BufReader{
+		file: f,
+		buf: []u8{},
+		pos: 0,
+		len: 0,
+		from_file: true,
+	}
+}
+
+pub fn BufReader.from_string(s string) BufReader {
+	b := s.bytes()
+	return BufReader{
+		file: File{ handle: 0, path: '', is_open: false },
+		buf: b,
+		pos: 0,
+		len: s.len,
+		from_file: false,
+	}
+}
+
+pub fn BufReader.from_bytes(b []u8) BufReader {
+	return BufReader{
+		file: File{ handle: 0, path: '', is_open: false },
+		buf: b,
+		pos: 0,
+		len: b.len,
+		from_file: false,
+	}
+}
+
+pub fn (mut b BufReader) read_byte() !u8 {
+	if b.pos >= b.len {
+		if !b.from_file {
+			return error('EOF')
+		}
+		if b.buf.cap == 0 {
+			b.buf = c_slice_u8_new(4096)
+		}
+		n := b.file.read(mut b.buf) or {
+			return error('EOF')
+		}
+		if n <= 0 {
+			return error('EOF')
+		}
+		b.pos = 0
+		b.len = n
+	}
+	byte_val := b.buf[b.pos]
+	b.pos = b.pos + 1
+	return byte_val
+}
+
+pub fn (mut b BufReader) read_line() !string {
+	mut line_bytes := []u8{}
+	for true {
+		ch := b.read_byte() or {
+			if line_bytes.len > 0 {
+				return line_bytes.to_string()
+			}
+			return error('EOF')
+		}
+		if ch == 10 {
+			if line_bytes.len > 0 && line_bytes[line_bytes.len - 1] == 13 {
+				line_bytes.pop()
+			}
+			return line_bytes.to_string()
+		}
+		line_bytes.push(ch)
+	}
+	return ''
+}
+
+pub fn (mut b BufReader) read_exact(count int) !string {
+	mut res := []u8{}
+	mut i := 0
+	for i < count {
+		ch := b.read_byte() or {
+			return error('unexpected EOF')
+		}
+		res.push(ch)
+		i = i + 1
+	}
+	return res.to_string()
+}
+
+pub fn (mut b BufReader) read_all() string {
+	mut res := []u8{}
+	for true {
+		ch := b.read_byte() or {
+			break
+		}
+		res.push(ch)
+	}
+	return res.to_string()
+}
+
+pub fn (mut b BufReader) close() !bool {
+	if b.from_file {
+		res := b.file.close() or {
+			return error(err)
+		}
+		return res
+	}
+	return true
+}

@@ -1,0 +1,57 @@
+module net
+
+@[intrinsic: 'vira_net_poll']
+fn c_net_poll(fd i64, events int, timeout_ms int) int
+
+pub struct PollEvent {
+pub:
+	fd i64
+	readable bool
+	writable bool
+	error bool
+}
+
+pub struct Poller {
+pub:
+	timeout_ms int
+}
+
+pub fn Poller.new(timeout_ms int) Poller {
+	return Poller{
+		timeout_ms: timeout_ms,
+	}
+}
+
+pub fn (p Poller) poll_one(fd i64, read bool, write bool) !PollEvent {
+	mut ev := 0
+	if read {
+		ev = ev + 1
+	}
+	if write {
+		ev = ev + 2
+	}
+	res := c_net_poll(fd, ev, p.timeout_ms)
+	if res < 0 {
+		return error('poll system call failed')
+	}
+	return PollEvent{
+		fd: fd,
+		readable: (res & 1) != 0,
+		writable: (res & 2) != 0,
+		error: (res & 4) != 0,
+	}
+}
+
+pub fn (p Poller) wait_readable(fd i64) !bool {
+	ev := p.poll_one(fd, true, false) or {
+		return error(err)
+	}
+	return ev.readable
+}
+
+pub fn (p Poller) wait_writable(fd i64) !bool {
+	ev := p.poll_one(fd, false, true) or {
+		return error(err)
+	}
+	return ev.writable
+}

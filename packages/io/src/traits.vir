@@ -1,0 +1,30 @@
+module io
+
+pub interface Reader {
+mut:
+	read(mut buf []u8) !int
+}
+
+pub interface Writer {
+mut:
+	write(buf []u8) !int
+	flush() !bool
+}
+
+pub interface Closer {
+mut:
+	close() !bool
+}
+
+pub interface ReadCloser {
+mut:
+	read(mut buf []u8) !int
+	close() !bool
+}
+
+pub interface WriteCloser {
+mut:
+	write(buf []u8) !int
+	flush() !bool
+	close() !bool
+}

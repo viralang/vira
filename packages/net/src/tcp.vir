@@ -1,0 +1,361 @@
+module net
+
+@[intrinsic: 'vira_net_tcp_listen']
+fn c_tcp_listen(host string, port int, backlog int) i64
+
+@[intrinsic: 'vira_net_tcp_accept']
+fn c_tcp_accept(server_fd i64) i64
+
+@[intrinsic: 'vira_net_tcp_connect']
+fn c_tcp_connect(host string, port int, timeout_ms i64) i64
+
+@[intrinsic: 'vira_net_tcp_read']
+fn c_tcp_read(fd i64, mut buf []u8, max_len int) int
+
+@[intrinsic: 'vira_net_tcp_write']
+fn c_tcp_write(fd i64, buf []u8, len int) int
+
+@[intrinsic: 'vira_net_tcp_close']
+fn c_tcp_close(fd i64) int
+
+@[intrinsic: 'vira_net_tcp_shutdown']
+fn c_tcp_shutdown(fd i64, how int) int
+
+@[intrinsic: 'vira_net_peer_addr']
+fn c_tcp_peer_addr(fd i64) string
+
+@[intrinsic: 'vira_net_local_addr']
+fn c_tcp_local_addr(fd i64) string
+
+@[intrinsic: 'vira_net_set_nonblocking']
+fn c_net_set_nonblocking(fd i64, nonblocking bool) int
+
+@[intrinsic: 'vira_net_set_nodelay']
+fn c_net_set_nodelay(fd i64, nodelay bool) int
+
+@[intrinsic: 'vira_net_set_reuseaddr']
+fn c_net_set_reuseaddr(fd i64, reuse bool) int
+
+@[intrinsic: 'vira_net_set_timeout']
+fn c_net_set_timeout(fd i64, read_ms i64, write_ms i64) int
+
+@[intrinsic: 'vira_slice_u8_new']
+fn c_slice_u8_new(cap int) []u8
+
+pub fn new_bytes(cap int) []u8 {
+	return c_slice_u8_new(cap)
+}
+
+pub struct TcpStream {
+pub mut:
+	fd i64
+	is_open bool
+	rx_buf []u8
+	rx_pos int
+	rx_len int
+}
+
+pub fn TcpStream.connect(addr string) !TcpStream {
+	parsed := SocketAddr.parse(addr) or {
+		return error(err)
+	}
+	fd := c_tcp_connect(parsed.ip, parsed.port, 0)
+	if fd < 0 {
+		return error('failed to connect to ${addr}')
+	}
+	return TcpStream{
+		fd: fd,
+		is_open: true,
+		rx_buf: []u8{},
+		rx_pos: 0,
+		rx_len: 0,
+	}
+}
+
+pub fn TcpStream.connect_timeout(addr string, timeout_ms i64) !TcpStream {
+	parsed := SocketAddr.parse(addr) or {
+		return error(err)
+	}
+	fd := c_tcp_connect(parsed.ip, parsed.port, timeout_ms)
+	if fd < 0 {
+		return error('connection to ${addr} timed out or failed')
+	}
+	return TcpStream{
+		fd: fd,
+		is_open: true,
+		rx_buf: []u8{},
+		rx_pos: 0,
+		rx_len: 0,
+	}
+}
+
+pub fn (mut s TcpStream) read(mut buf []u8) !int {
+	if !s.is_open || s.fd < 0 {
+		return error('socket is closed')
+	}
+	rem_buffered := s.rx_len - s.rx_pos
+	if rem_buffered > 0 {
+		mut can_copy := buf.cap
+		if rem_buffered < can_copy {
+			can_copy = rem_buffered
+		}
+		mut i := 0
+		for i < can_copy {
+			buf.push(s.rx_buf[s.rx_pos + i])
+			i = i + 1
+		}
+		s.rx_pos = s.rx_pos + can_copy
+		return can_copy
+	}
+	n := c_tcp_read(s.fd, mut buf, buf.cap)
+	if n < 0 {
+		return error('socket read error')
+	}
+	return n
+}
+
+pub fn (mut s TcpStream) read_byte() !u8 {
+	if !s.is_open || s.fd < 0 {
+		return error('socket is closed')
+	}
+	if s.rx_pos >= s.rx_len {
+		if s.rx_buf.cap == 0 {
+			s.rx_buf = c_slice_u8_new(4096)
+		}
+		n := c_tcp_read(s.fd, mut s.rx_buf, 4096)
+		if n <= 0 {
+			return error('EOF')
+		}
+		s.rx_pos = 0
+		s.rx_len = n
+	}
+	b := s.rx_buf[s.rx_pos]
+	s.rx_pos = s.rx_pos + 1
+	return b
+}
+
+pub fn (mut s TcpStream) read_line() !string {
+	mut line_bytes := []u8{}
+	for true {
+		b := s.read_byte() or {
+			if line_bytes.len > 0 {
+				return line_bytes.to_string()
+			}
+			return error(err)
+		}
+		if b == 10 {
+			if line_bytes.len > 0 && line_bytes[line_bytes.len - 1] == 13 {
+				line_bytes.pop()
+			}
+			return line_bytes.to_string()
+		}
+		line_bytes.push(b)
+	}
+	return ''
+}
+
+pub fn (mut s TcpStream) read_exact(n int) !string {
+	mut b := []u8{}
+	mut i := 0
+	for i < n {
+		byte_val := s.read_byte() or {
+			return error(err)
+		}
+		b.push(byte_val)
+		i = i + 1
+	}
+	return b.to_string()
+}
+
+pub fn (mut s TcpStream) read_all() !string {
+	mut acc := []u8{}
+	mut chunk := c_slice_u8_new(4096)
+	for true {
+		n := s.read(mut chunk) or {
+			break
+		}
+		if n <= 0 {
+			break
+		}
+		mut i := 0
+		for i < n {
+			acc.push(chunk[i])
+			i = i + 1
+		}
+		chunk.clear()
+	}
+	return acc.to_string()
+}
+
+pub fn (mut s TcpStream) write(buf []u8) !int {
+	if !s.is_open || s.fd < 0 {
+		return error('socket is closed')
+	}
+	n := c_tcp_write(s.fd, buf, buf.len)
+	if n < 0 {
+		return error('socket write error')
+	}
+	return n
+}
+
+pub fn (mut s TcpStream) write_string(str string) !int {
+	b := str.bytes()
+	n := s.write(b) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut s TcpStream) write_str(str string) !int {
+	n := s.write_string(str) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut s TcpStream) read_string(max_len int) !string {
+	mut b := c_slice_u8_new(max_len)
+	n := s.read(mut b) or {
+		return error(err)
+	}
+	if n <= 0 {
+		return ''
+	}
+	return b.to_string()
+}
+
+pub fn (mut s TcpStream) set_nodelay(nodelay bool) !bool {
+	if !s.is_open || s.fd < 0 { return error('socket is closed') }
+	res := c_net_set_nodelay(s.fd, nodelay)
+	if res != 0 { return error('failed to set TCP_NODELAY') }
+	return true
+}
+
+pub fn (mut s TcpStream) set_nonblocking(nonblocking bool) !bool {
+	if !s.is_open || s.fd < 0 { return error('socket is closed') }
+	res := c_net_set_nonblocking(s.fd, nonblocking)
+	if res != 0 { return error('failed to set nonblocking') }
+	return true
+}
+
+pub fn (mut s TcpStream) set_timeout(read_ms i64, write_ms i64) !bool {
+	if !s.is_open || s.fd < 0 { return error('socket is closed') }
+	res := c_net_set_timeout(s.fd, read_ms, write_ms)
+	if res != 0 { return error('failed to set socket timeout') }
+	return true
+}
+
+pub fn (s TcpStream) peer_addr() !SocketAddr {
+	if !s.is_open || s.fd < 0 { return error('socket is closed') }
+	addr_str := c_tcp_peer_addr(s.fd)
+	if addr_str.len == 0 {
+		return error('failed to get peer address')
+	}
+	parsed := SocketAddr.parse(addr_str) or {
+		return error(err)
+	}
+	return parsed
+}
+
+pub fn (s TcpStream) local_addr() !SocketAddr {
+	if !s.is_open || s.fd < 0 { return error('socket is closed') }
+	addr_str := c_tcp_local_addr(s.fd)
+	if addr_str.len == 0 {
+		return error('failed to get local address')
+	}
+	parsed := SocketAddr.parse(addr_str) or {
+		return error(err)
+	}
+	return parsed
+}
+
+pub fn (mut s TcpStream) shutdown(how int) !bool {
+	if !s.is_open || s.fd < 0 { return true }
+	res := c_tcp_shutdown(s.fd, how)
+	if res != 0 { return error('failed to shutdown socket') }
+	return true
+}
+
+pub fn (mut s TcpStream) close() !bool {
+	if !s.is_open || s.fd < 0 {
+		return true
+	}
+	res := c_tcp_close(s.fd)
+	s.is_open = false
+	s.fd = -1
+	if res != 0 {
+		return error('failed to close socket')
+	}
+	return true
+}
+
+pub struct TcpListener {
+pub mut:
+	fd i64
+	addr SocketAddr
+	is_open bool
+}
+
+pub fn TcpListener.bind(addr string) !TcpListener {
+	parsed := SocketAddr.parse(addr) or {
+		return error(err)
+	}
+	fd := c_tcp_listen(parsed.ip, parsed.port, 128)
+	if fd < 0 {
+		return error('failed to bind and listen on ${addr}')
+	}
+	return TcpListener{
+		fd: fd,
+		addr: parsed,
+		is_open: true,
+	}
+}
+
+pub fn (mut l TcpListener) accept() !TcpStream {
+	if !l.is_open || l.fd < 0 {
+		return error('listener is closed')
+	}
+	client_fd := c_tcp_accept(l.fd)
+	if client_fd < 0 {
+		return error('failed to accept incoming connection')
+	}
+	return TcpStream{
+		fd: client_fd,
+		is_open: true,
+		rx_buf: []u8{},
+		rx_pos: 0,
+		rx_len: 0,
+	}
+}
+
+pub fn (mut l TcpListener) set_nonblocking(nonblocking bool) !bool {
+	if !l.is_open || l.fd < 0 { return error('listener is closed') }
+	res := c_net_set_nonblocking(l.fd, nonblocking)
+	if res != 0 { return error('failed to set nonblocking on listener') }
+	return true
+}
+
+pub fn (l TcpListener) local_addr() !SocketAddr {
+	if !l.is_open || l.fd < 0 { return error('listener is closed') }
+	addr_str := c_tcp_local_addr(l.fd)
+	if addr_str.len == 0 {
+		return error('failed to get listener local address')
+	}
+	parsed := SocketAddr.parse(addr_str) or {
+		return error(err)
+	}
+	return parsed
+}
+
+pub fn (mut l TcpListener) close() !bool {
+	if !l.is_open || l.fd < 0 {
+		return true
+	}
+	res := c_tcp_close(l.fd)
+	l.is_open = false
+	l.fd = -1
+	if res != 0 {
+		return error('failed to close listener')
+	}
+	return true
+}

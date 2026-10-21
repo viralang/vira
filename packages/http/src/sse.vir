@@ -1,0 +1,71 @@
+module http
+
+import net
+
+pub struct SseWriter {
+pub mut:
+	stream net.TcpStream
+	is_open bool
+}
+
+pub fn SseWriter.start(mut stream net.TcpStream) !SseWriter {
+	headers := 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
+	sent := stream.write_string(headers) or {
+		return error('failed to send SSE handshake: ${err}')
+	}
+	if sent <= 0 {
+		return error('failed to write SSE headers')
+	}
+	return SseWriter{
+		stream: stream,
+		is_open: true,
+	}
+}
+
+pub fn (mut w SseWriter) send_event(event string, data string) !int {
+	if !w.is_open {
+		return error('SSE stream is closed')
+	}
+	payload := 'event: ${event}\r\ndata: ${data}\r\n\r\n'
+	n := w.stream.write_string(payload) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut w SseWriter) send_data(data string) !int {
+	if !w.is_open {
+		return error('SSE stream is closed')
+	}
+	payload := 'data: ${data}\r\n\r\n'
+	n := w.stream.write_string(payload) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut w SseWriter) send_token(token string) !int {
+	escaped_token := token.trim()
+	n := w.send_data('{"token":"${escaped_token}"}') or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut w SseWriter) send_done() !int {
+	n := w.send_data('[DONE]') or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut w SseWriter) close() !bool {
+	if !w.is_open {
+		return true
+	}
+	w.is_open = false
+	res := w.stream.close() or {
+		return error(err)
+	}
+	return res
+}

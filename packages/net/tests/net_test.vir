@@ -1,0 +1,220 @@
+module main
+
+import net
+
+fn test_socket_addr() {
+	addr1 := SocketAddr.new('127.0.0.1', 8080)
+	if addr1.ip != '127.0.0.1' || addr1.port != 8080 {
+		panic('mismatched SocketAddr.new')
+	}
+	s1 := addr1.to_string()
+	if s1 != '127.0.0.1:8080' {
+		panic('mismatched to_string()')
+	}
+
+	addr2 := SocketAddr.parse('192.168.1.100:9090') or {
+		panic('failed to parse ipv4 socket address')
+	}
+	if addr2.ip != '192.168.1.100' || addr2.port != 9090 {
+		panic('mismatched parsed ipv4')
+	}
+
+	addr3 := SocketAddr.parse('[::1]:7070') or {
+		panic('failed to parse ipv6 socket address')
+	}
+	if addr3.ip != '::1' || addr3.port != 7070 {
+		panic('mismatched parsed ipv6')
+	}
+
+	println('✓ test_socket_addr passed')
+}
+
+fn test_tcp_loopback() {
+	mut listener := TcpListener.bind('127.0.0.1:0') or {
+		panic('failed to bind listener on port 0')
+	}
+	bound_addr := listener.local_addr() or {
+		panic('failed to get listener local_addr')
+	}
+	if bound_addr.port <= 0 {
+		panic('invalid bound port')
+	}
+
+	mut client := TcpStream.connect(bound_addr.to_string()) or {
+		panic('failed to connect client')
+	}
+
+	mut server := listener.accept() or {
+		panic('failed to accept connection on listener')
+	}
+
+	// Client sends a line
+	c_sent := client.write_string('GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n') or {
+		panic('failed client write_string')
+	}
+	if c_sent <= 0 {
+		panic('expected positive bytes written')
+	}
+
+	// Server reads line by line
+	l1 := server.read_line() or { panic('failed to read l1') }
+	if l1 != 'GET /ping HTTP/1.1' {
+		panic('mismatched l1: ${l1}')
+	}
+	l2 := server.read_line() or { panic('failed to read l2') }
+	if l2 != 'Host: localhost' {
+		panic('mismatched l2: ${l2}')
+	}
+	l3 := server.read_line() or { panic('failed to read l3') }
+	if l3 != '' {
+		panic('expected empty line after headers')
+	}
+
+	// Server responds
+	s_sent := server.write_string('HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nPONG') or {
+		panic('failed server write_string')
+	}
+	if s_sent <= 0 {
+		panic('expected positive bytes written from server')
+	}
+
+	// Client reads response line and body
+	rl1 := client.read_line() or { panic('failed to read response l1') }
+	if rl1 != 'HTTP/1.1 200 OK' {
+		panic('mismatched response l1')
+	}
+	rl2 := client.read_line() or { panic('failed to read response l2') }
+	if rl2 != 'Content-Length: 4' {
+		panic('mismatched response l2')
+	}
+	rl3 := client.read_line() or { panic('failed to read empty line') }
+	if rl3 != '' {
+		panic('expected empty line before body')
+	}
+	body := client.read_exact(4) or { panic('failed to read body') }
+	if body != 'PONG' {
+		panic('mismatched body: ${body}')
+	}
+
+	// Test peer address
+	server_peer := server.peer_addr() or { panic('failed to get server peer addr') }
+	if server_peer.port <= 0 {
+		panic('invalid client port on server')
+	}
+
+	server.close() or { panic('failed to close server socket') }
+	client.close() or { panic('failed to close client socket') }
+	listener.close() or { panic('failed to close listener') }
+
+	println('✓ test_tcp_loopback passed')
+}
+
+fn test_udp_echo() {
+	mut srv := UdpSocket.bind('127.0.0.1:0') or {
+		panic('failed to bind UDP server')
+	}
+	srv_addr := srv.local_addr() or {
+		panic('failed to get UDP server local_addr')
+	}
+
+	mut cli := UdpSocket.bind('127.0.0.1:0') or {
+		panic('failed to bind UDP client')
+	}
+
+	// Send datagram from client to server
+	cli.send_to_string('VIRA UDP PING', srv_addr.to_string()) or {
+		panic('failed UDP send_to')
+	}
+
+	mut rx_buf := new_bytes(256)
+	packet := srv.recv_from(mut rx_buf) or {
+		panic('failed UDP recv_from')
+	}
+	if packet.len != 13 {
+		panic('mismatched UDP packet len')
+	}
+	received_msg := rx_buf.to_string()
+	if received_msg != 'VIRA UDP PING' {
+		panic('mismatched UDP received content: ${received_msg}')
+	}
+
+	// Reply back to sender
+	srv.send_to_string('VIRA UDP PONG', packet.sender.to_string()) or {
+		panic('failed UDP reply')
+	}
+
+	mut cli_buf := new_bytes(256)
+	reply_pkt := cli.recv_from(mut cli_buf) or {
+		panic('failed client UDP recv')
+	}
+	reply_msg := cli_buf.to_string()
+	if reply_msg != 'VIRA UDP PONG' {
+		panic('mismatched UDP reply: ${reply_msg}')
+	}
+
+	srv.close() or { panic('failed to close UDP server') }
+	cli.close() or { panic('failed to close UDP client') }
+
+	println('✓ test_udp_echo passed')
+}
+
+fn test_poller() {
+	mut listener := TcpListener.bind('127.0.0.1:0') or {
+		panic('failed to bind listener for poller')
+	}
+	addr := listener.local_addr() or {
+		panic('failed to get listener addr')
+	}
+
+	poller := Poller.new(500)
+
+	mut client := TcpStream.connect(addr.to_string()) or {
+		panic('failed client connect')
+	}
+
+	// Poller on listener should indicate readable (incoming connection pending)
+	ready := poller.wait_readable(listener.fd) or {
+		panic('poller wait_readable failed')
+	}
+	if !ready {
+		panic('expected listener to be readable')
+	}
+
+	mut server := listener.accept() or {
+		panic('failed to accept')
+	}
+
+	// Client writes data
+	client.write_string('POLL DATA\n') or {
+		panic('failed write_string')
+	}
+
+	// Poller on server socket should be readable
+	srv_ready := poller.wait_readable(server.fd) or {
+		panic('poller wait_readable on server failed')
+	}
+	if !srv_ready {
+		panic('expected server socket to be readable')
+	}
+
+	line := server.read_line() or {
+		panic('failed read_line')
+	}
+	if line != 'POLL DATA' {
+		panic('mismatched poll data')
+	}
+
+	server.close() or { panic('failed close server') }
+	client.close() or { panic('failed close client') }
+	listener.close() or { panic('failed close listener') }
+
+	println('✓ test_poller passed')
+}
+
+fn main() {
+	test_socket_addr()
+	test_tcp_loopback()
+	test_udp_echo()
+	test_poller()
+	println('=== All packages/net tests PASSED ===')
+}

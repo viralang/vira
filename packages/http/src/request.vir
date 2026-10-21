@@ -1,0 +1,98 @@
+module http
+
+import net
+
+pub struct Request {
+pub:
+	method string
+	path string
+	query string
+	version string
+	headers HeaderMap
+	body string
+}
+
+pub fn Request.new(method string, path string) Request {
+	return Request{
+		method: method,
+		path: path,
+		query: '',
+		version: 'HTTP/1.1',
+		headers: HeaderMap.new(),
+		body: '',
+	}
+}
+
+pub fn Request.parse(mut stream net.TcpStream) !Request {
+	start_line := stream.read_line() or {
+		return error('failed to read HTTP request line: ${err}')
+	}
+	if start_line.len == 0 {
+		return error('empty HTTP request line')
+	}
+
+	space1 := start_line.index_of(' ')
+	if space1 <= 0 {
+		return error('malformed HTTP request line: ${start_line}')
+	}
+	method := start_line.substr(0, space1)
+
+	rem := start_line.substr(space1 + 1, start_line.len)
+	space2 := rem.index_of(' ')
+	mut target := ''
+	mut version := 'HTTP/1.1'
+	if space2 > 0 {
+		target = rem.substr(0, space2)
+		version = rem.substr(space2 + 1, rem.len)
+	} else {
+		target = rem.clone()
+	}
+
+	mut path := ''
+	mut query := ''
+	qmark := target.index_of('?')
+	if qmark >= 0 {
+		path = target.substr(0, qmark)
+		query = target.substr(qmark + 1, target.len)
+	} else {
+		path = target.clone()
+	}
+
+	mut headers := HeaderMap.new()
+	for true {
+		line := stream.read_line() or {
+			break
+		}
+		if line.len == 0 {
+			break
+		}
+		colon := line.index_of(':')
+		if colon > 0 {
+			raw_name := line.substr(0, colon)
+			raw_val := line.substr(colon + 1, line.len)
+			h_name := raw_name.trim()
+			h_val := raw_val.trim()
+			headers.set(h_name, h_val)
+		}
+	}
+
+	mut body := ''
+	cl_str := headers.get_or('content-length', '')
+	if cl_str.len > 0 {
+		cl_num := cl_str.to_int() or { 0 }
+		if cl_num > 0 {
+			body = stream.read_exact(cl_num) or {
+				return error('failed to read complete request body of ${cl_num} bytes')
+			}
+		}
+	}
+
+	return Request{
+		method: method,
+		path: path,
+		query: query,
+		version: version,
+		headers: headers,
+		body: body,
+	}
+}

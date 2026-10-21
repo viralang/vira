@@ -1,0 +1,58 @@
+module net
+
+pub struct SocketAddr {
+pub:
+	ip string
+	port int
+}
+
+pub fn SocketAddr.new(ip string, port int) SocketAddr {
+	return SocketAddr{
+		ip: ip,
+		port: port,
+	}
+}
+
+pub fn SocketAddr.parse(addr string) !SocketAddr {
+	if addr.starts_with('[') {
+		bracket_idx := addr.index_of(']')
+		if bracket_idx > 0 && bracket_idx + 2 <= addr.len {
+			colon_check := addr.substr(bracket_idx + 1, bracket_idx + 2)
+			if colon_check == ':' {
+				ip_part := addr.substr(1, bracket_idx)
+				port_str := addr.substr(bracket_idx + 2, addr.len)
+				port_num := port_str.to_int() or {
+					return error('invalid port number in ipv6 socket address')
+				}
+				if port_num < 0 || port_num > 65535 {
+					return error('port number out of range')
+				}
+				return SocketAddr{
+					ip: ip_part,
+					port: port_num,
+				}
+			}
+		}
+	}
+
+	colon_idx := addr.index_of(':')
+	if colon_idx < 0 {
+		return error('invalid socket address format, expected host:port')
+	}
+	ip_part := addr.substr(0, colon_idx)
+	port_str := addr.substr(colon_idx + 1, addr.len)
+	port_num := port_str.to_int() or {
+		return error('invalid port number')
+	}
+	if port_num < 0 || port_num > 65535 {
+		return error('port number out of range (0-65535)')
+	}
+	return SocketAddr{
+		ip: ip_part,
+		port: port_num,
+	}
+}
+
+pub fn (s SocketAddr) to_string() string {
+	return '${s.ip}:${s.port}'
+}

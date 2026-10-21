@@ -1,0 +1,192 @@
+module main
+
+import net
+import http
+
+fn test_headers() {
+	mut h := http.HeaderMap.new()
+	h.set('Content-Type', 'application/json')
+	h.set('authorization', 'Bearer token123')
+
+	ctype := h.get('content-type') or { panic('missing content-type') }
+	if ctype != 'application/json' {
+		panic('mismatched ctype: ${ctype}')
+	}
+
+	auth := h.get('Authorization') or { panic('missing Authorization') }
+	if auth != 'Bearer token123' {
+		panic('mismatched auth: ${auth}')
+	}
+
+	if !h.contains('CONTENT-TYPE') {
+		panic('expected contains true for case-insensitive header')
+	}
+
+	formatted := h.format()
+	if !formatted.contains('Content-Type: application/json') {
+		panic('mismatched formatted headers')
+	}
+
+	println('✓ test_headers passed')
+}
+
+fn test_response_formatting() {
+	res := http.Response.json('{"status":"ok"}')
+	wire := res.format()
+	if !wire.starts_with('HTTP/1.1 200 OK\r\n') {
+		panic('mismatched response status line')
+	}
+	if !wire.contains('Content-Length: 15\r\n') {
+		panic('mismatched content length header')
+	}
+	if !wire.ends_with('{"status":"ok"}') {
+		panic('mismatched body in response wire format')
+	}
+	println('✓ test_response_formatting passed')
+}
+
+fn test_request_parse_and_server() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or {
+		panic('failed to bind HTTP server')
+	}
+	server_addr := server.local_addr() or {
+		panic('failed to get server addr')
+	}
+
+	mut client := net.TcpStream.connect(server_addr.to_string()) or {
+		panic('failed client connect')
+	}
+
+	client_payload := 'POST /v1/chat?stream=false HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{"prompt":"hi!"}'
+	client.write_string(client_payload) or {
+		panic('failed client write')
+	}
+
+	mut ctx := server.accept_request() or {
+		panic('failed server accept_request')
+	}
+
+	if ctx.req.method != 'POST' {
+		panic('mismatched method: ${ctx.req.method}')
+	}
+	if ctx.req.path != '/v1/chat' {
+		panic('mismatched path: ${ctx.req.path}')
+	}
+	if ctx.req.query != 'stream=false' {
+		panic('mismatched query: ${ctx.req.query}')
+	}
+	if ctx.req.body != '{"prompt":"hi!"}' {
+		panic('mismatched body: ${ctx.req.body}')
+	}
+
+	ctx.respond_json('{"reply":"hello from vira!"}') or {
+		panic('failed server respond_json')
+	}
+
+	status_line := client.read_line() or { panic('failed read status line') }
+	if status_line != 'HTTP/1.1 200 OK' {
+		panic('mismatched client response status line: ${status_line}')
+	}
+
+	// Read headers
+	mut resp_cl := 0
+	for true {
+		l := client.read_line() or { break }
+		if l.len == 0 {
+			break
+		}
+		if l.starts_with('Content-Length:') {
+			val_str := l.substr(15, l.len).trim()
+			resp_cl = val_str.to_int() or { 0 }
+		}
+	}
+
+	if resp_cl != 28 {
+		panic('mismatched response content length: ${resp_cl}')
+	}
+
+	resp_body := client.read_exact(resp_cl) or { panic('failed read resp body') }
+	if resp_body != '{"reply":"hello from vira!"}' {
+		panic('mismatched response body: ${resp_body}')
+	}
+
+	client.close() or { false }
+	server.close() or { false }
+
+	println('✓ test_request_parse_and_server passed')
+}
+
+fn test_sse_streaming() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or {
+		panic('failed to bind HTTP server for SSE')
+	}
+	server_addr := server.local_addr() or {
+		panic('failed to get server addr')
+	}
+
+	mut client := net.TcpStream.connect(server_addr.to_string()) or {
+		panic('failed client connect for SSE')
+	}
+
+	client.write_string('GET /v1/stream HTTP/1.1\r\nHost: localhost\r\n\r\n') or {
+		panic('failed client write for SSE')
+	}
+
+	mut ctx := server.accept_request() or {
+		panic('failed server accept_request for SSE')
+	}
+
+	mut sse := ctx.sse() or {
+		panic('failed to initialize SSE writer')
+	}
+
+	sse.send_token('Hello') or { panic('failed to send token 1') }
+	sse.send_token('World') or { panic('failed to send token 2') }
+	sse.send_done() or { panic('failed to send done') }
+	sse.close() or { false }
+
+	// Client reads handshake
+	status_line := client.read_line() or { panic('failed read SSE status line') }
+	if status_line != 'HTTP/1.1 200 OK' {
+		panic('mismatched SSE status: ${status_line}')
+	}
+
+	for true {
+		l := client.read_line() or { break }
+		if l.len == 0 {
+			break
+		}
+	}
+
+	// Read events
+	e1 := client.read_line() or { panic('failed read e1') }
+	if e1 != 'data: {"token":"Hello"}' {
+		panic('mismatched e1: ${e1}')
+	}
+	client.read_line() or { panic('failed read empty separator 1') }
+
+	e2 := client.read_line() or { panic('failed read e2') }
+	if e2 != 'data: {"token":"World"}' {
+		panic('mismatched e2: ${e2}')
+	}
+	client.read_line() or { panic('failed read empty separator 2') }
+
+	e3 := client.read_line() or { panic('failed read e3') }
+	if e3 != 'data: [DONE]' {
+		panic('mismatched e3: ${e3}')
+	}
+	client.read_line() or { panic('failed read empty separator 3') }
+
+	client.close() or { false }
+	server.close() or { false }
+
+	println('✓ test_sse_streaming passed')
+}
+
+fn main() {
+	test_headers()
+	test_response_formatting()
+	test_request_parse_and_server()
+	test_sse_streaming()
+	println('=== All packages/http tests PASSED ===')
+}

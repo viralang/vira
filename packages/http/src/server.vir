@@ -1,0 +1,99 @@
+module http
+
+import net
+
+pub struct RequestContext {
+pub mut:
+	req Request
+	stream net.TcpStream
+}
+
+pub fn (mut c RequestContext) respond(res Response) !int {
+	n := res.send(mut c.stream) or {
+		return error(err)
+	}
+	c.stream.close() or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut c RequestContext) respond_json(json string) !int {
+	res := Response.json(json)
+	n := c.respond(res) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut c RequestContext) respond_text(text string) !int {
+	res := Response.text(text)
+	n := c.respond(res) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn (mut c RequestContext) sse() !SseWriter {
+	writer := SseWriter.start(mut c.stream) or {
+		return error(err)
+	}
+	c.stream.rx_buf = []u8{}
+	return writer
+}
+
+pub struct HttpServer {
+pub mut:
+	listener net.TcpListener
+	addr net.SocketAddr
+	is_running bool
+}
+
+pub fn HttpServer.bind(addr string) !HttpServer {
+	mut l := net.TcpListener.bind(addr) or {
+		return error('failed to bind HTTP server: ${err}')
+	}
+	local := l.local_addr() or {
+		return error('failed to get HTTP server address: ${err}')
+	}
+	return HttpServer{
+		listener: l,
+		addr: local,
+		is_running: true,
+	}
+}
+
+pub fn (mut s HttpServer) accept_request() !RequestContext {
+	if !s.is_running {
+		return error('HTTP server is not running')
+	}
+	mut client := s.listener.accept() or {
+		return error(err)
+	}
+	req := Request.parse(mut client) or {
+		client.close() or { false }
+		return error(err)
+	}
+	return RequestContext{
+		req: req,
+		stream: client,
+	}
+}
+
+pub fn (s HttpServer) local_addr() !net.SocketAddr {
+	return net.SocketAddr{
+		ip: s.addr.ip.clone(),
+		port: s.addr.port,
+	}
+}
+
+pub fn (mut s HttpServer) close() !bool {
+	if !s.is_running {
+		return true
+	}
+	s.is_running = false
+	res := s.listener.close() or {
+		return error(err)
+	}
+	return res
+}

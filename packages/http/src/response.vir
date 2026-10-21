@@ -1,0 +1,103 @@
+module http
+
+import net
+
+pub struct Response {
+pub mut:
+	status_code int
+	status_text string
+	headers HeaderMap
+	body string
+}
+
+pub fn Response.new() Response {
+	mut h := HeaderMap.new()
+	h.set('Connection', 'close')
+	return Response{
+		status_code: 200,
+		status_text: 'OK',
+		headers: h,
+		body: '',
+	}
+}
+
+pub fn Response.with_status(status_code int, body string) Response {
+	mut r := Response.new()
+	r.status_code = status_code
+	if status_code == 200 {
+		r.status_text = 'OK'
+	} else if status_code == 404 {
+		r.status_text = 'Not Found'
+	} else {
+		r.status_text = 'Error'
+	}
+	r.headers.set('Content-Type', 'application/json')
+	r.body = body
+	return r
+}
+
+pub fn Response.ok(body string, content_type string) Response {
+	mut r := Response.new()
+	r.status_code = 200
+	r.status_text = 'OK'
+	r.headers.set('Content-Type', content_type)
+	r.body = body
+	return r
+}
+
+pub fn Response.json(json string) Response {
+	return Response.ok(json, 'application/json')
+}
+
+pub fn Response.text(text string) Response {
+	return Response.ok(text, 'text/plain; charset=utf-8')
+}
+
+pub fn Response.not_found(msg string) Response {
+	mut r := Response.new()
+	r.status_code = 404
+	r.status_text = 'Not Found'
+	r.headers.set('Content-Type', 'application/json')
+	r.body = '{"error":"not_found","message":"${msg}"}'
+	return r
+}
+
+pub fn Response.bad_request(msg string) Response {
+	mut r := Response.new()
+	r.status_code = 400
+	r.status_text = 'Bad Request'
+	r.headers.set('Content-Type', 'application/json')
+	r.body = '{"error":"bad_request","message":"${msg}"}'
+	return r
+}
+
+pub fn Response.internal_error(msg string) Response {
+	mut r := Response.new()
+	r.status_code = 500
+	r.status_text = 'Internal Server Error'
+	r.headers.set('Content-Type', 'application/json')
+	r.body = '{"error":"internal_error","message":"${msg}"}'
+	return r
+}
+
+pub fn (mut r Response) set_header(name string, value string) {
+	r.headers.set(name, value)
+}
+
+pub fn (r Response) format() string {
+	mut cl_header := ''
+	if !r.headers.contains('Content-Length') {
+		cl_header = 'Content-Length: ${r.body.len}\r\n'
+	}
+	formatted_headers := r.headers.format()
+	res := 'HTTP/1.1 ${r.status_code} ${r.status_text}\r\n${cl_header}${formatted_headers}\r\n${r.body}'
+	return res
+}
+
+pub fn (r Response) send(mut stream net.TcpStream) !int {
+	raw := r.format()
+	n := stream.write_string(raw) or {
+		return error(err)
+	}
+	return n
+}
