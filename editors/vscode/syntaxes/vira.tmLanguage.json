@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#attributes" },
     { "include": "#imports" },
     { "include": "#keywords" },
     { "include": "#collections" },
@@ -16,6 +17,20 @@
     { "include": "#functions" }
   ],
   "repository": {
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.vira",
+          "match": "(@\\[\\s*)([a-zA-Z0-9_]+)(?:\\s*:\\s*('[^']*'|\"[^\"]*\"))?(\\s*\\])",
+          "captures": {
+            "1": { "name": "punctuation.definition.annotation.begin.vira" },
+            "2": { "name": "entity.name.function.attribute.vira" },
+            "3": { "name": "string.quoted.attribute.vira" },
+            "4": { "name": "punctuation.definition.annotation.end.vira" }
+          }
+        }
+      ]
+    },
     "imports": {
       "patterns": [
         {
@@ -101,7 +116,7 @@
       "patterns": [
         {
           "name": "keyword.control.vira",
-          "match": "\\b(module|import|pub|mut|fn|return|if|else|match|for|in|or|is|as|break|continue)\\b"
+          "match": "\\b(module|import|pub|mut|fn|return|if|else|switch|case|default|match|for|in|or|is|as|break|continue)\\b"
         },
         {
           "name": "keyword.declaration.vira",
@@ -133,7 +148,7 @@
       "patterns": [
         {
           "name": "support.function.method.collection.vira",
-          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty)\\b(?=\\s*\\()"
+          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|substr|starts_with|ends_with|split|trim|to_lower|to_upper|to_int|to_i64|bytes|to_bytes)\\b(?=\\s*\\()"
         },
         {
           "name": "support.variable.property.collection.vira",
@@ -155,7 +170,7 @@
         },
         {
           "name": "entity.name.type.primitive.vira",
-          "match": "\\b(int|i64|f32|f16|bf16|f64|bool|string|void)\\b"
+          "match": "\\b(u8|byte|int|i64|f32|f16|bf16|f64|bool|string|void)\\b"
         },
         {
           "name": "entity.name.type.tensor.vira",

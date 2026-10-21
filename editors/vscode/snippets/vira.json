@@ -35,5 +35,17 @@
       "${1:val} := ${2:items}.get(${3:index}) or { ${4:default_val} }"
     ],
     "description": "Safely read element by index with default fallback"
+  },
+  "Switch Statement": {
+    "prefix": "switch",
+    "body": [
+      "switch ${1:expr} {",
+      "case ${2:val}:",
+      "\t${3}",
+      "default:",
+      "\t$0",
+      "}"
+    ],
+    "description": "Switch statement with cases and default"
   }
 }
