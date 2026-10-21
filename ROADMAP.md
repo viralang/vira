@@ -34,9 +34,11 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5.9] Native Collections: Arrays & Slices   ✅ COMPLETED
        │
+ [v0.5.9-dev] Stdlib, Switch Statements & Namespaces ✅ COMPLETED
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
- [v0.6] Phase 1: VexServe Web & LLM Streaming  ⏳ NEXT MILESTONE
+ [v0.6] Phase 1: ViraServe Full Production Suite ⏳ NEXT MILESTONE
        │
  [v0.7] Phase 2: C & Python FFI / Shared Libs  📅 PLANNED
        │
@@ -121,6 +123,28 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Comprehensive Builtin Method Suite:** Native methods including `.len`, `.cap`, `.get(idx)` (monadic `!T`), `.set(idx, val)`, `.push(val)`, `.pop()`, `.clear()`, and `.copy()`.
 - [x] **Full Toolchain & Editor Integration:** VS Code TextMate grammar, snippets, LSP type formatting, member auto-completion, and hover documentation.
 - [x] **Tutorial & Examples:** [Tutorial 27: Native Collections — Arrays and Slices](docs/tutorials/27_native_collections_arrays_and_slices.md) and runnable example [28_native_collections.vir](docs/examples/28_native_collections.vir).
+
+### 9. Standard Library Packages, Switch Statement & First-Class Namespacing (v0.5.9-dev)
+- [x] **Standard Library Packages (`packages/`):**
+  - **`packages/io`:** Unified `Reader`, `Writer`, and `Closer` structural interfaces, `File` descriptor handles, and zero-allocation `BufReader`.
+  - **`packages/net`:** Non-blocking `TcpListener`, `TcpStream`, `UdpSocket`, `Datagram`, `SocketAddr`, and OS-level `Poller` (`epoll`/`kqueue`/`WSAPoll`).
+  - **`packages/http`:** Transport-agnostic HTTP/1.1 engine with case-insensitive `HeaderMap`, zero-copy `Request.parse`, `Response` builder, `SseWriter`, and `HttpServer.bind`.
+  - **`packages/viraserve`:** Microframework rewrite with live loopback socket dispatch, Chase-Lev actor concurrency, and sub-millisecond response latency.
+- [x] **Multi-Branch Control Flow (`switch`):**
+  - Native compile-time branch evaluation with automatic break semantics.
+  - Multi-match comma-separated cases (`case 200, 201:`).
+  - String matching via optimized C99 `vira_str_eq` branches.
+  - Tagless boolean condition switching (`switch { case x >= 90: ... }`).
+  - Scoped Autofree LIFO cleanup for temporary variables in case blocks.
+- [x] **First-Class Package Namespacing & Module Scoping:**
+  - Distinct package boundaries via `module <name>` declarations.
+  - Package aliasing (`import net as mynet`) and qualified type signatures (`net.TcpStream`, `http.Response`).
+  - C99 symbol mangling (`net__TcpStream`, `http__Response_json`) guaranteeing zero link collisions.
+  - Cryptographic dependency management with canonical `vira.mod` manifests and deterministic SHA-256 `vira.lock` lockfiles.
+- [x] **Tutorials & Runnable Examples:**
+  - [Tutorial 28: Standard Library Networking, HTTP & ViraServe](docs/tutorials/28_standard_library_net_http_and_viraserve.md) & [29_stdlib_net_http_server.vir](docs/examples/29_stdlib_net_http_server.vir).
+  - [Tutorial 29: Control Flow & Switch Statement Patterns](docs/tutorials/29_control_flow_and_switch_patterns.md) & [30_switch_statement.vir](docs/examples/30_switch_statement.vir).
+  - [Tutorial 30: Package Namespacing, Modules & Dependency Management](docs/tutorials/30_package_namespacing_and_dependency_management.md) & [31_package_namespacing_and_modules.vir](docs/examples/31_package_namespacing_and_modules.vir).
 
 ---
 
