@@ -1,0 +1,96 @@
+// Example 29: Standard Library Networking & HTTP Server
+//
+// Demonstrates:
+// 1. Importing standard library packages `net` and `http`
+// 2. Binding a live HTTP server (`http.HttpServer.bind`)
+// 3. Dispatching requests via a client `net.TcpStream`
+// 4. Using the new `switch` statement for HTTP routing
+// 5. Zero-leak deterministic memory cleanup
+
+import net
+import http
+
+fn handle_http_request(req http.Request) http.Response {
+	mut res := http.Response.new()
+
+	switch req.method {
+	case 'GET':
+		switch req.path {
+		case '/':
+			res = http.Response.text('Welcome to Vira HTTP Server!')
+		case '/health':
+			res = http.Response.json('{"status":"healthy","uptime_seconds":120}')
+		case '/metrics':
+			res = http.Response.json('{"active_connections":1,"req_count":42}')
+		default:
+			res = http.Response.with_status(404, '{"error":"not_found"}')
+		}
+	case 'POST':
+		switch req.path {
+		case '/echo':
+			res = http.Response.json('{"echo":"${req.body}"}')
+		default:
+			res = http.Response.with_status(404, '{"error":"not_found"}')
+		}
+	default:
+		res = http.Response.with_status(405, '{"error":"method_not_allowed"}')
+	}
+
+	return res
+}
+
+fn main() {
+	println('===========================================================')
+	println('     VIRA STANDARD LIBRARY HTTP & NETWORKING DEMO          ')
+	println('===========================================================')
+
+	// 1. Bind HTTP server to loopback on ephemeral port
+	mut server := http.HttpServer.bind('127.0.0.1:0') or {
+		panic('Failed to bind HTTP server: ${err}')
+	}
+	addr := server.local_addr() or {
+		panic('Failed to get server address: ${err}')
+	}
+	println('• HTTP Server listening on http://${addr.ip}:${addr.port}')
+
+	// 2. Connect client TCP socket to server
+	mut client := net.TcpStream.connect('${addr.ip}:${addr.port}') or {
+		panic('Failed to connect client socket: ${err}')
+	}
+	println('• Client TCP stream connected to server')
+
+	// 3. Send HTTP GET /health request
+	raw_req := 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'
+	client.write_str(raw_req) or {
+		panic('Failed to send HTTP request: ${err}')
+	}
+	println('• Client sent: GET /health HTTP/1.1')
+
+	// 4. Accept connection on server side
+	mut ctx := server.accept_request() or {
+		panic('Server failed to accept request: ${err}')
+	}
+	println('• Server received request: ${ctx.req.method} ${ctx.req.path}')
+
+	// 5. Route request using switch statement and respond
+	response := handle_http_request(ctx.req)
+	n := ctx.respond(response) or {
+		panic('Server failed to respond: ${err}')
+	}
+	println('• Server responded ${response.status_code} (${n} bytes sent)')
+
+	// 6. Read server response on client socket
+	resp_str := client.read_string(1024) or {
+		panic('Client failed to read response: ${err}')
+	}
+	println('• Client received response payload:')
+	println('-----------------------------------------------------------')
+	println(resp_str)
+	println('-----------------------------------------------------------')
+
+	// 7. Cleanup
+	client.close() or { false }
+	server.close() or { false }
+
+	println('\n[SUCCESS] Standard library network & HTTP pipeline verified!')
+}

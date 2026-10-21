@@ -47,6 +47,8 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`26_actors_worker_pool_fanout.vir`](./26_actors_worker_pool_fanout.vir)** | Matrix Compute Worker Pool & Fan-Out/Fan-In | Parallel tensor fan-out (`<-`), Chase-Lev multicore work-stealing, work-helping `.await()`, and zero-leak O(1) private actor scratch arenas. |
 | **[`27_actors_ring_pipeline.vir`](./27_actors_ring_pipeline.vir)** | Chained Actor Pipeline & Token Passing | High-throughput sequential and interleaved token passing across independent pipeline stages, mailbox serialization, and 0 memory leaks. |
 | **[`28_native_collections.vir`](./28_native_collections.vir)** | Native Collections: Fixed Arrays (`[N]T`) & Slices (`[]T`) | Stack-allocated fixed arrays, dynamic slices with geometric growth, bounds check panics, safe retrieval via Result Monad (`.get() or {}`), for-in iteration, and zero-leak Autofree validation. |
+| **[`29_stdlib_net_http_server.vir`](./29_stdlib_net_http_server.vir)** | Standard Library Networking & HTTP Server | `packages/net` (TCP streams, loopback listener), `packages/http` (HttpServer, request parsing, response formatting), and switch statement routing with 0 leaks. |
+| **[`30_switch_statement.vir`](./30_switch_statement.vir)** | Switch Statements & Pattern Branching | Multi-branch switching on integer codes, string routes, comma-separated multiple matches, tagless boolean condition switches, and deterministic autofree safety. |
 
 ---
 
@@ -80,4 +82,6 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/23_multi_package_architecture.vir
 .\vira.exe run docs/examples/24_package_management_consumer.vir
 .\vira.exe run docs/examples/28_native_collections.vir
+.\vira.exe run docs/examples/29_stdlib_net_http_server.vir
+.\vira.exe run docs/examples/30_switch_statement.vir
 ```

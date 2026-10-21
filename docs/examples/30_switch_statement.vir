@@ -1,0 +1,100 @@
+// Example 30: Vira Switch Statement & Pattern Branching
+//
+// Demonstrates:
+// 1. Integer switch with single and multiple comma-separated cases
+// 2. String switch with direct value matching
+// 3. Tagless switch evaluating boolean conditions
+// 4. Deterministic automatic break (no fallthrough bugs) and autofree safety
+
+fn handle_status_code(code int) string {
+	mut description := ''
+	switch code {
+	case 200:
+		description = '200 OK: Request succeeded'
+	case 201, 202:
+		description = '20x Accepted: Resource created or queued'
+	case 400:
+		description = '400 Bad Request: Malformed syntax'
+	case 404:
+		description = '404 Not Found: Resource does not exist'
+	case 500, 502, 503:
+		description = '50x Server Error: Upstream service failure'
+	default:
+		description = 'Unknown HTTP Status Code'
+	}
+	return description
+}
+
+fn route_request(method string, path string) string {
+	mut action := ''
+	switch method {
+	case 'GET', 'HEAD':
+		switch path {
+		case '/':
+			action = 'Serve index.html'
+		case '/health':
+			action = 'Serve system health metrics'
+		case '/metrics':
+			action = 'Serve Prometheus telemetry'
+		default:
+			action = '404 Route Not Found'
+		}
+	case 'POST', 'PUT':
+		action = 'Process request payload and mutate state'
+	case 'DELETE':
+		action = 'Delete requested entity'
+	default:
+		action = '405 Method Not Allowed'
+	}
+	return action
+}
+
+fn classify_latency(latency_us i64) string {
+	mut tier := ''
+	switch {
+	case latency_us < 50:
+		tier = 'Ultra-low latency (<50 µs, L1 cache hit)'
+	case latency_us < 200:
+		tier = 'Fast response (<200 µs, Actor message pass)'
+	case latency_us < 1000:
+		tier = 'Standard response (<1 ms, In-memory dispatch)'
+	default:
+		tier = 'Slow request (>1 ms, Disk/Network I/O)'
+	}
+	return tier
+}
+
+fn main() {
+	println('====================================================')
+	println('       VIRA SWITCH STATEMENT DEMONSTRATION          ')
+	println('====================================================')
+
+	println('\n--- 1. INTEGER SWITCH (HTTP STATUS CODES) ---')
+	println(handle_status_code(200))
+	println(handle_status_code(201))
+	println(handle_status_code(404))
+	println(handle_status_code(503))
+	println(handle_status_code(418))
+
+	println('\n--- 2. STRING SWITCH (HTTP ROUTING) ---')
+	r1 := route_request('GET', '/')
+	println('GET /        -> ${r1}')
+	r2 := route_request('GET', '/health')
+	println('GET /health  -> ${r2}')
+	r3 := route_request('POST', '/submit')
+	println('POST /submit -> ${r3}')
+	r4 := route_request('TRACE', '/')
+	println('TRACE /      -> ${r4}')
+
+	println('\n--- 3. TAGLESS SWITCH (LATENCY CLASSIFICATION) ---')
+	t1 := classify_latency(12)
+	println('12 us   -> ${t1}')
+	t2 := classify_latency(150)
+	println('150 us  -> ${t2}')
+	t3 := classify_latency(750)
+	println('750 us  -> ${t3}')
+	t4 := classify_latency(3500)
+	println('3500 us -> ${t4}')
+
+	println('\n[SUCCESS] All switch statement examples executed successfully!')
+}

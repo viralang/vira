@@ -203,6 +203,44 @@ for item in scores {
 }
 ```
 
+#### Multi-Branch Control Flow (`switch`)
+Vira provides a native, zero-cost `switch` statement with automatic break, support for primitives, strings, and tagless boolean conditions:
+```v
+// Integer / Enum switch with multiple comma-separated cases
+switch status_code {
+case 200:
+    println('OK')
+case 201, 202:
+    println('Accepted')
+case 404:
+    println('Not Found')
+default:
+    println('Unknown status')
+}
+
+// Native string matching for protocols and routes
+switch req.method {
+case 'GET', 'HEAD':
+    handle_read(req)
+case 'POST', 'PUT':
+    handle_write(req)
+case 'DELETE':
+    handle_delete(req)
+default:
+    handle_other(req)
+}
+
+// Tagless boolean condition switch
+switch {
+case score >= 90:
+    grade = 'A'
+case score >= 80:
+    grade = 'B'
+default:
+    grade = 'C'
+}
+```
+
 ---
 
 ## 4. 4-Quadrant Struct Encapsulation & OOP
