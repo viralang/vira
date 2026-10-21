@@ -1,0 +1,78 @@
+fn test_integer_switch() {
+	mut matched := 0
+	val := 2
+	switch val {
+	case 1:
+		matched = 1
+	case 2, 3:
+		matched = 20
+	default:
+		matched = 99
+	}
+	if matched != 20 {
+		panic('expected 20 from integer switch')
+	}
+
+	val_def := 42
+	switch val_def {
+	case 1:
+		matched = 1
+	default:
+		matched = 100
+	}
+	if matched != 100 {
+		panic('expected 100 from default switch')
+	}
+}
+
+fn test_string_switch() {
+	method := 'POST'
+	mut route := ''
+	switch method {
+	case 'GET', 'HEAD':
+		route = 'read'
+	case 'POST', 'PUT':
+		route = 'write'
+	case 'DELETE':
+		route = 'delete'
+	default:
+		route = 'unknown'
+	}
+	if route != 'write' {
+		panic('expected write from string switch')
+	}
+
+	method2 := 'PATCH'
+	switch method2 {
+	case 'GET':
+		route = 'read'
+	default:
+		route = 'other'
+	}
+	if route != 'other' {
+		panic('expected other from default string switch')
+	}
+}
+
+fn test_tagless_switch() {
+	score := 85
+	mut grade := ''
+	switch {
+	case score >= 90:
+		grade = 'A'
+	case score >= 80:
+		grade = 'B'
+	default:
+		grade = 'C'
+	}
+	if grade != 'B' {
+		panic('expected B from tagless switch')
+	}
+}
+
+fn main() {
+	test_integer_switch()
+	test_string_switch()
+	test_tagless_switch()
+	println('ALL SWITCH STATEMENT TESTS PASSED!')
+}

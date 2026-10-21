@@ -133,7 +133,41 @@ func ResolveImportCandidates(fileDir string, projectRoot string, impTarget strin
 		}
 	}
 
-	// 3. Global cache (~/.vir/pkg)
+	// 3. Standard library packages (packages/<impTarget>/src, packages/<impTarget>)
+	stdRoots := []string{}
+	for d := fileDir; d != "" && d != "." && d != "/"; d = filepath.Dir(d) {
+		pkgCandidate := filepath.Join(d, "packages")
+		if info, err := os.Stat(pkgCandidate); err == nil && info.IsDir() {
+			stdRoots = append(stdRoots, pkgCandidate)
+			break
+		}
+	}
+	if checkRoot != "" {
+		stdRoots = append(stdRoots, filepath.Join(checkRoot, "packages"))
+	}
+	if vRoot := os.Getenv("VIRA_ROOT"); vRoot != "" {
+		stdRoots = append(stdRoots, filepath.Join(vRoot, "packages"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		stdRoots = append(stdRoots, filepath.Join(filepath.Dir(exe), "packages"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		stdRoots = append(stdRoots,
+			filepath.Join(home, ".vira", "packages"),
+			filepath.Join(home, ".vir", "packages"),
+		)
+	}
+
+	for _, sRoot := range stdRoots {
+		candidates = append(candidates,
+			filepath.Join(sRoot, impTarget, "src"),
+			filepath.Join(sRoot, impTarget),
+			filepath.Join(sRoot, impTarget+".vir"),
+			filepath.Join(sRoot, impTarget+".vex"),
+		)
+	}
+
+	// 4. Global cache (~/.vir/pkg)
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, ".vir", "pkg", impTarget),

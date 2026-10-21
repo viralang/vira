@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/viralang/vira/internal/parser"
 	"github.com/viralang/vira/internal/pkg"
 	"github.com/viralang/vira/internal/source"
+	stdpkg "github.com/viralang/vira/packages"
 	virart "github.com/viralang/vira/runtime"
 )
 
@@ -739,6 +741,7 @@ func vendorCmd(args []string) {
 // --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
 func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer) {
+	ensureStdPackagesExtracted()
 	fi, err := os.Stat(targetPath)
 	if err != nil {
 		fatalIO(err)
@@ -825,6 +828,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 	var mergedDecls []ast.Decl
 	var firstMod ast.Ident
 	var srcFiles []*source.File
+	var astFiles []*ast.File
 	var testFnNames []string
 	hasMain := false
 
@@ -840,6 +844,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 
 		p := parser.New(srcText)
 		astFile := p.ParseFile()
+		astFiles = append(astFiles, astFile)
 		if parseErrs := p.Errors(); len(parseErrs) > 0 {
 			for _, pe := range parseErrs {
 				fmt.Fprintln(os.Stderr, srcFile.FormatDiagnostic("SYNTAX", pe.Msg, pe.Span))
@@ -848,8 +853,12 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 			os.Exit(1)
 		}
 
-		if firstMod.Name == "" && astFile.Module.Name != "" {
-			firstMod = astFile.Module
+		if vFile == absTarget {
+			if astFile.Module.Name != "" {
+				firstMod = astFile.Module
+			} else {
+				firstMod.Name = "main"
+			}
 		}
 
 		// Resolve explicit import declarations dynamically
@@ -868,7 +877,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 								return nil
 							}
 							if subInfo.IsDir() {
-								if subInfo.Name() == "tests" || subInfo.Name() == ".git" {
+								if subInfo.Name() == "tests" || subInfo.Name() == ".git" || subInfo.Name() == "examples" {
 									return filepath.SkipDir
 								}
 								return nil
@@ -932,17 +941,24 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 
 		pRunner := parser.New(runnerSrc.String())
 		runnerAst := pRunner.ParseFile()
+		astFiles = append(astFiles, runnerAst)
 		mergedDecls = append(mergedDecls, runnerAst.Decls...)
 	}
 
+	var mergedImports []ast.ImportSpec
+	for _, af := range astFiles {
+		mergedImports = append(mergedImports, af.Imports...)
+	}
+
 	mergedAst := &ast.File{
-		Module: firstMod,
-		Decls:  mergedDecls,
+		Module:  firstMod,
+		Imports: mergedImports,
+		Decls:   mergedDecls,
 	}
 
 	// Phase 2: 3-Pass Type, Mutability, Tensor & Actor Checker
 	chk := checker.New()
-	chk.CheckFile(mergedAst)
+	chk.CheckFiles(astFiles)
 	if semErrs := chk.Errors(); len(semErrs) > 0 {
 		for _, se := range semErrs {
 			sFile := srcFiles[0]
@@ -1236,6 +1252,30 @@ func resolveRuntimeDir() string {
 		}
 	}
 	return "runtime"
+}
+
+func ensureStdPackagesExtracted() {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	cacheDir := filepath.Join(home, ".vira", "packages")
+	_ = os.MkdirAll(cacheDir, 0755)
+
+	_ = fs.WalkDir(stdpkg.StandardFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == "." || path == "embed.go" {
+			return nil
+		}
+		dest := filepath.Join(cacheDir, path)
+		if d.IsDir() {
+			return os.MkdirAll(dest, 0755)
+		}
+		data, err := stdpkg.StandardFS.ReadFile(path)
+		if err == nil {
+			_ = os.WriteFile(dest, data, 0644)
+		}
+		return nil
+	})
 }
 
 func fatalIO(err error) {

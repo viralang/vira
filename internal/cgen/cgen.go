@@ -14,6 +14,7 @@ type Generator struct {
 	chk         *checker.Checker
 	af          *autofree.Analyzer
 	mod         string
+	currentMod  string
 	tmpCounter  int
 	activeArena string // non-empty inside arena { ... } or actor step
 	inMainFn    bool
@@ -62,12 +63,23 @@ func sanitizeModName(mod string) string {
 	return res
 }
 
+func (g *Generator) currentModule() string {
+	if g.currentMod != "" {
+		return g.currentMod
+	}
+	if g.mod != "" {
+		return g.mod
+	}
+	return "main"
+}
+
 func New(chk *checker.Checker, af *autofree.Analyzer) *Generator {
 	cleanMod := sanitizeModName(chk.ModuleName())
 	return &Generator{
 		chk:          chk,
 		af:           af,
 		mod:          cleanMod,
+		currentMod:   cleanMod,
 		resultTypes:  make(map[string]checker.Type),
 		vtablePairs:  make(map[string]vtablePair),
 		actorSenders: make(map[string]actorMethodDispatchSpec),
@@ -112,6 +124,17 @@ func (g *Generator) EmitFile(file *ast.File) string {
 
 	// 1. Emit Struct & Actor typedefs + _autofree & _reset helpers in topological dependency order
 	out.WriteString("// --- 1. STRUCTS, ACTORS & DETERMINISTIC DESTRUCTORS ---\n")
+	for _, decl := range file.Decls {
+		if sd, ok := decl.(*ast.StructDecl); ok {
+			modName := sd.Module
+			if modName == "" {
+				modName = g.currentModule()
+			}
+			cSt := fmt.Sprintf("%s__%s", modName, sd.Name.Name)
+			out.WriteString(fmt.Sprintf("typedef struct %s %s;\n", cSt, cSt))
+		}
+	}
+	out.WriteString("\n")
 	g.emitStructsTopologically(&out, file)
 
 	// 2. Emit Result_T wrapper structs & Future[T] awaiters
@@ -160,7 +183,7 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	// 4. Emit Function & Method Forward Declarations
 	out.WriteString("// --- 4. FUNCTION & METHOD PROTOTYPES ---\n")
 	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FnDecl); ok && fn.Name.Name != "main" {
+		if fn, ok := decl.(*ast.FnDecl); ok && fn.Name.Name != "main" && (fn.Intrinsic == "" || fn.Body != nil) {
 			out.WriteString(g.fnSignature(fn) + ";\n")
 		}
 	}
@@ -327,6 +350,17 @@ func (g *Generator) scanExprRequirements(expr ast.Expr) {
 				if sel.Field.Name == "get" {
 					g.resultTypes[g.cResultName(arr.Elem)] = arr.Elem
 				}
+			} else if recvType != nil && recvType.Equals(checker.TypeString) {
+				switch sel.Field.Name {
+				case "split":
+					g.sliceTypes[g.cSliceName(checker.TypeString)] = &checker.SliceType{Elem: checker.TypeString}
+				case "bytes", "to_bytes":
+					g.sliceTypes[g.cSliceName(checker.TypeU8)] = &checker.SliceType{Elem: checker.TypeU8}
+				case "to_int":
+					g.resultTypes[g.cResultName(checker.TypeInt)] = checker.TypeInt
+				case "to_i64":
+					g.resultTypes[g.cResultName(checker.TypeI64)] = checker.TypeI64
+				}
 			}
 		}
 		// 2. Actor message send worker <- predict(...)
@@ -369,53 +403,94 @@ func (g *Generator) scanExprRequirements(expr ast.Expr) {
 func (g *Generator) emitStructsTopologically(out *strings.Builder, file *ast.File) {
 	declMap := make(map[string]*ast.StructDecl)
 	var declOrder []string
+
 	for _, decl := range file.Decls {
 		if sd, ok := decl.(*ast.StructDecl); ok {
-			declMap[sd.Name.Name] = sd
-			declOrder = append(declOrder, sd.Name.Name)
+			modName := sd.Module
+			if modName == "" {
+				modName = g.currentModule()
+			}
+			cName := fmt.Sprintf("%s__%s", modName, sd.Name.Name)
+			declMap[cName] = sd
+			declOrder = append(declOrder, cName)
 		}
 	}
 
 	emitted := make(map[string]bool)
-	var visit func(name string)
-	visit = func(name string) {
-		if emitted[name] {
+	var visit func(cName string)
+	visit = func(cName string) {
+		if emitted[cName] {
 			return
 		}
-		emitted[name] = true
-		st := g.chk.Structs()[name]
+		emitted[cName] = true
+		sd := declMap[cName]
+		if sd == nil {
+			return
+		}
+		st := g.chk.LookupStructInModule(sd.Module, sd.Name.Name)
+		if st == nil {
+			st = g.chk.LookupStruct(sd.Name.Name)
+		}
 		if st == nil {
 			return
 		}
 		// Emit embedded and nested value-struct dependencies first
 		for _, emb := range st.Embeds {
-			visit(emb.Name)
+			embMod := emb.Module
+			if embMod == "" {
+				embMod = sd.Module
+			}
+			visit(fmt.Sprintf("%s__%s", embMod, emb.Name))
 		}
 		for _, fname := range st.FieldOrder {
 			if subSt, isSt := st.Fields[fname].Type.(*checker.StructType); isSt {
-				visit(subSt.Name)
+				subMod := subSt.Module
+				if subMod == "" {
+					subMod = sd.Module
+				}
+				visit(fmt.Sprintf("%s__%s", subMod, subSt.Name))
+			}
+			if sl, isSl := st.Fields[fname].Type.(*checker.SliceType); isSl {
+				if elemSt, isElemSt := sl.Elem.(*checker.StructType); isElemSt {
+					elemMod := elemSt.Module
+					if elemMod == "" {
+						elemMod = sd.Module
+					}
+					visit(fmt.Sprintf("%s__%s", elemMod, elemSt.Name))
+				}
 			}
 		}
-		if sd, ok := declMap[name]; ok {
-			g.emitStructAndDestructor(out, sd)
-		}
+		g.emitStructAndDestructor(out, sd)
 	}
 
-	for _, name := range declOrder {
-		visit(name)
+	for _, cName := range declOrder {
+		visit(cName)
 	}
 }
 
 func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.StructDecl) {
-	st := g.chk.Structs()[sd.Name.Name]
-	cStructName := g.cStructName(st.Name)
+	st := g.chk.LookupStructInModule(sd.Module, sd.Name.Name)
+	if st == nil {
+		st = g.chk.LookupStruct(sd.Name.Name)
+	}
+	if st == nil {
+		return
+	}
+	cStructName := fmt.Sprintf("%s__%s", st.Module, st.Name)
+	if st.Module == "" {
+		cStructName = g.cStructName(st.Name)
+	}
 
 	out.WriteString(fmt.Sprintf("typedef struct %s {\n", cStructName))
 	if st.IsActor {
 		out.WriteString("    vira_actor_ctx _ctx;\n")
 	}
 	for _, emb := range st.Embeds {
-		out.WriteString(fmt.Sprintf("    %s %s;\n", g.cStructName(emb.Name), emb.Name))
+		cEmb := fmt.Sprintf("%s__%s", emb.Module, emb.Name)
+		if emb.Module == "" {
+			cEmb = g.cStructName(emb.Name)
+		}
+		out.WriteString(fmt.Sprintf("    %s %s;\n", cEmb, emb.Name))
 	}
 	for _, fname := range st.FieldOrder {
 		finfo := st.Fields[fname]
@@ -445,10 +520,15 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
 				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
 			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
-				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
+				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
+				if subSt.Module == "" {
+					cSub = g.cStructName(subSt.Name)
+				}
+				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", cSub, fname))
 			}
 		}
 		out.WriteString("}\n\n")
+		g.emitStructSliceDefinition(out, st, cStructName)
 		return
 	}
 
@@ -458,7 +538,11 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 		out.WriteString("    if (!self) return;\n")
 		for _, emb := range st.Embeds {
 			if g.af.StructNeedsFree[emb.Name] {
-				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(emb.Name), emb.Name))
+				cEmb := fmt.Sprintf("%s__%s", emb.Module, emb.Name)
+				if emb.Module == "" {
+					cEmb = g.cStructName(emb.Name)
+				}
+				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", cEmb, emb.Name))
 			}
 		}
 		for _, fname := range st.FieldOrder {
@@ -470,11 +554,98 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
 				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
 			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
-				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", g.cStructName(subSt.Name), fname))
+				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
+				if subSt.Module == "" {
+					cSub = g.cStructName(subSt.Name)
+				}
+				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", cSub, fname))
 			}
 		}
 		out.WriteString("}\n\n")
 	}
+	g.emitStructSliceDefinition(out, st, cStructName)
+}
+
+func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.StructType, cStructName string) {
+	out.WriteString(fmt.Sprintf("#ifndef _vira_slice_%s_DEFINED\n#define _vira_slice_%s_DEFINED\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("typedef struct {\n"))
+	out.WriteString(fmt.Sprintf("    %s*     data;\n", cStructName))
+	out.WriteString(fmt.Sprintf("    int32_t len;\n"))
+	out.WriteString(fmt.Sprintf("    int32_t cap;\n"))
+	out.WriteString(fmt.Sprintf("    bool    is_arena;\n"))
+	out.WriteString(fmt.Sprintf("} vira_slice_%s;\n\n", cStructName))
+
+	out.WriteString(fmt.Sprintf("static inline vira_slice_%s vira_slice_%s_new(int32_t initial_cap) {\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    vira_slice_%s s = { .data = NULL, .len = 0, .cap = 0, .is_arena = false };\n", cStructName))
+	out.WriteString(fmt.Sprintf("    if (initial_cap > 0) {\n"))
+	out.WriteString(fmt.Sprintf("        s.data = (%s*)malloc((size_t)initial_cap * sizeof(%s));\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("        if (s.data) { s.cap = initial_cap; _vira_record_alloc(); }\n"))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("    return s;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_push(vira_slice_%s* s, %s val) {\n", cStructName, cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    if (s->len >= s->cap) {\n"))
+	out.WriteString(fmt.Sprintf("        _vira_slice_grow((void**)&s->data, &s->cap, sizeof(%s), s->is_arena);\n", cStructName))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("    s->data[s->len++] = val;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline %s vira_slice_%s_pop(vira_slice_%s* s) {\n", cStructName, cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    if (s->len <= 0) {\n"))
+	out.WriteString(fmt.Sprintf("        fprintf(stderr, \"vira panic: pop from empty slice\\n\");\n"))
+	out.WriteString(fmt.Sprintf("        exit(1);\n"))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("    return s->data[--s->len];\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_set(vira_slice_%s* s, int32_t idx, %s val) {\n", cStructName, cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    vira_bounds_check(idx, s->len, __FILE__, __LINE__);\n"))
+	if g.af.StructNeedsFree[st.Name] {
+		out.WriteString(fmt.Sprintf("    %s_autofree(&s->data[idx]);\n", cStructName))
+	}
+	out.WriteString(fmt.Sprintf("    s->data[idx] = val;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_clear(vira_slice_%s* s) {\n", cStructName, cStructName))
+	if g.af.StructNeedsFree[st.Name] {
+		out.WriteString(fmt.Sprintf("    for (int32_t i = 0; i < s->len; i++) {\n"))
+		out.WriteString(fmt.Sprintf("        %s_autofree(&s->data[i]);\n", cStructName))
+		out.WriteString(fmt.Sprintf("    }\n"))
+	}
+	out.WriteString(fmt.Sprintf("    s->len = 0;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline bool vira_slice_%s_is_empty(const vira_slice_%s* s) {\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    return s->len == 0;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline vira_slice_%s vira_slice_%s_clone(const vira_slice_%s* s) {\n", cStructName, cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    vira_slice_%s res = vira_slice_%s_new(s->len);\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    if (s->len > 0 && s->data != NULL) {\n"))
+	out.WriteString(fmt.Sprintf("        memcpy(res.data, s->data, (size_t)s->len * sizeof(%s));\n", cStructName))
+	out.WriteString(fmt.Sprintf("        res.len = s->len;\n"))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("    return res;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline bool vira_slice_%s_contains(const vira_slice_%s* s, %s val) {\n", cStructName, cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    for (int32_t i = 0; i < s->len; i++) {\n"))
+	out.WriteString(fmt.Sprintf("        if (memcmp(&s->data[i], &val, sizeof(%s)) == 0) return true;\n", cStructName))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("    return false;\n"))
+	out.WriteString(fmt.Sprintf("}\n\n"))
+
+	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_free(vira_slice_%s* s) {\n", cStructName, cStructName))
+	out.WriteString(fmt.Sprintf("    if (s->data != NULL && !s->is_arena) {\n"))
+	if g.af.StructNeedsFree[st.Name] {
+		out.WriteString(fmt.Sprintf("        for (int32_t i = 0; i < s->len; i++) {\n"))
+		out.WriteString(fmt.Sprintf("            %s_autofree(&s->data[i]);\n", cStructName))
+		out.WriteString(fmt.Sprintf("        }\n"))
+	}
+	out.WriteString(fmt.Sprintf("        _vira_slice_free_raw((void**)&s->data, &s->len, &s->cap, s->is_arena);\n"))
+	out.WriteString(fmt.Sprintf("    }\n"))
+	out.WriteString(fmt.Sprintf("}\n#endif\n\n"))
 }
 
 // --- 2. INTERFACES & STATIC VTABLES ---
@@ -651,6 +822,12 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 // --- 4. FUNCTION & STATEMENT EMISSION ---
 
 func (g *Generator) fnSignature(fn *ast.FnDecl) string {
+	prevMod := g.currentMod
+	if fn.Module != "" {
+		g.currentMod = fn.Module
+	}
+	defer func() { g.currentMod = prevMod }()
+
 	retType := g.resolveCheckType(fn)
 	cRet := g.cType(retType)
 
@@ -658,8 +835,16 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 	var params []string
 
 	if fn.Receiver != nil {
-		stName := fn.Receiver.Type.(*ast.IdentType).Name.Name
-		cSt := g.cStructName(stName)
+		var stName string
+		if it, ok := fn.Receiver.Type.(*ast.IdentType); ok {
+			stName = it.Name.Name
+		} else if st, ok := fn.Receiver.Type.(*ast.SelectorType); ok {
+			stName = st.Name.Name
+		}
+		cSt := fmt.Sprintf("%s__%s", fn.Module, stName)
+		if fn.Module == "" {
+			cSt = g.cStructName(stName)
+		}
 		cName = fmt.Sprintf("%s_%s", cSt, fn.Name.Name)
 		qual := fmt.Sprintf("const %s*", cSt)
 		if fn.Receiver.IsMut {
@@ -667,9 +852,19 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 		}
 		params = append(params, fmt.Sprintf("%s %s", qual, fn.Receiver.Name.Name))
 	} else if fn.StaticType != nil {
-		cName = fmt.Sprintf("%s_%s", g.cStructName(fn.StaticType.Name), fn.Name.Name)
+		cSt := fmt.Sprintf("%s__%s", fn.Module, fn.StaticType.Name)
+		if fn.Module == "" {
+			cSt = g.cStructName(fn.StaticType.Name)
+		}
+		cName = fmt.Sprintf("%s_%s", cSt, fn.Name.Name)
+	} else if fn.Name.Name == "main" {
+		cName = "main"
 	} else {
-		cName = fmt.Sprintf("%s__%s", g.mod, fn.Name.Name)
+		fnMod := fn.Module
+		if fnMod == "" {
+			fnMod = g.currentModule()
+		}
+		cName = fmt.Sprintf("%s__%s", fnMod, fn.Name.Name)
 	}
 
 	for _, p := range fn.Params {
@@ -688,6 +883,15 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 }
 
 func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
+	if fn.Intrinsic != "" && fn.Body == nil {
+		return
+	}
+	prevMod := g.currentMod
+	if fn.Module != "" {
+		g.currentMod = fn.Module
+	}
+	defer func() { g.currentMod = prevMod }()
+
 	if fn.Name.Name == "main" {
 		g.inMainFn = true
 		out.WriteString("int main(void) {\n")
@@ -718,7 +922,7 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 	prevArena := g.activeArena
 	if fn.Receiver != nil {
 		stName := fn.Receiver.Type.(*ast.IdentType).Name.Name
-		if st := g.chk.Structs()[stName]; st != nil && st.IsActor && fn.Receiver.IsMut {
+		if st := g.chk.LookupStruct(stName); st != nil && st.IsActor && fn.Receiver.IsMut {
 			g.activeArena = fmt.Sprintf("(&%s->_ctx.isolated_heap)", fn.Receiver.Name.Name)
 		}
 	}
@@ -784,9 +988,33 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.emitLValue(s.Target)))
 			}
 		}
+		if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
+			targetLValue := g.emitLValue(s.Target)
+			valType := g.chk.ExprTypes[s.Value]
+			g.emitUnwrappedAssign(out, targetLValue, valType, call, indent, fnRet)
+			return
+		}
+		rhsExpr := g.emitExpr(s.Value)
+		if ident, ok := s.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+			targetType := g.chk.ExprTypes[s.Target]
+			if _, isStruct := targetType.(*checker.StructType); isStruct {
+				rhsExpr = "*" + rhsExpr
+			}
+		}
+		targetLValue := g.emitLValue(s.Target)
+		targetType := g.chk.ExprTypes[s.Target]
+		if _, isIdx := s.Target.(*ast.IndexExpr); !isIdx {
+			if targetType != nil && targetType.Equals(checker.TypeString) && s.Op == token.TokAssign {
+				tmpOld := g.nextTmp("old_str")
+				out.WriteString(fmt.Sprintf("%svira_string %s = %s;\n", indent, tmpOld, targetLValue))
+				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsExpr))
+				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, tmpOld))
+				return
+			}
+		}
 		opStr := s.Op.String()
 		out.WriteString(fmt.Sprintf("%s%s %s %s;\n",
-			indent, g.emitLValue(s.Target), opStr, g.emitExpr(s.Value)))
+			indent, targetLValue, opStr, rhsExpr))
 
 	case *ast.IfStmt:
 		out.WriteString(fmt.Sprintf("%sif (%s) {\n", indent, g.emitExpr(s.Cond)))
@@ -803,6 +1031,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			g.emitBlockStmts(out, s.Else, indent+"    ", fnRet)
 		}
 		out.WriteString(fmt.Sprintf("%s}\n", indent))
+
+	case *ast.SwitchStmt:
+		g.emitSwitchStmt(out, s, indent, fnRet)
 
 	case *ast.ForStmt:
 		if s.Init != nil {
@@ -956,6 +1187,139 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 	}
 }
 
+func (g *Generator) emitSwitchStmt(out *strings.Builder, s *ast.SwitchStmt, indent string, fnRet checker.Type) {
+	tagType := checker.Type(nil)
+	if s.Tag != nil {
+		tagType = g.chk.ExprTypes[s.Tag]
+	}
+
+	// 1. String switch: emit if-else if-else chain using vira_str_eq
+	if tagType != nil && tagType.Equals(checker.TypeString) {
+		tagExpr := g.emitExpr(s.Tag)
+		swTmp := g.nextTmp("sw_str")
+		out.WriteString(fmt.Sprintf("%s{\n", indent))
+		out.WriteString(fmt.Sprintf("%s    vira_string %s = %s;\n", indent, swTmp, tagExpr))
+
+		firstCase := true
+		for _, cs := range s.Cases {
+			if cs.IsDefault {
+				continue
+			}
+			var conds []string
+			for _, expr := range cs.Exprs {
+				conds = append(conds, fmt.Sprintf("vira_str_eq(%s, %s)", swTmp, g.emitExpr(expr)))
+			}
+			condStr := strings.Join(conds, " || ")
+			if firstCase {
+				out.WriteString(fmt.Sprintf("%s    if (%s) {\n", indent, condStr))
+				firstCase = false
+			} else {
+				out.WriteString(fmt.Sprintf("%s    } else if (%s) {\n", indent, condStr))
+			}
+			for _, stmt := range cs.Body {
+				g.emitStmt(out, stmt, indent+"        ", fnRet)
+			}
+		}
+
+		// Handle default
+		for _, cs := range s.Cases {
+			if cs.IsDefault {
+				if firstCase {
+					out.WriteString(fmt.Sprintf("%s    {\n", indent))
+					firstCase = false
+				} else {
+					out.WriteString(fmt.Sprintf("%s    } else {\n", indent))
+				}
+				for _, stmt := range cs.Body {
+					g.emitStmt(out, stmt, indent+"        ", fnRet)
+				}
+				break
+			}
+		}
+
+		if !firstCase {
+			out.WriteString(fmt.Sprintf("%s    }\n", indent))
+		}
+		out.WriteString(fmt.Sprintf("%s}\n", indent))
+		return
+	}
+
+	// 2. Tagless switch: emit if-else if-else chain
+	if s.Tag == nil {
+		out.WriteString(fmt.Sprintf("%s{\n", indent))
+		firstCase := true
+		for _, cs := range s.Cases {
+			if cs.IsDefault {
+				continue
+			}
+			var conds []string
+			for _, expr := range cs.Exprs {
+				conds = append(conds, fmt.Sprintf("(%s)", g.emitExpr(expr)))
+			}
+			condStr := strings.Join(conds, " || ")
+			if firstCase {
+				out.WriteString(fmt.Sprintf("%s    if (%s) {\n", indent, condStr))
+				firstCase = false
+			} else {
+				out.WriteString(fmt.Sprintf("%s    } else if (%s) {\n", indent, condStr))
+			}
+			for _, stmt := range cs.Body {
+				g.emitStmt(out, stmt, indent+"        ", fnRet)
+			}
+		}
+
+		// Handle default
+		for _, cs := range s.Cases {
+			if cs.IsDefault {
+				if firstCase {
+					out.WriteString(fmt.Sprintf("%s    {\n", indent))
+					firstCase = false
+				} else {
+					out.WriteString(fmt.Sprintf("%s    } else {\n", indent))
+				}
+				for _, stmt := range cs.Body {
+					g.emitStmt(out, stmt, indent+"        ", fnRet)
+				}
+				break
+			}
+		}
+
+		if !firstCase {
+			out.WriteString(fmt.Sprintf("%s    }\n", indent))
+		}
+		out.WriteString(fmt.Sprintf("%s}\n", indent))
+		return
+	}
+
+	// 3. Integer/enum/bool switch: emit native C switch
+	tagExpr := g.emitExpr(s.Tag)
+	out.WriteString(fmt.Sprintf("%sswitch (%s) {\n", indent, tagExpr))
+	for _, cs := range s.Cases {
+		if cs.IsDefault {
+			out.WriteString(fmt.Sprintf("%sdefault: {\n", indent))
+		} else {
+			for _, expr := range cs.Exprs {
+				out.WriteString(fmt.Sprintf("%scase %s:\n", indent, g.emitExpr(expr)))
+			}
+			out.WriteString(fmt.Sprintf("%s{\n", indent))
+		}
+		for _, stmt := range cs.Body {
+			g.emitStmt(out, stmt, indent+"    ", fnRet)
+		}
+		hasReturn := false
+		if len(cs.Body) > 0 {
+			if _, isRet := cs.Body[len(cs.Body)-1].(*ast.ReturnStmt); isRet {
+				hasReturn = true
+			}
+		}
+		if !hasReturn {
+			out.WriteString(fmt.Sprintf("%s    break;\n", indent))
+		}
+		out.WriteString(fmt.Sprintf("%s}\n", indent))
+	}
+	out.WriteString(fmt.Sprintf("%s}\n", indent))
+}
+
 func (g *Generator) emitUnwrappedCall(
 	out *strings.Builder,
 	varName string,
@@ -982,8 +1346,16 @@ func (g *Generator) emitUnwrappedCall(
 		isLast := i == len(call.OrBlock.Stmts)-1
 		if isLast {
 			if exprSt, ok := st.(*ast.ExprStmt); ok && varName != "" && !valType.Equals(checker.TypeVoid) {
-				out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, varName, g.emitExpr(exprSt.Expr)))
-				continue
+				isDivergent := false
+				if callExpr, isCall := exprSt.Expr.(*ast.CallExpr); isCall {
+					if id, isId := callExpr.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
+						isDivergent = true
+					}
+				}
+				if !isDivergent {
+					out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, varName, g.emitExpr(exprSt.Expr)))
+					continue
+				}
 			}
 		}
 		g.emitStmt(out, st, indent+"    ", fnRet)
@@ -993,6 +1365,56 @@ func (g *Generator) emitUnwrappedCall(
 	if varName != "" && !valType.Equals(checker.TypeVoid) {
 		out.WriteString(fmt.Sprintf("%s} else {\n", indent))
 		out.WriteString(fmt.Sprintf("%s    %s = %s.val;\n", indent, varName, tmpRes))
+	}
+	out.WriteString(fmt.Sprintf("%s}\n", indent))
+}
+
+func (g *Generator) emitUnwrappedAssign(
+	out *strings.Builder,
+	targetLValue string,
+	valType checker.Type,
+	call *ast.CallExpr,
+	indent string,
+	fnRet checker.Type,
+) {
+	tmpRes := g.nextTmp("res")
+	cRes := g.cResultName(valType)
+	out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, cRes, tmpRes, g.emitRawCall(call)))
+
+	out.WriteString(fmt.Sprintf("%sif (%s.is_err) {\n", indent, tmpRes))
+	out.WriteString(fmt.Sprintf("%s    vira_string err = %s.err;\n", indent, tmpRes))
+	out.WriteString(fmt.Sprintf("%s    (void)err;\n", indent))
+
+	for i, st := range call.OrBlock.Stmts {
+		isLast := i == len(call.OrBlock.Stmts)-1
+		if isLast {
+			if exprSt, ok := st.(*ast.ExprStmt); ok && targetLValue != "" && !valType.Equals(checker.TypeVoid) {
+				isDivergent := false
+				if callExpr, isCall := exprSt.Expr.(*ast.CallExpr); isCall {
+					if id, isId := callExpr.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
+						isDivergent = true
+					}
+				}
+				if !isDivergent {
+					out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+					continue
+				}
+			}
+		}
+		g.emitStmt(out, st, indent+"    ", fnRet)
+	}
+	out.WriteString(fmt.Sprintf("%s    vira_str_free(&err);\n", indent))
+
+	if targetLValue != "" && !valType.Equals(checker.TypeVoid) {
+		out.WriteString(fmt.Sprintf("%s} else {\n", indent))
+		if valType.Equals(checker.TypeString) {
+			tmpOld := g.nextTmp("old_str")
+			out.WriteString(fmt.Sprintf("%s    vira_string %s = %s;\n", indent, tmpOld, targetLValue))
+			out.WriteString(fmt.Sprintf("%s    %s = %s.val;\n", indent, targetLValue, tmpRes))
+			out.WriteString(fmt.Sprintf("%s    vira_str_free(&%s);\n", indent, tmpOld))
+		} else {
+			out.WriteString(fmt.Sprintf("%s    %s = %s.val;\n", indent, targetLValue, tmpRes))
+		}
 	}
 	out.WriteString(fmt.Sprintf("%s}\n", indent))
 }
@@ -1016,19 +1438,50 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		return e.Ident.Name
 
 	case *ast.StructInitExpr:
-		stName := e.Type.(*ast.IdentType).Name.Name
-		st := g.chk.Structs()[stName]
-		cSt := g.cStructName(stName)
+		var stName string
+		var fullType string
+		if ident, ok := e.Type.(*ast.IdentType); ok {
+			stName = ident.Name.Name
+			fullType = stName
+		} else if sel, ok := e.Type.(*ast.SelectorType); ok {
+			stName = sel.Name.Name
+			fullType = fmt.Sprintf("%s.%s", sel.Pkg.Name, sel.Name.Name)
+		}
+		var st *checker.StructType
+		if expType, ok := g.chk.ExprTypes[e].(*checker.StructType); ok {
+			st = expType
+		} else {
+			st = g.chk.LookupStruct(fullType)
+		}
+		cSt := g.cStructName(fullType)
+		if st != nil && st.Module != "" {
+			cSt = fmt.Sprintf("%s__%s", st.Module, st.Name)
+		}
 
 		var inits []string
-		if st.IsActor {
+		if st != nil && st.IsActor {
 			inits = append(inits, "._ctx = {0}")
 		}
 		for _, f := range e.Fields {
 			valStr := g.emitExpr(f.Value)
+			if ident, ok := f.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				if st != nil {
+					if finfo, hasField := st.Fields[f.Name.Name]; hasField {
+						if _, isStruct := finfo.Type.(*checker.StructType); isStruct {
+							valStr = "*" + valStr
+						}
+					}
+					for _, emb := range st.Embeds {
+						if emb.Name == f.Name.Name {
+							valStr = "*" + valStr
+							break
+						}
+					}
+				}
+			}
 			inits = append(inits, fmt.Sprintf(".%s = %s", f.Name.Name, valStr))
 		}
-		if st.IsActor {
+		if st != nil && st.IsActor {
 			return g.emitActorInitExpr(st, inits)
 		}
 		return fmt.Sprintf("(%s){ %s }", cSt, strings.Join(inits, ", "))
@@ -1461,14 +1914,68 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s_box_%s(%s)",
 				g.cStructName(iface.Name), st.Name, argStrs[0])
 		}
-		return fmt.Sprintf("%s__%s(%s)", g.mod, name, strings.Join(argStrs, ", "))
+		if sig, ok := g.chk.Functions()[name]; ok && sig.Intrinsic != "" {
+			return fmt.Sprintf("%s(%s)", sig.Intrinsic, strings.Join(argStrs, ", "))
+		}
+		fnMod := g.mod
+		if sig, ok := g.chk.Functions()[name]; ok && sig.Module != "" {
+			fnMod = sig.Module
+		}
+		return fmt.Sprintf("%s__%s(%s)", fnMod, name, strings.Join(argStrs, ", "))
 
 	case *ast.SelectorExpr:
-		// 1. Static Type Factory: Invoice.new(...)
+		// 1a. Qualified Static Method: `net.TcpStream.connect(...)`
+		if selLeft, ok := callee.Left.(*ast.SelectorExpr); ok {
+			if pkgIdent, ok := selLeft.Left.(*ast.IdentExpr); ok {
+				pkgName := pkgIdent.Ident.Name
+				typeName := selLeft.Field.Name
+				methodName := callee.Field.Name
+				st := g.chk.LookupStructInModule(pkgName, typeName)
+				if st == nil {
+					st = g.chk.LookupStruct(pkgName + "." + typeName)
+				}
+				if st != nil {
+					if sm, ok := st.StaticMethods[methodName]; ok && sm.Intrinsic != "" {
+						return fmt.Sprintf("%s(%s)", sm.Intrinsic, strings.Join(argStrs, ", "))
+					}
+					cSt := fmt.Sprintf("%s__%s", st.Module, st.Name)
+					if st.Module == "" {
+						cSt = g.cStructName(st.Name)
+					}
+					return fmt.Sprintf("%s_%s(%s)",
+						cSt, methodName, strings.Join(argStrs, ", "))
+				}
+			}
+		}
+
 		if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
-			if st, isSt := g.chk.Structs()[identLeft.Ident.Name]; isSt {
+			curr := g.currentModule()
+			st := g.chk.LookupStructInModule(curr, identLeft.Ident.Name)
+			if st == nil {
+				st = g.chk.LookupStruct(identLeft.Ident.Name)
+			}
+			if st != nil {
+				if sm, ok := st.StaticMethods[callee.Field.Name]; ok && sm.Intrinsic != "" {
+					return fmt.Sprintf("%s(%s)", sm.Intrinsic, strings.Join(argStrs, ", "))
+				}
+				cSt := fmt.Sprintf("%s__%s", st.Module, st.Name)
+				if st.Module == "" {
+					cSt = fmt.Sprintf("%s__%s", curr, st.Name)
+				}
 				return fmt.Sprintf("%s_%s(%s)",
-					g.cStructName(st.Name), callee.Field.Name, strings.Join(argStrs, ", "))
+					cSt, callee.Field.Name, strings.Join(argStrs, ", "))
+			}
+		}
+
+		// 1c. Top-level Module Function: `io.copy(...)`
+		if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
+			pkgName := identLeft.Ident.Name
+			fnName := callee.Field.Name
+			if fnSig := g.chk.LookupFunctionInModule(pkgName, fnName); fnSig != nil {
+				if fnSig.Intrinsic != "" {
+					return fmt.Sprintf("%s(%s)", fnSig.Intrinsic, strings.Join(argStrs, ", "))
+				}
+				return fmt.Sprintf("%s__%s(%s)", fnSig.Module, fnSig.Name, strings.Join(argStrs, ", "))
 			}
 		}
 
@@ -1508,6 +2015,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				}
 				return fmt.Sprintf("%s_supervise_%s(%s)",
 					g.cStructName(targetStruct), callee.Field.Name, strings.Join(allArgs, ", "))
+			}
+
+			if mSig, _, _ := st.LookupMethod(callee.Field.Name); mSig != nil && mSig.Intrinsic != "" {
+				return fmt.Sprintf("%s(%s)", mSig.Intrinsic, strings.Join(allArgs, ", "))
 			}
 
 			return fmt.Sprintf("%s_%s(%s)",
@@ -1557,6 +2068,8 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				return fmt.Sprintf("%s%slen", recvLValue, sep)
 			case "cap":
 				return fmt.Sprintf("%s%scap", recvLValue, sep)
+			case "to_string", "to_str":
+				return fmt.Sprintf("vira_bytes_to_string(%s)", recvPtr)
 			case "get":
 				cRes := g.cResultName(sl.Elem)
 				return fmt.Sprintf("({ const %s* _s = %s; int32_t _i = %s; (%s)(_i < 0 || _i >= _s->len ? (%s){ .is_err = true, .err = vira_str_lit(\"index out of bounds\", 19) } : (%s){ .is_err = false, .val = _s->data[_i] }); })",
@@ -1593,6 +2106,41 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				cRes := g.cResultName(arr.Elem)
 				return fmt.Sprintf("({ const %s* _a = %s; int32_t _i = %s; (%s)(_i < 0 || _i >= %d ? (%s){ .is_err = true, .err = vira_str_lit(\"index out of bounds\", 19) } : (%s){ .is_err = false, .val = _a->data[_i] }); })",
 					cArr, recvPtr, argStrs[0], cRes, arr.Len, cRes, cRes)
+			}
+		}
+
+		// 7. String receiver methods
+		if leftType != nil && leftType.Equals(checker.TypeString) {
+			strExpr := g.emitExpr(callee.Left)
+			switch callee.Field.Name {
+			case "len":
+				return fmt.Sprintf("(%s).len", strExpr)
+			case "contains":
+				return fmt.Sprintf("vira_str_contains(%s, %s)", strExpr, argStrs[0])
+			case "index_of":
+				return fmt.Sprintf("vira_str_index_of(%s, %s)", strExpr, argStrs[0])
+			case "substr":
+				return fmt.Sprintf("vira_str_substr(%s, %s, %s)", strExpr, argStrs[0], argStrs[1])
+			case "starts_with":
+				return fmt.Sprintf("vira_str_starts_with(%s, %s)", strExpr, argStrs[0])
+			case "ends_with":
+				return fmt.Sprintf("vira_str_ends_with(%s, %s)", strExpr, argStrs[0])
+			case "split":
+				return fmt.Sprintf("vira_str_split(%s, %s)", strExpr, argStrs[0])
+			case "trim":
+				return fmt.Sprintf("vira_str_trim(%s)", strExpr)
+			case "to_lower":
+				return fmt.Sprintf("vira_str_to_lower(%s)", strExpr)
+			case "to_upper":
+				return fmt.Sprintf("vira_str_to_upper(%s)", strExpr)
+			case "to_int":
+				return fmt.Sprintf("vira_str_to_int(%s)", strExpr)
+			case "to_i64":
+				return fmt.Sprintf("vira_str_to_i64(%s)", strExpr)
+			case "clone":
+				return fmt.Sprintf("vira_str_clone(%s)", strExpr)
+			case "bytes", "to_bytes":
+				return fmt.Sprintf("vira_str_to_bytes(%s)", strExpr)
 			}
 		}
 	}
@@ -1646,14 +2194,37 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 // --- TYPE MAPPING HELPERS ---
 
 func (g *Generator) cStructName(name string) string {
-	return fmt.Sprintf("%s__%s", g.mod, name)
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		return fmt.Sprintf("%s__%s", parts[0], parts[1])
+	}
+	curr := g.currentModule()
+	if st := g.chk.LookupStructInModule(curr, name); st != nil && st.Module != "" {
+		return fmt.Sprintf("%s__%s", st.Module, st.Name)
+	}
+	if st := g.chk.LookupStruct(name); st != nil && st.Module != "" {
+		return fmt.Sprintf("%s__%s", st.Module, st.Name)
+	}
+	if iface := g.chk.LookupInterfaceInModule(curr, name); iface != nil && iface.Module != "" {
+		return fmt.Sprintf("%s__%s", iface.Module, iface.Name)
+	}
+	if iface := g.chk.LookupInterface(name); iface != nil && iface.Module != "" {
+		return fmt.Sprintf("%s__%s", iface.Module, iface.Name)
+	}
+	return fmt.Sprintf("%s__%s", curr, name)
 }
 
 func (g *Generator) cResultName(inner checker.Type) string {
 	if inner == nil || inner.Equals(checker.TypeVoid) {
 		return "Result_void"
 	}
-	clean := strings.NewReplacer("[", "_", "]", "", " ", "_").Replace(inner.String())
+	if st, ok := inner.(*checker.StructType); ok {
+		if st.Module != "" {
+			return fmt.Sprintf("Result_%s__%s", st.Module, st.Name)
+		}
+		return "Result_" + g.cStructName(st.Name)
+	}
+	clean := strings.NewReplacer("[", "_", "]", "", " ", "_", ".", "__").Replace(inner.String())
 	return "Result_" + clean
 }
 
@@ -1664,6 +2235,8 @@ func (g *Generator) cType(t checker.Type) string {
 	switch v := t.(type) {
 	case *checker.PrimitiveType:
 		switch v.Kind {
+		case checker.PrimU8:
+			return "uint8_t"
 		case checker.PrimInt:
 			return "int32_t"
 		case checker.PrimI64:
@@ -1686,8 +2259,14 @@ func (g *Generator) cType(t checker.Type) string {
 	case *checker.FutureType:
 		return "vira_future"
 	case *checker.StructType:
+		if v.Module != "" {
+			return fmt.Sprintf("%s__%s", v.Module, v.Name)
+		}
 		return g.cStructName(v.Name)
 	case *checker.InterfaceType:
+		if v.Module != "" {
+			return fmt.Sprintf("%s__%s", v.Module, v.Name)
+		}
 		return g.cStructName(v.Name)
 	case *checker.ResultType:
 		return g.cResultName(v.Inner)
@@ -1711,6 +2290,8 @@ func (g *Generator) cSliceName(elem checker.Type) string {
 	switch v := elem.(type) {
 	case *checker.PrimitiveType:
 		switch v.Kind {
+		case checker.PrimU8:
+			return "vira_slice_u8"
 		case checker.PrimInt:
 			return "vira_slice_int"
 		case checker.PrimI64:
@@ -1725,6 +2306,9 @@ func (g *Generator) cSliceName(elem checker.Type) string {
 			return "vira_slice_string"
 		}
 	case *checker.StructType:
+		if v.Module != "" {
+			return fmt.Sprintf("vira_slice_%s__%s", v.Module, v.Name)
+		}
 		return fmt.Sprintf("vira_slice_%s", g.cStructName(v.Name))
 	}
 	clean := strings.NewReplacer("[", "_", "]", "", " ", "_").Replace(elem.String())
@@ -1734,6 +2318,8 @@ func (g *Generator) cSliceName(elem checker.Type) string {
 func (g *Generator) cSliceNameFromTypeName(tName string) string {
 	elem := strings.TrimPrefix(tName, "[]")
 	switch elem {
+	case "u8", "byte":
+		return "vira_slice_u8"
 	case "int":
 		return "vira_slice_int"
 	case "i64":
@@ -1782,13 +2368,36 @@ func (g *Generator) isPointerReceiverVar(name string) bool {
 }
 
 func (g *Generator) resolveCheckType(fn *ast.FnDecl) checker.Type {
+	fnMod := fn.Module
+	if fnMod == "" {
+		fnMod = g.currentModule()
+	}
 	if fn.Receiver != nil {
-		st := g.chk.Structs()[fn.Receiver.Type.(*ast.IdentType).Name.Name]
-		return st.Methods[fn.Name.Name].ReturnType
+		if ident, ok := fn.Receiver.Type.(*ast.IdentType); ok {
+			st := g.chk.LookupStructInModule(fnMod, ident.Name.Name)
+			if st == nil {
+				st = g.chk.LookupStruct(ident.Name.Name)
+			}
+			if st != nil && st.Methods != nil {
+				if m, ok := st.Methods[fn.Name.Name]; ok {
+					return m.ReturnType
+				}
+			}
+		}
 	}
 	if fn.StaticType != nil {
-		st := g.chk.Structs()[fn.StaticType.Name]
-		return st.StaticMethods[fn.Name.Name].ReturnType
+		st := g.chk.LookupStructInModule(fnMod, fn.StaticType.Name)
+		if st == nil {
+			st = g.chk.LookupStruct(fn.StaticType.Name)
+		}
+		if st != nil && st.StaticMethods != nil {
+			if m, ok := st.StaticMethods[fn.Name.Name]; ok {
+				return m.ReturnType
+			}
+		}
+	}
+	if sig := g.chk.LookupFunctionInModule(fnMod, fn.Name.Name); sig != nil {
+		return sig.ReturnType
 	}
 	if sig, ok := g.chk.Functions()[fn.Name.Name]; ok {
 		return sig.ReturnType
@@ -1797,13 +2406,35 @@ func (g *Generator) resolveCheckType(fn *ast.FnDecl) checker.Type {
 }
 
 func (g *Generator) resolveParamType(fn *ast.FnDecl, paramName string) checker.Type {
+	fnMod := fn.Module
+	if fnMod == "" {
+		fnMod = g.currentModule()
+	}
 	var params []checker.ParamInfo
 	if fn.Receiver != nil {
-		st := g.chk.Structs()[fn.Receiver.Type.(*ast.IdentType).Name.Name]
-		params = st.Methods[fn.Name.Name].Params
+		if ident, ok := fn.Receiver.Type.(*ast.IdentType); ok {
+			st := g.chk.LookupStructInModule(fnMod, ident.Name.Name)
+			if st == nil {
+				st = g.chk.LookupStruct(ident.Name.Name)
+			}
+			if st != nil && st.Methods != nil {
+				if m, ok := st.Methods[fn.Name.Name]; ok {
+					params = m.Params
+				}
+			}
+		}
 	} else if fn.StaticType != nil {
-		st := g.chk.Structs()[fn.StaticType.Name]
-		params = st.StaticMethods[fn.Name.Name].Params
+		st := g.chk.LookupStructInModule(fnMod, fn.StaticType.Name)
+		if st == nil {
+			st = g.chk.LookupStruct(fn.StaticType.Name)
+		}
+		if st != nil && st.StaticMethods != nil {
+			if m, ok := st.StaticMethods[fn.Name.Name]; ok {
+				params = m.Params
+			}
+		}
+	} else if sig := g.chk.LookupFunctionInModule(fnMod, fn.Name.Name); sig != nil {
+		params = sig.Params
 	} else if sig, ok := g.chk.Functions()[fn.Name.Name]; ok {
 		params = sig.Params
 	}

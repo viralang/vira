@@ -366,5 +366,45 @@ func TestLSPOOPCompositionExampleWithURLEncodedURI(t *testing.T) {
 	}
 }
 
+func TestLSPPackageSiblingFiles_ResponseVir(t *testing.T) {
+	respPath, err := filepath.Abs("../../packages/http/src/response.vir")
+	if err != nil {
+		t.Fatalf("failed to resolve path to response.vir: %v", err)
+	}
+	contentBytes, err := os.ReadFile(respPath)
+	if err != nil {
+		t.Fatalf("failed to read response.vir: %v", err)
+	}
+	code := string(contentBytes)
+	uri := "file://" + filepath.ToSlash(respPath)
 
+	var in bytes.Buffer
+	var out bytes.Buffer
 
+	sendRPC(&in, "initialize", map[string]interface{}{}, 1)
+
+	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
+		"textDocument": map[string]interface{}{
+			"uri":  uri,
+			"text": code,
+		},
+	}, nil)
+
+	sendRPC(&in, "shutdown", map[string]interface{}{}, 2)
+
+	server := lsp.NewServer(&in, &out)
+	if err := server.Run(); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	res := out.String()
+	if strings.Contains(res, "cannot call method 'set' on type 'void'") {
+		t.Errorf("found false diagnostic 'cannot call method set on type void': %s", res)
+	}
+	if strings.Contains(res, "unknown type 'HeaderMap'") {
+		t.Errorf("found false diagnostic 'unknown type HeaderMap': %s", res)
+	}
+	if !strings.Contains(res, `"diagnostics":[]`) {
+		t.Errorf("expected clean diagnostics [] on response.vir, got: %s", res)
+	}
+}

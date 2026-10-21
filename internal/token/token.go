@@ -51,6 +51,9 @@ const (
 	TokReturn
 	TokIf
 	TokElse
+	TokSwitch
+	TokCase
+	TokDefault
 	TokMatch
 	TokFor
 	TokIn
@@ -133,6 +136,9 @@ var keywords = map[string]Kind{
 	"continue":  TokContinue,
 	"if":        TokIf,
 	"else":      TokElse,
+	"switch":    TokSwitch,
+	"case":      TokCase,
+	"default":   TokDefault,
 	"match":     TokMatch,
 	"for":       TokFor,
 	"in":        TokIn,
@@ -211,6 +217,9 @@ func (k Kind) String() string {
 		TokContinue:   "continue",
 		TokIf:         "if",
 		TokElse:       "else",
+		TokSwitch:     "switch",
+		TokCase:       "case",
+		TokDefault:    "default",
 		TokMatch:      "match",
 		TokFor:        "for",
 		TokIn:         "in",

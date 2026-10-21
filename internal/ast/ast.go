@@ -58,10 +58,20 @@ func (a AccessMode) String() string {
 	}
 }
 
+// ImportSpec represents an imported module with an optional local alias.
+type ImportSpec struct {
+	Path    string     // import target, e.g. "net", "http", or "path/to/mod"
+	Name    string     // effective local name (alias if provided, otherwise base of path)
+	Alias   string     // explicitly defined alias via `as <alias>`, or empty
+	NamePos token.Span // span of the import name / target
+}
+
+func (imp ImportSpec) Span() token.Span { return imp.NamePos }
+
 // File represents a single parsed .vir source file.
 type File struct {
 	Module   Ident
-	Imports  []Ident
+	Imports  []ImportSpec
 	Decls    []Decl
 	FileSpan token.Span
 }
@@ -69,6 +79,18 @@ type File struct {
 func (f *File) Span() token.Span { return f.FileSpan }
 
 // --- TYPE EXPRESSIONS ---
+
+// SelectorType represents a qualified type reference like `net.TcpStream` or `http.HeaderMap`.
+type SelectorType struct {
+	Pkg        Ident      // e.g., "net"
+	Name       Ident      // e.g., "TcpStream"
+	TypeParams []TypeExpr // generic parameters if any
+}
+
+func (t *SelectorType) Span() token.Span {
+	return token.Span{Start: t.Pkg.Span().Start, End: t.Name.Span().End}
+}
+func (t *SelectorType) typeExprNode() {}
 
 type IdentType struct {
 	Name       Ident
@@ -129,6 +151,7 @@ type StructField struct {
 
 // StructDecl models a Vira struct or actor with composition (Embeds) and 4-quadrant fields.
 type StructDecl struct {
+	Module     string        // owning package / module name
 	IsPub      bool
 	IsActor    bool // true if declared with `actor Name { ... }`
 	Name       Ident
@@ -160,6 +183,7 @@ type InterfaceField struct {
 
 // InterfaceDecl models a structural interface supporting both fields and methods.
 type InterfaceDecl struct {
+	Module    string // owning package / module name
 	IsPub     bool
 	Name      Ident
 	Embeds    []TypeExpr
@@ -188,6 +212,7 @@ type Param struct {
 
 // FnDecl models free functions, receiver methods, and static type methods (`Invoice.new`).
 type FnDecl struct {
+	Module     string    // owning package / module name
 	IsPub      bool
 	Receiver   *Receiver // non-nil for instance methods: `fn (mut inv Invoice) mark_paid()`
 	StaticType *Ident    // non-nil for static type factories: `fn Invoice.new(...)`
@@ -196,6 +221,7 @@ type FnDecl struct {
 	Params     []Param
 	ReturnType TypeExpr // nil means void
 	Body       *BlockStmt
+	Intrinsic  string // non-empty for @[intrinsic: '...'] bindings
 	DeclSpan   token.Span
 }
 
@@ -257,6 +283,26 @@ type IfStmt struct {
 
 func (s *IfStmt) Span() token.Span { return s.StmtSpan }
 func (s *IfStmt) stmtNode()        {}
+
+// SwitchCase represents a single `case expr1, expr2: ...` or `default: ...`.
+type SwitchCase struct {
+	Exprs     []Expr // Empty for `default`
+	Body      []Stmt
+	IsDefault bool
+	CaseSpan  token.Span
+}
+
+func (c *SwitchCase) Span() token.Span { return c.CaseSpan }
+
+// SwitchStmt represents `switch tag { case ... }` or tagless `switch { case cond: ... }`.
+type SwitchStmt struct {
+	Tag      Expr // nil for tagless switch
+	Cases    []SwitchCase
+	StmtSpan token.Span
+}
+
+func (s *SwitchStmt) Span() token.Span { return s.StmtSpan }
+func (s *SwitchStmt) stmtNode()        {}
 
 // ForStmt represents `for cond { ... }`, `for { ... }`, or `for init; cond; post { ... }`.
 type ForStmt struct {

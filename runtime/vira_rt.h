@@ -26,15 +26,22 @@
 typedef SOCKET vira_socket_t;
 #define VIRA_INVALID_SOCKET INVALID_SOCKET
 #define VIRA_SOCKET_ERROR SOCKET_ERROR
+#define vira_poll WSAPoll
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <poll.h>
+#include <signal.h>
 #include <fcntl.h>
+#include <errno.h>
 typedef int vira_socket_t;
 #define VIRA_INVALID_SOCKET -1
 #define VIRA_SOCKET_ERROR -1
 #define closesocket close
+#define vira_poll poll
 #endif
 
 // --- HARDWARE SIMD INTRINSIC HEADERS ---
@@ -235,6 +242,7 @@ static inline void vira_slice_##TYPE_NAME##_free(vira_slice_##TYPE_NAME* s) { \
     _vira_slice_free_raw((void**)&s->data, &s->len, &s->cap, s->is_arena); \
 }
 
+VIRA_DEFINE_SLICE_TYPE(u8, uint8_t)
 VIRA_DEFINE_SLICE_TYPE(int, int32_t)
 VIRA_DEFINE_SLICE_TYPE(i64, int64_t)
 VIRA_DEFINE_SLICE_TYPE(f32, vira_f32)
@@ -321,6 +329,213 @@ static inline void vira_slice_string_free(vira_slice_string* s) {
     }
     s->len = 0;
     s->cap = 0;
+}
+
+#ifndef _Result_int_DEFINED
+#define _Result_int_DEFINED
+typedef struct {
+    bool is_err;
+    vira_string err;
+    int32_t val;
+} Result_int;
+#endif
+
+#ifndef _Result_i64_DEFINED
+#define _Result_i64_DEFINED
+typedef struct {
+    bool is_err;
+    vira_string err;
+    int64_t val;
+} Result_i64;
+#endif
+
+static inline bool vira_str_contains(vira_string s, vira_string sub) {
+    if (sub.len == 0) return true;
+    if (s.len < sub.len || s.data == NULL || sub.data == NULL) return false;
+    for (int32_t i = 0; i <= s.len - sub.len; i++) {
+        if (memcmp(&s.data[i], sub.data, (size_t)sub.len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline int32_t vira_str_index_of(vira_string s, vira_string sub) {
+    if (sub.len == 0) return 0;
+    if (s.len < sub.len || s.data == NULL || sub.data == NULL) return -1;
+    for (int32_t i = 0; i <= s.len - sub.len; i++) {
+        if (memcmp(&s.data[i], sub.data, (size_t)sub.len) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static inline bool vira_str_starts_with(vira_string s, vira_string prefix) {
+    if (prefix.len == 0) return true;
+    if (s.len < prefix.len || s.data == NULL || prefix.data == NULL) return false;
+    return memcmp(s.data, prefix.data, (size_t)prefix.len) == 0;
+}
+
+static inline bool vira_str_ends_with(vira_string s, vira_string suffix) {
+    if (suffix.len == 0) return true;
+    if (s.len < suffix.len || s.data == NULL || suffix.data == NULL) return false;
+    return memcmp(&s.data[s.len - suffix.len], suffix.data, (size_t)suffix.len) == 0;
+}
+
+static inline vira_string vira_str_substr(vira_string s, int32_t start, int32_t end) {
+    if (start < 0) start = 0;
+    if (end > s.len) end = s.len;
+    if (start >= end || s.data == NULL) {
+        return vira_str_lit("", 0);
+    }
+    int32_t len = end - start;
+    uint8_t* buf = (uint8_t*)malloc((size_t)len + 1);
+    if (!buf) {
+        fprintf(stderr, "vira panic: out of memory in vira_str_substr\n");
+        exit(1);
+    }
+    memcpy(buf, &s.data[start], (size_t)len);
+    buf[len] = '\0';
+    _vira_record_alloc();
+    return (vira_string){ .data = buf, .len = len, .is_lit = false };
+}
+
+static inline vira_string vira_str_trim(vira_string s) {
+    if (s.len == 0 || s.data == NULL) return vira_str_lit("", 0);
+    int32_t start = 0;
+    while (start < s.len && (s.data[start] == ' ' || s.data[start] == '\t' || s.data[start] == '\r' || s.data[start] == '\n')) {
+        start++;
+    }
+    int32_t end = s.len;
+    while (end > start && (s.data[end - 1] == ' ' || s.data[end - 1] == '\t' || s.data[end - 1] == '\r' || s.data[end - 1] == '\n')) {
+        end--;
+    }
+    return vira_str_substr(s, start, end);
+}
+
+static inline vira_string vira_str_to_lower(vira_string s) {
+    if (s.len == 0 || s.data == NULL) return vira_str_lit("", 0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)s.len + 1);
+    if (!buf) {
+        fprintf(stderr, "vira panic: out of memory in vira_str_to_lower\n");
+        exit(1);
+    }
+    for (int32_t i = 0; i < s.len; i++) {
+        uint8_t c = s.data[i];
+        if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));
+        buf[i] = c;
+    }
+    buf[s.len] = '\0';
+    _vira_record_alloc();
+    return (vira_string){ .data = buf, .len = s.len, .is_lit = false };
+}
+
+static inline vira_string vira_str_to_upper(vira_string s) {
+    if (s.len == 0 || s.data == NULL) return vira_str_lit("", 0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)s.len + 1);
+    if (!buf) {
+        fprintf(stderr, "vira panic: out of memory in vira_str_to_upper\n");
+        exit(1);
+    }
+    for (int32_t i = 0; i < s.len; i++) {
+        uint8_t c = s.data[i];
+        if (c >= 'a' && c <= 'z') c = (uint8_t)(c - ('a' - 'A'));
+        buf[i] = c;
+    }
+    buf[s.len] = '\0';
+    _vira_record_alloc();
+    return (vira_string){ .data = buf, .len = s.len, .is_lit = false };
+}
+
+static inline Result_int vira_str_to_int(vira_string s) {
+    if (s.len == 0 || s.data == NULL) {
+        return (Result_int){ .is_err = true, .err = vira_str_lit("empty string", 12) };
+    }
+    char buf[64];
+    int32_t copy_len = s.len < 63 ? s.len : 63;
+    memcpy(buf, s.data, (size_t)copy_len);
+    buf[copy_len] = '\0';
+    char* endptr = NULL;
+    long val = strtol(buf, &endptr, 10);
+    if (endptr == buf || *endptr != '\0') {
+        return (Result_int){ .is_err = true, .err = vira_str_lit("invalid integer format", 22) };
+    }
+    return (Result_int){ .is_err = false, .val = (int32_t)val };
+}
+
+static inline Result_i64 vira_str_to_i64(vira_string s) {
+    if (s.len == 0 || s.data == NULL) {
+        return (Result_i64){ .is_err = true, .err = vira_str_lit("empty string", 12) };
+    }
+    char buf[64];
+    int32_t copy_len = s.len < 63 ? s.len : 63;
+    memcpy(buf, s.data, (size_t)copy_len);
+    buf[copy_len] = '\0';
+    char* endptr = NULL;
+    long long val = strtoll(buf, &endptr, 10);
+    if (endptr == buf || *endptr != '\0') {
+        return (Result_i64){ .is_err = true, .err = vira_str_lit("invalid integer format", 22) };
+    }
+    return (Result_i64){ .is_err = false, .val = (int64_t)val };
+}
+
+static inline vira_slice_string vira_str_split(vira_string s, vira_string sep) {
+    vira_slice_string res = vira_slice_string_new(4);
+    if (s.len == 0 || s.data == NULL) {
+        vira_slice_string_push(&res, vira_str_lit("", 0));
+        return res;
+    }
+    if (sep.len == 0) {
+        for (int32_t i = 0; i < s.len; i++) {
+            vira_slice_string_push(&res, vira_str_substr(s, i, i + 1));
+        }
+        return res;
+    }
+    int32_t cur = 0;
+    while (cur <= s.len) {
+        int32_t next = -1;
+        if (cur <= s.len - sep.len) {
+            for (int32_t i = cur; i <= s.len - sep.len; i++) {
+                if (memcmp(&s.data[i], sep.data, (size_t)sep.len) == 0) {
+                    next = i;
+                    break;
+                }
+            }
+        }
+        if (next == -1) {
+            vira_slice_string_push(&res, vira_str_substr(s, cur, s.len));
+            break;
+        } else {
+            vira_slice_string_push(&res, vira_str_substr(s, cur, next));
+            cur = next + sep.len;
+        }
+    }
+    return res;
+}
+
+static inline vira_slice_u8 vira_str_to_bytes(vira_string s) {
+    vira_slice_u8 res = vira_slice_u8_new(s.len);
+    if (s.len > 0 && s.data != NULL) {
+        memcpy(res.data, s.data, (size_t)s.len);
+        res.len = s.len;
+    }
+    return res;
+}
+
+static inline vira_string vira_bytes_to_string(const vira_slice_u8* s) {
+    if (!s || s->len <= 0 || s->data == NULL) {
+        return vira_str_lit("", 0);
+    }
+    uint8_t* copy = (uint8_t*)malloc((size_t)s->len + 1);
+    if (!copy) {
+        fprintf(stderr, "vira panic: out of memory in vira_bytes_to_string\n");
+        exit(1);
+    }
+    memcpy(copy, s->data, (size_t)s->len);
+    copy[s->len] = '\0';
+    _vira_record_alloc();
+    return (vira_string){ .data = copy, .len = s->len, .is_lit = false };
 }
 
 // ============================================================================
@@ -415,7 +630,7 @@ static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows, int32_t cols) 
     size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
     void*  raw   = malloc(bytes + 64);
     if (!raw) {
-        fprintf(stderr, "vex panic: tensor allocation failed (%d x %d)\n", rows, cols);
+        fprintf(stderr, "vira panic: tensor allocation failed (%d x %d)\n", rows, cols);
         exit(1);
     }
     uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;
@@ -1138,6 +1353,82 @@ static inline Result_bool vira_remove_file(vira_string path) {
     return (Result_bool){ .is_err = true, .err = vira_str_format("failed to remove file '%s'", path_buf) };
 }
 
+static inline int64_t vira_io_file_open(vira_string path, vira_string mode) {
+    if (path.len == 0 || path.data == NULL || mode.len == 0 || mode.data == NULL) {
+        return 0;
+    }
+    char path_buf[1024];
+    int32_t plen = path.len < 1023 ? path.len : 1023;
+    memcpy(path_buf, path.data, (size_t)plen);
+    path_buf[plen] = '\0';
+
+    char mode_buf[16];
+    int32_t mlen = mode.len < 15 ? mode.len : 15;
+    memcpy(mode_buf, mode.data, (size_t)mlen);
+    mode_buf[mlen] = '\0';
+
+    FILE* f = fopen(path_buf, mode_buf);
+    return (int64_t)(uintptr_t)f;
+}
+
+static inline int32_t vira_io_file_read(int64_t handle, vira_slice_u8* buf, int32_t max_len) {
+    if (handle == 0 || buf == NULL || buf->data == NULL || max_len <= 0) {
+        return 0;
+    }
+    FILE* f = (FILE*)(uintptr_t)handle;
+    int32_t can_read = buf->cap < max_len ? buf->cap : max_len;
+    if (can_read <= 0) return 0;
+    size_t n = fread(buf->data, 1, (size_t)can_read, f);
+    buf->len = (int32_t)n;
+    return (int32_t)n;
+}
+
+static inline int32_t vira_io_file_write(int64_t handle, vira_slice_u8 buf, int32_t len) {
+    if (handle == 0 || buf.data == NULL || len <= 0) {
+        return 0;
+    }
+    FILE* f = (FILE*)(uintptr_t)handle;
+    int32_t to_write = buf.len < len ? buf.len : len;
+    if (to_write <= 0) return 0;
+    size_t n = fwrite(buf.data, 1, (size_t)to_write, f);
+    return (int32_t)n;
+}
+
+static inline int64_t vira_io_file_seek(int64_t handle, int64_t offset, int32_t whence) {
+    if (handle == 0) return -1;
+    FILE* f = (FILE*)(uintptr_t)handle;
+    int c_whence = SEEK_SET;
+    if (whence == 1) c_whence = SEEK_CUR;
+    else if (whence == 2) c_whence = SEEK_END;
+    if (fseek(f, (long)offset, c_whence) != 0) {
+        return -1;
+    }
+    long pos = ftell(f);
+    return (int64_t)pos;
+}
+
+static inline int32_t vira_io_file_flush(int64_t handle) {
+    if (handle == 0) return -1;
+    FILE* f = (FILE*)(uintptr_t)handle;
+    return fflush(f) == 0 ? 0 : -1;
+}
+
+static inline int32_t vira_io_file_close(int64_t handle) {
+    if (handle == 0) return 0;
+    FILE* f = (FILE*)(uintptr_t)handle;
+    return fclose(f) == 0 ? 0 : -1;
+}
+
+static inline int64_t vira_io_file_size(int64_t handle) {
+    if (handle == 0) return -1;
+    FILE* f = (FILE*)(uintptr_t)handle;
+    long cur = ftell(f);
+    if (fseek(f, 0, SEEK_END) != 0) return -1;
+    long sz = ftell(f);
+    fseek(f, cur, SEEK_SET);
+    return (int64_t)sz;
+}
+
 // ============================================================================
 // 7. PRETRAINED TENSOR BINARY WEIGHT I/O (PYTORCH / SAFETENSORS / GGUF COMPAT)
 // ============================================================================
@@ -1242,9 +1533,16 @@ static inline void _vira_net_init(void) {
         WSAStartup(MAKEWORD(2, 2), &wsa);
         initialized = 1;
     }
+#else
+    static int initialized = 0;
+    if (!initialized) {
+        signal(SIGPIPE, SIG_IGN);
+        initialized = 1;
+    }
 #endif
 }
 
+// --- LEGACY MINIMAL SOCKET WRAPPERS ---
 static inline int64_t vira_net_listen(int64_t port) {
     _vira_net_init();
     vira_socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1311,6 +1609,470 @@ static inline void vira_net_close(int64_t fd) {
     if (fd >= 0) {
         closesocket((vira_socket_t)fd);
     }
+}
+
+// --- STANDARD VIRA NETWORKING (TCP, UDP, MULTIPLEXING) ---
+
+static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port, int32_t backlog) {
+    _vira_net_init();
+    if (port < 0 || port > 65535) return -1;
+    if (backlog <= 0) backlog = 128;
+
+    char host_buf[256];
+    int hlen = host.len < 255 ? host.len : 255;
+    if (host.data && hlen > 0) {
+        memcpy(host_buf, host.data, hlen);
+        host_buf[hlen] = '\0';
+    } else {
+        host_buf[0] = '\0';
+    }
+
+    char port_buf[16];
+    snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
+
+    struct addrinfo hints, *res = NULL, *p = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char* node = (hlen > 0 && strcmp(host_buf, "0.0.0.0") != 0) ? host_buf : NULL;
+    if (getaddrinfo(node, port_buf, &hints, &res) != 0) {
+        return -1;
+    }
+
+    vira_socket_t listen_fd = VIRA_INVALID_SOCKET;
+    for (p = res; p != NULL; p = p->ai_next) {
+        listen_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (listen_fd == VIRA_INVALID_SOCKET) continue;
+
+        int opt = 1;
+#ifdef _WIN32
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+#endif
+
+        if (bind(listen_fd, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) {
+            break;
+        }
+
+        closesocket(listen_fd);
+        listen_fd = VIRA_INVALID_SOCKET;
+    }
+
+    freeaddrinfo(res);
+
+    if (listen_fd == VIRA_INVALID_SOCKET) return -1;
+    if (listen(listen_fd, (int)backlog) == VIRA_SOCKET_ERROR) {
+        closesocket(listen_fd);
+        return -1;
+    }
+
+    return (int64_t)listen_fd;
+}
+
+static inline int64_t vira_net_tcp_accept(int64_t server_fd) {
+    _vira_net_init();
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    vira_socket_t client = accept((vira_socket_t)server_fd, (struct sockaddr*)&addr, &addr_len);
+    if (client == VIRA_INVALID_SOCKET) return -1;
+    return (int64_t)client;
+}
+
+static inline vira_string vira_net_peer_addr(int64_t fd) {
+    if (fd < 0) return vira_str_lit("", 0);
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getpeername((vira_socket_t)fd, (struct sockaddr*)&addr, &addr_len) != 0) {
+        return vira_str_lit("", 0);
+    }
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in* s = (struct sockaddr_in*)&addr;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin_port);
+        return vira_str_format("%s:%d", ip, port);
+    } else if (addr.ss_family == AF_INET6) {
+        struct sockaddr_in6* s = (struct sockaddr_in6*)&addr;
+        char ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin6_port);
+        return vira_str_format("[%s]:%d", ip, port);
+    }
+    return vira_str_lit("", 0);
+}
+
+static inline vira_string vira_net_local_addr(int64_t fd) {
+    if (fd < 0) return vira_str_lit("", 0);
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getsockname((vira_socket_t)fd, (struct sockaddr*)&addr, &addr_len) != 0) {
+        return vira_str_lit("", 0);
+    }
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in* s = (struct sockaddr_in*)&addr;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin_port);
+        return vira_str_format("%s:%d", ip, port);
+    } else if (addr.ss_family == AF_INET6) {
+        struct sockaddr_in6* s = (struct sockaddr_in6*)&addr;
+        char ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin6_port);
+        return vira_str_format("[%s]:%d", ip, port);
+    }
+    return vira_str_lit("", 0);
+}
+
+static inline int64_t vira_net_tcp_connect(vira_string host, int32_t port, int64_t timeout_ms) {
+    _vira_net_init();
+    if (port <= 0 || port > 65535) return -1;
+
+    char host_buf[256];
+    int hlen = host.len < 255 ? host.len : 255;
+    if (host.data && hlen > 0) {
+        memcpy(host_buf, host.data, hlen);
+        host_buf[hlen] = '\0';
+    } else {
+        host_buf[0] = '\0';
+    }
+
+    char port_buf[16];
+    snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
+
+    struct addrinfo hints, *res = NULL, *p = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host_buf, port_buf, &hints, &res) != 0) {
+        return -1;
+    }
+
+    vira_socket_t conn_fd = VIRA_INVALID_SOCKET;
+    for (p = res; p != NULL; p = p->ai_next) {
+        conn_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (conn_fd == VIRA_INVALID_SOCKET) continue;
+
+        if (timeout_ms <= 0) {
+            if (connect(conn_fd, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) {
+                break;
+            }
+        } else {
+#ifdef _WIN32
+            u_long mode = 1;
+            ioctlsocket(conn_fd, FIONBIO, &mode);
+#else
+            int orig_flags = fcntl((int)conn_fd, F_GETFL, 0);
+            fcntl((int)conn_fd, F_SETFL, orig_flags | O_NONBLOCK);
+#endif
+            int ret = connect(conn_fd, p->ai_addr, (socklen_t)p->ai_addrlen);
+            bool ok = false;
+            if (ret == 0) {
+                ok = true;
+            } else {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK) {
+#else
+                if (errno == EINPROGRESS) {
+#endif
+                    struct pollfd pfd;
+                    pfd.fd = conn_fd;
+                    pfd.events = POLLOUT;
+                    pfd.revents = 0;
+                    int pr = vira_poll(&pfd, 1, (int)timeout_ms);
+                    if (pr > 0 && (pfd.revents & POLLOUT)) {
+                        int sock_err = 0;
+                        socklen_t errlen = sizeof(sock_err);
+                        getsockopt(conn_fd, SOL_SOCKET, SO_ERROR, (char*)&sock_err, &errlen);
+                        if (sock_err == 0) {
+                            ok = true;
+                        }
+                    }
+                }
+            }
+
+#ifdef _WIN32
+            mode = 0;
+            ioctlsocket(conn_fd, FIONBIO, &mode);
+#else
+            fcntl((int)conn_fd, F_SETFL, orig_flags);
+#endif
+            if (ok) {
+                break;
+            }
+        }
+
+        closesocket(conn_fd);
+        conn_fd = VIRA_INVALID_SOCKET;
+    }
+
+    freeaddrinfo(res);
+    return (int64_t)conn_fd;
+}
+
+static inline int32_t vira_net_tcp_read(int64_t fd, vira_slice_u8* buf, int32_t max_len) {
+    if (fd < 0 || buf == NULL || buf->data == NULL || max_len <= 0) {
+        return 0;
+    }
+    int32_t can_read = buf->cap < max_len ? buf->cap : max_len;
+    if (can_read <= 0) return 0;
+
+    int n = recv((vira_socket_t)fd, (char*)buf->data, (int)can_read, 0);
+    if (n > 0) {
+        buf->len = (int32_t)n;
+        return (int32_t)n;
+    }
+    if (n == 0) {
+        buf->len = 0;
+        return 0;
+    }
+#ifdef _WIN32
+    int werr = WSAGetLastError();
+    if (werr == WSAEWOULDBLOCK) return -2;
+#else
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+#endif
+    return -1;
+}
+
+static inline int32_t vira_net_tcp_write(int64_t fd, vira_slice_u8 buf, int32_t len) {
+    if (fd < 0 || buf.data == NULL || len <= 0) {
+        return 0;
+    }
+    int32_t to_write = buf.len < len ? buf.len : len;
+    if (to_write <= 0) return 0;
+
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+    int sent = send((vira_socket_t)fd, (const char*)buf.data, (int)to_write, flags);
+    return (int32_t)sent;
+}
+
+static inline int32_t vira_net_tcp_close(int64_t fd) {
+    if (fd < 0) return 0;
+    return closesocket((vira_socket_t)fd) == 0 ? 0 : -1;
+}
+
+static inline int32_t vira_net_tcp_shutdown(int64_t fd, int32_t how) {
+    if (fd < 0) return 0;
+#ifdef _WIN32
+    int c_how = (how == 0) ? SD_RECEIVE : ((how == 1) ? SD_SEND : SD_BOTH);
+#else
+    int c_how = (how == 0) ? SHUT_RD : ((how == 1) ? SHUT_WR : SHUT_RDWR);
+#endif
+    return shutdown((vira_socket_t)fd, c_how) == 0 ? 0 : -1;
+}
+
+static inline int32_t vira_net_set_nonblocking(int64_t fd, bool nonblocking) {
+    if (fd < 0) return -1;
+#ifdef _WIN32
+    u_long mode = nonblocking ? 1 : 0;
+    return ioctlsocket((vira_socket_t)fd, FIONBIO, &mode) == 0 ? 0 : -1;
+#else
+    int flags = fcntl((int)fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    flags = nonblocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return fcntl((int)fd, F_SETFL, flags) == 0 ? 0 : -1;
+#endif
+}
+
+static inline int32_t vira_net_set_nodelay(int64_t fd, bool nodelay) {
+    if (fd < 0) return -1;
+    int opt = nodelay ? 1 : 0;
+    return setsockopt((vira_socket_t)fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&opt, sizeof(opt)) == 0 ? 0 : -1;
+}
+
+static inline int32_t vira_net_set_reuseaddr(int64_t fd, bool reuse) {
+    if (fd < 0) return -1;
+    int opt = reuse ? 1 : 0;
+    return setsockopt((vira_socket_t)fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)) == 0 ? 0 : -1;
+}
+
+static inline int32_t vira_net_set_timeout(int64_t fd, int64_t read_timeout_ms, int64_t write_timeout_ms) {
+    if (fd < 0) return -1;
+#ifdef _WIN32
+    DWORD r_to = (DWORD)read_timeout_ms;
+    DWORD w_to = (DWORD)write_timeout_ms;
+    if (read_timeout_ms >= 0) setsockopt((vira_socket_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&r_to, sizeof(r_to));
+    if (write_timeout_ms >= 0) setsockopt((vira_socket_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&w_to, sizeof(w_to));
+#else
+    if (read_timeout_ms >= 0) {
+        struct timeval tv;
+        tv.tv_sec = read_timeout_ms / 1000;
+        tv.tv_usec = (read_timeout_ms % 1000) * 1000;
+        setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    if (write_timeout_ms >= 0) {
+        struct timeval tv;
+        tv.tv_sec = write_timeout_ms / 1000;
+        tv.tv_usec = (write_timeout_ms % 1000) * 1000;
+        setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+#endif
+    return 0;
+}
+
+static inline int32_t vira_net_poll(int64_t fd, int32_t events, int32_t timeout_ms) {
+    if (fd < 0) return -1;
+    struct pollfd pfd;
+    pfd.fd = (vira_socket_t)fd;
+    pfd.events = 0;
+    if (events & 1) pfd.events |= POLLIN;
+    if (events & 2) pfd.events |= POLLOUT;
+    pfd.revents = 0;
+
+    int n = vira_poll(&pfd, 1, (int)timeout_ms);
+    if (n <= 0) return n;
+
+    int32_t res = 0;
+    if (pfd.revents & POLLIN) res |= 1;
+    if (pfd.revents & POLLOUT) res |= 2;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) res |= 4;
+    return res;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+static __thread struct sockaddr_storage _vira_last_udp_sender;
+static __thread socklen_t _vira_last_udp_sender_len = 0;
+#else
+static struct sockaddr_storage _vira_last_udp_sender;
+static socklen_t _vira_last_udp_sender_len = 0;
+#endif
+
+static inline int64_t vira_net_udp_bind(vira_string host, int32_t port) {
+    _vira_net_init();
+    if (port < 0 || port > 65535) return -1;
+
+    char host_buf[256];
+    int hlen = host.len < 255 ? host.len : 255;
+    if (host.data && hlen > 0) {
+        memcpy(host_buf, host.data, hlen);
+        host_buf[hlen] = '\0';
+    } else {
+        host_buf[0] = '\0';
+    }
+
+    char port_buf[16];
+    snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
+
+    struct addrinfo hints, *res = NULL, *p = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char* node = (hlen > 0 && strcmp(host_buf, "0.0.0.0") != 0) ? host_buf : NULL;
+    if (getaddrinfo(node, port_buf, &hints, &res) != 0) {
+        return -1;
+    }
+
+    vira_socket_t udp_fd = VIRA_INVALID_SOCKET;
+    for (p = res; p != NULL; p = p->ai_next) {
+        udp_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (udp_fd == VIRA_INVALID_SOCKET) continue;
+
+        int opt = 1;
+#ifdef _WIN32
+        setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+        setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+        setsockopt(udp_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+#endif
+
+        if (bind(udp_fd, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) {
+            break;
+        }
+
+        closesocket(udp_fd);
+        udp_fd = VIRA_INVALID_SOCKET;
+    }
+
+    freeaddrinfo(res);
+    return (int64_t)udp_fd;
+}
+
+static inline int32_t vira_net_udp_send_to(int64_t fd, vira_slice_u8 buf, int32_t len, vira_string host, int32_t port) {
+    if (fd < 0 || buf.data == NULL || len <= 0 || port < 0 || port > 65535) {
+        return 0;
+    }
+    int32_t to_write = buf.len < len ? buf.len : len;
+    if (to_write <= 0) return 0;
+
+    char host_buf[256];
+    int hlen = host.len < 255 ? host.len : 255;
+    if (host.data && hlen > 0) {
+        memcpy(host_buf, host.data, hlen);
+        host_buf[hlen] = '\0';
+    } else {
+        host_buf[0] = '\0';
+    }
+
+    char port_buf[16];
+    snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if (getaddrinfo(host_buf, port_buf, &hints, &res) != 0 || !res) {
+        return -1;
+    }
+
+    int sent = sendto((vira_socket_t)fd, (const char*)buf.data, (int)to_write, 0, res->ai_addr, (socklen_t)res->ai_addrlen);
+    freeaddrinfo(res);
+    return (int32_t)sent;
+}
+
+static inline int32_t vira_net_udp_recv_from(int64_t fd, vira_slice_u8* buf, int32_t max_len) {
+    if (fd < 0 || buf == NULL || buf->data == NULL || max_len <= 0) {
+        return 0;
+    }
+    int32_t can_read = buf->cap < max_len ? buf->cap : max_len;
+    if (can_read <= 0) return 0;
+
+    _vira_last_udp_sender_len = sizeof(_vira_last_udp_sender);
+    memset(&_vira_last_udp_sender, 0, sizeof(_vira_last_udp_sender));
+
+    int n = recvfrom((vira_socket_t)fd, (char*)buf->data, (int)can_read, 0,
+                     (struct sockaddr*)&_vira_last_udp_sender, &_vira_last_udp_sender_len);
+    if (n >= 0) {
+        buf->len = (int32_t)n;
+        return (int32_t)n;
+    }
+    return -1;
+}
+
+static inline vira_string vira_net_udp_last_sender(void) {
+    if (_vira_last_udp_sender_len == 0) {
+        return vira_str_lit("", 0);
+    }
+    if (_vira_last_udp_sender.ss_family == AF_INET) {
+        struct sockaddr_in* s = (struct sockaddr_in*)&_vira_last_udp_sender;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin_port);
+        return vira_str_format("%s:%d", ip, port);
+    } else if (_vira_last_udp_sender.ss_family == AF_INET6) {
+        struct sockaddr_in6* s = (struct sockaddr_in6*)&_vira_last_udp_sender;
+        char ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip));
+        int port = ntohs(s->sin6_port);
+        return vira_str_format("[%s]:%d", ip, port);
+    }
+    return vira_str_lit("", 0);
 }
 
 static inline vira_string vira_http_response(int64_t status_code, vira_string content_type, vira_string body) {

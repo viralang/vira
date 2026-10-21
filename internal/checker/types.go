@@ -18,6 +18,7 @@ type PrimitiveKind string
 
 const (
 	PrimVoid   PrimitiveKind = "void"
+	PrimU8     PrimitiveKind = "u8"
 	PrimInt    PrimitiveKind = "int"
 	PrimI64    PrimitiveKind = "i64"
 	PrimF32    PrimitiveKind = "f32"
@@ -38,8 +39,10 @@ func (p *PrimitiveType) Equals(other Type) bool {
 	if !ok {
 		return false
 	}
-	// Allow seamless integer literal promotion between int and i64 for ergonomics
-	if (p.Kind == PrimInt && o.Kind == PrimI64) || (p.Kind == PrimI64 && o.Kind == PrimInt) {
+	// Allow seamless integer literal promotion between u8, int and i64 for ergonomics
+	if (p.Kind == PrimInt && o.Kind == PrimI64) || (p.Kind == PrimI64 && o.Kind == PrimInt) ||
+		(p.Kind == PrimU8 && (o.Kind == PrimInt || o.Kind == PrimI64)) ||
+		((p.Kind == PrimInt || p.Kind == PrimI64) && o.Kind == PrimU8) {
 		return true
 	}
 	// Allow float literals (f64) to promote cleanly to f32 / bf16
@@ -52,6 +55,7 @@ func (p *PrimitiveType) Equals(other Type) bool {
 
 var (
 	TypeVoid   = &PrimitiveType{Kind: PrimVoid}
+	TypeU8     = &PrimitiveType{Kind: PrimU8}
 	TypeInt    = &PrimitiveType{Kind: PrimInt}
 	TypeI64    = &PrimitiveType{Kind: PrimI64}
 	TypeF32    = &PrimitiveType{Kind: PrimF32}
@@ -176,6 +180,7 @@ type ParamInfo struct {
 
 // FnSig stores the signature of a free function, receiver method, or static factory.
 type FnSig struct {
+	Module        string
 	Name          string
 	IsPub         bool
 	HasReceiver   bool
@@ -183,6 +188,7 @@ type FnSig struct {
 	IsMutReceiver bool
 	Params        []ParamInfo
 	ReturnType    Type
+	Intrinsic     string
 	Span          token.Span
 }
 
@@ -228,7 +234,12 @@ type StructType struct {
 	Span            token.Span
 }
 
-func (s *StructType) String() string { return s.Name }
+func (s *StructType) String() string {
+	if s.Module != "" && s.Module != "main" {
+		return s.Module + "." + s.Name
+	}
+	return s.Name
+}
 
 func (s *StructType) Equals(other Type) bool {
 	o, ok := other.(*StructType)
@@ -267,7 +278,12 @@ type InterfaceType struct {
 	Span    token.Span
 }
 
-func (i *InterfaceType) String() string { return i.Name }
+func (i *InterfaceType) String() string {
+	if i.Module != "" && i.Module != "main" {
+		return i.Module + "." + i.Name
+	}
+	return i.Name
+}
 
 func (i *InterfaceType) Equals(other Type) bool {
 	o, ok := other.(*InterfaceType)

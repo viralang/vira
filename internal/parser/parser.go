@@ -23,6 +23,7 @@ type Parser struct {
 	lex             *lexer.Lexer
 	cur             token.Token
 	peek            token.Token
+	prev            token.Token
 	errors          []ParseError
 	allowStructInit bool
 }
@@ -46,6 +47,7 @@ func (p *Parser) Errors() []ParseError {
 
 func (p *Parser) advance() token.Token {
 	prev := p.cur
+	p.prev = prev
 	p.cur = p.peek
 	p.peek = p.lex.Next()
 	return prev
@@ -92,6 +94,8 @@ func (p *Parser) ParseFile() *ast.File {
 	if p.cur.Kind == token.TokModule {
 		p.advance()
 		file.Module = p.parseIdent()
+	} else {
+		file.Module = ast.Ident{Name: "main"}
 	}
 
 	for p.cur.Kind == token.TokImport {
@@ -99,30 +103,17 @@ func (p *Parser) ParseFile() *ast.File {
 		if p.cur.Kind == token.TokLParen {
 			p.advance()
 			for p.cur.Kind != token.TokRParen && p.cur.Kind != token.TokEOF {
-				if p.cur.Kind == token.TokString {
-					tok := p.advance()
-					raw := tok.Lexeme(p.src)
-					file.Imports = append(file.Imports, ast.Ident{
-						Name:    strings.Trim(raw, "'\""),
-						NamePos: tok.Span,
-					})
-				} else if p.cur.Kind == token.TokIdent {
-					file.Imports = append(file.Imports, p.parseIdent())
-				} else {
-					p.errorf(p.cur.Span, "expected import target identifier or string, got %s", p.cur.Kind)
-					p.advance()
+				spec := p.parseImportItem()
+				if spec.Path != "" {
+					file.Imports = append(file.Imports, spec)
 				}
 			}
 			p.expect(token.TokRParen)
-		} else if p.cur.Kind == token.TokString {
-			tok := p.advance()
-			raw := tok.Lexeme(p.src)
-			file.Imports = append(file.Imports, ast.Ident{
-				Name:    strings.Trim(raw, "'\""),
-				NamePos: tok.Span,
-			})
 		} else {
-			file.Imports = append(file.Imports, p.parseIdent())
+			spec := p.parseImportItem()
+			if spec.Path != "" {
+				file.Imports = append(file.Imports, spec)
+			}
 		}
 	}
 
@@ -132,12 +123,89 @@ func (p *Parser) ParseFile() *ast.File {
 		}
 	}
 
+	modName := file.Module.Name
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			if d.Module == "" {
+				d.Module = modName
+			}
+		case *ast.InterfaceDecl:
+			if d.Module == "" {
+				d.Module = modName
+			}
+		case *ast.FnDecl:
+			if d.Module == "" {
+				d.Module = modName
+			}
+		}
+	}
+
 	file.FileSpan.End = p.cur.Span.End
 	return file
 }
 
+func (p *Parser) parseImportItem() ast.ImportSpec {
+	var path string
+	var span token.Span
+	var defaultName string
+
+	if p.cur.Kind == token.TokString {
+		tok := p.advance()
+		path = strings.Trim(tok.Lexeme(p.src), "'\"")
+		span = tok.Span
+		defaultName = path
+	} else if p.cur.Kind == token.TokIdent {
+		ident := p.parseIdent()
+		path = ident.Name
+		span = ident.NamePos
+		defaultName = ident.Name
+	} else {
+		p.errorf(p.cur.Span, "expected import target identifier or string, got %s", p.cur.Kind)
+		p.advance()
+		return ast.ImportSpec{}
+	}
+
+	alias := ""
+	name := defaultName
+	if p.cur.Kind == token.TokAs {
+		p.advance() // consume 'as'
+		aliasIdent := p.parseIdent()
+		alias = aliasIdent.Name
+		name = aliasIdent.Name
+		span = token.Span{Start: span.Start, End: aliasIdent.NamePos.End}
+	}
+
+	return ast.ImportSpec{
+		Path:    path,
+		Name:    name,
+		Alias:   alias,
+		NamePos: span,
+	}
+}
+
 func (p *Parser) parseDecl() ast.Decl {
 	startSpan := p.cur.Span
+	var intrinsicName string
+	if p.cur.Kind == token.TokAt {
+		p.advance() // consume @
+		if p.cur.Kind == token.TokLBracket {
+			p.advance() // consume [
+			attrIdent := p.parseIdent()
+			if attrIdent.Name == "intrinsic" {
+				if p.cur.Kind == token.TokColon || p.cur.Kind == token.TokAssign {
+					p.advance()
+				}
+				if p.cur.Kind == token.TokString {
+					strLit := p.cur.Lexeme(p.src)
+					intrinsicName = strings.Trim(strLit, "'\"")
+					p.advance()
+				}
+			}
+			p.expect(token.TokRBracket)
+		}
+	}
+
 	isPub := false
 	if p.cur.Kind == token.TokPub {
 		isPub = true
@@ -152,7 +220,7 @@ func (p *Parser) parseDecl() ast.Decl {
 	case token.TokInterface:
 		return p.parseInterfaceDecl(isPub, startSpan)
 	case token.TokFn:
-		return p.parseFnDecl(isPub, startSpan)
+		return p.parseFnDecl(isPub, startSpan, intrinsicName)
 	default:
 		p.errorf(p.cur.Span, "unexpected top-level token %s (%q)", p.cur.Kind, p.cur.Lexeme(p.src))
 		p.advance()
@@ -207,7 +275,9 @@ func (p *Parser) parseStructDecl(isPub bool, isActor bool, startSpan token.Span)
 
 		// If a newline or `}` immediately follows the identifier (or `[T]` generic args),
 		// it is an anonymous embedded struct (e.g. `AuditMeta`).
-		if p.cur.Kind == token.TokLBracket || p.cur.Kind == token.TokRBrace || p.hasNewlineBetween(firstIdent.NamePos, p.cur.Span) {
+		// Note: A slice/array type like `buf []u8` or `arr [4]int` has `[` followed by `]` or an integer literal.
+		isSliceOrArray := p.cur.Kind == token.TokLBracket && (p.peek.Kind == token.TokRBracket || p.peek.Kind == token.TokInt)
+		if (!isSliceOrArray && p.cur.Kind == token.TokLBracket) || p.cur.Kind == token.TokRBrace || p.hasNewlineBetween(firstIdent.NamePos, p.cur.Span) {
 			var tParams []ast.TypeExpr
 			if p.cur.Kind == token.TokLBracket {
 				tParams = p.parseTypeArgList()
@@ -260,11 +330,21 @@ func (p *Parser) parseInterfaceDecl(isPub bool, startSpan token.Span) *ast.Inter
 
 	isMutSection := false
 	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
-		if p.cur.Kind == token.TokMut && p.peek.Kind == token.TokColon {
+		if (p.cur.Kind == token.TokMut || p.cur.Kind == token.TokPub) && p.peek.Kind == token.TokColon {
+			if p.cur.Kind == token.TokMut {
+				isMutSection = true
+			} else {
+				isMutSection = false
+			}
 			p.advance()
 			p.advance()
-			isMutSection = true
 			continue
+		}
+
+		isMethodMut := isMutSection
+		if p.cur.Kind == token.TokMut {
+			p.advance()
+			isMethodMut = true
 		}
 
 		memberName := p.parseIdent()
@@ -277,7 +357,7 @@ func (p *Parser) parseInterfaceDecl(isPub bool, startSpan token.Span) *ast.Inter
 			}
 			decl.Methods = append(decl.Methods, ast.InterfaceMethod{
 				Name:          memberName,
-				IsMutReceiver: isMutSection,
+				IsMutReceiver: isMethodMut,
 				Params:        params,
 				ReturnType:    retType,
 				MethodSpan:    memberName.NamePos,
@@ -288,7 +368,7 @@ func (p *Parser) parseInterfaceDecl(isPub bool, startSpan token.Span) *ast.Inter
 			decl.Fields = append(decl.Fields, ast.InterfaceField{
 				Name:      memberName,
 				Type:      fieldType,
-				IsMut:     isMutSection,
+				IsMut:     isMethodMut,
 				FieldSpan: token.Span{Start: memberName.NamePos.Start, End: fieldType.Span().End},
 			})
 		}
@@ -301,10 +381,10 @@ func (p *Parser) parseInterfaceDecl(isPub bool, startSpan token.Span) *ast.Inter
 
 // --- FUNCTIONS, RECEIVER METHODS & STATIC TYPE FACTORIES ---
 
-func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span) *ast.FnDecl {
+func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string) *ast.FnDecl {
 	p.expect(token.TokFn)
 
-	decl := &ast.FnDecl{IsPub: isPub}
+	decl := &ast.FnDecl{IsPub: isPub, Intrinsic: intrinsic}
 
 	// 1. Optional Receiver: `fn (inv Invoice)` or `fn (mut inv Invoice)`
 	if p.cur.Kind == token.TokLParen {
@@ -343,8 +423,15 @@ func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span) *ast.FnDecl {
 		decl.ReturnType = p.parseTypeExpr()
 	}
 
-	decl.Body = p.parseBlock()
-	decl.DeclSpan = token.Span{Start: startSpan.Start, End: decl.Body.BlockSpan.End}
+	if p.cur.Kind == token.TokLBrace {
+		decl.Body = p.parseBlock()
+		decl.DeclSpan = token.Span{Start: startSpan.Start, End: decl.Body.BlockSpan.End}
+	} else if decl.Intrinsic != "" {
+		decl.DeclSpan = token.Span{Start: startSpan.Start, End: p.prev.Span.End}
+	} else {
+		p.expect(token.TokLBrace)
+		decl.DeclSpan = token.Span{Start: startSpan.Start, End: p.prev.Span.End}
+	}
 	return decl
 }
 
@@ -417,6 +504,16 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	default:
 		identTok := p.advance()
 		ident := ast.Ident{Name: identTok.Lexeme(p.src), NamePos: identTok.Span}
+		if p.cur.Kind == token.TokDot && p.peek.Kind == token.TokIdent && !p.hasNewlineBetween(identTok.Span, p.cur.Span) {
+			p.advance() // consume '.'
+			nameTok := p.advance()
+			nameIdent := ast.Ident{Name: nameTok.Lexeme(p.src), NamePos: nameTok.Span}
+			var tArgs []ast.TypeExpr
+			if p.cur.Kind == token.TokLBracket {
+				tArgs = p.parseTypeArgList()
+			}
+			return &ast.SelectorType{Pkg: ident, Name: nameIdent, TypeParams: tArgs}
+		}
 		var tArgs []ast.TypeExpr
 		if p.cur.Kind == token.TokLBracket {
 			tArgs = p.parseTypeArgList()
@@ -537,6 +634,9 @@ func (p *Parser) parseStmt() ast.Stmt {
 			StmtSpan: token.Span{Start: ifTok.Span.Start, End: endSpan},
 		}
 
+	case token.TokSwitch:
+		return p.parseSwitchStmt()
+
 	case token.TokFor:
 		forTok := p.advance()
 		// 1. Infinite loop `for { ... }`
@@ -640,6 +740,86 @@ func (p *Parser) parseStmt() ast.Stmt {
 	}
 }
 
+func (p *Parser) parseSwitchStmt() *ast.SwitchStmt {
+	swTok := p.expect(token.TokSwitch)
+	var tag ast.Expr
+	if p.cur.Kind != token.TokLBrace {
+		prevAllow := p.allowStructInit
+		p.allowStructInit = false
+		tag = p.parseExpr(0)
+		p.allowStructInit = prevAllow
+	}
+
+	p.expect(token.TokLBrace)
+	var cases []ast.SwitchCase
+
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind == token.TokCase {
+			caseTok := p.advance()
+			var exprs []ast.Expr
+			for {
+				expr := p.parseExpr(0)
+				exprs = append(exprs, expr)
+				if p.cur.Kind == token.TokComma {
+					p.advance()
+				} else {
+					break
+				}
+			}
+			colonTok := p.expect(token.TokColon)
+			startPos := caseTok.Span.Start
+			endPos := colonTok.Span.End
+
+			var body []ast.Stmt
+			for p.cur.Kind != token.TokCase && p.cur.Kind != token.TokDefault && p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+				stmt := p.parseStmt()
+				if stmt != nil {
+					body = append(body, stmt)
+					endPos = stmt.Span().End
+				}
+			}
+
+			cases = append(cases, ast.SwitchCase{
+				Exprs:     exprs,
+				Body:      body,
+				IsDefault: false,
+				CaseSpan:  token.Span{Start: startPos, End: endPos},
+			})
+		} else if p.cur.Kind == token.TokDefault {
+			defTok := p.advance()
+			colonTok := p.expect(token.TokColon)
+			startPos := defTok.Span.Start
+			endPos := colonTok.Span.End
+
+			var body []ast.Stmt
+			for p.cur.Kind != token.TokCase && p.cur.Kind != token.TokDefault && p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+				stmt := p.parseStmt()
+				if stmt != nil {
+					body = append(body, stmt)
+					endPos = stmt.Span().End
+				}
+			}
+
+			cases = append(cases, ast.SwitchCase{
+				Exprs:     nil,
+				Body:      body,
+				IsDefault: true,
+				CaseSpan:  token.Span{Start: startPos, End: endPos},
+			})
+		} else {
+			p.errorf(p.cur.Span, "expected 'case' or 'default' in switch body, got %s", p.cur.Kind)
+			p.advance()
+		}
+	}
+
+	rbrace := p.expect(token.TokRBrace)
+	return &ast.SwitchStmt{
+		Tag:      tag,
+		Cases:    cases,
+		StmtSpan: token.Span{Start: swTok.Span.Start, End: rbrace.Span.End},
+	}
+}
+
 // --- PRATT EXPRESSION PARSER ---
 
 func (p *Parser) parseExpr(minPrec int) ast.Expr {
@@ -663,6 +843,14 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 				Field:       field,
 				IsActorSend: isSend,
 				SelSpan:     token.Span{Start: left.Span().Start, End: field.NamePos.End},
+			}
+			if !isSend && p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(field.Name) {
+				if identLeft, isIdent := left.(*ast.SelectorExpr).Left.(*ast.IdentExpr); isIdent {
+					return p.parseStructInit(&ast.SelectorType{
+						Pkg:  identLeft.Ident,
+						Name: field,
+					})
+				}
 			}
 		case token.TokLParen:
 			left = p.parseCallExpr(left)
@@ -713,7 +901,7 @@ func (p *Parser) parsePrefix() ast.Expr {
 		raw := tok.Lexeme(p.src)
 		return &ast.LiteralExpr{
 			Kind:    tok.Kind,
-			Value:   strings.Trim(raw, "'"),
+			Value:   unescapeString(strings.Trim(raw, "'\"")),
 			LitSpan: tok.Span,
 		}
 
@@ -887,11 +1075,50 @@ func (p *Parser) parseCallExpr(callee ast.Expr) *ast.CallExpr {
 	}
 }
 
+func unescapeString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			case 'r':
+				b.WriteByte('\r')
+				i++
+			case 't':
+				b.WriteByte('\t')
+				i++
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			case '\'':
+				b.WriteByte('\'')
+				i++
+			case '"':
+				b.WriteByte('"')
+				i++
+			case '0':
+				b.WriteByte(0)
+				i++
+			default:
+				b.WriteByte(s[i])
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
 func (p *Parser) parseStringInterp() *ast.StringInterpExpr {
 	startTok := p.expect(token.TokStrStart)
-	firstSeg := strings.TrimPrefix(startTok.Lexeme(p.src), "'")
+	rawFirst := startTok.Lexeme(p.src)
+	firstSeg := strings.TrimPrefix(rawFirst, "'")
+	firstSeg = strings.TrimPrefix(firstSeg, "\"")
 
-	segments := []string{firstSeg}
+	segments := []string{unescapeString(firstSeg)}
 	var exprs []ast.Expr
 	endPos := startTok.Span.End
 
@@ -903,12 +1130,14 @@ func (p *Parser) parseStringInterp() *ast.StringInterpExpr {
 
 		if p.cur.Kind == token.TokStrPart {
 			partTok := p.advance()
-			segments = append(segments, partTok.Lexeme(p.src))
+			segments = append(segments, unescapeString(partTok.Lexeme(p.src)))
 			endPos = partTok.Span.End
 		} else if p.cur.Kind == token.TokStrEnd {
 			endTok := p.advance()
-			lastSeg := strings.TrimSuffix(endTok.Lexeme(p.src), "'")
-			segments = append(segments, lastSeg)
+			rawLast := endTok.Lexeme(p.src)
+			lastSeg := strings.TrimSuffix(rawLast, "'")
+			lastSeg = strings.TrimSuffix(lastSeg, "\"")
+			segments = append(segments, unescapeString(lastSeg))
 			endPos = endTok.Span.End
 			break
 		} else {

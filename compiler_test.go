@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -860,6 +861,99 @@ fn main() {
 	}
 }
 
+func TestNamespaceQualifiedTypeAndImportAliasParsing(t *testing.T) {
+	src := `
+module test_app
+
+import net as mynet
+import http
+import (
+	io as vira_io
+)
+
+pub struct ServerConfig {
+pub:
+	stream mynet.TcpStream
+	headers []http.Header
+}
+
+pub fn handle(mut s mynet.TcpStream) !http.Response {
+	hdr := http.Header{ name: 'X-Vira', value: '1.0' }
+	return http.Response.ok()
+}
+`
+	p := parser.New(src)
+	f := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("unexpected parser errors: %v", p.Errors())
+	}
+
+	// Verify imports
+	if len(f.Imports) != 3 {
+		t.Fatalf("expected 3 imports, got %d", len(f.Imports))
+	}
+	if f.Imports[0].Path != "net" || f.Imports[0].Alias != "mynet" || f.Imports[0].Name != "mynet" {
+		t.Errorf("import[0] alias mismatch: %+v", f.Imports[0])
+	}
+	if f.Imports[1].Path != "http" || f.Imports[1].Alias != "" || f.Imports[1].Name != "http" {
+		t.Errorf("import[1] mismatch: %+v", f.Imports[1])
+	}
+	if f.Imports[2].Path != "io" || f.Imports[2].Alias != "vira_io" || f.Imports[2].Name != "vira_io" {
+		t.Errorf("import[2] alias mismatch: %+v", f.Imports[2])
+	}
+
+	// Verify struct field qualified types
+	stDecl, ok := f.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf("expected StructDecl, got %T", f.Decls[0])
+	}
+	selType, ok := stDecl.Fields[0].Type.(*ast.SelectorType)
+	if !ok || selType.Pkg.Name != "mynet" || selType.Name.Name != "TcpStream" {
+		t.Errorf("expected SelectorType mynet.TcpStream, got %#v", stDecl.Fields[0].Type)
+	}
+
+	arrType, ok := stDecl.Fields[1].Type.(*ast.ArrayType)
+	if !ok {
+		t.Fatalf("expected ArrayType, got %#v", stDecl.Fields[1].Type)
+	}
+	elemSelType, ok := arrType.Elem.(*ast.SelectorType)
+	if !ok || elemSelType.Pkg.Name != "http" || elemSelType.Name.Name != "Header" {
+		t.Errorf("expected slice elem http.Header, got %#v", arrType.Elem)
+	}
+
+	// Verify function qualified parameter and return types
+	fnDecl, ok := f.Decls[1].(*ast.FnDecl)
+	if !ok {
+		t.Fatalf("expected FnDecl, got %T", f.Decls[1])
+	}
+	paramSel, ok := fnDecl.Params[0].Type.(*ast.SelectorType)
+	if !ok || paramSel.Pkg.Name != "mynet" || paramSel.Name.Name != "TcpStream" {
+		t.Errorf("expected param type mynet.TcpStream, got %#v", fnDecl.Params[0].Type)
+	}
+	resType, ok := fnDecl.ReturnType.(*ast.ResultType)
+	if !ok {
+		t.Fatalf("expected ResultType, got %#v", fnDecl.ReturnType)
+	}
+	retSel, ok := resType.Inner.(*ast.SelectorType)
+	if !ok || retSel.Pkg.Name != "http" || retSel.Name.Name != "Response" {
+		t.Errorf("expected return type !http.Response, got %#v", resType.Inner)
+	}
+
+	// Verify qualified struct literal initialization: http.Header{ ... }
+	varDecl, ok := fnDecl.Body.Stmts[0].(*ast.VarDeclStmt)
+	if !ok {
+		t.Fatalf("expected VarDeclStmt, got %T", fnDecl.Body.Stmts[0])
+	}
+	structInit, ok := varDecl.Value.(*ast.StructInitExpr)
+	if !ok {
+		t.Fatalf("expected StructInitExpr, got %T", varDecl.Value)
+	}
+	initType, ok := structInit.Type.(*ast.SelectorType)
+	if !ok || initType.Pkg.Name != "http" || initType.Name.Name != "Header" {
+		t.Errorf("expected struct init type http.Header, got %#v", structInit.Type)
+	}
+}
+
 func TestDynamicImportAndCircularResolution(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vira_import_test_*")
 	if err != nil {
@@ -903,7 +997,11 @@ fn main() {
 		t.Fatalf("failed to write main.vir: %v", err)
 	}
 
-	viraBin, err := filepath.Abs("vira.exe")
+	binName := "vira"
+	if runtime.GOOS == "windows" {
+		binName = "vira.exe"
+	}
+	viraBin, err := filepath.Abs(binName)
 	if err != nil {
 		t.Fatalf("failed to get absolute path to vira: %v", err)
 	}
@@ -920,4 +1018,224 @@ fn main() {
 		t.Errorf("expected 'Computed Sum: 42' in output, got:\n%s", outStr)
 	}
 }
+
+func TestCheckerNamespacesAndDisambiguation(t *testing.T) {
+	netSrc := `
+module net
+
+pub struct TcpStream {
+pub:
+	fd int
+}
+
+pub fn TcpStream.connect(addr string) !TcpStream {
+	return TcpStream{ fd: 10 }
+}
+
+struct SecretInternals {
+	key string
+}
+`
+	httpSrc := `
+module http
+
+import net
+
+pub struct Request {
+pub:
+	method string
+	path   string
+	stream net.TcpStream
+}
+
+pub fn Request.new(m string, p string, s net.TcpStream) Request {
+	return Request{ method: m, path: p, stream: s }
+}
+`
+	rpcSrc := `
+module rpc
+
+pub struct Request {
+pub:
+	id int
+	service string
+}
+`
+	appSrc := `
+module app
+
+import (
+	net
+	http
+	rpc as myrpc
+)
+
+fn main() {
+	stream := net.TcpStream.connect('127.0.0.1:8080') or { panic(err) }
+	hReq := http.Request.new('GET', '/index', stream)
+	rReq := myrpc.Request{ id: 1, service: 'auth' }
+	println(hReq.method)
+	println(rReq.service)
+}
+`
+
+	pNet := parser.New(netSrc)
+	fNet := pNet.ParseFile()
+	if len(pNet.Errors()) > 0 {
+		t.Fatalf("parser errors in net: %v", pNet.Errors())
+	}
+
+	pHttp := parser.New(httpSrc)
+	fHttp := pHttp.ParseFile()
+	if len(pHttp.Errors()) > 0 {
+		t.Fatalf("parser errors in http: %v", pHttp.Errors())
+	}
+
+	pRpc := parser.New(rpcSrc)
+	fRpc := pRpc.ParseFile()
+	if len(pRpc.Errors()) > 0 {
+		t.Fatalf("parser errors in rpc: %v", pRpc.Errors())
+	}
+
+	pApp := parser.New(appSrc)
+	fApp := pApp.ParseFile()
+	if len(pApp.Errors()) > 0 {
+		t.Fatalf("parser errors in app: %v", pApp.Errors())
+	}
+
+	chk := checker.New()
+	chk.CheckFiles([]*ast.File{fNet, fHttp, fRpc, fApp})
+
+	if len(chk.Errors()) > 0 {
+		for _, err := range chk.Errors() {
+			t.Errorf("unexpected semantic error: %s", err.Msg)
+		}
+		t.FailNow()
+	}
+
+	// Verify both http.Request and rpc.Request exist without collision
+	httpReq := chk.LookupStructInModule("http", "Request")
+	rpcReq := chk.LookupStructInModule("rpc", "Request")
+	if httpReq == nil || rpcReq == nil {
+		t.Fatalf("expected both http.Request and rpc.Request to exist")
+	}
+	if httpReq == rpcReq {
+		t.Fatalf("http.Request and rpc.Request should be distinct structs")
+	}
+	if len(httpReq.Fields) != 3 || len(rpcReq.Fields) != 2 {
+		t.Errorf("struct field mismatch: http=%d, rpc=%d", len(httpReq.Fields), len(rpcReq.Fields))
+	}
+
+	// Verify private type access is rejected across modules
+	badSrc := `
+module bad_app
+import net
+
+fn test() {
+	s := net.SecretInternals{ key: 'secret' }
+}
+`
+	pBad := parser.New(badSrc)
+	fBad := pBad.ParseFile()
+	chkBad := checker.New()
+	chkBad.CheckFiles([]*ast.File{fNet, fBad})
+	if len(chkBad.Errors()) == 0 {
+		t.Fatalf("expected semantic error for private struct access, got none")
+	}
+	foundPrivErr := false
+	for _, e := range chkBad.Errors() {
+		if strings.Contains(e.Msg, "private to module") {
+			foundPrivErr = true
+			break
+		}
+	}
+	if !foundPrivErr {
+		t.Errorf("expected 'private to module' error, got: %v", chkBad.Errors())
+	}
+
+	// Verify unqualified external access suggests qualification
+	unqualSrc := `
+module unqual_app
+import net
+
+fn test() {
+	s := TcpStream{ fd: 1 }
+}
+`
+	pUnqual := parser.New(unqualSrc)
+	fUnqual := pUnqual.ParseFile()
+	chkUnqual := checker.New()
+	chkUnqual.CheckFiles([]*ast.File{fNet, fUnqual})
+	if len(chkUnqual.Errors()) == 0 {
+		t.Fatalf("expected semantic error for unqualified type, got none")
+	}
+	foundSuggestErr := false
+	for _, e := range chkUnqual.Errors() {
+		if strings.Contains(e.Msg, "did you mean 'net.TcpStream'?") {
+			foundSuggestErr = true
+			break
+		}
+	}
+	if !foundSuggestErr {
+		t.Errorf("expected 'did you mean net.TcpStream' error, got: %v", chkUnqual.Errors())
+	}
+}
+
+func TestSwitchStatement(t *testing.T) {
+	src := `
+module switch_test
+
+fn test_sw(x int, s string) int {
+	mut res := 0
+	switch x {
+	case 1:
+		res = 10
+	case 2, 3:
+		res = 20
+	default:
+		res = 99
+	}
+
+	switch s {
+	case "GET", "HEAD":
+		res += 1
+	default:
+		res += 2
+	}
+
+	switch {
+	case res > 10:
+		res += 100
+	default:
+		res += 50
+	}
+
+	return res
+}
+`
+	p := parser.New(src)
+	f := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("parser errors in switch test: %v", p.Errors())
+	}
+
+	chk := checker.New()
+	chk.CheckFiles([]*ast.File{f})
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("checker errors in switch test: %v", chk.Errors())
+	}
+
+	af := autofree.New(chk)
+	af.AnalyzeFile(f)
+
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(f)
+	if !strings.Contains(cCode, "switch (x)") {
+		t.Errorf("expected native switch (x) in C code, got:\n%s", cCode)
+	}
+	if !strings.Contains(cCode, "vira_str_eq") {
+		t.Errorf("expected vira_str_eq in C code for string switch, got:\n%s", cCode)
+	}
+}
+
 

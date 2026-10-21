@@ -56,12 +56,30 @@ func (s *Scope) Lookup(name string) (*VarSymbol, bool) {
 	return nil, false
 }
 
+type ModuleScope struct {
+	Name       string
+	Structs    map[string]*StructType
+	Interfaces map[string]*InterfaceType
+	Functions  map[string]*FnSig
+}
+
+func NewModuleScope(name string) *ModuleScope {
+	return &ModuleScope{
+		Name:       name,
+		Structs:    make(map[string]*StructType),
+		Interfaces: make(map[string]*InterfaceType),
+		Functions:  make(map[string]*FnSig),
+	}
+}
+
 type Checker struct {
-	currentMod string
-	structs    map[string]*StructType
-	interfaces map[string]*InterfaceType
-	functions  map[string]*FnSig
-	errors     []SemanticError
+	currentMod     string
+	currentImports map[string]string // alias or pkg name -> target module name
+	modules        map[string]*ModuleScope
+	structs        map[string]*StructType
+	interfaces     map[string]*InterfaceType
+	functions      map[string]*FnSig
+	errors         []SemanticError
 
 	// Semantic side-tables consumed by Phase 3 (autofree) and Phase 4 (cgen)
 	ExprTypes     map[ast.Expr]Type
@@ -73,11 +91,13 @@ type Checker struct {
 
 func New() *Checker {
 	c := &Checker{
-		structs:       make(map[string]*StructType),
-		interfaces:    make(map[string]*InterfaceType),
-		functions:     make(map[string]*FnSig),
-		ExprTypes:     make(map[ast.Expr]Type),
-		SelectorPaths: make(map[*ast.SelectorExpr][]string),
+		currentImports: make(map[string]string),
+		modules:        make(map[string]*ModuleScope),
+		structs:        make(map[string]*StructType),
+		interfaces:     make(map[string]*InterfaceType),
+		functions:      make(map[string]*FnSig),
+		ExprTypes:      make(map[ast.Expr]Type),
+		SelectorPaths:  make(map[*ast.SelectorExpr][]string),
 	}
 	c.registerBuiltins()
 	return c
@@ -103,8 +123,96 @@ func (c *Checker) ModuleName() string {
 	return c.currentMod
 }
 
+func (c *Checker) Modules() map[string]*ModuleScope {
+	return c.modules
+}
+
+func (c *Checker) getOrCreateModule(name string) *ModuleScope {
+	if name == "" {
+		name = "main"
+	}
+	m, ok := c.modules[name]
+	if !ok {
+		m = NewModuleScope(name)
+		c.modules[name] = m
+	}
+	return m
+}
+
+func (c *Checker) LookupStructInModule(modName, structName string) *StructType {
+	if m, ok := c.modules[modName]; ok {
+		return m.Structs[structName]
+	}
+	return nil
+}
+
+func (c *Checker) LookupInterfaceInModule(modName, ifaceName string) *InterfaceType {
+	if m, ok := c.modules[modName]; ok {
+		return m.Interfaces[ifaceName]
+	}
+	return nil
+}
+
+func (c *Checker) LookupFunctionInModule(modName, fnName string) *FnSig {
+	if m, ok := c.modules[modName]; ok {
+		return m.Functions[fnName]
+	}
+	return nil
+}
+
 func (c *Checker) LookupStruct(name string) *StructType {
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		targetMod := parts[0]
+		if resolved, ok := c.currentImports[parts[0]]; ok {
+			targetMod = resolved
+		}
+		if st := c.LookupStructInModule(targetMod, parts[1]); st != nil {
+			return st
+		}
+	}
+	if c.currentMod != "" {
+		if st := c.LookupStructInModule(c.currentMod, name); st != nil {
+			return st
+		}
+	}
 	return c.structs[name]
+}
+
+func (c *Checker) LookupInterface(name string) *InterfaceType {
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		targetMod := parts[0]
+		if resolved, ok := c.currentImports[parts[0]]; ok {
+			targetMod = resolved
+		}
+		if iface := c.LookupInterfaceInModule(targetMod, parts[1]); iface != nil {
+			return iface
+		}
+	}
+	if c.currentMod != "" {
+		if iface := c.LookupInterfaceInModule(c.currentMod, name); iface != nil {
+			return iface
+		}
+	}
+	return c.interfaces[name]
+}
+
+func (c *Checker) setFileImports(imports []ast.ImportSpec) {
+	c.currentImports = make(map[string]string)
+	for _, imp := range imports {
+		targetMod := imp.Path
+		if idx := strings.LastIndex(targetMod, "/"); idx >= 0 {
+			targetMod = targetMod[idx+1:]
+		}
+		targetMod = strings.TrimSuffix(strings.TrimSuffix(targetMod, ".vir"), ".vex")
+
+		localName := imp.Name
+		if localName == "" {
+			localName = targetMod
+		}
+		c.currentImports[localName] = targetMod
+	}
 }
 
 func (c *Checker) errorf(span token.Span, format string, args ...any) {
@@ -740,68 +848,149 @@ func (c *Checker) registerBuiltins() {
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.
 func (c *Checker) CheckFile(file *ast.File) {
-	c.currentMod = file.Module.Name
-	if c.currentMod == "" {
-		c.currentMod = "main"
-	}
+	c.CheckFiles([]*ast.File{file})
+}
 
+// CheckFiles executes all 3 semantic passes across multiple AST Files, handling cross-module namespaces.
+func (c *Checker) CheckFiles(files []*ast.File) {
 	// Pass 1A: Register type names (StructDecl, Actor, & InterfaceDecl shells)
-	for _, decl := range file.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			c.structs[d.Name.Name] = &StructType{
-				Module:          c.currentMod,
-				Name:            d.Name.Name,
-				IsPub:           d.IsPub,
-				IsActor:         d.IsActor,
-				Fields:          make(map[string]*FieldInfo),
-				Methods:         make(map[string]*FnSig),
-				StaticMethods:   make(map[string]*FnSig),
-				PromotedFields:  make(map[string]PromotedField),
-				PromotedMethods: make(map[string]PromotedMethod),
-				Span:            d.DeclSpan,
-			}
-		case *ast.InterfaceDecl:
-			c.interfaces[d.Name.Name] = &InterfaceType{
-				Module:  c.currentMod,
-				Name:    d.Name.Name,
-				IsPub:   d.IsPub,
-				Fields:  make(map[string]*FieldInfo),
-				Methods: make(map[string]*FnSig),
-				Span:    d.DeclSpan,
+	for _, file := range files {
+		modName := file.Module.Name
+		if modName == "" {
+			modName = "main"
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.StructDecl:
+				dMod := d.Module
+				if dMod == "" {
+					dMod = modName
+				}
+				dScope := c.getOrCreateModule(dMod)
+				st := &StructType{
+					Module:          dMod,
+					Name:            d.Name.Name,
+					IsPub:           d.IsPub,
+					IsActor:         d.IsActor,
+					Fields:          make(map[string]*FieldInfo),
+					Methods:         make(map[string]*FnSig),
+					StaticMethods:   make(map[string]*FnSig),
+					PromotedFields:  make(map[string]PromotedField),
+					PromotedMethods: make(map[string]PromotedMethod),
+					Span:            d.DeclSpan,
+				}
+				dScope.Structs[d.Name.Name] = st
+				c.structs[dMod+"."+d.Name.Name] = st
+				if _, exists := c.structs[d.Name.Name]; !exists || dMod == "main" {
+					c.structs[d.Name.Name] = st
+				}
+			case *ast.InterfaceDecl:
+				dMod := d.Module
+				if dMod == "" {
+					dMod = modName
+				}
+				dScope := c.getOrCreateModule(dMod)
+				iface := &InterfaceType{
+					Module:  dMod,
+					Name:    d.Name.Name,
+					IsPub:   d.IsPub,
+					Fields:  make(map[string]*FieldInfo),
+					Methods: make(map[string]*FnSig),
+					Span:    d.DeclSpan,
+				}
+				dScope.Interfaces[d.Name.Name] = iface
+				c.interfaces[dMod+"."+d.Name.Name] = iface
+				if _, exists := c.interfaces[d.Name.Name]; !exists || dMod == "main" {
+					c.interfaces[d.Name.Name] = iface
+				}
 			}
 		}
 	}
 
 	// Pass 1B: Resolve struct fields, embeds, interface members, and function/method headers
-	for _, decl := range file.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			c.registerStructMembers(d)
-		case *ast.InterfaceDecl:
-			c.registerInterfaceMembers(d)
-		case *ast.FnDecl:
-			c.registerFnHeader(d)
+	for _, file := range files {
+		fileMod := file.Module.Name
+		if fileMod == "" {
+			fileMod = "main"
+		}
+		c.currentMod = fileMod
+		c.setFileImports(file.Imports)
+
+		for _, decl := range file.Decls {
+			savedMod := c.currentMod
+			if d, ok := decl.(*ast.StructDecl); ok && d.Module != "" {
+				c.currentMod = d.Module
+			} else if d, ok := decl.(*ast.InterfaceDecl); ok && d.Module != "" {
+				c.currentMod = d.Module
+			} else if d, ok := decl.(*ast.FnDecl); ok && d.Module != "" {
+				c.currentMod = d.Module
+			}
+
+			switch d := decl.(type) {
+			case *ast.StructDecl:
+				c.registerStructMembers(d)
+			case *ast.InterfaceDecl:
+				c.registerInterfaceMembers(d)
+			case *ast.FnDecl:
+				c.registerFnHeader(d)
+			}
+			c.currentMod = savedMod
 		}
 	}
 
-	// Pass 2: Flatten & promote embedded struct fields and methods
+	// Pass 2: Flatten & promote embedded struct fields and methods across all modules
+	visited := make(map[*StructType]bool)
 	for _, st := range c.structs {
-		c.promoteEmbeddedMembers(st)
+		if !visited[st] {
+			c.promoteEmbeddedMembers(st)
+			visited[st] = true
+		}
+	}
+	for _, m := range c.modules {
+		for _, st := range m.Structs {
+			if !visited[st] {
+				c.promoteEmbeddedMembers(st)
+				visited[st] = true
+			}
+		}
 	}
 
 	// Pass 3: Type-check function/method bodies, mutability, 4-quadrant visibility, and !T handling
-	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FnDecl); ok {
-			c.checkFnBody(fn)
+	for _, file := range files {
+		fileMod := file.Module.Name
+		if fileMod == "" {
+			fileMod = "main"
+		}
+		c.currentMod = fileMod
+		c.setFileImports(file.Imports)
+
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FnDecl); ok {
+				savedMod := c.currentMod
+				if fn.Module != "" {
+					c.currentMod = fn.Module
+				}
+				c.checkFnBody(fn)
+				c.currentMod = savedMod
+			}
 		}
 	}
+
+	// Reset currentMod to root file's module so c.ModuleName() reports the primary module
+	rootMod := "main"
+	if len(files) > 0 && files[0].Module.Name != "" {
+		rootMod = files[0].Module.Name
+	}
+	c.currentMod = rootMod
 }
 
 // --- PASS 1: HEADER & MEMBER REGISTRATION ---
 
 func (c *Checker) registerStructMembers(d *ast.StructDecl) {
-	st := c.structs[d.Name.Name]
+	st := c.LookupStruct(d.Name.Name)
+	if st == nil {
+		return
+	}
 
 	for _, embExpr := range d.Embeds {
 		embType := c.resolveTypeExpr(embExpr)
@@ -836,7 +1025,10 @@ func (c *Checker) registerStructMembers(d *ast.StructDecl) {
 }
 
 func (c *Checker) registerInterfaceMembers(d *ast.InterfaceDecl) {
-	iface := c.interfaces[d.Name.Name]
+	iface := c.LookupInterface(d.Name.Name)
+	if iface == nil {
+		return
+	}
 	for _, f := range d.Fields {
 		acc := ast.AccessPubImm
 		if f.IsMut {
@@ -864,6 +1056,7 @@ func (c *Checker) registerInterfaceMembers(d *ast.InterfaceDecl) {
 			ret = c.resolveTypeExpr(m.ReturnType)
 		}
 		iface.Methods[m.Name.Name] = &FnSig{
+			Module:        c.currentMod,
 			Name:          m.Name.Name,
 			IsPub:         true,
 			HasReceiver:   true,
@@ -890,10 +1083,12 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 	}
 
 	sig := &FnSig{
+		Module:     c.currentMod,
 		Name:       d.Name.Name,
 		IsPub:      d.IsPub,
 		Params:     params,
 		ReturnType: ret,
+		Intrinsic:  d.Intrinsic,
 		Span:       d.DeclSpan,
 	}
 
@@ -911,7 +1106,7 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 	}
 
 	if d.StaticType != nil {
-		if st, ok := c.structs[d.StaticType.Name]; ok {
+		if st := c.LookupStruct(d.StaticType.Name); st != nil {
 			st.StaticMethods[d.Name.Name] = sig
 		} else {
 			c.errorf(d.StaticType.NamePos, "unknown struct '%s' for static method '%s'", d.StaticType.Name, d.Name.Name)
@@ -919,7 +1114,17 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 		return
 	}
 
-	c.functions[d.Name.Name] = sig
+	dMod := d.Module
+	if dMod == "" {
+		dMod = c.currentMod
+	}
+	sig.Module = dMod
+	modScope := c.getOrCreateModule(dMod)
+	modScope.Functions[d.Name.Name] = sig
+	c.functions[dMod+"."+d.Name.Name] = sig
+	if _, exists := c.functions[d.Name.Name]; !exists || dMod == "main" {
+		c.functions[d.Name.Name] = sig
+	}
 }
 
 // --- PASS 2: STRUCT EMBEDDING PROMOTION (BFS FLATTENING) ---
@@ -1067,6 +1272,43 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 		if s.Else != nil {
 			elseScope := NewScope(scope)
 			c.checkBlock(s.Else, elseScope)
+		}
+
+	case *ast.SwitchStmt:
+		var tagType Type
+		if s.Tag != nil {
+			tagType = c.checkExpr(s.Tag, scope)
+		}
+		defaultCount := 0
+		for _, cs := range s.Cases {
+			if cs.IsDefault {
+				defaultCount++
+				if defaultCount > 1 {
+					c.errorf(cs.CaseSpan, "multiple default cases in switch statement")
+				}
+			} else {
+				for _, expr := range cs.Exprs {
+					caseType := c.checkExpr(expr, scope)
+					if s.Tag != nil {
+						isMatch := caseType.Equals(tagType)
+						if !isMatch && (caseType.Equals(TypeInt) || caseType.Equals(TypeI64) || caseType.Equals(TypeU8)) &&
+							(tagType.Equals(TypeInt) || tagType.Equals(TypeI64) || tagType.Equals(TypeU8)) {
+							isMatch = true
+						}
+						if !isMatch {
+							c.errorf(expr.Span(), "type mismatch in switch case: cannot compare '%s' with '%s'", caseType, tagType)
+						}
+					} else {
+						if !caseType.Equals(TypeBool) {
+							c.errorf(expr.Span(), "tagless switch case condition must be boolean, got '%s'", caseType)
+						}
+					}
+				}
+			}
+			caseScope := NewScope(scope)
+			for _, caseStmt := range cs.Body {
+				c.checkStmt(caseStmt, caseScope)
+			}
 		}
 
 	case *ast.ForStmt:
@@ -1466,21 +1708,102 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			return iface
 		}
 
-		sig = c.functions[callName]
+		// 1. Look in current module functions
+		if modScope, ok := c.modules[c.currentMod]; ok {
+			if fSig, ok := modScope.Functions[callName]; ok {
+				sig = fSig
+			}
+		}
+		// 2. Fallback to global c.functions (builtins and global functions)
+		if sig == nil {
+			sig = c.functions[callName]
+		}
+		// 3. Did user call an unqualified imported function? Give helpful diagnostic
+		if sig == nil {
+			for pkgAlias, modTarget := range c.currentImports {
+				if modScope, ok := c.modules[modTarget]; ok {
+					if fnSig, ok := modScope.Functions[callName]; ok && fnSig.IsPub {
+						c.errorf(callee.Span(), "cannot find unqualified function '%s'; did you mean '%s.%s'?",
+							callName, pkgAlias, callName)
+						sig = fnSig
+						break
+					}
+				}
+			}
+		}
 		if sig == nil {
 			c.errorf(callee.Span(), "undefined function '%s'", callName)
 			return TypeVoid
 		}
 
 	case *ast.SelectorExpr:
-		// 1. Static Type Factory: `Invoice.new(...)`
-		if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
-			if st, isStruct := c.structs[identLeft.Ident.Name]; isStruct {
-				callName = st.Name + "." + callee.Field.Name
-				sig = st.StaticMethods[callee.Field.Name]
-				if sig == nil {
-					c.errorf(callee.SelSpan, "struct '%s' has no static method '%s'", st.Name, callee.Field.Name)
-					return TypeVoid
+		// 1a. Qualified Static Method: `net.TcpStream.connect(...)`
+		if selLeft, ok := callee.Left.(*ast.SelectorExpr); ok {
+			if pkgIdent, ok := selLeft.Left.(*ast.IdentExpr); ok {
+				pkgName := pkgIdent.Ident.Name
+				targetMod := pkgName
+				if resolvedMod, ok := c.currentImports[pkgName]; ok {
+					targetMod = resolvedMod
+				}
+				modScope := c.modules[targetMod]
+				if modScope == nil && targetMod == c.currentMod {
+					modScope = c.getOrCreateModule(targetMod)
+				}
+				if modScope != nil {
+					typeName := selLeft.Field.Name
+					if st, ok := modScope.Structs[typeName]; ok {
+						if targetMod != c.currentMod && !st.IsPub {
+							c.errorf(selLeft.SelSpan, "struct '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+							return TypeVoid
+						}
+						methodName := callee.Field.Name
+						sig = st.StaticMethods[methodName]
+						if sig == nil {
+							c.errorf(callee.SelSpan, "struct '%s.%s' has no static method '%s'", pkgName, typeName, methodName)
+							return TypeVoid
+						}
+						if targetMod != c.currentMod && !sig.IsPub {
+							c.errorf(callee.SelSpan, "static method '%s.%s.%s' is private", pkgName, typeName, methodName)
+							return TypeVoid
+						}
+						callName = fmt.Sprintf("%s.%s.%s", pkgName, typeName, methodName)
+					}
+				}
+			}
+		}
+
+		// 1b. Static Type Factory: `Invoice.new(...)`
+		if sig == nil {
+			if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
+				if st := c.LookupStruct(identLeft.Ident.Name); st != nil {
+					if sm, ok := st.StaticMethods[callee.Field.Name]; ok {
+						sig = sm
+						callName = st.Name + "." + callee.Field.Name
+					}
+				}
+			}
+		}
+
+		// 1c. Top-level Module Function: `io.copy(...)`
+		if sig == nil {
+			if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
+				if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
+					pkgName := identLeft.Ident.Name
+					targetMod := pkgName
+					if resolvedMod, ok := c.currentImports[pkgName]; ok {
+						targetMod = resolvedMod
+					}
+					if modScope, ok := c.modules[targetMod]; ok {
+						fnName := callee.Field.Name
+						if fnSig, ok := modScope.Functions[fnName]; ok {
+							if targetMod != c.currentMod && !fnSig.IsPub {
+								c.errorf(callee.SelSpan, "function '%s.%s' is private to module '%s'", pkgName, fnName, targetMod)
+								return TypeVoid
+							}
+							sig = fnSig
+							callName = fmt.Sprintf("%s.%s", pkgName, fnName)
+						}
+					}
 				}
 			}
 		}
@@ -1596,6 +1919,18 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "slice." + callee.Field.Name
+				case "to_string", "to_str":
+					if !sl.Elem.Equals(TypeU8) {
+						c.errorf(callee.SelSpan, "to_string() is only available on []u8, got %s", sl)
+						return TypeVoid
+					}
+					sig = &FnSig{
+						Name:       callee.Field.Name,
+						Params:     nil,
+						ReturnType: TypeString,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice." + callee.Field.Name
 				default:
 					c.errorf(callee.SelSpan, "slice '%s' has no method '%s'", sl, callee.Field.Name)
 					return TypeVoid
@@ -1636,6 +1971,54 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					callName = "array.len"
 				default:
 					c.errorf(callee.SelSpan, "array '%s' has no method '%s'", arr, callee.Field.Name)
+					return TypeVoid
+				}
+			} else if recvType.Equals(TypeString) {
+				switch callee.Field.Name {
+				case "len":
+					sig = &FnSig{Name: "len", Params: nil, ReturnType: TypeInt, Span: callee.SelSpan}
+					callName = "string.len"
+				case "contains":
+					sig = &FnSig{Name: "contains", Params: []ParamInfo{{Name: "substr", Type: TypeString}}, ReturnType: TypeBool, Span: callee.SelSpan}
+					callName = "string.contains"
+				case "index_of":
+					sig = &FnSig{Name: "index_of", Params: []ParamInfo{{Name: "substr", Type: TypeString}}, ReturnType: TypeInt, Span: callee.SelSpan}
+					callName = "string.index_of"
+				case "substr":
+					sig = &FnSig{Name: "substr", Params: []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}}, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.substr"
+				case "starts_with":
+					sig = &FnSig{Name: "starts_with", Params: []ParamInfo{{Name: "prefix", Type: TypeString}}, ReturnType: TypeBool, Span: callee.SelSpan}
+					callName = "string.starts_with"
+				case "ends_with":
+					sig = &FnSig{Name: "ends_with", Params: []ParamInfo{{Name: "suffix", Type: TypeString}}, ReturnType: TypeBool, Span: callee.SelSpan}
+					callName = "string.ends_with"
+				case "split":
+					sig = &FnSig{Name: "split", Params: []ParamInfo{{Name: "sep", Type: TypeString}}, ReturnType: &SliceType{Elem: TypeString}, Span: callee.SelSpan}
+					callName = "string.split"
+				case "trim":
+					sig = &FnSig{Name: "trim", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.trim"
+				case "to_lower":
+					sig = &FnSig{Name: "to_lower", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.to_lower"
+				case "to_upper":
+					sig = &FnSig{Name: "to_upper", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.to_upper"
+				case "to_int":
+					sig = &FnSig{Name: "to_int", Params: nil, ReturnType: &ResultType{Inner: TypeInt}, Span: callee.SelSpan}
+					callName = "string.to_int"
+				case "to_i64":
+					sig = &FnSig{Name: "to_i64", Params: nil, ReturnType: &ResultType{Inner: TypeI64}, Span: callee.SelSpan}
+					callName = "string.to_i64"
+				case "clone":
+					sig = &FnSig{Name: "clone", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.clone"
+				case "bytes", "to_bytes":
+					sig = &FnSig{Name: callee.Field.Name, Params: nil, ReturnType: &SliceType{Elem: TypeU8}, Span: callee.SelSpan}
+					callName = "string." + callee.Field.Name
+				default:
+					c.errorf(callee.SelSpan, "string has no method '%s'", callee.Field.Name)
 					return TypeVoid
 				}
 			} else if st, ok := recvType.(*StructType); ok {
@@ -1809,7 +2192,16 @@ func (c *Checker) checkOrBlock(block *ast.BlockStmt, scope *Scope, expectedType 
 					c.checkStmt(last, scope)
 				}
 				return
+			case *ast.BranchStmt:
+				c.checkStmt(last, scope)
+				return
 			case *ast.ExprStmt:
+				if call, ok := last.Expr.(*ast.CallExpr); ok {
+					if id, isId := call.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
+						c.checkExpr(last.Expr, scope)
+						return
+					}
+				}
 				valType := c.checkExpr(last.Expr, scope)
 				if !expectedType.Equals(TypeVoid) && !valType.Equals(expectedType) {
 					c.errorf(last.Span(), "'or' block fallback expression has type '%s', expected '%s'",
@@ -1875,8 +2267,40 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 		return TypeVoid
 	}
 	switch t := te.(type) {
+	case *ast.SelectorType:
+		pkgName := t.Pkg.Name
+		targetMod := pkgName
+		if resolvedMod, ok := c.currentImports[pkgName]; ok {
+			targetMod = resolvedMod
+		}
+		modScope := c.modules[targetMod]
+		if modScope == nil && targetMod == c.currentMod {
+			modScope = c.getOrCreateModule(targetMod)
+		}
+		if modScope == nil {
+			c.errorf(t.Pkg.NamePos, "module '%s' is not imported or does not exist", pkgName)
+			return TypeVoid
+		}
+		typeName := t.Name.Name
+		if st, ok := modScope.Structs[typeName]; ok {
+			if targetMod != c.currentMod && !st.IsPub {
+				c.errorf(t.Name.NamePos, "type '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			return st
+		}
+		if iface, ok := modScope.Interfaces[typeName]; ok {
+			if targetMod != c.currentMod && !iface.IsPub {
+				c.errorf(t.Name.NamePos, "interface '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			return iface
+		}
+		c.errorf(t.Name.NamePos, "module '%s' has no type '%s'", pkgName, typeName)
+		return TypeVoid
+
 	case *ast.IdentType:
 		switch t.Name.Name {
+		case "u8", "byte":
+			return TypeU8
 		case "int":
 			return TypeInt
 		case "i64":
@@ -1904,12 +2328,43 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			}
 			return &FutureType{Inner: TypeVoid}
 		}
-		if st, ok := c.structs[t.Name.Name]; ok {
-			return st
+
+		// 1. Look in current module scope
+		if modScope, ok := c.modules[c.currentMod]; ok {
+			if st, ok := modScope.Structs[t.Name.Name]; ok {
+				return st
+			}
+			if iface, ok := modScope.Interfaces[t.Name.Name]; ok {
+				return iface
+			}
 		}
-		if iface, ok := c.interfaces[t.Name.Name]; ok {
-			return iface
+
+		// 2. Check if it exists in one of the imported modules (enforcing strict qualification)
+		for pkgAlias, modTarget := range c.currentImports {
+			if modScope, ok := c.modules[modTarget]; ok {
+				if st, ok := modScope.Structs[t.Name.Name]; ok && st.IsPub {
+					c.errorf(t.Name.NamePos, "cannot find unqualified type '%s'; did you mean '%s.%s'?",
+						t.Name.Name, pkgAlias, t.Name.Name)
+					return st
+				}
+				if iface, ok := modScope.Interfaces[t.Name.Name]; ok && iface.IsPub {
+					c.errorf(t.Name.NamePos, "cannot find unqualified interface '%s'; did you mean '%s.%s'?",
+						t.Name.Name, pkgAlias, t.Name.Name)
+					return iface
+				}
+			}
 		}
+
+		// 3. Fallback to global c.structs/c.interfaces (for main/unspecified module and backwards compatibility)
+		if c.currentMod == "main" || c.currentMod == "" {
+			if st, ok := c.structs[t.Name.Name]; ok {
+				return st
+			}
+			if iface, ok := c.interfaces[t.Name.Name]; ok {
+				return iface
+			}
+		}
+
 		c.errorf(t.Name.NamePos, "unknown type '%s'", t.Name.Name)
 		return TypeVoid
 

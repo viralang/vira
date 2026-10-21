@@ -150,6 +150,9 @@ func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
 func (a *Analyzer) AnalyzeFile(file *ast.File) {
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*ast.FnDecl); ok {
+			if fn.Body == nil {
+				continue
+			}
 			report := &FnReport{FnName: a.formatFnName(fn)}
 			rootScope := &LexicalScope{}
 			a.rewriteBlock(fn.Body, rootScope, true, report)
@@ -199,26 +202,35 @@ func (a *Analyzer) rewriteBlock(
 			// 2. Register variable in current scope if its type owns heap memory
 			valType := a.chk.ExprTypes[s.Value]
 			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
-				state := StateScopedLocal
-				if scope.InArena {
-					state = StateManagedByArena
+				// Variables initialized by borrowing from containers or struct fields do not own the memory
+				isBorrow := false
+				if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+					isBorrow = true
+				} else if _, isSel := s.Value.(*ast.SelectorExpr); isSel {
+					isBorrow = true
 				}
-				tv := &TrackedVar{
-					Name:        s.Name.Name,
-					Type:        valType,
-					CleanupKind: kind,
-					State:       state,
-					DeclSpan:    s.StmtSpan,
+				if !isBorrow {
+					state := StateScopedLocal
+					if scope.InArena {
+						state = StateManagedByArena
+					}
+					tv := &TrackedVar{
+						Name:        s.Name.Name,
+						Type:        valType,
+						CleanupKind: kind,
+						State:       state,
+						DeclSpan:    s.StmtSpan,
+					}
+					scope.Vars = append(scope.Vars, tv)
+					report.TrackedVars = append(report.TrackedVars, tv)
 				}
-				scope.Vars = append(scope.Vars, tv)
-				report.TrackedVars = append(report.TrackedVars, tv)
 			}
 			rewritten = append(rewritten, s)
 			rewritten = append(rewritten, postStmts...)
 
 		case *ast.AssignStmt:
 			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
-			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, false)
+			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
 			rewritten = append(rewritten, postStmts...)
@@ -229,6 +241,22 @@ func (a *Analyzer) rewriteBlock(
 			if s.Else != nil {
 				elseScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
 				a.rewriteBlock(s.Else, elseScope, false, report)
+			}
+			rewritten = append(rewritten, s)
+
+		case *ast.SwitchStmt:
+			if s.Tag != nil {
+				a.inspectExprMovesAndOrBlocks(s.Tag, scope, report)
+			}
+			for i := range s.Cases {
+				cs := &s.Cases[i]
+				for _, expr := range cs.Exprs {
+					a.inspectExprMovesAndOrBlocks(expr, scope, report)
+				}
+				caseScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+				dummyBlock := &ast.BlockStmt{Stmts: cs.Body, BlockSpan: cs.CaseSpan}
+				a.rewriteBlock(dummyBlock, caseScope, false, report)
+				cs.Body = dummyBlock.Stmts
 			}
 			rewritten = append(rewritten, s)
 
@@ -284,31 +312,42 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.ReturnStmt:
-			// If returning an unassigned string interpolation (e.g. `return "hello ${x}"`),
-			// hoist it into a temporary variable so it is evaluated BEFORE unwinding scope destructors,
-			// preventing any use-after-free of interpolated variables!
-			if interp, ok := s.Value.(*ast.StringInterpExpr); ok {
-				a.tmpCounter++
-				tmpName := fmt.Sprintf("_vira_ret_str_%d", a.tmpCounter)
-				tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
-				varDecl := &ast.VarDeclStmt{
-					Name:     tmpIdent,
-					Value:    interp,
-					IsMut:    false,
-					StmtSpan: interp.Span(),
-				}
-				a.chk.ExprTypes[varDecl.Value] = checker.TypeString
-				identExpr := &ast.IdentExpr{Ident: tmpIdent}
-				a.chk.ExprTypes[identExpr] = checker.TypeString
-
-				rewritten = append(rewritten, varDecl)
-				s.Value = identExpr
-			} else if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				if tv := scope.Find(ident.Ident.Name); tv != nil {
 					tv.State = StateEscapesViaReturn
 				}
 			} else if s.Value != nil {
 				a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+
+				// If returning a non-literal expression (e.g. `return slice.to_string()` or `return "hello ${x}"`),
+				// hoist it into a temporary variable so it is evaluated BEFORE unwinding scope destructors,
+				// preventing any use-after-free of local variables!
+				isErrorCall := false
+				if call, isCall := s.Value.(*ast.CallExpr); isCall {
+					if id, isId := call.Callee.(*ast.IdentExpr); isId && id.Ident.Name == "error" {
+						isErrorCall = true
+					}
+				}
+				if !isErrorCall {
+					if _, isLit := s.Value.(*ast.LiteralExpr); !isLit {
+						a.tmpCounter++
+						retType := a.chk.ExprTypes[s.Value]
+						tmpName := fmt.Sprintf("_vira_ret_val_%d", a.tmpCounter)
+						tmpIdent := ast.Ident{Name: tmpName, NamePos: s.Value.Span()}
+						varDecl := &ast.VarDeclStmt{
+							Name:     tmpIdent,
+							Value:    s.Value,
+							IsMut:    false,
+							StmtSpan: s.Value.Span(),
+						}
+						a.chk.ExprTypes[varDecl.Value] = retType
+						identExpr := &ast.IdentExpr{Ident: tmpIdent}
+						a.chk.ExprTypes[identExpr] = retType
+
+						rewritten = append(rewritten, varDecl)
+						s.Value = identExpr
+					}
+				}
 			}
 
 			// Unwind all active scopes up to function root in LIFO order before `return`
@@ -458,6 +497,16 @@ func (a *Analyzer) walkAndHoistCallArgs(
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
+		isContainerStore := false
+		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel {
+			switch sel.Field.Name {
+			case "push", "append", "set", "insert", "add", "set_header":
+				isContainerStore = true
+			}
+		}
+		if isContainerStore {
+			return
+		}
 		for i := range e.Args {
 			arg := &e.Args[i]
 			if arg.Expr == nil {
@@ -493,6 +542,10 @@ func (a *Analyzer) walkAndHoistCallArgs(
 				report.InjectedFrees = append(report.InjectedFrees, freeStmt)
 				arg.Expr = identExpr
 			} else if callArg, isCall := arg.Expr.(*ast.CallExpr); isCall {
+				// Do not hoist and free .clone() calls because clone() produces an owned copy
+				if sel, isSel := callArg.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
+					continue
+				}
 				// 3. Hoist CallExpr returning string passed as argument
 				retType := a.chk.ExprTypes[callArg]
 				if retType != nil && retType.Equals(checker.TypeString) {

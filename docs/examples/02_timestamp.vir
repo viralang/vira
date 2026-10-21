@@ -1,4 +1,4 @@
-module DateTime
+module oop_demo
 
 // --- 1. REUSABLE EMBEDDED BASE STRUCT ---
 // Defined in a separate file to demonstrate modular composition via `import`.

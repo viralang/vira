@@ -477,6 +477,86 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 
 	workList := []workItem{{filePath: rootPath, ast: astFile}}
 
+	// Discover all sibling source files in the same project root or directory
+	searchDir := ""
+	if pRoot != "" {
+		searchDir = pRoot
+	} else if fileDir != "" && fileDir != "/" && fileDir != "." && !(len(fileDir) <= 3 && strings.Contains(fileDir, ":")) {
+		if fi, err := os.Stat(fileDir); err == nil && fi.IsDir() {
+			searchDir = fileDir
+		}
+	}
+
+	isTest := strings.HasSuffix(rootPath, "_test.vir") || strings.HasSuffix(rootPath, "_test.vex") ||
+		strings.Contains(rootPath, string(filepath.Separator)+"tests"+string(filepath.Separator))
+
+	if searchDir != "" {
+		_ = filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "vendor" {
+					return filepath.SkipDir
+				}
+				if !isTest && base == "tests" {
+					return filepath.SkipDir
+				}
+				if base == "examples" && !strings.Contains(rootPath, string(filepath.Separator)+"examples"+string(filepath.Separator)) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			cleanPath := filepath.Clean(path)
+			if visited[cleanPath] {
+				return nil
+			}
+			isSource := strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")
+			if !isTest {
+				isSource = isSource && !strings.HasSuffix(info.Name(), "_test.vir") && !strings.HasSuffix(info.Name(), "_test.vex")
+			}
+			if isSource {
+				doc := s.loadDoc(cleanPath)
+				if doc != nil && doc.AST != nil {
+					if astFile.Module.Name == "" || doc.AST.Module.Name == astFile.Module.Name || doc.AST.Module.Name == "" {
+						visited[cleanPath] = true
+						results = append(results, *doc)
+						workList = append(workList, workItem{filePath: cleanPath, ast: doc.AST})
+					}
+				}
+			}
+			return nil
+		})
+
+		for docURI := range s.docs {
+			docPath := uriToPath(docURI)
+			cleanDocPath := filepath.Clean(docPath)
+			if visited[cleanDocPath] {
+				continue
+			}
+			rel, err := filepath.Rel(searchDir, cleanDocPath)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				isSource := strings.HasSuffix(cleanDocPath, ".vir") || strings.HasSuffix(cleanDocPath, ".vex")
+				if !isTest {
+					isSource = isSource && !strings.HasSuffix(cleanDocPath, "_test.vir") && !strings.HasSuffix(cleanDocPath, "_test.vex")
+				}
+				if isSource {
+					doc := s.loadDoc(cleanDocPath)
+					if doc != nil && doc.AST != nil {
+						if astFile.Module.Name == "" || doc.AST.Module.Name == astFile.Module.Name || doc.AST.Module.Name == "" {
+							visited[cleanDocPath] = true
+							results = append(results, *doc)
+							workList = append(workList, workItem{filePath: cleanDocPath, ast: doc.AST})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	visitedPkg := make(map[string]bool)
+
 	for len(workList) > 0 {
 		curr := workList[0]
 		workList = workList[1:]
@@ -485,6 +565,9 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 
 		for _, imp := range curr.ast.Imports {
 			impTarget := imp.Name
+			if visitedPkg[impTarget] {
+				continue
+			}
 			candidates := pkg.ResolveImportCandidates(cDir, pRoot, impTarget)
 
 			for _, cand := range candidates {
@@ -496,6 +579,7 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 				cStat, cErr := os.Stat(cleanCand)
 				if cErr == nil && cStat.IsDir() {
 					visited[cleanCand] = true
+					visitedPkg[impTarget] = true
 					_ = filepath.Walk(cleanCand, func(subPath string, subInfo os.FileInfo, err error) error {
 						if err != nil {
 							return nil
@@ -526,6 +610,7 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 				doc := s.loadDoc(cleanCand)
 				if doc != nil {
 					visited[cleanCand] = true
+					visitedPkg[impTarget] = true
 					results = append(results, *doc)
 					workList = append(workList, workItem{filePath: cleanCand, ast: doc.AST})
 					break
@@ -626,21 +711,14 @@ func (s *Server) validateDocument(uri string, text string) {
 
 		// Include imported files so imported structs, methods & types are recognized without false errors
 		imported := s.resolveImports(uri, astFile)
-		var mergedDecls []ast.Decl
+		var allFiles []*ast.File
 		for _, imp := range imported {
-			mergedDecls = append(mergedDecls, imp.AST.Decls...)
+			allFiles = append(allFiles, imp.AST)
 		}
-		mergedDecls = append(mergedDecls, astFile.Decls...)
-
-		mergedAst := &ast.File{
-			Module:   astFile.Module,
-			Imports:  astFile.Imports,
-			Decls:    mergedDecls,
-			FileSpan: astFile.FileSpan,
-		}
+		allFiles = append(allFiles, astFile)
 
 		chk := checker.New()
-		chk.CheckFile(mergedAst)
+		chk.CheckFiles(allFiles)
 		if semErrs := chk.Errors(); len(semErrs) > 0 {
 			for _, se := range semErrs {
 				// Only publish diagnostics that belong to the active document being validated
@@ -711,6 +789,15 @@ func formatTypeExpr(t ast.TypeExpr) string {
 			return fmt.Sprintf("[N]%s", formatTypeExpr(v.Elem))
 		}
 		return "[]" + formatTypeExpr(v.Elem)
+	case *ast.SelectorType:
+		if len(v.TypeParams) > 0 {
+			var params []string
+			for _, p := range v.TypeParams {
+				params = append(params, formatTypeExpr(p))
+			}
+			return fmt.Sprintf("%s.%s[%s]", v.Pkg.Name, v.Name.Name, strings.Join(params, ", "))
+		}
+		return fmt.Sprintf("%s.%s", v.Pkg.Name, v.Name.Name)
 	case *ast.IdentType:
 		if len(v.TypeParams) > 0 {
 			var params []string
@@ -735,6 +822,7 @@ func formatTypeExpr(t ast.TypeExpr) string {
 	default:
 		return "unknown"
 	}
+	return "unknown"
 }
 
 func getEmbedInfo(emb ast.TypeExpr) (string, token.Span) {
@@ -1385,6 +1473,13 @@ func findInBlock(uri string, f *source.File, block *ast.BlockStmt, word string) 
 		case *ast.ForStmt:
 			if st.Body != nil {
 				if loc := findInBlock(uri, f, st.Body, word); loc != nil {
+					return loc
+				}
+			}
+		case *ast.SwitchStmt:
+			for _, cs := range st.Cases {
+				dummyBlock := &ast.BlockStmt{Stmts: cs.Body}
+				if loc := findInBlock(uri, f, dummyBlock, word); loc != nil {
 					return loc
 				}
 			}
