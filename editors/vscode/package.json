@@ -2,7 +2,7 @@
   "name": "vira-language",
   "displayName": "Vira Programming Language",
   "description": "Rich language support, syntax highlighting, and LSP integration for the Vira Programming Language.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "viralang",
   "icon": "icon.png",
   "repository": {

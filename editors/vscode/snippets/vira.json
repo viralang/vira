@@ -47,5 +47,19 @@
       "}"
     ],
     "description": "Switch statement with cases and default"
+  },
+  "Module Declaration": {
+    "prefix": "mod",
+    "body": [
+      "module ${1:name}"
+    ],
+    "description": "Declare package module namespace"
+  },
+  "Import with Alias": {
+    "prefix": "impas",
+    "body": [
+      "import ${1:package} as ${2:alias}"
+    ],
+    "description": "Import package with local namespace alias"
   }
 }
