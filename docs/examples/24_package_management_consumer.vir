@@ -18,13 +18,13 @@ module package_consumer_demo
 import "vira_test"
 
 fn main() {
-	// 1. Instantiate the imported Logger from `vira_test`
-	mut log := Logger.new('ConsumerApp')
-	log.info('External package successfully imported and initialized!')
+	// 1. Instantiate the imported Logger using qualified package namespace `vira_test.Logger`
+	mut log := vira_test.Logger.new('ConsumerApp')
+	log.info('External package successfully imported with package namespacing!')
 
-	// 2. Perform 2D Vector operations using `vira_test.Vec2`
-	v1 := Vec2.new(10.0, 20.0)
-	v2 := Vec2.new(5.0, 15.0)
+	// 2. Perform 2D Vector operations using qualified `vira_test.Vec2`
+	v1 := vira_test.Vec2.new(10.0, 20.0)
+	v2 := vira_test.Vec2.new(5.0, 15.0)
 
 	sum := v1.add(v2)
 	scaled := sum.scale(2.0)
@@ -37,16 +37,16 @@ fn main() {
 	println('  • scaled:   (${scaled.x}, ${scaled.y})')
 	println('  • dot prod: ${dot_prod}')
 
-	// 3. Use numeric utilities from `vira_test`
+	// 3. Use package-qualified numeric utilities `vira_test.clamp`, `vira_test.min_int`, `vira_test.max_int`
 	raw_speed := 165
-	bounded_speed := clamp(raw_speed, 0, 100)
-	min_val := min_int(45, 90)
-	max_val := max_int(45, 90)
+	bounded_speed := vira_test.clamp(raw_speed, 0, 100)
+	min_val := vira_test.min_int(45, 90)
+	max_val := vira_test.max_int(45, 90)
 
 	log.info('Numeric utility results:')
-	println('  • clamp(165, 0, 100) = ${bounded_speed}')
-	println('  • min_int(45, 90)    = ${min_val}')
-	println('  • max_int(45, 90)    = ${max_val}')
+	println('  • vira_test.clamp(165, 0, 100) = ${bounded_speed}')
+	println('  • vira_test.min_int(45, 90)    = ${min_val}')
+	println('  • vira_test.max_int(45, 90)    = ${max_val}')
 
 	log.ok('All external package capabilities verified successfully!')
 }

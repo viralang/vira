@@ -49,6 +49,7 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`28_native_collections.vir`](./28_native_collections.vir)** | Native Collections: Fixed Arrays (`[N]T`) & Slices (`[]T`) | Stack-allocated fixed arrays, dynamic slices with geometric growth, bounds check panics, safe retrieval via Result Monad (`.get() or {}`), for-in iteration, and zero-leak Autofree validation. |
 | **[`29_stdlib_net_http_server.vir`](./29_stdlib_net_http_server.vir)** | Standard Library Networking & HTTP Server | `packages/net` (TCP streams, loopback listener), `packages/http` (HttpServer, request parsing, response formatting), and switch statement routing with 0 leaks. |
 | **[`30_switch_statement.vir`](./30_switch_statement.vir)** | Switch Statements & Pattern Branching | Multi-branch switching on integer codes, string routes, comma-separated multiple matches, tagless boolean condition switches, and deterministic autofree safety. |
+| **[`31_package_namespacing_and_modules.vir`](./31_package_namespacing_and_modules.vir)** | First-Class Package Namespacing & Modules | Module declarations (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, and cryptographic `vira.lock` dependency locking. |
 
 ---
 

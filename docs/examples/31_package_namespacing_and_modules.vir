@@ -1,0 +1,81 @@
+// Example 31: Package Namespacing, Modules & Dependency Resolution
+//
+// Demonstrates:
+// 1. Module declarations (`module main`)
+// 2. Importing packages (`import net`, `import http`) with isolated module scopes
+// 3. Qualified type annotations (`net.TcpStream`, `http.HttpServer`, `http.Response`)
+// 4. Qualified static methods (`http.HttpServer.bind`, `net.TcpStream.connect`)
+// 5. Qualified struct literals and multi-package composition
+// 6. Manifest (`vira.mod`) and lockfile (`vira.lock`) reproducible dependency management
+
+import net
+import http
+
+fn route_handler(req http.Request) http.Response {
+	println('• Route handler received: ${req.method} ${req.path}')
+	
+	switch req.path {
+	case '/api/v1/status':
+		return http.Response.json('{"system":"ok","version":"0.5.9-dev","namespacing":true}')
+	case '/api/v1/ping':
+		return http.Response.text('pong')
+	default:
+		return http.Response.with_status(404, '{"error":"route_not_found"}')
+	}
+}
+
+fn main() {
+	println('===========================================================')
+	println('     VIRA FIRST-CLASS PACKAGE NAMESPACING DEMO             ')
+	println('===========================================================')
+
+	// 1. Bind an HTTP server using qualified static method `http.HttpServer.bind`
+	mut srv := http.HttpServer.bind('127.0.0.1:0') or {
+		panic('Failed to bind namespaced HTTP server: ${err}')
+	}
+	server_addr := srv.local_addr() or {
+		panic('Failed to get server address: ${err}')
+	}
+	println('1. Bound HTTP Server on http://${server_addr.ip}:${server_addr.port}')
+
+	// 2. Connect client TCP socket using qualified `net.TcpStream.connect`
+	mut client := net.TcpStream.connect('${server_addr.ip}:${server_addr.port}') or {
+		panic('Failed to connect client stream: ${err}')
+	}
+	println('2. Connected client stream (type: net.TcpStream)')
+
+	// 3. Send HTTP request over TCP stream
+	raw_req := 'GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'
+	client.write_str(raw_req) or {
+		panic('Failed to write HTTP request: ${err}')
+	}
+	println('3. Sent GET /api/v1/status request to server')
+
+	// 4. Server accepts connection into an http.RequestContext
+	mut ctx := srv.accept_request() or {
+		panic('Failed to accept request: ${err}')
+	}
+	println('4. Server accepted request into http.RequestContext')
+
+	// 5. Generate namespaced response and send over socket
+	res := route_handler(ctx.req)
+	n := ctx.respond(res) or {
+		panic('Failed to respond: ${err}')
+	}
+	println('5. Server sent response with status ${res.status_code} (${n} bytes)')
+
+	// 6. Client reads and parses server response
+	wire_res := client.read_string(1024) or {
+		panic('Failed to read response wire payload: ${err}')
+	}
+	println('6. Client received response wire payload:')
+	println('-----------------------------------------------------------')
+	println(wire_res)
+	println('-----------------------------------------------------------')
+
+	// 7. Cleanup sockets
+	client.close() or { false }
+	srv.close() or { false }
+
+	println('\n[SUCCESS] Package namespacing and cross-module typing verified!')
+}

@@ -384,19 +384,20 @@ module my_app
 import "vira_test"
 
 fn main() {
-    mut log := Logger.new('MyApp')
-    log.info('Application started successfully!')
+    // 1. Qualified package namespace instantiation
+    mut log := vira_test.Logger.new('MyApp')
+    log.info('Application started successfully with package namespacing!')
 
-    // Use exported Vec2 struct & methods
-    v1 := Vec2.new(10.0, 20.0)
-    v2 := Vec2.new(5.0, 15.0)
+    // 2. Qualified struct static factory
+    v1 := vira_test.Vec2.new(10.0, 20.0)
+    v2 := vira_test.Vec2.new(5.0, 15.0)
     sum := v1.add(v2)
     scaled := sum.scale(2.0)
 
     log.ok('Vector calculation: scaled=(${scaled.x}, ${scaled.y})')
 
-    // Use exported clamp utility
-    speed := clamp(150, 0, 100)
+    // 3. Qualified top-level utility function
+    speed := vira_test.clamp(150, 0, 100)
     log.info('Bounded speed: ${speed}')
 }
 ```
@@ -408,7 +409,7 @@ vira run .
 
 **Output:**
 ```text
-[INFO] [MyApp] #1: Application started successfully!
+[INFO] [MyApp] #1: Application started successfully with package namespacing!
 [ OK ] [MyApp] #2: Vector calculation: scaled=(30.00, 70.00)
 [INFO] [MyApp] #3: Bounded speed: 100
 [vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)

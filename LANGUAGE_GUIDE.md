@@ -93,15 +93,45 @@ vira <command> [flags] <file.vir>
 
 ## 3. Language Basics
 
-### Modules
+### Modules & Package Namespacing
 
 Every Vira source file begins with a `module` declaration defining its namespace boundary:
 
 ```v
-module billing
+module http
 ```
 
-Symbols prefixed with `pub` are visible outside the module; un-prefixed symbols are module-private.
+If omitted, standalone files default to `module main`.
+
+#### Visibility & Encapsulation
+- Symbols prefixed with `pub` (`pub struct`, `pub fn`, `pub mut:`) are exported and accessible across modules.
+- Unprefixed symbols are private to the owning module.
+- Within the same module, symbols are directly accessible unqualified.
+- Across modules, external symbols must be qualified with their package or alias name:
+
+```v
+import net
+import http
+import io as vira_io
+
+// Qualified types
+pub fn handle_connection(mut stream net.TcpStream) !http.Response {
+    // Qualified static method calls
+    mut srv := http.HttpServer.bind('127.0.0.1:8080')!
+    return http.Response.json('{"status":"ok"}')
+}
+```
+
+#### Reproducible Dependencies (`vira.mod` & `vira.lock`)
+Packages declare their module identity and dependencies in `vira.mod`:
+```text
+module http
+version 0.1.0
+deps
+    net 0.1.0
+    io 0.1.0
+```
+Cryptographic SHA-256 lockfiles (`vira.lock`) ensure 100% reproducible builds across machines and CI pipelines.
 
 ---
 
