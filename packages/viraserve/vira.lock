@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "path": "http",
+      "version": "0.1.0",
+      "checksum": "sha256:688f37414fba25add8dbed7568e0b1d69839296cb274d22a267da5eb25b6fab7"
+    },
+    {
+      "path": "io",
+      "version": "0.1.0",
+      "checksum": "sha256:5b60f1c96fcc2236f300f6125e72c66c00215dfca424bb2851771cee4689b1a1"
+    },
+    {
+      "path": "net",
+      "version": "0.1.0",
+      "checksum": "sha256:4ea2d26ee7b87790f8f260330a6b51216debc5ac26d3b64c7abdfdf70e47226c"
+    }
+  ]
+}

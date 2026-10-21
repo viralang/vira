@@ -140,21 +140,33 @@ func (c *Checker) getOrCreateModule(name string) *ModuleScope {
 }
 
 func (c *Checker) LookupStructInModule(modName, structName string) *StructType {
-	if m, ok := c.modules[modName]; ok {
+	targetMod := modName
+	if resolved, ok := c.currentImports[modName]; ok {
+		targetMod = resolved
+	}
+	if m, ok := c.modules[targetMod]; ok {
 		return m.Structs[structName]
 	}
 	return nil
 }
 
 func (c *Checker) LookupInterfaceInModule(modName, ifaceName string) *InterfaceType {
-	if m, ok := c.modules[modName]; ok {
+	targetMod := modName
+	if resolved, ok := c.currentImports[modName]; ok {
+		targetMod = resolved
+	}
+	if m, ok := c.modules[targetMod]; ok {
 		return m.Interfaces[ifaceName]
 	}
 	return nil
 }
 
 func (c *Checker) LookupFunctionInModule(modName, fnName string) *FnSig {
-	if m, ok := c.modules[modName]; ok {
+	targetMod := modName
+	if resolved, ok := c.currentImports[modName]; ok {
+		targetMod = resolved
+	}
+	if m, ok := c.modules[targetMod]; ok {
 		return m.Functions[fnName]
 	}
 	return nil

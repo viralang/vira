@@ -62,3 +62,87 @@ func TestFindProjectRoot(t *testing.T) {
 		t.Errorf("expected module 'test_project', got %s", m.Module)
 	}
 }
+
+func TestManifestWithColonsAndName(t *testing.T) {
+	content := `name: "http"
+version: "0.1.0"
+description: "Vira Standard HTTP Engine"
+deps
+	net 0.1.0
+	io 0.1.0
+`
+	m, err := mod.ParseManifest(content)
+	if err != nil {
+		t.Fatalf("ParseManifest with colons failed: %v", err)
+	}
+	if m.Module != "http" {
+		t.Errorf("expected module 'http', got %s", m.Module)
+	}
+	if len(m.Dependencies) != 2 {
+		t.Errorf("expected 2 dependencies, got %d", len(m.Dependencies))
+	}
+}
+
+func TestGeneratePackageLockfiles(t *testing.T) {
+	pkgsRoot := filepath.Join("..", "..", "packages")
+	ioCS, err := mod.ComputeDirChecksum(filepath.Join(pkgsRoot, "io"))
+	if err != nil {
+		t.Fatalf("failed to compute io checksum: %v", err)
+	}
+	netCS, err := mod.ComputeDirChecksum(filepath.Join(pkgsRoot, "net"))
+	if err != nil {
+		t.Fatalf("failed to compute net checksum: %v", err)
+	}
+	httpCS, err := mod.ComputeDirChecksum(filepath.Join(pkgsRoot, "http"))
+	if err != nil {
+		t.Fatalf("failed to compute http checksum: %v", err)
+	}
+
+	// 1. packages/net/vira.lock
+	netLock := mod.NewLockfile()
+	netLock.Set(mod.LockedPackage{
+		Path:     "io",
+		Version:  "0.1.0",
+		Checksum: ioCS,
+	})
+	if err := netLock.Save(filepath.Join(pkgsRoot, "net", "vira.lock")); err != nil {
+		t.Fatalf("failed to save net/vira.lock: %v", err)
+	}
+
+	// 2. packages/http/vira.lock
+	httpLock := mod.NewLockfile()
+	httpLock.Set(mod.LockedPackage{
+		Path:     "io",
+		Version:  "0.1.0",
+		Checksum: ioCS,
+	})
+	httpLock.Set(mod.LockedPackage{
+		Path:     "net",
+		Version:  "0.1.0",
+		Checksum: netCS,
+	})
+	if err := httpLock.Save(filepath.Join(pkgsRoot, "http", "vira.lock")); err != nil {
+		t.Fatalf("failed to save http/vira.lock: %v", err)
+	}
+
+	// 3. packages/viraserve/vira.lock
+	vsLock := mod.NewLockfile()
+	vsLock.Set(mod.LockedPackage{
+		Path:     "io",
+		Version:  "0.1.0",
+		Checksum: ioCS,
+	})
+	vsLock.Set(mod.LockedPackage{
+		Path:     "net",
+		Version:  "0.1.0",
+		Checksum: netCS,
+	})
+	vsLock.Set(mod.LockedPackage{
+		Path:     "http",
+		Version:  "0.1.0",
+		Checksum: httpCS,
+	})
+	if err := vsLock.Save(filepath.Join(pkgsRoot, "viraserve", "vira.lock")); err != nil {
+		t.Fatalf("failed to save viraserve/vira.lock: %v", err)
+	}
+}

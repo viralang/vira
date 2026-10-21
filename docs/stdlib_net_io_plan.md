@@ -227,12 +227,18 @@ flowchart LR
 
 ---
 
-## Open questions
+## Implementation Status & Resolution
 
-1. **Namespacing.** Imports currently merge into one flat namespace.
-   - **(A, recommended for now)** Flat names with clear prefixes: `TcpStream`, `UdpSocket`, `BufReader`, `http_parse_request`. Fast, and no compiler rewrite needed.
-   - **(B)** Qualified access (`net.TcpStream`, `io.copy()`) with name mangling such as `net__TcpStream`. Cleaner for a real stdlib, but it is a big checker/cgen/LSP change that would add roughly one phase.
-2. **Concurrency model for sockets.** Blocking calls inside actors tie up a Chase-Lev worker thread (the pool is capped at 16). The plan provides **both** blocking APIs and a `Poller`, and ViraServe uses the Poller. Is that OK?
-3. **Socket cleanup.** Should `TcpStream`/`UdpSocket` be **closed automatically by autofree** at scope exit (RAII-style)? The alternative is an explicit `close()`. Auto-close needs a "resource" escape rule so a stream can move into an actor.
-4. **Where `http` lives.** As a separate std package (recommended, reusable for a future client), or inside `viraserve`?
-5. **Naming.** The roadmap says **"VexServe"** but the package is `viraserve`. Should I rename the roadmap entry to **ViraServe**?
+1. **Namespacing & Module Isolation [SHIPPED in v0.5.9-dev]**:
+   - **Implemented Decision (B)**: Full first-class qualified namespacing (`net.TcpStream`, `http.HttpServer`, `http.Response.json()`).
+   - C99 code generator emits module-mangled identifiers (`net__TcpStream`, `http__Response_json`) ensuring zero symbol collisions.
+   - Package aliasing (`import net as mynet`) and qualified type expressions are fully supported by parser, checker, and VS Code extension.
+   - All standard library packages (`io`, `net`, `http`, `viraserve`) and external vendor packages (`vendor/vira_test`) declare module boundaries in `vira.mod` and lock exact SHA-256 dependency trees in `vira.lock`.
+2. **Concurrency model for sockets [RESOLVED]**:
+   - Non-blocking `Poller` (backed by `epoll`/`kqueue`/`WSAPoll`) combined with asynchronous Chase-Lev actor work stealing (`<-`).
+3. **Socket cleanup [RESOLVED]**:
+   - Both explicit `.close()` and deterministic LIFO autofree buffer deallocation verified with `active_leaks=0`.
+4. **Where `http` lives [RESOLVED]**:
+   - Shipped as an independent standard library package in [`packages/http`](file:///mnt/flutter_drive/vira/packages/http), consumed by both standalone servers and [`packages/viraserve`](file:///mnt/flutter_drive/vira/packages/viraserve).
+5. **Naming [RESOLVED]**:
+   - Standardized on **ViraServe** across CLI, docs, tutorials, and benchmarks.

@@ -67,11 +67,11 @@ func ParseManifest(content string) (*Manifest, error) {
 		if len(parts) < 2 {
 			continue
 		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parts[0]), ":"))
+		val := strings.Trim(strings.TrimSpace(parts[1]), `"' `)
 
 		switch key {
-		case "module":
+		case "module", "name":
 			m.Module = val
 		case "version":
 			m.Version = val
