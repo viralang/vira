@@ -49,26 +49,45 @@ Every actor automatically receives a dedicated mailbox spinlock and an isolated 
 
 ---
 
-## 3. Asynchronous Message Passing (`<-`)
+---
 
-Send messages to an actor asynchronously using the `<-` send operator:
+## 3. Asynchronous Message Passing (`<-`) & Message Modes
+
+Vira supports three distinct messaging patterns:
+
+### 3.1 Asynchronous Futures (`fut := actor <- method()`)
+Both jobs are queued onto the work-stealing pool immediately without blocking the caller:
 
 ```v
 mut node_a := WorkerNode{ id: 101, jobs_completed: 0 }
 mut node_b := WorkerNode{ id: 102, jobs_completed: 0 }
 
-// Both jobs are queued onto the work-stealing pool immediately
 fut_a := node_a <- process_batch(32, false)
 fut_b := node_b <- process_batch(32, true)
 ```
 
-The calling thread does not block. The message is packaged into an envelope and submitted to the scheduler, immediately returning a `Future[f32]`.
+### 3.2 Detached Fire-and-Forget Sends (`actor <- method()`)
+When the caller does not need the return value, dispatch the message as a standalone statement or discard the binding (`_ :=`):
+
+```v
+node_a <- process_batch(16, false)       // Standalone statement
+_ := node_b <- process_batch(16, false)  // Discarded binding
+```
+
+Detached sends compile to `_send_detached_` (`done = -1`). The background worker thread automatically deallocates the task envelope when finished without creating or awaiting a `Future[T]` handle (`active_leaks = 0`).
+
+### 3.3 Zero-Alloc Synchronous Calls (`res := actor <- method() or { ... }`)
+If the caller immediately unwraps an actor call with an `or { ... }` fallback block, the compiler elides the heap-allocated envelope. The message envelope is stack-allocated on the caller's frame and synchronized directly:
+
+```v
+sync_res := node_a <- process_batch(32, false) or { 0.0 }
+```
 
 ---
 
 ## 4. Work-Stealing Pool & `.await()`
 
-To retrieve the result of an actor call, invoke `.await()` on the returned `Future`:
+To retrieve the result of an asynchronous actor call, invoke `.await()` on the returned `Future`:
 
 ```v
 score_a := fut_a.await() or {
@@ -78,13 +97,14 @@ score_a := fut_a.await() or {
 ```
 
 ### The Chase-Lev Work-Stealing Scheduler
-- Each worker thread in the pool has its own lock-free deque.
-- When an idle thread runs out of tasks, it steals tasks from the tails of other workers' deques using atomic CAS (compare-and-swap) operations.
-- Calling `.await()` cooperates with the scheduler: if the awaited future is still running, the awaiting thread can steal and execute pending tasks instead of sleeping.
+- **Cacheline Alignment:** Deque `top` and `bottom` pointers are isolated on separate 64-byte cachelines (`_Alignas(64)`), eliminating false sharing across threads.
+- **Round-Robin Cursor:** Tasks submitted from non-worker threads use a dedicated round-robin cursor to balance load.
+- **Monotonic Clocks:** Scheduler park conditions use `CLOCK_MONOTONIC` to avoid clock drift issues.
+- **Work-Helping:** Calling `.await()` cooperates with the scheduler: if the awaited future is still running, the awaiting thread steals and executes pending tasks from victim queues instead of sleeping.
 
 ---
 
-## 5. Fault Supervision: `setjmp`/`longjmp` & `OneForOne` Restarts
+## 5. Fault Supervision, Restarts & Actor Lifecycle
 
 When a worker thread panics (e.g. from a division by zero, invalid tensor dimension, or explicit `panic('...')` call):
 
@@ -100,9 +120,14 @@ When a worker thread panics (e.g. from a division by zero, invalid tensor dimens
 +-------------------------------------------------------------+
 | Supervisor Traps Error                                      |
 |   ├── O(1) Arena Wipe: isolated_heap.offset = 0             |
-|   ├── State Reset: WorkerNode_supervisor_reset(&self)       |
-|   ├── Increment restart counter (OneForOne policy)          |
-|   └── Pack error into Future: Result{ is_err: true, err }   |
+|   ├── Check restarts < max_restarts (default: 3)            |
+|   ├── If within limit:                                      |
+|   │     ├── restarts++                                      |
+|   │     ├── OneForOne State Reset: reset mutable fields     |
+|   │     └── Return error via Result container               |
+|   └── If limit exceeded:                                    |
+|         ├── Transition to VIRA_ACTOR_STOPPED                |
+|         └── Reject future messages as dead-letters          |
 +-------------------------------------------------------------+
 ```
 
@@ -116,13 +141,16 @@ score_b := fut_b.await() or {
 }
 ```
 
-### Automatic Recovery
-Because the actor was reset and its memory was cleared in O(1), the actor is immediately healthy and ready to accept subsequent jobs:
+### Automatic Recovery & Restart Reset
+Because the actor was reset and its memory was cleared in O(1), the actor is immediately healthy and ready to accept subsequent jobs. When an actor successfully completes a job, its consecutive `restarts` counter is automatically reset back to 0:
 
 ```v
 fut_b_retry := node_b <- process_batch(32, false)
 score_b_retry := fut_b_retry.await() or { 0.0 }
 ```
+
+### Stopped State & Dead-Letter Rejection
+If an actor suffers consecutive faults exceeding `max_restarts` (default: 3), it enters `VIRA_ACTOR_STOPPED`. Any further message dispatched to it fails immediately with `"Actor has stopped due to unhandled faults"`, protecting upstream callers from cascading failures. See [`docs/examples/32_actor_detached_and_lifecycle.vir`](../examples/32_actor_detached_and_lifecycle.vir) for a runnable demonstration.
 
 ---
 

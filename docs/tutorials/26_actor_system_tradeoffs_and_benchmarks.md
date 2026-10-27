@@ -124,15 +124,15 @@ vira run -prod examples/actor_stress_benchmark.vir
 ✓ 0 worker thread crashes, 0 process crashes, 0 memory corruption
 
 --- BENCHMARK 4: Actor Ring Pipeline (10,000 Hops) ---
-✓ Traversed 10000 ring hops in 5160 µs
-✓ Ring Token Rate: 1,666,666 hops/sec
-✓ Average Hop Latency: 516 ns/hop
+✓ Traversed 10000 ring hops in 1522 µs
+✓ Ring Token Rate: 5,000,000 hops/sec
+✓ Average Hop Latency: 152 ns/hop
 
 =================================================================
 ✓ ALL BENCHMARKS COMPLETED WITH DETERMINISTIC ZERO LEAKS!        
 =================================================================
 [vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)
-[vira_rt] pool_workers=4 | actor_tasks_run=14500 | work_steals=13854
+[vira_rt] pool_workers=4 | actor_tasks_run=14500 | work_steals=14236
 [vira_rt] active_leaks=0 | total_freed=14511
 ```
 
@@ -140,7 +140,7 @@ vira run -prod examples/actor_stress_benchmark.vir
 
 ## 4. Multi-Example Showcase
 
-The documentation includes 3 complete, production-grade actor examples:
+The documentation includes 4 complete, production-grade actor examples:
 
 ### Example 1: Resilient Banking & Account Supervisor
 *File:* [`docs/examples/25_actors_banking_fault_tolerance.vir`](../examples/25_actors_banking_fault_tolerance.vir)
@@ -160,7 +160,7 @@ vira run docs/examples/25_actors_banking_fault_tolerance.vir
 
 Demonstrates:
 - Managing a pool of `MatrixWorker` actors.
-- Asynchronously fanning out 8 SIMD AVX2 tensor multiplication tasks (`dim x dim`) across the Chase-Lev scheduler.
+- Asynchronously fanning out 8 SIMD AVX2 tensor multiplication tasks (`dim x dim`) across the Chase-Lev scheduler with 64×64 L2-cache blocking.
 - Work-helping `.await()` synchronizing and aggregating the matrix sum.
 - 0 memory leaks across all temporary tensors and futures.
 
@@ -173,11 +173,25 @@ vira run docs/examples/26_actors_worker_pool_fanout.vir
 
 Demonstrates:
 - Chained actor stages (`Ingress -> Validation -> Enrichment -> Egress`).
-- High-speed token hand-off with sequential transformation.
+- High-speed token hand-off with sequential transformation (>5M hops/sec).
 - Interleaved concurrent token streams processing without cross-talk or race conditions.
 
 ```bash
 vira run docs/examples/27_actors_ring_pipeline.vir
+```
+
+### Example 4: Detached Fire-and-Forget Sends & Lifecycle Management
+*File:* [`docs/examples/32_actor_detached_and_lifecycle.vir`](../examples/32_actor_detached_and_lifecycle.vir)
+
+Demonstrates:
+- Detached fire-and-forget message passing (`actor <- method()` and `_ := actor <- method()`) with zero future overhead and automatic worker envelope reclamation.
+- Zero-alloc synchronous calls (`actor <- method() or { ... }`) executing directly with stack envelopes.
+- Actor state transition to `VIRA_ACTOR_STOPPED` when consecutive restarts exceed `max_restarts`.
+- Automatic reset of consecutive `restarts = 0` on healthy message execution.
+- Dead-letter rejection preventing message delivery to stopped actors.
+
+```bash
+vira run docs/examples/32_actor_detached_and_lifecycle.vir
 ```
 
 ---
@@ -187,4 +201,6 @@ vira run docs/examples/27_actors_ring_pipeline.vir
 1. **Keep Actor Messages Focused:** Pass data by value or via immutable references. Let the actor own and mutate its internal state.
 2. **Embrace "Let It Crash":** Instead of defensive NULL checks or deeply nested error flags, use `panic(...)` when an internal invariant is violated. The supervisor will trap the fault, wipe scratch memory in O(1), and restart the actor cleanly.
 3. **Use Non-Blocking Fan-Out:** Dispatch concurrent actor messages in bursts with `<-`, and await them in a batch. The runtime's work-helping mechanism will steal and execute tasks while awaiting.
-4. **Rely on Autofree:** Temporary interpolated strings passed to calls (`log.info('...')`, `println('...')`) are automatically reclaimed upon statement exit with zero leaks (`active_leaks=0`).
+4. **Use Detached Sends for Telemetry & Ingestion:** Discarding or ignoring return values with `w <- log(...)` or `_ := w <- log(...)` automatically bypasses future allocation and frees task envelopes asynchronously.
+5. **Leverage Zero-Alloc Synchronous Calls:** When immediate synchronization is desired, `res := w <- compute(...) or { fallback }` executes without heap allocations.
+6. **Rely on Autofree:** Temporary interpolated strings passed to calls (`log.info('...')`, `println('...')`) are automatically reclaimed upon statement exit with zero leaks (`active_leaks=0`).

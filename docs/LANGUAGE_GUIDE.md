@@ -521,15 +521,16 @@ total := tensor_sum(y)
 
 The Vira runtime automatically selects the fastest available vector instructions:
 
-- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
-- **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
-- **Fallback:** Cache-blocked 8x8 tiling algorithm for portable C99 execution
+- **x86_64 AVX2 + FMA:** 256-bit vector registers (8 single-precision floats per cycle)
+- **AArch64 NEON:** 128-bit vector registers (4 single-precision floats per cycle)
+- **x86_64 SSE2:** 128-bit vector registers (4 single-precision floats per cycle)
+- **L2 Cache Blocking:** Hierarchical 64×64 cache-tiled matrix multiplication (`@`) keeping intermediate submatrices resident within L1/L2 data cache across all SIMD backends.
 
 ---
 
 ## 9. Actor Concurrency & Fault Supervision
 
-Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads.
+Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads and microservices.
 
 ### Actor Definition
 
@@ -558,19 +559,18 @@ pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
 
 ---
 
-### Message Passing (`<-`) & Futures
+### Message Passing Modes (`<-`)
 
-Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
+Vira supports three execution modes for message passing:
+
+#### 1. Asynchronous with Futures (`fut := actor <- method()`)
+Dispatches a message onto the Chase-Lev work-stealing pool immediately returning a `Future[T]` handle. The calling thread continues execution without blocking:
 
 ```v
-mut w1 := AIWorker{ id: 1, batches_run: 0 }
-mut w2 := AIWorker{ id: 2, batches_run: 0 }
-
-// Asynchronous parallel fan-out
 fut1 := w1 <- predict(2.0, false)
-fut2 := w2 <- predict(3.0, true) // Will simulate fault
+fut2 := w2 <- predict(3.0, true) // Fault injected
 
-// Non-blocking work-stealing await
+// Non-blocking work-stealing await with cooperative work helping
 res1 := fut1.await() or { 0.0 }
 res2 := fut2.await() or {
     println('Worker 2 faulted: ${err}')
@@ -578,24 +578,54 @@ res2 := fut2.await() or {
 }
 ```
 
+#### 2. Detached Fire-and-Forget Sends (`actor <- method()`)
+When the return value is not needed (e.g. background logging, metrics emission, fire-and-forget ingestion), dispatch the call as a standalone statement or discard the handle with `_ :=`:
+
+```v
+w1 <- predict(1.0, false)       // Standalone statement send
+_ := w2 <- predict(1.5, false)  // Discarded binding
+```
+
+The compiler routes both forms to `_send_detached_` (`done = -1`). The background worker thread automatically frees the task envelope upon completion without creating or tracking a `Future[T]`, delivering maximum throughput with zero memory leaks (`active_leaks = 0`).
+
+#### 3. Zero-Alloc Synchronous Calls (`res := actor <- method() or { ... }`)
+When the caller immediately unwraps an actor call with `or { ... }`, the compiler optimizes the dispatch into a zero-allocation synchronous call. The envelope is allocated on the caller's stack frame, eliminating heap `malloc`/`free` overhead while maintaining supervisor fault containment.
+
+```v
+sync_res := w1 <- predict(2.5, false) or { 0.0 }
+```
+
 ---
 
-### Lock-Free Work-Stealing Pool
+### Lock-Free Work-Stealing Pool & Cache Optimization
 
-- Tasks are submitted to a pool of worker threads sized to `min(CPU cores, 16)`.
-- Each worker maintains a lock-free **Chase-Lev deque**.
-- Idle workers automatically steal tasks from overloaded workers using atomic compare-and-swap operations.
+- Tasks are submitted to a multicore pool of worker threads sized to `min(CPU cores, 16)`.
+- **Chase-Lev Deques with Cacheline Separation:** Worker deques place `top` and `bottom` pointers on separate 64-byte cachelines (`_Alignas(64)`), eliminating false sharing under high concurrency.
+- **Round-Robin Task Distribution:** External submissions utilize an isolated cacheline round-robin cursor to balance queue pressure across all workers.
+- **Monotonic Clocks:** Condition variables synchronize using `CLOCK_MONOTONIC` to ensure deterministic parking and wake-ups immune to system clock shifts.
+- **Work-Helping Await:** Calling `fut.await()` causes the awaiting thread to steal and execute pending tasks from victim deques instead of sleeping.
 
 ---
 
-### Erlang-Style Fault Boundaries (`panic` & `OneForOne`)
+### Erlang-Style Fault Boundaries & Actor Lifecycle
 
-When an actor encounters a `panic('...')`:
+Actors follow an Erlang-inspired supervision lifecycle:
 
-1. The per-thread TLS fault boundary (`setjmp`/`longjmp`) intercepts the panic before it can crash the process.
-2. The actor's isolated scratch arena is wiped in **O(1)** time.
-3. The supervisor applies a `OneForOne` restart strategy, resetting internal state and logging the trapped error.
-4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
+```
+[VIRA_ACTOR_RUNNING] ──(panic)──► [VIRA_ACTOR_FAULTED]
+         ▲                               │
+         │ (restarts < max_restarts)     │ (restarts >= max_restarts)
+         └─── [OneForOne Restart] ◄──────┴────────► [VIRA_ACTOR_STOPPED]
+                                                           │
+                                                           ▼
+                                                [Dead-Letter Rejection]
+```
+
+1. **Panic Interception:** Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process.
+2. **O(1) Arena Wipe:** The actor's private scratch arena slab is cleared in $O(1)$ time (`isolated_heap.offset = 0`), wiping temporary tensors and state.
+3. **OneForOne Restart:** If consecutive restarts are below `max_restarts` (default: 3), the supervisor increments the restart counter, executes `_supervisor_reset(&self)`, and restores the actor to `VIRA_ACTOR_RUNNING`.
+4. **Consecutive Fault Reset:** A successful message execution resets consecutive `restarts = 0`, ensuring intermittent faults across long-running services do not accumulate toward the limit.
+5. **Dead-Letter Containment (`VIRA_ACTOR_STOPPED`):** If an actor suffers consecutive faults exceeding `max_restarts`, it transitions to `VIRA_ACTOR_STOPPED`. Subsequent message attempts are immediately rejected with error `"Actor has stopped due to unhandled faults"`, protecting downstream queues from cascade failures.
 
 ```text
 [vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]

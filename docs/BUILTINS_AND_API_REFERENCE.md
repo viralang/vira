@@ -275,11 +275,24 @@ response := fut.await() or {
 }
 ```
 
-### Fire-and-Forget
-If the return value is not needed, discard the future with `_`:
+### Detached Fire-and-Forget Sends
+If the return value is not needed, dispatch the send as a standalone statement or discard the handle with `_ :=`:
 ```v
-_ := gw <- handle_request(99)
+gw <- handle_request(99)       // Standalone statement send
+_ := gw <- handle_request(100) // Discarded binding
 ```
+Both forms compile to `_send_detached_` (`done = -1`). The runtime worker thread automatically frees the task envelope upon completion without creating a `Future[T]` handle or leaking memory (`active_leaks = 0`).
+
+### Zero-Alloc Synchronous Shorthand
+When an actor message is directly unwrapped with `or { ... }`, the compiler eliminates heap envelope allocation, executing synchronously with a stack-allocated envelope:
+```v
+res := gw <- handle_request(101) or { 'fallback' }
+```
+
+### Actor Lifecycle & Fault Containment
+- **`VIRA_ACTOR_RUNNING`**: Default operational state.
+- **Intermittent Fault Recovery**: Panics trigger $O(1)$ isolated scratch arena wipes and `OneForOne` state resets. A subsequent successful message execution resets consecutive `restarts = 0`.
+- **`VIRA_ACTOR_STOPPED`**: If consecutive faults exceed `max_restarts` (default: 3), the actor stops permanently. Subsequent message sends are rejected with `"Actor has stopped due to unhandled faults"`.
 
 ---
 

@@ -50,6 +50,7 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`29_stdlib_net_http_server.vir`](./29_stdlib_net_http_server.vir)** | Standard Library Networking & HTTP Server | `packages/net` (TCP streams, loopback listener), `packages/http` (HttpServer, request parsing, response formatting), and switch statement routing with 0 leaks. |
 | **[`30_switch_statement.vir`](./30_switch_statement.vir)** | Switch Statements & Pattern Branching | Multi-branch switching on integer codes, string routes, comma-separated multiple matches, tagless boolean condition switches, and deterministic autofree safety. |
 | **[`31_package_namespacing_and_modules.vir`](./31_package_namespacing_and_modules.vir)** | First-Class Package Namespacing & Modules | Module declarations (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, and cryptographic `vira.lock` dependency locking. |
+| **[`32_actor_detached_and_lifecycle.vir`](./32_actor_detached_and_lifecycle.vir)** | Actor Detached Sends & Lifecycle Management | Detached fire-and-forget messaging (`w <- method()`), zero-alloc synchronous execution (`w <- method() or { ... }`), supervisor restart count reset on healthy run, `VIRA_ACTOR_STOPPED` dead-letter rejection, and 0 memory leaks. |
 
 ---
 
@@ -82,7 +83,12 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/22_gui_navigation_lifecycle.vir
 .\vira.exe run docs/examples/23_multi_package_architecture.vir
 .\vira.exe run docs/examples/24_package_management_consumer.vir
+.\vira.exe run docs/examples/25_actors_banking_fault_tolerance.vir
+.\vira.exe run docs/examples/26_actors_worker_pool_fanout.vir
+.\vira.exe run docs/examples/27_actors_ring_pipeline.vir
 .\vira.exe run docs/examples/28_native_collections.vir
 .\vira.exe run docs/examples/29_stdlib_net_http_server.vir
 .\vira.exe run docs/examples/30_switch_statement.vir
+.\vira.exe run docs/examples/31_package_namespacing_and_modules.vir
+.\vira.exe run docs/examples/32_actor_detached_and_lifecycle.vir
 ```

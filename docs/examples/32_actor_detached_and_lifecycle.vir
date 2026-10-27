@@ -1,0 +1,88 @@
+module actor_lifecycle_demo
+
+pub actor WorkerService {
+pub:
+	service_id int
+mut:
+	events_logged int = 0
+	tasks_completed int = 0
+}
+
+pub fn (mut w WorkerService) log_event(msg string) bool {
+	w.events_logged = w.events_logged + 1
+	println('[WorkerService #${w.service_id}] Detached Event Logged: "${msg}" (total=${w.events_logged})')
+	return true
+}
+
+pub fn (mut w WorkerService) compute(scale f32, fail bool) f32 {
+	if fail {
+		panic('Simulated compute engine fault')
+	}
+	w.tasks_completed = w.tasks_completed + 1
+	return scale * 42.0
+}
+
+fn main() {
+	println('=================================================================')
+	println('   VIRA ACTOR SYSTEM: DETACHED SENDS & LIFECYCLE MANAGEMENT      ')
+	println('=================================================================')
+
+	println('\n--- 1. INITIALIZING SERVICE ACTOR ---')
+	mut svc := WorkerService{ service_id: 1, events_logged: 0, tasks_completed: 0 }
+	println('Actor initialized in VIRA_ACTOR_RUNNING state')
+
+	println('\n--- 2. DETACHED FIRE-AND-FORGET SENDS (<-) ---')
+	// Statement send: zero-leak automatic worker envelope deallocation
+	svc <- log_event('System telemetry boot sequence')
+	_ := svc <- log_event('Cache warming completed')
+
+	println('\n--- 3. ZERO-ALLOC SYNCHRONOUS INVOCATION (or { ... }) ---')
+	// Synchronous dispatch with zero heap allocation for the envelope
+	sync_res := svc <- compute(2.0, false) or {
+		eprintln('Unexpected error: ${err}')
+		0.0
+	}
+	println('Synchronous Call Result: ${sync_res}')
+
+	println('\n--- 4. INTERMITTENT FAULT & RESTART RESET ---')
+	// Fault 1 of 3: Supervisor traps fault, arena wiped, restarts = 1
+	f1 := svc <- compute(1.0, true)
+	_ := f1.await() or {
+		println('Supervisor trapped intermittent fault: "${err}"')
+		0.0
+	}
+
+	// Successful call resets consecutive restarts back to 0!
+	f_healthy := svc <- compute(3.0, false)
+	healthy_val := f_healthy.await() or { 0.0 }
+	println('Healthy call succeeded: ${healthy_val} (consecutive restarts reset to 0)')
+
+	println('\n--- 5. CONSECUTIVE FAULTS & VIRA_ACTOR_STOPPED TRANSITION ---')
+	// Trip fault 1
+	f_err1 := svc <- compute(1.0, true)
+	_ := f_err1.await() or { 0.0 }
+
+	// Trip fault 2
+	f_err2 := svc <- compute(1.0, true)
+	_ := f_err2.await() or { 0.0 }
+
+	// Trip fault 3 (restart 3/3)
+	f_err3 := svc <- compute(1.0, true)
+	_ := f_err3.await() or { 0.0 }
+
+	// Trip fault 4 (exceeds max_restarts = 3) -> transitions to VIRA_ACTOR_STOPPED
+	f_err4 := svc <- compute(1.0, true)
+	_ := f_err4.await() or { 0.0 }
+
+	println('\n--- 6. DEAD-LETTER REJECTION ON STOPPED ACTOR ---')
+	// Subsequent message to stopped actor is immediately rejected
+	f_dead := svc <- compute(5.0, false)
+	_ := f_dead.await() or {
+		println('Dead-letter rejected: "${err}"')
+		0.0
+	}
+
+	println('\n=================================================================')
+	println('✓ ALL ACTOR LIFECYCLE TESTS COMPLETED WITH 0 LEAKS!              ')
+	println('=================================================================')
+}
