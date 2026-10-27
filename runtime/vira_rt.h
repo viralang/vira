@@ -1146,7 +1146,21 @@ static inline void vira_panic(vira_string msg) {
     if (!_vira_tls_actor->last_error.is_lit && _vira_tls_actor->last_error.data != NULL) {
       vira_str_free(&_vira_tls_actor->last_error);
     }
-    _vira_tls_actor->last_error = vira_str_clone(msg);
+    uintptr_t p = (uintptr_t)msg.data;
+    uintptr_t arena_start = (uintptr_t)_vira_tls_actor->isolated_heap.buf;
+    uintptr_t arena_end = arena_start + (uintptr_t)_vira_tls_actor->isolated_heap.cap;
+    if (p >= arena_start && p < arena_end) {
+      char *buf = (char *)malloc((size_t)msg.len + 1);
+      if (buf != NULL) {
+        memcpy(buf, msg.data, (size_t)msg.len);
+        buf[msg.len] = '\0';
+        _vira_record_alloc();
+      }
+      _vira_tls_actor->last_error = (vira_string){
+          .data = (const uint8_t *)buf, .len = msg.len, .is_lit = false};
+    } else {
+      _vira_tls_actor->last_error = msg;
+    }
     longjmp(_vira_tls_actor->fault_boundary, 1);
   }
   fprintf(stderr, "vira unrecoverable panic: %.*s\n", msg.len,
