@@ -13,11 +13,11 @@ import http
 
 fn route_handler(req http.Request) http.Response {
 	println('• Route handler received: ${req.method} ${req.path}')
-	
+
 	switch req.path {
-	case '/api/v1/status':
+		case '/api/v1/status':
 		return http.Response.json('{"system":"ok","version":"0.5.9-dev","namespacing":true}')
-	case '/api/v1/ping':
+		case '/api/v1/ping':
 		return http.Response.text('pong')
 	default:
 		return http.Response.with_status(404, '{"error":"route_not_found"}')

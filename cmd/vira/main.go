@@ -806,7 +806,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 				}
 				if info.IsDir() {
 					base := filepath.Base(path)
-					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" || (base == "examples" && !strings.Contains(absTarget, string(filepath.Separator)+"examples"+string(filepath.Separator))) {
+					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" || base == "examples" {
 						return filepath.SkipDir
 					}
 					return nil
@@ -924,11 +924,12 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		}
 	}
 
-	if manifest != nil && manifest.Module != "" {
-		firstMod.Name = manifest.Module
-	}
 	if firstMod.Name == "" {
-		firstMod.Name = "main"
+		if manifest != nil && manifest.Module != "" {
+			firstMod.Name = manifest.Module
+		} else {
+			firstMod.Name = "main"
+		}
 	}
 
 	// In test mode: synthesize a test runner main() if none is defined

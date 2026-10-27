@@ -42,6 +42,7 @@ type TrackedVar struct {
 type LexicalScope struct {
 	Parent  *LexicalScope
 	InArena bool
+	IsLoop  bool
 	Vars    []*TrackedVar
 }
 
@@ -199,6 +200,15 @@ func (a *Analyzer) rewriteBlock(
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			rewritten = append(rewritten, preStmts...)
 
+			// If initialized from an existing local variable `b := a`, transfer ownership
+			if s.Name.Name != "_" {
+				if ident, ok := s.Value.(*ast.IdentExpr); ok {
+					if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
+						srcVar.State = StateMovedToContainer
+					}
+				}
+			}
+
 			// 2. Register variable in current scope if its type owns heap memory
 			valType := a.chk.ExprTypes[s.Value]
 			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
@@ -231,18 +241,53 @@ func (a *Analyzer) rewriteBlock(
 		case *ast.AssignStmt:
 			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
+					srcVar.State = StateMovedToContainer
+				}
+			}
 			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
 			rewritten = append(rewritten, postStmts...)
 
 		case *ast.IfStmt:
-			thenScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			a.inspectExprMovesAndOrBlocks(s.Cond, scope, report)
+			preStmts, postStmts := a.hoistTemporaryStrings(s.Cond, scope, report, false)
+			rewritten = append(rewritten, preStmts...)
+
+			condScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			for _, pre := range preStmts {
+				if vdecl, ok := pre.(*ast.VarDeclStmt); ok {
+					valType := a.chk.ExprTypes[vdecl.Value]
+					if needsFree, kind := a.typeNeedsCleanup(valType); needsFree {
+						tv := &TrackedVar{
+							Name:        vdecl.Name.Name,
+							Type:        valType,
+							CleanupKind: kind,
+							State:       StateScopedLocal,
+							DeclSpan:    vdecl.StmtSpan,
+						}
+						condScope.Vars = append(condScope.Vars, tv)
+						report.TrackedVars = append(report.TrackedVars, tv)
+					}
+				}
+			}
+
+			thenScope := &LexicalScope{Parent: condScope, InArena: scope.InArena}
 			a.rewriteBlock(s.Then, thenScope, false, report)
 			if s.Else != nil {
-				elseScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+				elseScope := &LexicalScope{Parent: condScope, InArena: scope.InArena}
 				a.rewriteBlock(s.Else, elseScope, false, report)
 			}
 			rewritten = append(rewritten, s)
+			for _, post := range postStmts {
+				if df, ok := post.(*ast.DeferFreeStmt); ok {
+					if tv := condScope.Find(df.VarName); tv != nil {
+						tv.State = StateMovedToContainer
+					}
+				}
+			}
+			rewritten = append(rewritten, postStmts...)
 
 		case *ast.SwitchStmt:
 			if s.Tag != nil {
@@ -261,7 +306,7 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.ForStmt:
-			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena, IsLoop: true}
 			if s.Init != nil {
 				if vdecl, ok := s.Init.(*ast.VarDeclStmt); ok {
 					valType := a.chk.ExprTypes[vdecl.Value]
@@ -286,12 +331,19 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.ForInStmt:
-			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			loopScope := &LexicalScope{Parent: scope, InArena: scope.InArena, IsLoop: true}
 			a.rewriteBlock(s.Body, loopScope, false, report)
 			rewritten = append(rewritten, s)
 
 		case *ast.BranchStmt:
+			// Unwind active scopes up to and including the innermost loop body scope
+			frees := a.collectLoopFrees(scope, fmt.Sprintf("before %s", s.Tok.String()))
+			for _, f := range frees {
+				rewritten = append(rewritten, f)
+				report.InjectedFrees = append(report.InjectedFrees, f)
+			}
 			rewritten = append(rewritten, s)
+			diverged = true
 
 		case *ast.ArenaStmt:
 			a.arenaCounter++
@@ -312,9 +364,13 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.ReturnStmt:
+			skipVar := ""
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				if tv := scope.Find(ident.Ident.Name); tv != nil {
-					tv.State = StateEscapesViaReturn
+				skipVar = ident.Ident.Name
+				if isFnRoot {
+					if tv := scope.Find(ident.Ident.Name); tv != nil {
+						tv.State = StateEscapesViaReturn
+					}
 				}
 			} else if s.Value != nil {
 				a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
@@ -346,12 +402,13 @@ func (a *Analyzer) rewriteBlock(
 
 						rewritten = append(rewritten, varDecl)
 						s.Value = identExpr
+						skipVar = tmpName
 					}
 				}
 			}
 
-			// Unwind all active scopes up to function root in LIFO order before `return`
-			frees := a.collectScopeChainFrees(scope, "before return")
+			// Unwind all active scopes up to function root in LIFO order before `return` (except returned var)
+			frees := a.collectScopeChainFreesExcept(scope, skipVar, "before return")
 			for _, f := range frees {
 				rewritten = append(rewritten, f)
 				report.InjectedFrees = append(report.InjectedFrees, f)
@@ -486,6 +543,77 @@ func (a *Analyzer) hoistTemporaryStrings(
 	return preStmts, postStmts
 }
 
+func (a *Analyzer) maybeHoistSubExpr(
+	expr ast.Expr,
+	preStmts *[]ast.Stmt,
+	postFrees *[]*ast.DeferFreeStmt,
+	report *FnReport,
+) ast.Expr {
+	if expr == nil {
+		return nil
+	}
+	if interp, ok := expr.(*ast.StringInterpExpr); ok {
+		a.tmpCounter++
+		tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
+		tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
+		varDecl := &ast.VarDeclStmt{
+			Name:     tmpIdent,
+			Value:    interp,
+			IsMut:    false,
+			StmtSpan: interp.Span(),
+		}
+		a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+		identExpr := &ast.IdentExpr{Ident: tmpIdent}
+		a.chk.ExprTypes[identExpr] = checker.TypeString
+
+		freeStmt := &ast.DeferFreeStmt{
+			VarName:  tmpName,
+			TypeName: "string",
+			Kind:     ast.CleanupString,
+			Reason:   "zero-leak temporary string operand cleanup",
+			StmtSpan: interp.Span(),
+		}
+		*preStmts = append(*preStmts, varDecl)
+		*postFrees = append(*postFrees, freeStmt)
+		report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+		return identExpr
+	}
+
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if sel, isSel := call.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
+			return expr
+		}
+		retType := a.chk.ExprTypes[call]
+		if retType != nil && retType.Equals(checker.TypeString) {
+			a.tmpCounter++
+			tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
+			tmpIdent := ast.Ident{Name: tmpName, NamePos: call.Span()}
+			varDecl := &ast.VarDeclStmt{
+				Name:     tmpIdent,
+				Value:    call,
+				IsMut:    false,
+				StmtSpan: call.Span(),
+			}
+			a.chk.ExprTypes[varDecl.Value] = checker.TypeString
+			identExpr := &ast.IdentExpr{Ident: tmpIdent}
+			a.chk.ExprTypes[identExpr] = checker.TypeString
+
+			freeStmt := &ast.DeferFreeStmt{
+				VarName:  tmpName,
+				TypeName: "string",
+				Kind:     ast.CleanupString,
+				Reason:   "zero-leak temporary string operand cleanup",
+				StmtSpan: call.Span(),
+			}
+			*preStmts = append(*preStmts, varDecl)
+			*postFrees = append(*postFrees, freeStmt)
+			report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+			return identExpr
+		}
+	}
+	return expr
+}
+
 func (a *Analyzer) walkAndHoistCallArgs(
 	expr ast.Expr,
 	preStmts *[]ast.Stmt,
@@ -500,9 +628,16 @@ func (a *Analyzer) walkAndHoistCallArgs(
 		isContainerStore := false
 		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel {
 			switch sel.Field.Name {
-			case "push", "append", "set", "insert", "add", "set_header":
+			case "push", "append", "set", "insert", "add", "set_header", "json", "ok", "text", "html", "with_status", "not_found", "bad_request", "internal_error":
 				isContainerStore = true
 			}
+		}
+		callRetType := a.chk.ExprTypes[e]
+		if resType, isRes := callRetType.(*checker.ResultType); isRes {
+			callRetType = resType.Inner
+		}
+		if _, isStruct := callRetType.(*checker.StructType); isStruct {
+			isContainerStore = true
 		}
 		if isContainerStore {
 			return
@@ -515,76 +650,21 @@ func (a *Analyzer) walkAndHoistCallArgs(
 			// 1. Recursively walk nested subexpressions
 			a.walkAndHoistCallArgs(arg.Expr, preStmts, postFrees, report)
 
-			// 2. Hoist StringInterpExpr passed as argument
-			if interp, ok := arg.Expr.(*ast.StringInterpExpr); ok {
-				a.tmpCounter++
-				tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
-				tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
-				varDecl := &ast.VarDeclStmt{
-					Name:     tmpIdent,
-					Value:    interp,
-					IsMut:    false,
-					StmtSpan: interp.Span(),
-				}
-				a.chk.ExprTypes[varDecl.Value] = checker.TypeString
-				identExpr := &ast.IdentExpr{Ident: tmpIdent}
-				a.chk.ExprTypes[identExpr] = checker.TypeString
-
-				freeStmt := &ast.DeferFreeStmt{
-					VarName:  tmpName,
-					TypeName: "string",
-					Kind:     ast.CleanupString,
-					Reason:   "zero-leak temporary string argument cleanup",
-					StmtSpan: interp.Span(),
-				}
-				*preStmts = append(*preStmts, varDecl)
-				*postFrees = append(*postFrees, freeStmt)
-				report.InjectedFrees = append(report.InjectedFrees, freeStmt)
-				arg.Expr = identExpr
-			} else if callArg, isCall := arg.Expr.(*ast.CallExpr); isCall {
-				// Do not hoist and free .clone() calls because clone() produces an owned copy
-				if sel, isSel := callArg.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
-					continue
-				}
-				// 3. Hoist CallExpr returning string passed as argument
-				retType := a.chk.ExprTypes[callArg]
-				if retType != nil && retType.Equals(checker.TypeString) {
-					a.tmpCounter++
-					tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
-					tmpIdent := ast.Ident{Name: tmpName, NamePos: callArg.Span()}
-					varDecl := &ast.VarDeclStmt{
-						Name:     tmpIdent,
-						Value:    callArg,
-						IsMut:    false,
-						StmtSpan: callArg.Span(),
-					}
-					a.chk.ExprTypes[varDecl.Value] = checker.TypeString
-					identExpr := &ast.IdentExpr{Ident: tmpIdent}
-					a.chk.ExprTypes[identExpr] = checker.TypeString
-
-					freeStmt := &ast.DeferFreeStmt{
-						VarName:  tmpName,
-						TypeName: "string",
-						Kind:     ast.CleanupString,
-						Reason:   "zero-leak temporary string call argument cleanup",
-						StmtSpan: callArg.Span(),
-					}
-					*preStmts = append(*preStmts, varDecl)
-					*postFrees = append(*postFrees, freeStmt)
-					report.InjectedFrees = append(report.InjectedFrees, freeStmt)
-					arg.Expr = identExpr
-				}
-			}
+			// 2. Hoist temporary string if applicable
+			arg.Expr = a.maybeHoistSubExpr(arg.Expr, preStmts, postFrees, report)
 		}
 		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
 			a.walkAndHoistCallArgs(sel.Left, preStmts, postFrees, report)
 		}
 
 	case *ast.BinaryExpr:
+		e.Left = a.maybeHoistSubExpr(e.Left, preStmts, postFrees, report)
+		e.Right = a.maybeHoistSubExpr(e.Right, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Left, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Right, preStmts, postFrees, report)
 
 	case *ast.UnaryExpr:
+		e.Expr = a.maybeHoistSubExpr(e.Expr, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Expr, preStmts, postFrees, report)
 
 	case *ast.SelectorExpr:
@@ -592,11 +672,14 @@ func (a *Analyzer) walkAndHoistCallArgs(
 	}
 }
 
-// collectSingleScopeFrees emits LIFO destructors for variables in a single block scope.
-func (a *Analyzer) collectSingleScopeFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+// collectSingleScopeFreesExcept emits LIFO destructors for variables in a single block scope, skipping skipVar.
+func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar string, reason string) []*ast.DeferFreeStmt {
 	var frees []*ast.DeferFreeStmt
 	for i := len(scope.Vars) - 1; i >= 0; i-- {
 		tv := scope.Vars[i]
+		if skipVar != "" && tv.Name == skipVar {
+			continue
+		}
 		if tv.State == StateScopedLocal {
 			frees = append(frees, &ast.DeferFreeStmt{
 				VarName:  tv.Name,
@@ -610,13 +693,35 @@ func (a *Analyzer) collectSingleScopeFrees(scope *LexicalScope, reason string) [
 	return frees
 }
 
-// collectScopeChainFrees walks from the current scope up to the function root in LIFO order for early returns.
-func (a *Analyzer) collectScopeChainFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+// collectScopeChainFreesExcept walks from the current scope up to the function root in LIFO order for early returns, skipping skipVar.
+func (a *Analyzer) collectScopeChainFreesExcept(scope *LexicalScope, skipVar string, reason string) []*ast.DeferFreeStmt {
 	var frees []*ast.DeferFreeStmt
 	for cur := scope; cur != nil; cur = cur.Parent {
-		frees = append(frees, a.collectSingleScopeFrees(cur, reason)...)
+		frees = append(frees, a.collectSingleScopeFreesExcept(cur, skipVar, reason)...)
 	}
 	return frees
+}
+
+// collectLoopFrees unwinds active scopes up to and including the innermost loop body scope.
+func (a *Analyzer) collectLoopFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+	var frees []*ast.DeferFreeStmt
+	for cur := scope; cur != nil; cur = cur.Parent {
+		frees = append(frees, a.collectSingleScopeFreesExcept(cur, "", reason)...)
+		if cur.IsLoop {
+			break
+		}
+	}
+	return frees
+}
+
+// collectSingleScopeFrees emits LIFO destructors for variables in a single block scope.
+func (a *Analyzer) collectSingleScopeFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+	return a.collectSingleScopeFreesExcept(scope, "", reason)
+}
+
+// collectScopeChainFrees walks from the current scope up to the function root in LIFO order for early returns.
+func (a *Analyzer) collectScopeChainFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
+	return a.collectScopeChainFreesExcept(scope, "", reason)
 }
 
 // FormatReport renders a human-readable summary of struct destructors, escape states, and injected frees.

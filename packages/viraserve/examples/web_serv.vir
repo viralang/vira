@@ -1,0 +1,60 @@
+module main
+
+import net
+import http
+
+fn main() {
+	// 1. Bind HTTP server to localhost on port 8080
+	mut server := http.HttpServer.bind('127.0.0.1:8181') or {
+		panic('Failed to bind server on 127.0.0.1:8181: ${err}')
+	}
+	println('===========================================================')
+	println('       VIRA LIVE HTTP WEB APPLICATION SERVER               ')
+	println('===========================================================')
+	println('• Listening on: http://127.0.0.1:8181')
+	println('• Available routes:')
+	println('    GET  /           - Home HTML Dashboard')
+	println('    GET  /api/status - JSON Health & Status API')
+	println('    POST /api/echo   - Echo JSON Payload')
+	println('• Ready to accept incoming requests. Press Ctrl+C to stop.')
+	println('===========================================================')
+
+	// 2. Continuous request processing loop
+	for server.is_running {
+		mut ctx := server.accept_request() or {
+			continue
+		}
+
+		println('[server] Incoming ${ctx.req.method} ${ctx.req.path}')
+
+		mut res := http.Response.new()
+
+		// 3. Route dispatching using switch
+		switch ctx.req.method {
+			case 'GET':
+			switch ctx.req.path {
+				case '/':
+				html := '<!DOCTYPE html><html><head><title>Vira Web Server</title></head><body><h1>Welcome to Vira Web Server!</h1><p>Fast, memory-safe, compiled without GC pauses.</p></body></html>'
+				res = http.Response.ok(html, 'text/html')
+				case '/api/register':
+				res = http.Response.json('{"service":"vira_web_app","status":"healthy","code":200}')
+			default:
+				res = http.Response.not_found('Page not found')
+			}
+			case 'POST':
+			switch ctx.req.path {
+				case '/api/echo':
+				res = http.Response.json('{"received":"${ctx.req.body}"}')
+			default:
+				res = http.Response.not_found('Endpoint not found')
+			}
+		default:
+			res = http.Response.with_status(405, '{"error":"method_not_allowed"}')
+		}
+
+		// 4. Respond to client and close connection
+		ctx.respond(res) or {
+			continue
+		}
+	}
+}

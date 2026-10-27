@@ -1,0 +1,14 @@
+module main
+
+import "viraserve"
+
+fn main() {
+	arena{
+		mut app := ViraServe.new('ProductionAPI', 8181)
+		app.print_banner()
+		app.listen_and_serve() or {
+			panic('Failed to run server: ${err}')
+		}
+	}
+
+}

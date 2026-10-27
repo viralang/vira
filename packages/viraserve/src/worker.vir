@@ -16,7 +16,10 @@ pub fn (mut w RequestWorker) execute_route(route_id int, method string, path str
 	}
 
 	if route_id == RouteID.health() {
-		return '{"status":"UP","worker_id":${w.worker_id},"handled":${w.requests_handled},"checks":{"pool":"healthy","autofree":"zero_leaks"}}'
+		arena{
+			return '{"status":"UP","worker_id":${w.worker_id},"handled":${w.requests_handled},"checks":{"pool":"healthy","autofree":"zero_leaks"}}'
+		}
+
 	}
 
 	if route_id == RouteID.metrics() {

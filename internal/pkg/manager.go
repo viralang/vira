@@ -135,12 +135,17 @@ func ResolveImportCandidates(fileDir string, projectRoot string, impTarget strin
 
 	// 3. Standard library packages (packages/<impTarget>/src, packages/<impTarget>)
 	stdRoots := []string{}
-	for d := fileDir; d != "" && d != "." && d != "/"; d = filepath.Dir(d) {
+	for d := fileDir; d != "" && d != "." && d != "/" && d != "\\" && d != string(filepath.Separator); {
 		pkgCandidate := filepath.Join(d, "packages")
 		if info, err := os.Stat(pkgCandidate); err == nil && info.IsDir() {
 			stdRoots = append(stdRoots, pkgCandidate)
 			break
 		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
 	}
 	if checkRoot != "" {
 		stdRoots = append(stdRoots, filepath.Join(checkRoot, "packages"))

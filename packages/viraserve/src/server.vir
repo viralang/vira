@@ -55,10 +55,37 @@ pub fn (mut s ViraServe) serve_one(mut server http.HttpServer) !bool {
 	}
 	req := Request.new(ctx.req.method.clone(), ctx.req.path.clone(), ctx.req.query.clone(), ctx.req.body.clone(), 0)
 	res := s.dispatch_request(req)
-	n := ctx.respond(http.Response.with_status(res.status_code, res.body.clone())) or {
+	mut http_res := http.Response.with_status(res.status_code, res.body.clone())
+	if res.content_type != '' {
+		http_res.headers.set('Content-Type', res.content_type.clone())
+	}
+	n := ctx.respond(http_res) or {
 		return error(err)
 	}
 	return n > 0
+}
+
+pub fn (mut s ViraServe) serve(mut server http.HttpServer) !bool {
+	for server.is_running {
+		s.serve_one(mut server) or {
+			continue
+		}
+	}
+	return true
+}
+
+pub fn (mut s ViraServe) listen_and_serve() !bool {
+	addr := '127.0.0.1:${s.port}'
+	mut server := http.HttpServer.bind(addr) or {
+		return error('failed to bind HTTP server on ${addr}: ${err}')
+	}
+	println('• Listening on: http://${addr}')
+	println('• Ready to accept incoming requests. Press Ctrl+C to stop.\n')
+
+	ok := s.serve(mut server) or {
+		return error(err)
+	}
+	return ok
 }
 
 pub fn (s ViraServe) print_banner() {

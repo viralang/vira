@@ -481,7 +481,7 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 	searchDir := ""
 	if pRoot != "" {
 		searchDir = pRoot
-	} else if fileDir != "" && fileDir != "/" && fileDir != "." && !(len(fileDir) <= 3 && strings.Contains(fileDir, ":")) {
+	} else if fileDir != "" && fileDir != "/" && fileDir != "\\" && fileDir != string(filepath.Separator) && fileDir != "." && !(len(fileDir) <= 3 && strings.Contains(fileDir, ":")) {
 		if fi, err := os.Stat(fileDir); err == nil && fi.IsDir() {
 			searchDir = fileDir
 		}
@@ -822,7 +822,6 @@ func formatTypeExpr(t ast.TypeExpr) string {
 	default:
 		return "unknown"
 	}
-	return "unknown"
 }
 
 func getEmbedInfo(emb ast.TypeExpr) (string, token.Span) {

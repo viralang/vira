@@ -1238,4 +1238,154 @@ fn test_sw(x int, s string) int {
 	}
 }
 
+func TestAutofreeBugRegressions(t *testing.T) {
+	src := `
+module regressions
+
+fn test_break_and_continue() {
+	mut i := 0
+	for i < 5 {
+		s := 'iter ${i}'
+		if i == 1 {
+			i = i + 1
+			continue
+		}
+		if i == 3 {
+			break
+		}
+		_ := s
+		i = i + 1
+	}
+}
+
+fn test_maybe_return(flag bool) string {
+	s := 'owned ${flag}'
+	if flag {
+		return s
+	}
+	_ := s
+	return 'literal'
+}
+
+fn test_alias_copy() {
+	a := 'heap ${42}'
+	b := a
+	_ := b
+}
+
+fn test_condition_temporaries() {
+	name := 'Content-Type'
+	mut hits := 0
+	mut i := 0
+	for i < 10 {
+		if name.to_lower() == 'content-type' {
+			hits = hits + 1
+		}
+		i = i + 1
+	}
+	_ := hits
+}
+
+pub struct Item {
+pub:
+	msg string
+}
+
+fn make_item(s string) Item {
+	return Item{ msg: s }
+}
+
+fn test_struct_constructor_string() {
+	tag := 'world'
+	it := make_item('hello ${tag}')
+	if it.msg != 'hello world' {
+		panic('msg mismatch')
+	}
+}
+
+fn main() {
+	test_break_and_continue()
+	r1 := test_maybe_return(true)
+	_ := r1
+	r2 := test_maybe_return(false)
+	_ := r2
+	test_alias_copy()
+	test_condition_temporaries()
+	test_struct_constructor_string()
+}
+`
+	p := parser.New(src)
+	astFile := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("parse errors: %v", p.Errors())
+	}
+
+	chk := checker.New()
+	chk.CheckFiles([]*ast.File{astFile})
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("semantic errors: %v", chk.Errors())
+	}
+
+	af := autofree.New(chk)
+	af.AnalyzeFile(astFile)
+
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(astFile)
+
+	var cCompiler string
+	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+		if _, err := exec.LookPath(cand); err == nil {
+			cCompiler = cand
+			break
+		}
+	}
+	if cCompiler == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				cCompiler = cand
+			}
+		}
+	}
+	if cCompiler == "" {
+		t.Skip("C compiler not available, skipping native run")
+		return
+	}
+
+	runtimeDir, err := filepath.Abs("runtime")
+	if err != nil {
+		t.Fatalf("failed to resolve runtime dir: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	cFile := filepath.Join(tmpDir, "regressions.c")
+	binFile := filepath.Join(tmpDir, "regressions_app")
+	if os.PathSeparator == '\\' {
+		binFile += ".exe"
+	}
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("write C file: %v", err)
+	}
+
+	cFlags := []string{"-std=c99", "-O2", "-march=native", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+	buildCmd := exec.Command(cCompiler, cFlags...)
+	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("C99 compilation failed (%v):\n%s\nGenerated C99:\n%s", err, string(buildOut), cCode)
+	}
+
+	runCmd := exec.Command(binFile)
+	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+	rawOut, err := runCmd.CombinedOutput()
+	outStr := string(rawOut)
+	if err != nil {
+		t.Fatalf("binary execution failed with exit code %v:\n%s", err, outStr)
+	}
+
+	if !strings.Contains(outStr, "[vira_rt] active_leaks=0") {
+		t.Fatalf("expected 0 active leaks in autofree regressions, got output:\n%s", outStr)
+	}
+}
+
+
 

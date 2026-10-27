@@ -14,20 +14,20 @@ fn handle_http_request(req http.Request) http.Response {
 	mut res := http.Response.new()
 
 	switch req.method {
-	case 'GET':
+		case 'GET':
 		switch req.path {
-		case '/':
+			case '/':
 			res = http.Response.text('Welcome to Vira HTTP Server!')
-		case '/health':
+			case '/health':
 			res = http.Response.json('{"status":"healthy","uptime_seconds":120}')
-		case '/metrics':
+			case '/metrics':
 			res = http.Response.json('{"active_connections":1,"req_count":42}')
 		default:
 			res = http.Response.with_status(404, '{"error":"not_found"}')
 		}
-	case 'POST':
+		case 'POST':
 		switch req.path {
-		case '/echo':
+			case '/echo':
 			res = http.Response.json('{"echo":"${req.body}"}')
 		default:
 			res = http.Response.with_status(404, '{"error":"not_found"}')
@@ -45,6 +45,7 @@ fn main() {
 	println('===========================================================')
 
 	// 1. Bind HTTP server to loopback on ephemeral port
+
 	mut server := http.HttpServer.bind('127.0.0.1:0') or {
 		panic('Failed to bind HTTP server: ${err}')
 	}
