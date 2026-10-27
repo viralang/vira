@@ -745,9 +745,14 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("static void _%s_%s_worker_task(void* _raw_env) {\n", cActor, method.Name))
 	out.WriteString(fmt.Sprintf("    %s* env = (%s*)_raw_env;\n", envName, envName))
 	out.WriteString(fmt.Sprintf("    %s* self = env->self;\n", cActor))
-	out.WriteString("    while (__atomic_test_and_set(&self->_ctx.mailbox_lock, __ATOMIC_ACQUIRE)) { sched_yield(); }\n")
+	out.WriteString("    if (self->_ctx.state == VIRA_ACTOR_STOPPED) {\n")
+	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = vira_str_lit(\"Actor has stopped due to unhandled faults\", 41) };\n", cRes))
+	out.WriteString("        return;\n")
+	out.WriteString("    }\n")
+	out.WriteString("    vira_actor_ctx* _prev_tls_actor = _vira_tls_actor;\n")
 	out.WriteString("    _vira_tls_actor = &self->_ctx;\n")
 	out.WriteString("    self->_ctx.in_actor = true;\n")
+	out.WriteString("    self->_ctx.mailbox_lock = 1;\n")
 	out.WriteString("    self->_ctx.last_worker_id = _vira_tls_worker_id;\n")
 	out.WriteString("    if (setjmp(self->_ctx.fault_boundary) == 0) {\n")
 
@@ -763,22 +768,26 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	}
 	out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
-	out.WriteString("        _vira_tls_actor = NULL;\n")
-	out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")
+	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
+	out.WriteString("        self->_ctx.restarts = 0;\n")
+	out.WriteString("        _vira_tls_actor = _prev_tls_actor;\n")
 	out.WriteString("    } else {\n")
 	out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Wipe actor's isolated arena slab in O(1)\n")
 	out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
-	out.WriteString("        _vira_tls_actor = NULL;\n")
+	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
+	out.WriteString("        _vira_tls_actor = _prev_tls_actor;\n")
 	out.WriteString("        vira_string _err = self->_ctx.last_error;\n")
+	out.WriteString("        self->_ctx.last_error = vira_str_lit(\"\", 0);\n")
 	out.WriteString("        if (self->_ctx.restarts < self->_ctx.max_restarts) {\n")
 	out.WriteString("            self->_ctx.restarts++;\n")
 	out.WriteString("            self->_ctx.state = VIRA_ACTOR_RUNNING;\n")
 	out.WriteString(fmt.Sprintf("            %s_supervisor_reset(self);\n", cActor))
 	out.WriteString("            printf(\"[vira_supervisor | worker_thread=%d] Actor '%s' (#%d) trapped fault ('%.*s') -> O(1) arena wipe & OneForOne restart [%d/%d]\\n\",\n")
 	out.WriteString("                   _vira_tls_worker_id, self->_ctx.name, self->_ctx.id, _err.len, (const char*)_err.data, self->_ctx.restarts, self->_ctx.max_restarts);\n")
+	out.WriteString("        } else {\n")
+	out.WriteString("            self->_ctx.state = VIRA_ACTOR_STOPPED;\n")
 	out.WriteString("        }\n")
-	out.WriteString("        __atomic_clear(&self->_ctx.mailbox_lock, __ATOMIC_RELEASE);\n")
 	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = _err };\n", cRes))
 	out.WriteString("    }\n")
 	out.WriteString("}\n\n")
@@ -801,21 +810,41 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
 	out.WriteString("    env->_hdr._task.env = env;\n")
 	out.WriteString("    env->_hdr._task.done = 0;\n")
-	out.WriteString("    vira_scheduler_submit_async(&env->_hdr._task);\n")
+	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
 	out.WriteString("    return (vira_future){ .task = &env->_hdr._task, .env = env };\n")
 	out.WriteString("}\n\n")
 
-	// 4. Emit Synchronous Shorthand (_supervise_ = _spawn_ + Future_await)
-	var forwardArgs []string
-	forwardArgs = append(forwardArgs, "self")
+	// 4. Emit Fire-and-Forget Detached Sender (_send_detached_)
+	out.WriteString(fmt.Sprintf("static inline void %s_send_detached_%s(%s) {\n",
+		cActor, method.Name, strings.Join(paramList, ", ")))
+	out.WriteString(fmt.Sprintf("    %s* env = (%s*)malloc(sizeof(%s));\n", envName, envName, envName))
+	out.WriteString("    _vira_record_alloc();\n")
+	out.WriteString("    env->self = self;\n")
 	for _, p := range method.Params {
-		forwardArgs = append(forwardArgs, p.Name)
+		out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))
 	}
+	out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
+	out.WriteString("    env->_hdr._task.env = env;\n")
+	out.WriteString("    env->_hdr._task.next_actor_msg = NULL;\n")
+	out.WriteString("    env->_hdr._task.done = -1;\n")
+	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
+	out.WriteString("}\n\n")
+
+	// 5. Emit Zero-Alloc Synchronous Shorthand (_supervise_ = stack-allocated env)
 	out.WriteString(fmt.Sprintf("static inline %s %s_supervise_%s(%s) {\n",
 		cRes, cActor, method.Name, strings.Join(paramList, ", ")))
-	out.WriteString(fmt.Sprintf("    vira_future _fut = %s_spawn_%s(%s);\n",
-		cActor, method.Name, strings.Join(forwardArgs, ", ")))
-	out.WriteString(fmt.Sprintf("    return Future_%s_await(&_fut);\n", cRes))
+	out.WriteString(fmt.Sprintf("    %s env;\n", envName))
+	out.WriteString("    env.self = self;\n")
+	for _, p := range method.Params {
+		out.WriteString(fmt.Sprintf("    env.%s = %s;\n", p.Name, p.Name))
+	}
+	out.WriteString(fmt.Sprintf("    env._hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
+	out.WriteString("    env._hdr._task.env = &env;\n")
+	out.WriteString("    env._hdr._task.next_actor_msg = NULL;\n")
+	out.WriteString("    env._hdr._task.done = 0;\n")
+	out.WriteString("    vira_actor_send(&self->_ctx, &env._hdr._task);\n")
+	out.WriteString("    vira_scheduler_await(&env._hdr._task);\n")
+	out.WriteString("    return env._hdr.result;\n")
 	out.WriteString("}\n\n")
 }
 
@@ -946,10 +975,57 @@ func (g *Generator) emitBlockStmts(out *strings.Builder, b *ast.BlockStmt, inden
 	}
 }
 
+func (g *Generator) tryEmitDetachedActorSend(expr ast.Expr) (string, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.OrBlock != nil || call.Propagate {
+		return "", false
+	}
+	callee, isSel := call.Callee.(*ast.SelectorExpr)
+	if !isSel || !callee.IsActorSend {
+		return "", false
+	}
+	leftType := g.chk.ExprTypes[callee.Left]
+	st, isStruct := leftType.(*checker.StructType)
+	if !isStruct || !st.IsActor {
+		return "", false
+	}
+
+	recvExpr := g.emitLValue(callee.Left)
+	isPtr := false
+	if ident, ok := callee.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+		isPtr = true
+	}
+
+	targetStruct := st.Name
+	if hops, hasHops := g.chk.SelectorPaths[callee]; hasHops && len(hops) > 0 {
+		sep := "."
+		if isPtr {
+			sep = "->"
+		}
+		recvExpr = fmt.Sprintf("&%s%s%s", recvExpr, sep, strings.Join(hops, "."))
+		targetStruct = hops[len(hops)-1]
+	} else if !isPtr {
+		recvExpr = "&" + recvExpr
+	}
+
+	var argStrs []string
+	for _, arg := range call.Args {
+		argStrs = append(argStrs, g.emitExpr(arg.Expr))
+	}
+	allArgs := append([]string{recvExpr}, argStrs...)
+
+	return fmt.Sprintf("%s_send_detached_%s(%s)",
+		g.cStructName(targetStruct), callee.Field.Name, strings.Join(allArgs, ", ")), true
+}
+
 func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string, fnRet checker.Type) {
 	switch s := stmt.(type) {
 	case *ast.VarDeclStmt:
 		if s.Name.Name == "_" {
+			if detached, ok := g.tryEmitDetachedActorSend(s.Value); ok {
+				out.WriteString(fmt.Sprintf("%s%s;\n", indent, detached))
+				return
+			}
 			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
 				valType := g.chk.ExprTypes[s.Value]
 				g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)
@@ -973,6 +1049,19 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			indent, qual, g.cType(valType), s.Name.Name, g.emitExpr(s.Value)))
 
 	case *ast.AssignStmt:
+		if ident, ok := s.Target.(*ast.IdentExpr); ok && ident.Ident.Name == "_" {
+			if detached, ok := g.tryEmitDetachedActorSend(s.Value); ok {
+				out.WriteString(fmt.Sprintf("%s%s;\n", indent, detached))
+				return
+			}
+			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
+				valType := g.chk.ExprTypes[s.Value]
+				g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)
+				return
+			}
+			out.WriteString(fmt.Sprintf("%s(void)(%s);\n", indent, g.emitExpr(s.Value)))
+			return
+		}
 		if idxExpr, isIdx := s.Target.(*ast.IndexExpr); isIdx {
 			leftType := g.chk.ExprTypes[idxExpr.Left]
 			lenExpr := fmt.Sprintf("%s.len", g.emitLValue(idxExpr.Left))
@@ -1178,6 +1267,10 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		out.WriteString(fmt.Sprintf("%sreturn %s;\n", indent, g.emitExpr(s.Value)))
 
 	case *ast.ExprStmt:
+		if detached, ok := g.tryEmitDetachedActorSend(s.Expr); ok {
+			out.WriteString(fmt.Sprintf("%s%s;\n", indent, detached))
+			return
+		}
 		if call, ok := s.Expr.(*ast.CallExpr); ok && call.OrBlock != nil {
 			valType := g.chk.ExprTypes[s.Expr]
 			g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)

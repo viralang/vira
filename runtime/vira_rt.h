@@ -57,19 +57,57 @@ typedef int vira_socket_t;
 #include <arm_neon.h>
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define VIRA_CACHELINE_ALIGNED __attribute__((aligned(64)))
+#elif defined(_MSC_VER)
+#define VIRA_CACHELINE_ALIGNED __declspec(align(64))
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define VIRA_CACHELINE_ALIGNED _Alignas(64)
+#else
+#define VIRA_CACHELINE_ALIGNED
+#endif
+
+static inline void vira_cpu_relax(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_pause();
+#elif defined(__aarch64__)
+  __asm__ __volatile__("yield");
+#else
+  __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
 // --- THREAD-SAFE TELEMETRY COUNTERS FOR ZERO-LEAK VERIFICATION ---
-static volatile int64_t _vira_active_heap_allocs = 0;
-static volatile int64_t _vira_total_heap_frees = 0;
-static volatile int64_t _vira_total_tasks_run = 0;
-static volatile int64_t _vira_total_work_steals = 0;
+static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_active_heap_allocs = 0;
+static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_total_heap_frees = 0;
+static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_total_tasks_run = 0;
+static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_total_work_steals = 0;
+
+static __thread int64_t _vira_tls_alloc_delta = 0;
+static __thread int64_t _vira_tls_free_count = 0;
+
+static inline void _vira_flush_tls_mem_stats(void) {
+  if (_vira_tls_alloc_delta != 0) {
+    __atomic_add_fetch(&_vira_active_heap_allocs, _vira_tls_alloc_delta, __ATOMIC_RELAXED);
+    _vira_tls_alloc_delta = 0;
+  }
+  if (_vira_tls_free_count != 0) {
+    __atomic_add_fetch(&_vira_total_heap_frees, _vira_tls_free_count, __ATOMIC_RELAXED);
+    _vira_tls_free_count = 0;
+  }
+}
 
 static inline void _vira_record_alloc(void) {
-  __atomic_add_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);
+  if (++_vira_tls_alloc_delta >= 64) {
+    _vira_flush_tls_mem_stats();
+  }
 }
 
 static inline void _vira_record_free(void) {
-  __atomic_sub_fetch(&_vira_active_heap_allocs, 1, __ATOMIC_RELAXED);
-  __atomic_add_fetch(&_vira_total_heap_frees, 1, __ATOMIC_RELAXED);
+  --_vira_tls_alloc_delta;
+  if (++_vira_tls_free_count >= 64) {
+    _vira_flush_tls_mem_stats();
+  }
 }
 
 typedef float vira_f32;
@@ -773,53 +811,63 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
   const int32_t K = a.cols;
   const int32_t N = b.cols;
 
-  for (int32_t i = 0; i < M; i++) {
-    vira_f32 *c_row = &out.data[i * N];
-    for (int32_t k = 0; k < K; k++) {
-      const vira_f32 a_ik = a.data[i * K + k];
-      const vira_f32 *b_row = &b.data[k * N];
-      int32_t j = 0;
+  for (int32_t si = 0; si < M; si += 64) {
+    int32_t imax = (si + 64 < M) ? (si + 64) : M;
+    for (int32_t sk = 0; sk < K; sk += 64) {
+      int32_t kmax = (sk + 64 < K) ? (sk + 64) : K;
+      for (int32_t sj = 0; sj < N; sj += 64) {
+        int32_t jmax = (sj + 64 < N) ? (sj + 64) : N;
+
+        for (int32_t i = si; i < imax; i++) {
+          vira_f32 *c_row = &out.data[i * N];
+          for (int32_t k = sk; k < kmax; k++) {
+            const vira_f32 a_ik = a.data[i * K + k];
+            const vira_f32 *b_row = &b.data[k * N];
+            int32_t j = sj;
 
 #if defined(__AVX2__)
-      __m256 va = _mm256_set1_ps(a_ik);
-      for (; j + 8 <= N; j += 8) {
-        __m256 vc = _mm256_loadu_ps(&c_row[j]);
-        __m256 vb = _mm256_loadu_ps(&b_row[j]);
+            __m256 va = _mm256_set1_ps(a_ik);
+            for (; j + 8 <= jmax; j += 8) {
+              __m256 vc = _mm256_loadu_ps(&c_row[j]);
+              __m256 vb = _mm256_loadu_ps(&b_row[j]);
 #if defined(__FMA__)
-        vc = _mm256_fmadd_ps(va, vb, vc);
+              vc = _mm256_fmadd_ps(va, vb, vc);
 #else
-        vc = _mm256_add_ps(_mm256_mul_ps(va, vb), vc);
+              vc = _mm256_add_ps(_mm256_mul_ps(va, vb), vc);
 #endif
-        _mm256_storeu_ps(&c_row[j], vc);
-      }
+              _mm256_storeu_ps(&c_row[j], vc);
+            }
 #elif defined(__ARM_NEON) || defined(__aarch64__)
-      for (; j + 8 <= N; j += 8) {
-        float32x4_t vc0 = vld1q_f32(&c_row[j]);
-        float32x4_t vc1 = vld1q_f32(&c_row[j + 4]);
-        float32x4_t vb0 = vld1q_f32(&b_row[j]);
-        float32x4_t vb1 = vld1q_f32(&b_row[j + 4]);
-        vc0 = vfmaq_n_f32(vc0, vb0, a_ik);
-        vc1 = vfmaq_n_f32(vc1, vb1, a_ik);
-        vst1q_f32(&c_row[j], vc0);
-        vst1q_f32(&c_row[j + 4], vc1);
-      }
-      for (; j + 4 <= N; j += 4) {
-        float32x4_t vc0 = vld1q_f32(&c_row[j]);
-        float32x4_t vb0 = vld1q_f32(&b_row[j]);
-        vc0 = vfmaq_n_f32(vc0, vb0, a_ik);
-        vst1q_f32(&c_row[j], vc0);
-      }
+            for (; j + 8 <= jmax; j += 8) {
+              float32x4_t vc0 = vld1q_f32(&c_row[j]);
+              float32x4_t vc1 = vld1q_f32(&c_row[j + 4]);
+              float32x4_t vb0 = vld1q_f32(&b_row[j]);
+              float32x4_t vb1 = vld1q_f32(&b_row[j + 4]);
+              vc0 = vfmaq_n_f32(vc0, vb0, a_ik);
+              vc1 = vfmaq_n_f32(vc1, vb1, a_ik);
+              vst1q_f32(&c_row[j], vc0);
+              vst1q_f32(&c_row[j + 4], vc1);
+            }
+            for (; j + 4 <= jmax; j += 4) {
+              float32x4_t vc0 = vld1q_f32(&c_row[j]);
+              float32x4_t vb0 = vld1q_f32(&b_row[j]);
+              vc0 = vfmaq_n_f32(vc0, vb0, a_ik);
+              vst1q_f32(&c_row[j], vc0);
+            }
 #elif defined(__SSE2__)
-      __m128 va = _mm_set1_ps(a_ik);
-      for (; j + 4 <= N; j += 4) {
-        __m128 vc = _mm_loadu_ps(&c_row[j]);
-        __m128 vb = _mm_loadu_ps(&b_row[j]);
-        vc = _mm_add_ps(_mm_mul_ps(va, vb), vc);
-        _mm_storeu_ps(&c_row[j], vc);
-      }
+            __m128 va = _mm_set1_ps(a_ik);
+            for (; j + 4 <= jmax; j += 4) {
+              __m128 vc = _mm_loadu_ps(&c_row[j]);
+              __m128 vb = _mm_loadu_ps(&b_row[j]);
+              vc = _mm_add_ps(_mm_mul_ps(va, vb), vc);
+              _mm_storeu_ps(&c_row[j], vc);
+            }
 #endif
-      for (; j < N; j++) {
-        c_row[j] += a_ik * b_row[j];
+            for (; j < jmax; j++) {
+              c_row[j] += a_ik * b_row[j];
+            }
+          }
+        }
       }
     }
   }
@@ -1018,6 +1066,21 @@ static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
 // 4. MULTI-THREADED LOCK-FREE WORK-STEALING ACTOR POOL & SUPERVISOR
 // ============================================================================
 
+#define VIRA_WS_CAP 4096
+#define VIRA_WS_MASK (VIRA_WS_CAP - 1)
+#define VIRA_MAX_WORKERS 32
+
+typedef void (*vira_task_fn)(void *env);
+
+typedef struct _vira_task {
+  vira_task_fn fn;
+  void *env;
+  struct _vira_task *next_actor_msg; // Intrusive MPSC link
+  volatile int32_t done;             // 0 = pending, 1 = completed on worker pool
+} vira_task;
+
+static void _vira_actor_drain_task(void *env);
+
 typedef enum {
   VIRA_ACTOR_RUNNING = 0,
   VIRA_ACTOR_FAULTED = 1,
@@ -1035,7 +1098,11 @@ typedef struct {
   vira_string last_error;
   bool in_actor;
   volatile uint8_t mailbox_lock; // Ensures single-actor sequential state safety
-  int32_t last_worker_id; // Tracks which worker thread executed the actor
+  int32_t last_worker_id;        // Tracks which worker thread executed the actor
+  vira_task * volatile mbox_head;
+  vira_task * volatile mbox_tail;
+  volatile int32_t scheduled;
+  vira_task drain_task;
 } vira_actor_ctx;
 
 // Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!
@@ -1057,9 +1124,19 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->in_actor = false;
   ctx->mailbox_lock = 0;
   ctx->last_worker_id = -1;
+  ctx->mbox_head = NULL;
+  ctx->mbox_tail = NULL;
+  ctx->scheduled = 0;
+  ctx->drain_task.fn = _vira_actor_drain_task;
+  ctx->drain_task.env = ctx;
+  ctx->drain_task.next_actor_msg = NULL;
+  ctx->drain_task.done = 0;
 }
 
 static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
+  while (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
+    vira_cpu_relax();
+  }
   vira_arena_destroy(&ctx->isolated_heap);
 }
 
@@ -1078,28 +1155,6 @@ static inline void vira_panic(vira_string msg) {
 }
 
 // --- CHASE-LEV STYLE LOCK-FREE WORK-STEALING DEQUE ---
-#if defined(__GNUC__) || defined(__clang__)
-#define VIRA_CACHELINE_ALIGNED __attribute__((aligned(64)))
-#elif defined(_MSC_VER)
-#define VIRA_CACHELINE_ALIGNED __declspec(align(64))
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#define VIRA_CACHELINE_ALIGNED _Alignas(64)
-#else
-#define VIRA_CACHELINE_ALIGNED
-#endif
-
-#define VIRA_WS_CAP 4096
-#define VIRA_WS_MASK (VIRA_WS_CAP - 1)
-#define VIRA_MAX_WORKERS 32
-
-typedef void (*vira_task_fn)(void *env);
-
-typedef struct {
-  vira_task_fn fn;
-  void *env;
-  volatile int32_t done; // 0 = pending, 1 = completed on worker pool
-} vira_task;
-
 typedef struct _vira_overflow_node {
   vira_task *task;
   struct _vira_overflow_node *next;
@@ -1124,9 +1179,9 @@ typedef struct {
   int32_t num_workers;
   volatile bool initialized;
   volatile int32_t shutdown;
-  volatile uint32_t rr_cursor;
-  vira_overflow_queue overflow;
-  vira_ws_deque workers[VIRA_MAX_WORKERS];
+  VIRA_CACHELINE_ALIGNED volatile uint32_t rr_cursor; // Isolate on its own cache line!
+  VIRA_CACHELINE_ALIGNED vira_overflow_queue overflow;
+  VIRA_CACHELINE_ALIGNED vira_ws_deque workers[VIRA_MAX_WORKERS];
 } vira_scheduler;
 
 static vira_scheduler _vira_sched = {0};
@@ -1179,16 +1234,6 @@ static inline vira_task *_vira_overflow_pop(void) {
   return task;
 }
 
-static inline void vira_cpu_relax(void) {
-#if defined(__x86_64__) || defined(_M_X64)
-  _mm_pause();
-#elif defined(__aarch64__)
-  __asm__ __volatile__("yield");
-#else
-  __asm__ __volatile__("" ::: "memory");
-#endif
-}
-
 // Push task onto a deque's bottom
 static inline bool vira_ws_push(vira_ws_deque *q, vira_task *t) {
   int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_RELAXED);
@@ -1215,16 +1260,55 @@ static inline bool vira_ws_push_mp(vira_ws_deque *q, vira_task *t) {
   return true;
 }
 
+// Local LIFO pop by queue owner
+static inline vira_task *vira_ws_pop(vira_ws_deque *q) {
+  int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_RELAXED);
+  int64_t t = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);
+  if (t >= b) {
+    return NULL; // Fast exit if empty
+  }
+
+  while (__atomic_exchange_n(&q->push_lock, 1, __ATOMIC_ACQUIRE)) {
+    vira_cpu_relax();
+  }
+  b = __atomic_load_n(&q->bottom, __ATOMIC_RELAXED) - 1;
+  __atomic_store_n(&q->bottom, b, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  t = __atomic_load_n(&q->top, __ATOMIC_RELAXED);
+  vira_task *task = NULL;
+  if (t <= b) {
+    task = __atomic_load_n(&q->ring[b & VIRA_WS_MASK], __ATOMIC_RELAXED);
+    if (t == b) {
+      if (!__atomic_compare_exchange_n(&q->top, &t, t + 1, false,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        task = NULL;
+      }
+      __atomic_store_n(&q->bottom, b + 1, __ATOMIC_RELAXED);
+    }
+  } else {
+    __atomic_store_n(&q->bottom, b + 1, __ATOMIC_RELAXED);
+  }
+  __atomic_store_n(&q->push_lock, 0, __ATOMIC_RELEASE);
+  return task;
+}
+
 // Pop or steal a task from the top of any deque using lock-free CAS
 static inline vira_task *vira_ws_steal(vira_ws_deque *q) {
   int64_t t = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);
-  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   int64_t b = __atomic_load_n(&q->bottom, __ATOMIC_ACQUIRE);
   if (t >= b) {
-    return NULL; // Empty
+    return NULL; // Fast exit: no SEQ_CST fence when empty!
   }
+
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  t = __atomic_load_n(&q->top, __ATOMIC_ACQUIRE);
+  b = __atomic_load_n(&q->bottom, __ATOMIC_ACQUIRE);
+  if (t >= b) {
+    return NULL;
+  }
+
   vira_task *task =
-      __atomic_load_n(&q->ring[t & VIRA_WS_MASK], __ATOMIC_RELAXED);
+      __atomic_load_n(&q->ring[t & VIRA_WS_MASK], __ATOMIC_ACQUIRE);
   if (!__atomic_compare_exchange_n(&q->top, &t, t + 1, false, __ATOMIC_SEQ_CST,
                                    __ATOMIC_RELAXED)) {
     return NULL; // Lost race to another thief
@@ -1247,18 +1331,26 @@ static inline bool _vira_any_work(void) {
 }
 
 static inline void vira_sched_wake_one(void) {
-  __atomic_thread_fence(__ATOMIC_SEQ_CST); // pairs with the fence in _vira_park
-  if (__atomic_load_n(&_vira_parker.sleepers, __ATOMIC_RELAXED) > 0) {
-    pthread_mutex_lock(&_vira_parker.mu);
-    pthread_cond_signal(&_vira_parker.cv);
-    pthread_mutex_unlock(&_vira_parker.mu);
+  // Fast check without a full fence if no one is sleeping
+  if (__atomic_load_n(&_vira_parker.sleepers, __ATOMIC_ACQUIRE) <= 0) {
+    return;
+  }
+  // Atomically claim one sleeper so concurrent producers don't pile onto the mutex
+  int32_t s = __atomic_load_n(&_vira_parker.sleepers, __ATOMIC_ACQUIRE);
+  while (s > 0) {
+    if (__atomic_compare_exchange_n(&_vira_parker.sleepers, &s, s - 1, true,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE)) {
+      pthread_mutex_lock(&_vira_parker.mu);
+      pthread_cond_signal(&_vira_parker.cv);
+      pthread_mutex_unlock(&_vira_parker.mu);
+      return;
+    }
   }
 }
 
 static void _vira_park(void) {
   pthread_mutex_lock(&_vira_parker.mu);
   __atomic_add_fetch(&_vira_parker.sleepers, 1, __ATOMIC_SEQ_CST);
-  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (!_vira_any_work() && !__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
     struct timespec ts;
 #if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
@@ -1266,14 +1358,18 @@ static void _vira_park(void) {
 #else
     clock_gettime(CLOCK_REALTIME, &ts);
 #endif
-    ts.tv_nsec += 2000000; // 2ms backstop against any missed wakeup
+    ts.tv_nsec += 2000000;
     if (ts.tv_nsec >= 1000000000L) {
       ts.tv_sec++;
       ts.tv_nsec -= 1000000000L;
     }
     pthread_cond_timedwait(&_vira_parker.cv, &_vira_parker.mu, &ts);
   }
-  __atomic_sub_fetch(&_vira_parker.sleepers, 1, __ATOMIC_SEQ_CST);
+  // If we timed out (weren't claimed by wake_one), decrement sleepers safely
+  int32_t s = __atomic_load_n(&_vira_parker.sleepers, __ATOMIC_RELAXED);
+  while (s > 0 && !__atomic_compare_exchange_n(&_vira_parker.sleepers, &s, s - 1,
+                                               true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+  }
   pthread_mutex_unlock(&_vira_parker.mu);
 }
 
@@ -1289,7 +1385,7 @@ static inline uint32_t _vira_xorshift(uint32_t *s) {
 static inline vira_task *_vira_find_task(vira_ws_deque *self, uint32_t *rng,
                                          bool *stolen) {
   *stolen = false;
-  vira_task *task = vira_ws_steal(self);
+  vira_task *task = vira_ws_pop(self);
   if (task) {
     return task;
   }
@@ -1380,6 +1476,7 @@ static void *_vira_worker_loop(void *arg) {
   if (local_steals) {
     __atomic_add_fetch(&_vira_total_work_steals, local_steals, __ATOMIC_RELAXED);
   }
+  _vira_flush_tls_mem_stats();
   return NULL;
 }
 
@@ -1444,6 +1541,7 @@ static inline void vira_scheduler_shutdown(void) {
   _vira_sched.overflow.tail = NULL;
   pthread_mutex_unlock(&_vira_sched.overflow.mu);
 
+  _vira_flush_tls_mem_stats();
   __atomic_store_n(&_vira_sched.initialized, false, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&_vira_sched_init_mu);
 }
@@ -1467,23 +1565,124 @@ typedef struct {
   void *env;
 } vira_future;
 
-// Pushes a heap-backed actor task onto a worker deque and returns immediately
-// (non-blocking)
+// Pushes a task onto a worker deque and returns immediately (non-blocking)
 static inline void vira_scheduler_submit_async(vira_task *task) {
   vira_scheduler_ensure_init();
   __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
 
-  // Cluster bursts on Worker 0's deque first so idle peer threads steal tasks
-  // concurrently
-  uint32_t seq =
-      __atomic_fetch_add(&_vira_sched.rr_cursor, 1, __ATOMIC_RELAXED);
-  int32_t queue_idx =
-      (seq % 2 == 0) ? 0 : (int32_t)(seq % (uint32_t)_vira_sched.num_workers);
-
-  while (!vira_ws_push_mp(&_vira_sched.workers[queue_idx], task)) {
-    sched_yield();
+  int32_t queue_idx = _vira_tls_worker_id;
+  if (queue_idx < 0 || queue_idx >= _vira_sched.num_workers) {
+    uint32_t seq =
+        __atomic_fetch_add(&_vira_sched.rr_cursor, 1, __ATOMIC_RELAXED);
+    queue_idx = (int32_t)(seq % (uint32_t)_vira_sched.num_workers);
   }
+
+  vira_ws_push_mp(&_vira_sched.workers[queue_idx], task);
   vira_sched_wake_one();
+}
+
+static inline vira_task *vira_actor_pop_msg(vira_actor_ctx *ctx) {
+  vira_task *head = ctx->mbox_head;
+  if (!head) {
+    if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_ACQUIRE) != NULL) {
+      while ((head = __atomic_load_n(&ctx->mbox_head, __ATOMIC_ACQUIRE)) == NULL) {
+        vira_cpu_relax();
+      }
+    } else {
+      return NULL;
+    }
+  }
+
+  vira_task *next = __atomic_load_n(&head->next_actor_msg, __ATOMIC_ACQUIRE);
+  if (next != NULL) {
+    ctx->mbox_head = next;
+    return head;
+  }
+
+  vira_task *expected = head;
+  if (__atomic_compare_exchange_n(&ctx->mbox_tail, &expected, NULL, false,
+                                  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    ctx->mbox_head = NULL;
+    return head;
+  }
+
+  while ((next = __atomic_load_n(&head->next_actor_msg, __ATOMIC_ACQUIRE)) == NULL) {
+    vira_cpu_relax();
+  }
+  ctx->mbox_head = next;
+  return head;
+}
+
+static void _vira_actor_drain_task(void *env) {
+  vira_actor_ctx *ctx = (vira_actor_ctx *)env;
+  int32_t quota = 64;
+  int32_t count = 0;
+
+  while (quota-- > 0) {
+    vira_task *msg = vira_actor_pop_msg(ctx);
+    if (!msg) {
+      break;
+    }
+    vira_task_fn fn = msg->fn;
+    void *menv = msg->env;
+    bool is_detached = (__atomic_load_n(&msg->done, __ATOMIC_RELAXED) == -1);
+    fn(menv);
+    count++;
+    if (is_detached) {
+      free(menv);
+      _vira_record_free();
+    } else {
+      __atomic_store_n(&msg->done, 1, __ATOMIC_RELEASE);
+    }
+  }
+
+  if (count > 1) {
+    __atomic_add_fetch(&_vira_total_tasks_run, count - 1, __ATOMIC_RELAXED);
+  }
+
+  if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_ACQUIRE) != NULL ||
+      ctx->mbox_head != NULL) {
+    ctx->drain_task.fn = _vira_actor_drain_task;
+    ctx->drain_task.env = ctx;
+    ctx->drain_task.next_actor_msg = NULL;
+    ctx->drain_task.done = 0;
+    vira_scheduler_submit_async(&ctx->drain_task);
+  } else {
+    __atomic_store_n(&ctx->scheduled, 0, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_SEQ_CST) != NULL ||
+        __atomic_load_n(&ctx->mbox_head, __ATOMIC_SEQ_CST) != NULL) {
+      if (__atomic_exchange_n(&ctx->scheduled, 1, __ATOMIC_SEQ_CST) == 0) {
+        ctx->drain_task.fn = _vira_actor_drain_task;
+        ctx->drain_task.env = ctx;
+        ctx->drain_task.next_actor_msg = NULL;
+        ctx->drain_task.done = 0;
+        vira_scheduler_submit_async(&ctx->drain_task);
+      }
+    }
+  }
+}
+
+static inline void vira_actor_send(vira_actor_ctx *ctx, vira_task *task) {
+  vira_scheduler_ensure_init();
+  task->next_actor_msg = NULL;
+  if (__atomic_load_n(&task->done, __ATOMIC_RELAXED) != -1) {
+    __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
+  }
+
+  vira_task *prev = __atomic_exchange_n(&ctx->mbox_tail, task, __ATOMIC_ACQ_REL);
+  if (prev != NULL) {
+    __atomic_store_n(&prev->next_actor_msg, task, __ATOMIC_RELEASE);
+  } else {
+    __atomic_store_n(&ctx->mbox_head, task, __ATOMIC_RELEASE);
+  }
+
+  if (__atomic_exchange_n(&ctx->scheduled, 1, __ATOMIC_ACQ_REL) == 0) {
+    ctx->drain_task.fn = _vira_actor_drain_task;
+    ctx->drain_task.env = ctx;
+    ctx->drain_task.next_actor_msg = NULL;
+    ctx->drain_task.done = 0;
+    vira_scheduler_submit_async(&ctx->drain_task);
+  }
 }
 
 // Waits for a future's task to complete; while waiting, the caller helps steal
@@ -3453,6 +3652,7 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_tensor_f32 table,
 }
 
 static inline void vira_report_mem_stats(void) {
+  _vira_flush_tls_mem_stats();
   vira_scheduler_shutdown();
   printf("[vira_rt] simd=%s\n", vira_simd_backend_name());
   printf(
