@@ -1066,7 +1066,10 @@ static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
 static inline void vira_panic(vira_string msg) {
   if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
     _vira_tls_actor->state = VIRA_ACTOR_FAULTED;
-    _vira_tls_actor->last_error = msg;
+    if (!_vira_tls_actor->last_error.is_lit && _vira_tls_actor->last_error.data != NULL) {
+      vira_str_free(&_vira_tls_actor->last_error);
+    }
+    _vira_tls_actor->last_error = vira_str_clone(msg);
     longjmp(_vira_tls_actor->fault_boundary, 1);
   }
   fprintf(stderr, "vira unrecoverable panic: %.*s\n", msg.len,
@@ -1075,7 +1078,17 @@ static inline void vira_panic(vira_string msg) {
 }
 
 // --- CHASE-LEV STYLE LOCK-FREE WORK-STEALING DEQUE ---
-#define VIRA_WS_CAP 65536
+#if defined(__GNUC__) || defined(__clang__)
+#define VIRA_CACHELINE_ALIGNED __attribute__((aligned(64)))
+#elif defined(_MSC_VER)
+#define VIRA_CACHELINE_ALIGNED __declspec(align(64))
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define VIRA_CACHELINE_ALIGNED _Alignas(64)
+#else
+#define VIRA_CACHELINE_ALIGNED
+#endif
+
+#define VIRA_WS_CAP 4096
 #define VIRA_WS_MASK (VIRA_WS_CAP - 1)
 #define VIRA_MAX_WORKERS 32
 
@@ -1087,24 +1100,37 @@ typedef struct {
   volatile int32_t done; // 0 = pending, 1 = completed on worker pool
 } vira_task;
 
+typedef struct _vira_overflow_node {
+  vira_task *task;
+  struct _vira_overflow_node *next;
+} vira_overflow_node;
+
+typedef struct {
+  vira_overflow_node *head;
+  vira_overflow_node *tail;
+  pthread_mutex_t mu;
+} vira_overflow_queue;
+
 typedef struct {
   int32_t worker_id;
   pthread_t thread;
-  volatile int64_t top;    // Modified via CAS by thieves (FIFO steal)
-  volatile int64_t bottom; // Modified by owner (LIFO push/pop)
-  volatile uint8_t push_lock; // Serializes external producers (multi-producer safe)
-  vira_task *ring[VIRA_WS_CAP];
+  VIRA_CACHELINE_ALIGNED volatile int64_t top;    // Modified via CAS by thieves (FIFO steal)
+  VIRA_CACHELINE_ALIGNED volatile int64_t bottom; // Modified by owner (LIFO push/pop)
+  VIRA_CACHELINE_ALIGNED volatile uint8_t push_lock; // Serializes external producers (multi-producer safe)
+  VIRA_CACHELINE_ALIGNED vira_task *ring[VIRA_WS_CAP];
 } vira_ws_deque;
 
 typedef struct {
   int32_t num_workers;
-  bool initialized;
+  volatile bool initialized;
   volatile int32_t shutdown;
   volatile uint32_t rr_cursor;
+  vira_overflow_queue overflow;
   vira_ws_deque workers[VIRA_MAX_WORKERS];
 } vira_scheduler;
 
 static vira_scheduler _vira_sched = {0};
+static pthread_mutex_t _vira_sched_init_mu = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
   pthread_mutex_t mu;
@@ -1115,6 +1141,43 @@ typedef struct {
 static vira_parker _vira_parker = {
     PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0
 };
+
+static inline void _vira_overflow_push(vira_task *t) {
+  vira_overflow_node *node = (vira_overflow_node *)malloc(sizeof(vira_overflow_node));
+  if (!node) {
+    fprintf(stderr, "vira panic: out of memory in scheduler overflow queue\n");
+    exit(1);
+  }
+  node->task = t;
+  node->next = NULL;
+  pthread_mutex_lock(&_vira_sched.overflow.mu);
+  if (_vira_sched.overflow.tail) {
+    _vira_sched.overflow.tail->next = node;
+    _vira_sched.overflow.tail = node;
+  } else {
+    _vira_sched.overflow.head = node;
+    _vira_sched.overflow.tail = node;
+  }
+  pthread_mutex_unlock(&_vira_sched.overflow.mu);
+}
+
+static inline vira_task *_vira_overflow_pop(void) {
+  if (!__atomic_load_n(&_vira_sched.overflow.head, __ATOMIC_ACQUIRE))
+    return NULL;
+  pthread_mutex_lock(&_vira_sched.overflow.mu);
+  vira_overflow_node *node = _vira_sched.overflow.head;
+  vira_task *task = NULL;
+  if (node) {
+    task = node->task;
+    _vira_sched.overflow.head = node->next;
+    if (!_vira_sched.overflow.head) {
+      _vira_sched.overflow.tail = NULL;
+    }
+    free(node);
+  }
+  pthread_mutex_unlock(&_vira_sched.overflow.mu);
+  return task;
+}
 
 static inline void vira_cpu_relax(void) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1146,7 +1209,10 @@ static inline bool vira_ws_push_mp(vira_ws_deque *q, vira_task *t) {
   }
   bool ok = vira_ws_push(q, t);
   __atomic_store_n(&q->push_lock, 0, __ATOMIC_RELEASE);
-  return ok;
+  if (!ok) {
+    _vira_overflow_push(t);
+  }
+  return true;
 }
 
 // Pop or steal a task from the top of any deque using lock-free CAS
@@ -1167,6 +1233,9 @@ static inline vira_task *vira_ws_steal(vira_ws_deque *q) {
 }
 
 static inline bool _vira_any_work(void) {
+  if (__atomic_load_n(&_vira_sched.overflow.head, __ATOMIC_ACQUIRE) != NULL) {
+    return true;
+  }
   for (int32_t i = 0; i < _vira_sched.num_workers; i++) {
     vira_ws_deque *q = &_vira_sched.workers[i];
     if (__atomic_load_n(&q->top, __ATOMIC_ACQUIRE) <
@@ -1192,7 +1261,11 @@ static void _vira_park(void) {
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (!_vira_any_work() && !__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
     struct timespec ts;
+#if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
     clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     ts.tv_nsec += 2000000; // 2ms backstop against any missed wakeup
     if (ts.tv_nsec >= 1000000000L) {
       ts.tv_sec++;
@@ -1212,7 +1285,7 @@ static inline uint32_t _vira_xorshift(uint32_t *s) {
   return *s = x;
 }
 
-// Own deque first, then sweep victims starting at a random offset
+// Own deque first, then sweep victims starting at a random offset, then overflow queue
 static inline vira_task *_vira_find_task(vira_ws_deque *self, uint32_t *rng,
                                          bool *stolen) {
   *stolen = false;
@@ -1222,20 +1295,25 @@ static inline vira_task *_vira_find_task(vira_ws_deque *self, uint32_t *rng,
   }
 
   int32_t n = _vira_sched.num_workers;
-  if (n <= 1) {
-    return NULL;
+  if (n > 1) {
+    int32_t start = (int32_t)(_vira_xorshift(rng) % (uint32_t)n);
+    for (int32_t i = 0; i < n; i++) {
+      int32_t v = (start + i) % n;
+      if (v == self->worker_id) {
+        continue;
+      }
+      task = vira_ws_steal(&_vira_sched.workers[v]);
+      if (task) {
+        *stolen = true;
+        return task;
+      }
+    }
   }
-  int32_t start = (int32_t)(_vira_xorshift(rng) % (uint32_t)n);
-  for (int32_t i = 0; i < n; i++) {
-    int32_t v = (start + i) % n;
-    if (v == self->worker_id) {
-      continue;
-    }
-    task = vira_ws_steal(&_vira_sched.workers[v]);
-    if (task) {
-      *stolen = true;
-      return task;
-    }
+
+  task = _vira_overflow_pop();
+  if (task) {
+    *stolen = true;
+    return task;
   }
   return NULL;
 }
@@ -1251,7 +1329,7 @@ static void *_vira_worker_loop(void *arg) {
   int64_t local_run = 0, local_steals = 0;
   int32_t idle = 0;
 
-  while (!__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
+  while (true) {
     bool stolen;
     vira_task *task = _vira_find_task(self, &rng, &stolen);
 
@@ -1267,6 +1345,12 @@ static void *_vira_worker_loop(void *arg) {
       local_run++;
       __atomic_store_n(&task->done, 1, __ATOMIC_RELEASE); // task may be freed after this
       continue;
+    }
+
+    if (__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
+      if (!_vira_any_work()) {
+        break; // All worker deques and overflow drained! Clean termination
+      }
     }
 
     // Idle: spin -> yield -> park
@@ -1308,7 +1392,18 @@ static inline void vira_scheduler_init(int32_t num_workers) {
   _vira_sched.num_workers = num_workers;
   _vira_sched.shutdown = 0;
   _vira_sched.rr_cursor = 0;
-  _vira_sched.initialized = true;
+
+  _vira_sched.overflow.head = NULL;
+  _vira_sched.overflow.tail = NULL;
+  pthread_mutex_init(&_vira_sched.overflow.mu, NULL);
+
+  pthread_condattr_t cattr;
+  pthread_condattr_init(&cattr);
+#if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
+  pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+#endif
+  pthread_cond_init(&_vira_parker.cv, &cattr);
+  pthread_condattr_destroy(&cattr);
 
   for (int32_t i = 0; i < num_workers; i++) {
     _vira_sched.workers[i].worker_id = i;
@@ -1318,11 +1413,17 @@ static inline void vira_scheduler_init(int32_t num_workers) {
     pthread_create(&_vira_sched.workers[i].thread, NULL, _vira_worker_loop,
                    &_vira_sched.workers[i]);
   }
+  __atomic_store_n(&_vira_sched.initialized, true, __ATOMIC_RELEASE);
 }
 
 static inline void vira_scheduler_shutdown(void) {
-  if (!_vira_sched.initialized)
+  if (!__atomic_load_n(&_vira_sched.initialized, __ATOMIC_ACQUIRE))
     return;
+  pthread_mutex_lock(&_vira_sched_init_mu);
+  if (!_vira_sched.initialized) {
+    pthread_mutex_unlock(&_vira_sched_init_mu);
+    return;
+  }
   __atomic_store_n(&_vira_sched.shutdown, 1, __ATOMIC_SEQ_CST);
   pthread_mutex_lock(&_vira_parker.mu);
   pthread_cond_broadcast(&_vira_parker.cv);
@@ -1330,7 +1431,33 @@ static inline void vira_scheduler_shutdown(void) {
   for (int32_t i = 0; i < _vira_sched.num_workers; i++) {
     pthread_join(_vira_sched.workers[i].thread, NULL);
   }
-  _vira_sched.initialized = false;
+
+  // Drain any remaining overflow queue items
+  pthread_mutex_lock(&_vira_sched.overflow.mu);
+  vira_overflow_node *cur = _vira_sched.overflow.head;
+  while (cur) {
+    vira_overflow_node *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+  _vira_sched.overflow.head = NULL;
+  _vira_sched.overflow.tail = NULL;
+  pthread_mutex_unlock(&_vira_sched.overflow.mu);
+
+  __atomic_store_n(&_vira_sched.initialized, false, __ATOMIC_RELEASE);
+  pthread_mutex_unlock(&_vira_sched_init_mu);
+}
+
+// Thread-safe lazy initialization guard
+static inline void vira_scheduler_ensure_init(void) {
+  if (__atomic_load_n(&_vira_sched.initialized, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  pthread_mutex_lock(&_vira_sched_init_mu);
+  if (!_vira_sched.initialized) {
+    vira_scheduler_init(4);
+  }
+  pthread_mutex_unlock(&_vira_sched_init_mu);
 }
 
 // --- ASYNCHRONOUS FUTURE[T] PRIMITIVES (FAN-OUT + WORK-HELPING AWAIT) ---
@@ -1343,9 +1470,7 @@ typedef struct {
 // Pushes a heap-backed actor task onto a worker deque and returns immediately
 // (non-blocking)
 static inline void vira_scheduler_submit_async(vira_task *task) {
-  if (!_vira_sched.initialized) {
-    vira_scheduler_init(4);
-  }
+  vira_scheduler_ensure_init();
   __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
 
   // Cluster bursts on Worker 0's deque first so idle peer threads steal tasks
@@ -1376,6 +1501,9 @@ static inline void vira_scheduler_await(vira_task *task) {
       for (int32_t i = 0; i < n; i++) {
         int32_t v = (start + i) % n;
         vira_task *stolen = vira_ws_steal(&_vira_sched.workers[v]);
+        if (stolen == NULL) {
+          stolen = _vira_overflow_pop();
+        }
         if (stolen != NULL) {
           __atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);
           vira_task_fn fn = stolen->fn;
@@ -1402,9 +1530,7 @@ static inline void vira_scheduler_await(vira_task *task) {
 
 // Synchronous helper (spawn + immediate await)
 static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void *env) {
-  if (!_vira_sched.initialized) {
-    vira_scheduler_init(4);
-  }
+  vira_scheduler_ensure_init();
   vira_task task = {.fn = fn, .env = env, .done = 0};
   vira_scheduler_submit_async(&task);
   vira_scheduler_await(&task);
@@ -1744,7 +1870,6 @@ static inline Result_tensor_f32 vira_tensor_load_bin(vira_arena *opt_arena,
     memcpy(path_buf, path.data, len);
   }
   path_buf[len] = '\0';
-  vira_str_free(&path);
 
   FILE *f = fopen(path_buf, "rb");
   if (!f) {
@@ -1785,7 +1910,6 @@ static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t,
     memcpy(path_buf, path.data, len);
   }
   path_buf[len] = '\0';
-  vira_str_free(&path);
 
   FILE *f = fopen(path_buf, "wb");
   if (!f) {
@@ -2479,93 +2603,173 @@ static inline vira_string vira_http_response(int64_t status_code,
 // 13. FAST JSON FIELD PARSER
 // ============================================================================
 
-static inline vira_string vira_json_get_str(vira_string json, vira_string key) {
-  char pattern[256];
-  int klen = key.len < 200 ? key.len : 200;
-  if (key.data && klen > 0) {
-    memcpy(pattern, key.data, klen);
+static inline const char *_vira_memmem(const char *haystack, size_t hlen,
+                                       const char *needle, size_t nlen) {
+  if (nlen == 0)
+    return haystack;
+  if (hlen < nlen || !haystack || !needle)
+    return NULL;
+  for (size_t i = 0; i <= hlen - nlen; i++) {
+    if (haystack[i] == needle[0] && memcmp(haystack + i, needle, nlen) == 0) {
+      return haystack + i;
+    }
   }
-  pattern[klen] = '\0';
+  return NULL;
+}
 
-  const char *hay = (const char *)json.data;
-  if (!hay)
+static inline vira_string vira_json_get_str(vira_string json, vira_string key) {
+  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+    return vira_str_lit("", 0);
+  }
+  char search_quote[260];
+  int klen = key.len < 250 ? key.len : 250;
+  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
+                        (const char *)key.data);
+  if (sq_len <= 0)
     return vira_str_lit("", 0);
 
-  char search_quote[260];
-  snprintf(search_quote, sizeof(search_quote), "\"%s\"", pattern);
+  const char *hay = (const char *)json.data;
+  size_t hlen = (size_t)json.len;
 
-  const char *found = strstr(hay, search_quote);
+  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
   if (!found)
     return vira_str_lit("", 0);
 
-  const char *colon = strchr(found + strlen(search_quote), ':');
+  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
+  if (offset >= hlen)
+    return vira_str_lit("", 0);
+
+  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
   if (!colon)
     return vira_str_lit("", 0);
 
-  const char *val_start = strchr(colon, '"');
+  offset = (size_t)(colon - hay) + 1;
+  if (offset >= hlen)
+    return vira_str_lit("", 0);
+
+  const char *val_start =
+      (const char *)memchr(hay + offset, '"', hlen - offset);
   if (!val_start)
     return vira_str_lit("", 0);
   val_start++;
 
-  const char *val_end = strchr(val_start, '"');
+  offset = (size_t)(val_start - hay);
+  if (offset >= hlen)
+    return vira_str_lit("", 0);
+
+  const char *val_end =
+      (const char *)memchr(hay + offset, '"', hlen - offset);
   if (!val_end)
     return vira_str_lit("", 0);
 
   int val_len = (int)(val_end - val_start);
-  char *out = (char *)malloc(val_len + 1);
+  char *out = (char *)malloc((size_t)val_len + 1);
   if (!out)
     return vira_str_lit("", 0);
   _vira_record_alloc();
-  memcpy(out, val_start, val_len);
+  memcpy(out, val_start, (size_t)val_len);
   out[val_len] = '\0';
   return (vira_string){
       .data = (const uint8_t *)out, .len = val_len, .is_lit = false};
 }
 
 static inline int64_t vira_json_get_int(vira_string json, vira_string key) {
+  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+    return 0;
+  }
   char search_quote[260];
-  int klen = key.len < 200 ? key.len : 200;
-  snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
-           (const char *)key.data);
+  int klen = key.len < 250 ? key.len : 250;
+  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
+                        (const char *)key.data);
+  if (sq_len <= 0)
+    return 0;
 
   const char *hay = (const char *)json.data;
-  if (!hay)
-    return 0;
-  const char *found = strstr(hay, search_quote);
+  size_t hlen = (size_t)json.len;
+
+  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
   if (!found)
     return 0;
 
-  const char *colon = strchr(found + strlen(search_quote), ':');
+  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
+  if (offset >= hlen)
+    return 0;
+
+  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
   if (!colon)
     return 0;
   colon++;
-  while (*colon == ' ' || *colon == '\t')
-    colon++;
 
-  return (int64_t)strtoll(colon, NULL, 10);
+  while (colon < hay + hlen && (*colon == ' ' || *colon == '\t' ||
+                                *colon == '\r' || *colon == '\n')) {
+    colon++;
+  }
+  if (colon >= hay + hlen)
+    return 0;
+
+  char num_buf[64];
+  int nlen = 0;
+  while (colon + nlen < hay + hlen && nlen < 63) {
+    char c = colon[nlen];
+    if ((c >= '0' && c <= '9') || c == '-' || c == '+') {
+      num_buf[nlen] = c;
+      nlen++;
+    } else {
+      break;
+    }
+  }
+  num_buf[nlen] = '\0';
+  return (int64_t)strtoll(num_buf, NULL, 10);
 }
 
 static inline float vira_json_get_f32(vira_string json, vira_string key) {
+  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+    return 0.0f;
+  }
   char search_quote[260];
-  int klen = key.len < 200 ? key.len : 200;
-  snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
-           (const char *)key.data);
+  int klen = key.len < 250 ? key.len : 250;
+  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
+                        (const char *)key.data);
+  if (sq_len <= 0)
+    return 0.0f;
 
   const char *hay = (const char *)json.data;
-  if (!hay)
-    return 0.0f;
-  const char *found = strstr(hay, search_quote);
+  size_t hlen = (size_t)json.len;
+
+  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
   if (!found)
     return 0.0f;
 
-  const char *colon = strchr(found + strlen(search_quote), ':');
+  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
+  if (offset >= hlen)
+    return 0.0f;
+
+  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
   if (!colon)
     return 0.0f;
   colon++;
-  while (*colon == ' ' || *colon == '\t')
-    colon++;
 
-  return (float)strtod(colon, NULL);
+  while (colon < hay + hlen && (*colon == ' ' || *colon == '\t' ||
+                                *colon == '\r' || *colon == '\n')) {
+    colon++;
+  }
+  if (colon >= hay + hlen)
+    return 0.0f;
+
+  char num_buf[64];
+  int nlen = 0;
+  while (colon + nlen < hay + hlen && nlen < 63) {
+    char c = colon[nlen];
+    if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
+        c == 'e' || c == 'E') {
+      num_buf[nlen] = c;
+      nlen++;
+    } else {
+      break;
+    }
+  }
+  num_buf[nlen] = '\0';
+  return (float)strtod(num_buf, NULL);
 }
 
 // ============================================================================
@@ -2580,7 +2784,6 @@ static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
     memcpy(path_buf, path.data, len);
   }
   path_buf[len] = '\0';
-  vira_str_free(&path);
 
   char name_buf[256];
   int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
@@ -2588,7 +2791,6 @@ static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
     memcpy(name_buf, tensor_name.data, nlen);
   }
   name_buf[nlen] = '\0';
-  vira_str_free(&tensor_name);
 
   FILE *f = fopen(path_buf, "rb");
   if (!f) {
@@ -2859,14 +3061,12 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   if (path.data && len > 0)
     memcpy(path_buf, path.data, len);
   path_buf[len] = '\0';
-  vira_str_free(&path);
 
   char name_buf[256];
   int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
   if (tensor_name.data && nlen > 0)
     memcpy(name_buf, tensor_name.data, nlen);
   name_buf[nlen] = '\0';
-  vira_str_free(&tensor_name);
 
   FILE *f = fopen(path_buf, "rb");
   if (!f) {
@@ -3042,8 +3242,8 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
         uint8_t byte = nibbles[j];
         int8_t v0 = (int8_t)(byte & 0x0F) - 8;
         int8_t v1 = (int8_t)(byte >> 4) - 8;
-        t.data[base + 2 * j] = scale * (float)v0;
-        t.data[base + 2 * j + 1] = scale * (float)v1;
+        t.data[base + j] = scale * (float)v0;
+        t.data[base + j + 16] = scale * (float)v1;
       }
     }
   } else {
@@ -3128,11 +3328,11 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
       float cos_a = cosf(angle);
       float sin_a = sinf(angle);
 
-      float q0 = q_row[2 * i];
-      float q1 = q_row[2 * i + 1];
+      float q0 = q_row[i];
+      float q1 = q_row[i + half_dim];
 
-      out_row[2 * i] = q0 * cos_a - q1 * sin_a;
-      out_row[2 * i + 1] = q0 * sin_a + q1 * cos_a;
+      out_row[i] = q0 * cos_a - q1 * sin_a;
+      out_row[i + half_dim] = q0 * sin_a + q1 * cos_a;
     }
   }
   return out;

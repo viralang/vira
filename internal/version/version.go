@@ -5,4 +5,4 @@ package version
 // It can also be overridden at link-time with:
 //
 //	-ldflags="-X github.com/viralang/vira/internal/version.Version=vX.Y.Z"
-var Version = "v0.5.10"
+var Version = "v0.5.11"
