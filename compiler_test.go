@@ -1387,5 +1387,246 @@ fn main() {
 	}
 }
 
+func TestRuntimeCorrectnessAndSchedulerFixes(t *testing.T) {
+	var cCompiler string
+	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+		if _, err := exec.LookPath(cand); err == nil {
+			cCompiler = cand
+			break
+		}
+	}
+	if cCompiler == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				cCompiler = cand
+			}
+		}
+	}
+	if cCompiler == "" {
+		t.Skip("C compiler not available, skipping native run")
+		return
+	}
+
+	runtimeDir, err := filepath.Abs("runtime")
+	if err != nil {
+		t.Fatalf("failed to resolve runtime dir: %v", err)
+	}
+
+	cCode := `
+#include "vira_rt.h"
+#include <assert.h>
+#include <stdio.h>
+#include <math.h>
+
+static void dummy_task(void* env) {
+    int* val = (int*)env;
+    __atomic_add_fetch(val, 1, __ATOMIC_RELAXED);
+}
+
+int main(void) {
+    // 1. Test RoPE pairing (half_dim split)
+    vira_tensor_f32 q = vira_tensor_f32_alloc(1, 4);
+    q.data[0] = 1.0f;
+    q.data[1] = 2.0f;
+    q.data[2] = 3.0f;
+    q.data[3] = 4.0f;
+    // With pos = 0, angle is 0, cos = 1, sin = 0, out equals q
+    vira_tensor_f32 r0 = vira_tensor_rope(q, 0, 10000.0f);
+    assert(fabsf(r0.data[0] - 1.0f) < 1e-4);
+    assert(fabsf(r0.data[1] - 2.0f) < 1e-4);
+    assert(fabsf(r0.data[2] - 3.0f) < 1e-4);
+    assert(fabsf(r0.data[3] - 4.0f) < 1e-4);
+    vira_tensor_f32_free(&q);
+    vira_tensor_f32_free(&r0);
+
+    // 2. Test JSON parsing on non-NUL-terminated slices
+    const char raw_json[] = "{\"id\":12345,\"name\":\"antigravity\",\"score\":99.5}TRAILING_GARBAGE";
+    vira_string jstr = { .data = (const uint8_t*)raw_json, .len = 49, .is_lit = true }; // excludes TRAILING_GARBAGE
+    vira_string name_res = vira_json_get_str(jstr, vira_str_lit("name", 4));
+    assert(name_res.len == 11);
+    assert(memcmp(name_res.data, "antigravity", 11) == 0);
+    vira_str_free(&name_res);
+
+    int64_t id_res = vira_json_get_int(jstr, vira_str_lit("id", 2));
+    assert(id_res == 12345);
+
+    float score_res = vira_json_get_f32(jstr, vira_str_lit("score", 5));
+    assert(fabsf(score_res - 99.5f) < 1e-3);
+
+    // 3. Test Loader caller string ownership (caller owns string, no double-free)
+    vira_string test_path = vira_str_format("nonexistent_test_%d.bin", 123);
+    Result_tensor_f32 res = vira_tensor_load_bin(NULL, 2, 2, test_path);
+    assert(res.is_err == true);
+    vira_str_free(&res.err);
+    // Caller safely frees its own string without double free
+    vira_str_free(&test_path);
+
+    // 4. Test Scheduler multithreaded concurrent submission and overflow fallback
+    vira_scheduler_init(4);
+    int counter = 0;
+    const int NUM_TASKS = 5000; // Exceeds VIRA_WS_CAP (4096) to test overflow queue!
+    vira_task tasks[NUM_TASKS];
+    for (int i = 0; i < NUM_TASKS; i++) {
+        tasks[i].fn = dummy_task;
+        tasks[i].env = &counter;
+        tasks[i].done = 0;
+        vira_scheduler_submit_async(&tasks[i]);
+    }
+    for (int i = 0; i < NUM_TASKS; i++) {
+        vira_scheduler_await(&tasks[i]);
+    }
+    assert(counter == NUM_TASKS);
+
+    // 5. Test Actor MPSC Mailbox and FIFO Batch Execution
+    vira_actor_ctx act_ctx;
+    vira_actor_ctx_init(&act_ctx, 42, "test_actor", 3);
+    int actor_counter = 0;
+    const int NUM_ACTOR_MSGS = 200;
+    vira_task act_tasks[NUM_ACTOR_MSGS];
+    for (int i = 0; i < NUM_ACTOR_MSGS; i++) {
+        act_tasks[i].fn = dummy_task;
+        act_tasks[i].env = &actor_counter;
+        act_tasks[i].done = 0;
+        vira_actor_send(&act_ctx, &act_tasks[i]);
+    }
+    for (int i = 0; i < NUM_ACTOR_MSGS; i++) {
+        vira_scheduler_await(&act_tasks[i]);
+    }
+    assert(actor_counter == NUM_ACTOR_MSGS);
+    vira_actor_ctx_destroy(&act_ctx);
+
+    // 6. Test Shutdown draining
+    vira_scheduler_shutdown();
+
+    printf("[vira_rt] all runtime tests passed cleanly! active_allocs=%lld\\n", (long long)_vira_active_heap_allocs);
+    assert(_vira_active_heap_allocs == 0);
+    return 0;
+}
+`
+
+	tmpDir := t.TempDir()
+	cFile := filepath.Join(tmpDir, "runtime_fixes_test.c")
+	binFile := filepath.Join(tmpDir, "runtime_fixes_bin")
+	if os.PathSeparator == '\\' {
+		binFile += ".exe"
+	}
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("write C file: %v", err)
+	}
+
+	cFlags := []string{
+		"-std=c99", "-O1", "-g", "-fsanitize=address,undefined",
+		"-pthread", "-I" + runtimeDir, cFile, "-lm", "-o", binFile,
+	}
+	buildCmd := exec.Command(cCompiler, cFlags...)
+	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("C99 compilation with sanitizers failed (%v):\n%s", err, string(buildOut))
+	}
+
+	runCmd := exec.Command(binFile)
+	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	rawOut, err := runCmd.CombinedOutput()
+	outStr := string(rawOut)
+	if err != nil {
+		t.Fatalf("runtime fixes test execution failed with exit code %v:\n%s", err, outStr)
+	}
+
+	if !strings.Contains(outStr, "[vira_rt] all runtime tests passed cleanly!") {
+		t.Fatalf("expected clean pass, got output:\n%s", outStr)
+	}
+}
+
+func TestActorOptimizationDetachedAndStopped(t *testing.T) {
+	viraSrc := `module actor_opt_test
+
+pub actor Counter {
+mut:
+	val int = 0
+}
+
+pub fn (mut c Counter) add(x int) int {
+	c.val = c.val + 1
+	if x < 0 {
+		panic('negative value fault')
+	}
+	return c.val
+}
+
+pub fn (mut c Counter) get() int {
+	return c.val
+}
+
+fn main() {
+	mut c := Counter{ val: 0 }
+
+	// 1. Fire-and-forget detached sends (should auto-free envelope and not leak)
+	for mut i := 0; i < 50; i = i + 1 {
+		c <- add(1)
+		_ := c <- add(1)
+	}
+
+	// 2. Synchronous call via or-block (stack-allocated env)
+	v := c <- get() or { 0 }
+	println("count after detached sends: ${v}")
+
+	// 3. Trigger 4 consecutive panics exceeding max_restarts (3) to test VIRA_ACTOR_STOPPED
+	mut faults := 0
+	for mut f := 0; f < 4; f = f + 1 {
+		_ := c <- add(-1) or {
+			faults = faults + 1
+			0
+		}
+	}
+
+	// 4. Any message sent to stopped actor must be rejected
+	res := c <- get() or {
+		println("actor cleanly stopped")
+		999
+	}
+	println("final result: ${res}")
+}
+`
+
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "actor_opt_test.vir")
+	if err := os.WriteFile(srcFile, []byte(viraSrc), 0644); err != nil {
+		t.Fatalf("failed to write test vir file: %v", err)
+	}
+
+	binName := "vira"
+	if runtime.GOOS == "windows" {
+		binName = "vira.exe"
+	}
+	viraBin, err := filepath.Abs(binName)
+	if err != nil {
+		t.Fatalf("failed to get absolute path to vira: %v", err)
+	}
+
+	runCmd := exec.Command(viraBin, "run", srcFile)
+	runCmd.Dir = "."
+	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	out, err := runCmd.CombinedOutput()
+	outStr := string(out)
+	if err != nil {
+		t.Fatalf("actor optimization test failed (%v):\n%s", err, outStr)
+	}
+
+	if !strings.Contains(outStr, "count after detached sends: 100") {
+		t.Errorf("missing count after detached sends, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "actor cleanly stopped") {
+		t.Errorf("expected actor cleanly stopped, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "final result: 999") {
+		t.Errorf("expected final result: 999, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "active_leaks=0") {
+		t.Errorf("expected zero leaks (active_leaks=0), got:\n%s", outStr)
+	}
+}
+
+
 
 

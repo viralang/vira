@@ -57,8 +57,9 @@ INSTALLED=0
 # Check local compiled binaries
 for cand in "./vira" "./bin/vira" "../vira" "./vex" "./bin/vex" "../vex"; do
     if [ -f "$cand" ]; then
+        rm -f "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
         cp "$cand" "$BIN_DIR/vira"
-        ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$BIN_DIR/vira" "$BIN_DIR/vex"
+        ln -sf "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || cp "$cand" "$BIN_DIR/vex"
         chmod +x "$BIN_DIR/vira" "$BIN_DIR/vex" 2>/dev/null || true
         echo "  ${GREEN}✓ Installed local binary from $cand${RESET}"
         INSTALLED=1
