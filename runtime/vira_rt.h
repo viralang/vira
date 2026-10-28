@@ -154,7 +154,7 @@ static inline vira_string vira_str_format(const char *fmt, ...) {
 
   char *buf = (char *)malloc((size_t)needed + 1);
   if (!buf) {
-    fprintf(stderr, "vex panic: out of memory in vira_str_format\n");
+    fprintf(stderr, "vira panic: out of memory in vira_str_format\n");
     exit(1);
   }
   vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);
@@ -166,10 +166,14 @@ static inline vira_string vira_str_format(const char *fmt, ...) {
 }
 
 static inline vira_string vira_str_clone(vira_string s) {
-  if (s.is_lit || s.data == NULL || s.len == 0) {
+  if (s.is_lit || s.data == NULL || s.len <= 0) {
     return s;
   }
   uint8_t *copy = (uint8_t *)malloc((size_t)s.len + 1);
+  if (!copy) {
+    fprintf(stderr, "vira panic: out of memory in vira_str_clone\n");
+    exit(1);
+  }
   memcpy(copy, s.data, (size_t)s.len);
   copy[s.len] = '\0';
   _vira_record_alloc();
@@ -811,6 +815,11 @@ typedef struct {
 
 static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows,
                                                     int32_t cols) {
+  if (rows <= 0 || cols <= 0) {
+    fprintf(stderr, "vira tensor error: invalid dimensions (%d x %d)\n", rows,
+            cols);
+    exit(1);
+  }
   size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
   void *raw = malloc(bytes + 64);
   if (!raw) {
@@ -873,7 +882,7 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
                                                      vira_tensor_f32 b) {
   if (a.cols != b.rows) {
     fprintf(stderr,
-            "vex tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",
+            "vira tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",
             a.rows, a.cols, b.rows, b.cols);
     exit(1);
   }
@@ -1019,7 +1028,7 @@ static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
 static inline vira_tensor_f32
 vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   if (a.rows != b.rows || a.cols != b.cols) {
-    fprintf(stderr, "vex tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
+    fprintf(stderr, "vira tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
             a.rows, a.cols, b.rows, b.cols);
     exit(1);
   }
@@ -1058,7 +1067,7 @@ vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
 static inline vira_tensor_f32
 vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   if (a.rows != b.rows || a.cols != b.cols) {
-    fprintf(stderr, "vex tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
+    fprintf(stderr, "vira tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
             a.rows, a.cols, b.rows, b.cols);
     exit(1);
   }
@@ -1164,6 +1173,7 @@ typedef struct _vira_task {
 } vira_task;
 
 static void _vira_actor_drain_task(void *env);
+static inline void vira_scheduler_await(vira_task *task);
 
 typedef enum {
   VIRA_ACTOR_RUNNING = 0,
@@ -1218,8 +1228,14 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
 }
 
 static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
-  while (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
-    vira_cpu_relax();
+  if (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
+    vira_scheduler_await(&ctx->drain_task);
+    while (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
+      vira_cpu_relax();
+    }
+  }
+  if (!ctx->last_error.is_lit && ctx->last_error.data != NULL) {
+    vira_str_free(&ctx->last_error);
   }
   vira_arena_destroy(&ctx->isolated_heap);
 }
@@ -2547,6 +2563,8 @@ static inline int64_t vira_net_tcp_connect(vira_string host, int32_t port,
   }
 
   freeaddrinfo(res);
+  if (conn_fd == VIRA_INVALID_SOCKET)
+    return -1;
   return (int64_t)conn_fd;
 }
 
@@ -2769,6 +2787,8 @@ static inline int64_t vira_net_udp_bind(vira_string host, int32_t port) {
   }
 
   freeaddrinfo(res);
+  if (udp_fd == VIRA_INVALID_SOCKET)
+    return -1;
   return (int64_t)udp_fd;
 }
 
@@ -2871,23 +2891,28 @@ static inline vira_string vira_http_response(int64_t status_code,
   }
   ctype_buf[ctype_len] = '\0';
 
-  int header_est = 256 + body.len;
-  char *res = (char *)malloc(header_est);
+  int32_t body_len = body.len > 0 ? body.len : 0;
+  size_t alloc_sz = 512 + (size_t)body_len + 1;
+  char *res = (char *)malloc(alloc_sz);
   if (!res)
     return vira_str_lit("", 0);
   _vira_record_alloc();
 
-  int n = snprintf(res, header_est,
+  int n = snprintf(res, 512,
                    "HTTP/1.1 %lld %s\r\n"
                    "Content-Type: %s\r\n"
                    "Content-Length: %d\r\n"
                    "Connection: close\r\n"
                    "\r\n",
-                   (long long)status_code, status_text, ctype_buf, body.len);
+                   (long long)status_code, status_text, ctype_buf, body_len);
+  if (n < 0)
+    n = 0;
+  if (n > 511)
+    n = 511;
 
-  if (body.len > 0 && body.data) {
-    memcpy(res + n, body.data, body.len);
-    n += body.len;
+  if (body_len > 0 && body.data) {
+    memcpy(res + n, body.data, (size_t)body_len);
+    n += body_len;
   }
   res[n] = '\0';
   return (vira_string){.data = (const uint8_t *)res, .len = n, .is_lit = false};
@@ -3646,7 +3671,7 @@ static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
                                                        vira_tensor_f32 b) {
   if (a.rows != b.rows || a.cols != b.cols) {
     fprintf(stderr,
-            "vex tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
+            "vira tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
             a.rows, a.cols, b.rows, b.cols);
     exit(1);
   }
@@ -3736,7 +3761,7 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_tensor_f32 table,
                                                     int64_t token_id) {
   if (token_id < 0 || token_id >= table.rows) {
     fprintf(stderr,
-            "vex tensor error: embedding index %lld out of range [0, %d)\n",
+            "vira tensor error: embedding index %lld out of range [0, %d)\n",
             (long long)token_id, table.rows);
     exit(1);
   }
