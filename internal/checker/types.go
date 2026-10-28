@@ -53,6 +53,19 @@ func (p *PrimitiveType) Equals(other Type) bool {
 	return p.Kind == o.Kind
 }
 
+// ExactEquals checks strict type identity without implicit numeric primitive promotion.
+// Used for invariant container element types ([]T, [N]T, &T, tensor[T]) and mutable pointer arguments.
+func ExactEquals(a, b Type) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if pa, ok := a.(*PrimitiveType); ok {
+		pb, okB := b.(*PrimitiveType)
+		return okB && pa.Kind == pb.Kind
+	}
+	return a.Equals(b)
+}
+
 var (
 	TypeVoid   = &PrimitiveType{Kind: PrimVoid}
 	TypeU8     = &PrimitiveType{Kind: PrimU8}
@@ -109,7 +122,7 @@ func (r *RefType) String() string {
 
 func (r *RefType) Equals(other Type) bool {
 	o, ok := other.(*RefType)
-	return ok && r.IsMut == o.IsMut && r.Inner.Equals(o.Inner)
+	return ok && r.IsMut == o.IsMut && ExactEquals(r.Inner, o.Inner)
 }
 
 // TensorType represents `tensor[T]`.
@@ -121,7 +134,7 @@ func (t *TensorType) String() string { return fmt.Sprintf("tensor[%s]", t.DType)
 
 func (t *TensorType) Equals(other Type) bool {
 	o, ok := other.(*TensorType)
-	return ok && t.DType.Equals(o.DType)
+	return ok && ExactEquals(t.DType, o.DType)
 }
 
 // FutureType represents `Future[T]` returned by asynchronous actor sends (`worker <- msg()`).
@@ -133,7 +146,7 @@ func (f *FutureType) String() string { return fmt.Sprintf("Future[%s]", f.Inner)
 
 func (f *FutureType) Equals(other Type) bool {
 	o, ok := other.(*FutureType)
-	return ok && f.Inner.Equals(o.Inner)
+	return ok && ExactEquals(f.Inner, o.Inner)
 }
 
 // ArrayType represents a fixed-size stack array `[N]T`.
@@ -146,7 +159,7 @@ func (a *ArrayType) String() string { return fmt.Sprintf("[%d]%s", a.Len, a.Elem
 
 func (a *ArrayType) Equals(other Type) bool {
 	o, ok := other.(*ArrayType)
-	return ok && a.Len == o.Len && a.Elem.Equals(o.Elem)
+	return ok && a.Len == o.Len && ExactEquals(a.Elem, o.Elem)
 }
 
 // SliceType represents a growable dynamic array / slice `[]T`.
@@ -158,7 +171,7 @@ func (s *SliceType) String() string { return fmt.Sprintf("[]%s", s.Elem) }
 
 func (s *SliceType) Equals(other Type) bool {
 	o, ok := other.(*SliceType)
-	return ok && s.Elem.Equals(o.Elem)
+	return ok && ExactEquals(s.Elem, o.Elem)
 }
 
 // FieldInfo stores resolved metadata for a struct or interface field.

@@ -647,21 +647,29 @@ static inline vira_string vira_bytes_to_string(const vira_slice_u8 *s) {
 // 2. 64-BYTE ALIGNED BUMP-POINTER ARENA ALLOCATOR (`arena { ... }`)
 // ============================================================================
 
+typedef struct _vira_arena_slab {
+  uint8_t *buf;
+  size_t cap;
+  struct _vira_arena_slab *next;
+} vira_arena_slab;
+
 typedef struct {
   uint8_t *buf;
   size_t cap;
   size_t offset;
+  vira_arena_slab *overflow_slabs;
 } vira_arena;
 
 static inline vira_arena vira_arena_init(size_t capacity) {
   uint8_t *slab = (uint8_t *)malloc(capacity + 64);
   if (!slab) {
-    fprintf(stderr, "vex panic: failed to allocate arena slab (%zu bytes)\n",
+    fprintf(stderr, "vira panic: failed to allocate arena slab (%zu bytes)\n",
             capacity);
     exit(1);
   }
   _vira_record_alloc();
-  return (vira_arena){.buf = slab, .cap = capacity, .offset = 0};
+  return (vira_arena){
+      .buf = slab, .cap = capacity, .offset = 0, .overflow_slabs = NULL};
 }
 
 static inline void *vira_arena_alloc(vira_arena *a, size_t size) {
@@ -677,12 +685,75 @@ static inline void *vira_arena_alloc(vira_arena *a, size_t size) {
   size_t total = pad + ((size + 63) & ~(size_t)63);
 
   if (a->offset + total > a->cap) {
-    fprintf(stderr, "vex panic: arena slab exhausted (%zu / %zu bytes)\n",
-            a->offset + total, a->cap);
-    exit(1);
+    vira_arena_slab *old_slab =
+        (vira_arena_slab *)malloc(sizeof(vira_arena_slab));
+    if (!old_slab) {
+      fprintf(stderr, "vira panic: failed to allocate arena slab header\n");
+      exit(1);
+    }
+    old_slab->buf = a->buf;
+    old_slab->cap = a->cap;
+    old_slab->next = a->overflow_slabs;
+
+    size_t min_cap = ((size + 63) & ~(size_t)63) + 64;
+    size_t doubled = a->cap * 2;
+    size_t new_cap =
+        (doubled >= min_cap) ? doubled : ((min_cap + 4095) & ~(size_t)4095);
+    uint8_t *new_buf = (uint8_t *)malloc(new_cap + 64);
+    if (!new_buf) {
+      fprintf(stderr, "vira panic: failed to allocate chained arena slab (%zu bytes)\n",
+              new_cap);
+      exit(1);
+    }
+    _vira_record_alloc();
+    a->overflow_slabs = old_slab;
+    a->buf = new_buf;
+    a->cap = new_cap;
+    a->offset = 0;
+
+    base = (uintptr_t)a->buf;
+    aligned = (base + 63) & ~(uintptr_t)63;
+    pad = (size_t)(aligned - base);
+    total = pad + ((size + 63) & ~(size_t)63);
   }
   a->offset += total;
   return (void *)aligned;
+}
+
+static inline bool vira_arena_contains(const vira_arena *a, const void *ptr) {
+  if (!a || !ptr)
+    return false;
+  uintptr_t p = (uintptr_t)ptr;
+  if (a->buf != NULL) {
+    uintptr_t start = (uintptr_t)a->buf;
+    if (p >= start && p < start + a->cap + 64) {
+      return true;
+    }
+  }
+  for (const vira_arena_slab *s = a->overflow_slabs; s != NULL; s = s->next) {
+    uintptr_t start = (uintptr_t)s->buf;
+    if (p >= start && p < start + s->cap + 64) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static inline void vira_arena_reset(vira_arena *a) {
+  if (!a)
+    return;
+  vira_arena_slab *cur = a->overflow_slabs;
+  while (cur != NULL) {
+    vira_arena_slab *next = cur->next;
+    if (cur->buf != NULL) {
+      free(cur->buf);
+      _vira_record_free();
+    }
+    free(cur);
+    cur = next;
+  }
+  a->overflow_slabs = NULL;
+  a->offset = 0;
 }
 
 static inline vira_string vira_arena_str_format(vira_arena *a, const char *fmt,
@@ -702,7 +773,10 @@ static inline vira_string vira_arena_str_format(vira_arena *a, const char *fmt,
 }
 
 static inline void vira_arena_destroy(vira_arena *a) {
-  if (a != NULL && a->buf != NULL) {
+  if (a == NULL)
+    return;
+  vira_arena_reset(a);
+  if (a->buf != NULL) {
     free(a->buf);
     a->buf = NULL;
     a->cap = 0;
@@ -1062,6 +1136,16 @@ static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
   }
 }
 
+static inline vira_tensor_f32 vira_tensor_f32_clone(vira_tensor_f32 t) {
+  if (t.data == NULL || t.rows <= 0 || t.cols <= 0) {
+    return (vira_tensor_f32){0};
+  }
+  vira_tensor_f32 copy = vira_tensor_f32_alloc(t.rows, t.cols);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  memcpy(copy.data, t.data, bytes);
+  return copy;
+}
+
 // ============================================================================
 // 4. MULTI-THREADED LOCK-FREE WORK-STEALING ACTOR POOL & SUPERVISOR
 // ============================================================================
@@ -1146,10 +1230,7 @@ static inline void vira_panic(vira_string msg) {
     if (!_vira_tls_actor->last_error.is_lit && _vira_tls_actor->last_error.data != NULL) {
       vira_str_free(&_vira_tls_actor->last_error);
     }
-    uintptr_t p = (uintptr_t)msg.data;
-    uintptr_t arena_start = (uintptr_t)_vira_tls_actor->isolated_heap.buf;
-    uintptr_t arena_end = arena_start + (uintptr_t)_vira_tls_actor->isolated_heap.cap;
-    if (p >= arena_start && p < arena_end) {
+    if (vira_arena_contains(&_vira_tls_actor->isolated_heap, msg.data)) {
       char *buf = (char *)malloc((size_t)msg.len + 1);
       if (buf != NULL) {
         memcpy(buf, msg.data, (size_t)msg.len);
@@ -3152,11 +3233,11 @@ vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
 #if defined(__AVX2__)
   __m256 zero = _mm256_setzero_ps();
   for (; i + 7 < total; i += 8) {
-    __m256 in_v = _mm256_load_ps(&input.data[i]);
-    __m256 grad_v = _mm256_load_ps(&grad_out.data[i]);
+    __m256 in_v = _mm256_loadu_ps(&input.data[i]);
+    __m256 grad_v = _mm256_loadu_ps(&grad_out.data[i]);
     __m256 mask = _mm256_cmp_ps(in_v, zero, _CMP_GT_OQ);
     __m256 res_v = _mm256_and_ps(mask, grad_v);
-    _mm256_store_ps(&out.data[i], res_v);
+    _mm256_storeu_ps(&out.data[i], res_v);
   }
 #endif
 
@@ -3176,11 +3257,11 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
 #if defined(__AVX2__)
   __m256 lr_v = _mm256_set1_ps(lr);
   for (; i + 7 < total; i += 8) {
-    __m256 p_v = _mm256_load_ps(&param->data[i]);
-    __m256 g_v = _mm256_load_ps(&grad.data[i]);
+    __m256 p_v = _mm256_loadu_ps(&param->data[i]);
+    __m256 g_v = _mm256_loadu_ps(&grad.data[i]);
     __m256 step = _mm256_mul_ps(lr_v, g_v);
     __m256 updated = _mm256_sub_ps(p_v, step);
-    _mm256_store_ps(&param->data[i], updated);
+    _mm256_storeu_ps(&param->data[i], updated);
   }
 #endif
 

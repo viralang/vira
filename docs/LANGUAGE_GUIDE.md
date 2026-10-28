@@ -77,6 +77,11 @@ vira <command> [flags] <file.vir>
 | :--- | :--- | :--- |
 | `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
 | `build` | Compile into a native standalone executable (`.exe` / ELF) | `vira build -prod -o app main.vir` |
+| `test` | Discover and execute `*_test.vir` test suites | `vira test ./...` |
+| `fmt` | Format `.vir` source files to canonical style | `vira fmt main.vir` |
+| `doc` | Generate documentation from `.vir` module declarations | `vira doc packages/http` |
+| `pkg` | Manage `vira.mod` dependencies and cryptographic `vira.lock` files | `vira pkg lock` |
+| `lsp` | Start the JSON-RPC 2.0 Language Server (`virals`) over stdio | `vira lsp` |
 | `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
 | `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vira check main.vir` |
 | `demo` | Generate and execute the built-in parallel AI actor demo | `vira demo` |
@@ -167,8 +172,9 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 
 | Type | Description | Size |
 | :--- | :--- | :--- |
+| `u8` / `byte` | Unsigned 8-bit integer (raw byte buffers, I/O, network packets) | 8-bit |
 | `int` | Default signed integer | 32-bit |
-| `i64` | Signed 64-bit integer (timestamps, currency) | 64-bit |
+| `i64` | Signed 64-bit integer (timestamps, currency, file offsets) | 64-bit |
 | `f32` | Single-precision IEEE 754 float | 32-bit |
 | `f64` | Double-precision IEEE 754 float | 64-bit |
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |

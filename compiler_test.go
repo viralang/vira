@@ -1515,10 +1515,12 @@ int main(void) {
 		t.Fatalf("write C file: %v", err)
 	}
 
-	cFlags := []string{
-		"-std=c99", "-O1", "-g", "-fsanitize=address,undefined",
-		"-pthread", "-I" + runtimeDir, cFile, "-lm", "-o", binFile,
+	hasSanitizers := probeSanitizerSupport(cCompiler)
+	cFlags := []string{"-std=c99", "-O1", "-g"}
+	if hasSanitizers {
+		cFlags = append(cFlags, "-fsanitize=address,undefined")
 	}
+	cFlags = append(cFlags, "-pthread", "-I"+runtimeDir, cFile, "-lm", "-o", binFile)
 	buildCmd := exec.Command(cCompiler, cFlags...)
 	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
@@ -1626,6 +1628,186 @@ fn main() {
 		t.Errorf("expected zero leaks (active_leaks=0), got:\n%s", outStr)
 	}
 }
+
+func TestP0FixesContainerTypesArenaSlicesAndStructClone(t *testing.T) {
+	// P0-1: Invariant container types and mutable call parameters must reject mismatched primitive element types
+	t.Run("P0_1_InvariantContainerAndMutParamTypes", func(t *testing.T) {
+		checkErrs := func(src string) []checker.SemanticError {
+			p := parser.New(src)
+			f := p.ParseFile()
+			if len(p.Errors()) > 0 {
+				t.Fatalf("unexpected parse errors: %v", p.Errors())
+			}
+			chk := checker.New()
+			chk.CheckFile(f)
+			return chk.Errors()
+		}
+
+		sliceMismatchSrc := `module main
+fn takes_ints(xs []int) int {
+	return xs.len
+}
+fn main() {
+	bytes := []u8{1, 2, 3}
+	_ := takes_ints(bytes)
+}
+`
+		if errs := checkErrs(sliceMismatchSrc); len(errs) == 0 {
+			t.Fatalf("expected type error when passing []u8 to []int parameter, got none")
+		}
+
+		mutParamMismatchSrc := `module main
+fn mutate_int(mut x int) {
+	x = 42
+}
+fn main() {
+	mut b := u8(7)
+	mutate_int(mut b)
+}
+`
+		if errs := checkErrs(mutParamMismatchSrc); len(errs) == 0 {
+			t.Fatalf("expected type error when passing mut u8 to mut int parameter, got none")
+		}
+	})
+
+	// P0-2 & P0-3: Non-arena heap objects inside arena blocks must be freed, and cloning a slice of structs with heap fields must deep-clone without double-free or leak
+	t.Run("P0_2_ArenaHeapCleanupsAnd_P0_3_StructSliceDeepClone", func(t *testing.T) {
+		viraSrc := `module p0_runtime_test
+
+struct Record {
+	label string
+	nums  []int
+}
+
+fn make_tag(id int) string {
+	return "tag_${id}"
+}
+
+fn main() {
+	// P0-2: Allocate slices, structs, and heap strings inside an arena block
+	arena {
+		mut local_nums := []int{10, 20, 30}
+		local_nums.push(40)
+		t := make_tag(local_nums[3])
+		println("arena tag: ${t}")
+	}
+
+	// P0-3: Deep clone a slice of structs owning string and []int fields
+	mut items := []Record{
+		Record{ label: "first_${1}", nums: []int{1, 2, 3} },
+		Record{ label: "second_${2}", nums: []int{4, 5} },
+	}
+	cloned := items.clone()
+	println("cloned len=${cloned.len} first=${cloned[0].label} second_num=${cloned[1].nums[1]}")
+}
+`
+		tmpDir := t.TempDir()
+		srcFile := filepath.Join(tmpDir, "p0_runtime_test.vir")
+		if err := os.WriteFile(srcFile, []byte(viraSrc), 0644); err != nil {
+			t.Fatalf("failed to write test vir file: %v", err)
+		}
+
+		binName := "vira"
+		if runtime.GOOS == "windows" {
+			binName = "vira.exe"
+		}
+		viraBin, err := filepath.Abs(binName)
+		if err != nil {
+			t.Fatalf("failed to get absolute path to vira: %v", err)
+		}
+
+		runCmd := exec.Command(viraBin, "run", srcFile)
+		runCmd.Dir = "."
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		out, err := runCmd.CombinedOutput()
+		outStr := string(out)
+		if err != nil {
+			t.Fatalf("P0 runtime test failed (%v):\n%s", err, outStr)
+		}
+
+		if !strings.Contains(outStr, "arena tag: tag_40") {
+			t.Errorf("missing expected arena tag output, got:\n%s", outStr)
+		}
+		if !strings.Contains(outStr, "cloned len=2 first=first_1 second_num=5") {
+			t.Errorf("missing expected cloned struct slice output, got:\n%s", outStr)
+		}
+		if !strings.Contains(outStr, "active_leaks=0") {
+			t.Errorf("expected zero leaks (active_leaks=0), got:\n%s", outStr)
+		}
+	})
+
+	// P1: Chained arena slabs (>1MB inside arena {}) & cross-module struct destructor disambiguation
+	t.Run("P1_ChainedArenaSlabsAndModuleStructAutofree", func(t *testing.T) {
+		// 1. Cross-module struct name collision check
+		pA := parser.New("module mod_a\npub struct Config {\npub:\n\tport int\n}\n")
+		fA := pA.ParseFile()
+		pMain := parser.New("module main\nimport mod_a\nstruct Config {\n\tname string\n}\nfn main() {\n\tc1 := mod_a.Config{ port: 8080 }\n\tc2 := Config{ name: \"srv_${c1.port}\" }\n\tprintln(c2.name)\n}\n")
+		fMain := pMain.ParseFile()
+
+		chk := checker.New()
+		chk.CheckFiles([]*ast.File{fA, fMain})
+		if len(chk.Errors()) > 0 {
+			t.Fatalf("unexpected semantic errors: %v", chk.Errors())
+		}
+		af := autofree.New(chk)
+		af.AnalyzeFile(fA)
+		af.AnalyzeFile(fMain)
+
+		stA := chk.LookupStructInModule("mod_a", "Config")
+		stMain := chk.LookupStructInModule("main", "Config")
+		if af.StructTypeNeedsFree(stA) {
+			t.Fatalf("expected mod_a.Config (int only) NOT to need _autofree")
+		}
+		if !af.StructTypeNeedsFree(stMain) {
+			t.Fatalf("expected main.Config (owns string) to need _autofree")
+		}
+
+		// 2. Chained arena slabs (>1MB tensors inside arena {})
+		arenaOverflowSrc := `module arena_chain_test
+
+fn main() {
+	arena {
+		// Each 512x512 f32 tensor is 1,048,576 bytes (1 MB).
+		// Allocating 3 tensors inside a single arena block forces chained slab allocation.
+		t1 := tensor_fill(512, 512, 1.0)
+		t2 := tensor_fill(512, 512, 2.0)
+		t3 := tensor_add(t1, t2)
+		println("chained arena sum=${tensor_sum(t3)}")
+	}
+}
+`
+		tmpDir := t.TempDir()
+		srcFile := filepath.Join(tmpDir, "arena_chain_test.vir")
+		if err := os.WriteFile(srcFile, []byte(arenaOverflowSrc), 0644); err != nil {
+			t.Fatalf("failed to write test vir file: %v", err)
+		}
+
+		binName := "vira"
+		if runtime.GOOS == "windows" {
+			binName = "vira.exe"
+		}
+		viraBin, err := filepath.Abs(binName)
+		if err != nil {
+			t.Fatalf("failed to get absolute path to vira: %v", err)
+		}
+
+		runCmd := exec.Command(viraBin, "run", srcFile)
+		runCmd.Dir = "."
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		out, err := runCmd.CombinedOutput()
+		outStr := string(out)
+		if err != nil {
+			t.Fatalf("chained arena test failed (%v):\n%s", err, outStr)
+		}
+		if !strings.Contains(outStr, "chained arena sum=786432") {
+			t.Errorf("expected sum=786432, got:\n%s", outStr)
+		}
+		if !strings.Contains(outStr, "active_leaks=0") {
+			t.Errorf("expected zero leaks (active_leaks=0), got:\n%s", outStr)
+		}
+	})
+}
+
 
 
 

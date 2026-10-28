@@ -84,36 +84,73 @@ func New(chk *checker.Checker) *Analyzer {
 // computeStructDestructors determines which structs transitively own heap memory.
 func (a *Analyzer) computeStructDestructors() {
 	structs := a.chk.Structs()
+	for _, st := range structs {
+		qualName := st.Name
+		if st.Module != "" {
+			qualName = st.Module + "." + st.Name
+		}
+		if _, exists := a.StructNeedsFree[qualName]; !exists {
+			a.StructNeedsFree[qualName] = false
+		}
+		if _, exists := a.StructNeedsFree[st.Name]; !exists {
+			a.StructNeedsFree[st.Name] = false
+		}
+	}
 	changed := true
 	for changed {
 		changed = false
-		for name, st := range structs {
-			if a.StructNeedsFree[name] {
+		for _, st := range structs {
+			qualName := st.Name
+			if st.Module != "" {
+				qualName = st.Module + "." + st.Name
+			}
+			if a.StructNeedsFree[qualName] {
 				continue
 			}
+			needs := false
 			if st.IsActor {
-				a.StructNeedsFree[name] = true
-				changed = true
-				continue
+				needs = true
 			}
-			for _, f := range st.Fields {
-				if ok, _ := a.typeNeedsCleanup(f.Type); ok {
-					a.StructNeedsFree[name] = true
-					changed = true
-					break
-				}
-			}
-			if !a.StructNeedsFree[name] {
-				for _, emb := range st.Embeds {
-					if a.StructNeedsFree[emb.Name] {
-						a.StructNeedsFree[name] = true
-						changed = true
+			if !needs {
+				for _, f := range st.Fields {
+					if ok, _ := a.typeNeedsCleanup(f.Type); ok {
+						needs = true
 						break
 					}
 				}
 			}
+			if !needs {
+				for _, emb := range st.Embeds {
+					if a.StructTypeNeedsFree(emb) {
+						needs = true
+						break
+					}
+				}
+			}
+			if needs {
+				a.StructNeedsFree[qualName] = true
+				a.StructNeedsFree[st.Name] = true
+				changed = true
+			}
 		}
 	}
+}
+
+// StructTypeNeedsFree checks whether a StructType requires an _autofree destructor,
+// preferring its module-qualified key to avoid cross-module name collisions.
+func (a *Analyzer) StructTypeNeedsFree(st *checker.StructType) bool {
+	if st == nil {
+		return false
+	}
+	if st.IsActor {
+		return true
+	}
+	if st.Module != "" {
+		if needs, ok := a.StructNeedsFree[st.Module+"."+st.Name]; ok {
+			return needs
+		}
+	}
+	return a.StructNeedsFree[st.Name]
 }
 
 func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
@@ -134,7 +171,7 @@ func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
 		if v.IsActor {
 			return true, ast.CleanupActor
 		}
-		if a.StructNeedsFree[v.Name] {
+		if a.StructTypeNeedsFree(v) {
 			return true, ast.CleanupStruct
 		}
 		return false, 0
@@ -221,7 +258,7 @@ func (a *Analyzer) rewriteBlock(
 				}
 				if !isBorrow {
 					state := StateScopedLocal
-					if scope.InArena {
+					if scope.InArena && a.isAllocatedOnArena(kind, s.Value) {
 						state = StateManagedByArena
 					}
 					tv := &TrackedVar{
@@ -312,7 +349,7 @@ func (a *Analyzer) rewriteBlock(
 					valType := a.chk.ExprTypes[vdecl.Value]
 					if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && vdecl.Name.Name != "_" {
 						state := StateScopedLocal
-						if loopScope.InArena {
+						if loopScope.InArena && a.isAllocatedOnArena(kind, vdecl.Value) {
 							state = StateManagedByArena
 						}
 						tv := &TrackedVar{
@@ -487,6 +524,36 @@ func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScop
 	}
 }
 
+// isAllocatedOnArena reports whether an expression of cleanup kind `kind` inside an `arena { ... }`
+// block is backed by the bump arena slab (as opposed to malloc).
+// Only tensor operations using activeArena and string interpolations (vira_arena_str_format)
+// allocate on the bump slab; slices, structs, interfaces, and heap string calls allocate via malloc.
+func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
+	if kind == ast.CleanupTensor {
+		if call, ok := rhs.(*ast.CallExpr); ok {
+			if ident, ok := call.Callee.(*ast.IdentExpr); ok {
+				switch ident.Ident.Name {
+				case "tensor_fill", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin":
+					return true
+				}
+			}
+			return false
+		}
+		if bin, ok := rhs.(*ast.BinaryExpr); ok {
+			if bin.Op == token.TokAt || bin.Op == token.TokPlus || bin.Op == token.TokMinus {
+				return true
+			}
+		}
+		return false
+	}
+	if kind == ast.CleanupString {
+		if _, isInterp := rhs.(*ast.StringInterpExpr); isInterp {
+			return true
+		}
+	}
+	return false
+}
+
 // hoistTemporaryStrings extracts unassigned temporary heap strings (e.g., *ast.StringInterpExpr
 // or *ast.CallExpr returning string passed as call arguments) into scoped synthetic variables,
 // injecting immediate statement-exit DeferFreeStmt cleanup for zero-leak memory management.
@@ -496,7 +563,7 @@ func (a *Analyzer) hoistTemporaryStrings(
 	report *FnReport,
 	isRootAssigned bool,
 ) ([]ast.Stmt, []ast.Stmt) {
-	if scope.InArena || expr == nil {
+	if expr == nil {
 		return nil, nil
 	}
 
@@ -504,7 +571,7 @@ func (a *Analyzer) hoistTemporaryStrings(
 	var postFrees []*ast.DeferFreeStmt
 
 	// If root expr itself is an unassigned StringInterpExpr (e.g. in ExprStmt: `'hello ${x}'`)
-	if !isRootAssigned {
+	if !isRootAssigned && !scope.InArena {
 		if interp, ok := expr.(*ast.StringInterpExpr); ok {
 			a.tmpCounter++
 			tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
@@ -533,7 +600,7 @@ func (a *Analyzer) hoistTemporaryStrings(
 		}
 	}
 
-	a.walkAndHoistCallArgs(expr, &preStmts, &postFrees, report)
+	a.walkAndHoistCallArgs(expr, scope.InArena, &preStmts, &postFrees, report)
 
 	var postStmts []ast.Stmt
 	// LIFO cleanup
@@ -545,6 +612,7 @@ func (a *Analyzer) hoistTemporaryStrings(
 
 func (a *Analyzer) maybeHoistSubExpr(
 	expr ast.Expr,
+	inArena bool,
 	preStmts *[]ast.Stmt,
 	postFrees *[]*ast.DeferFreeStmt,
 	report *FnReport,
@@ -553,6 +621,9 @@ func (a *Analyzer) maybeHoistSubExpr(
 		return nil
 	}
 	if interp, ok := expr.(*ast.StringInterpExpr); ok {
+		if inArena {
+			return expr
+		}
 		a.tmpCounter++
 		tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
 		tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
@@ -616,6 +687,7 @@ func (a *Analyzer) maybeHoistSubExpr(
 
 func (a *Analyzer) walkAndHoistCallArgs(
 	expr ast.Expr,
+	inArena bool,
 	preStmts *[]ast.Stmt,
 	postFrees *[]*ast.DeferFreeStmt,
 	report *FnReport,
@@ -648,27 +720,27 @@ func (a *Analyzer) walkAndHoistCallArgs(
 				continue
 			}
 			// 1. Recursively walk nested subexpressions
-			a.walkAndHoistCallArgs(arg.Expr, preStmts, postFrees, report)
+			a.walkAndHoistCallArgs(arg.Expr, inArena, preStmts, postFrees, report)
 
 			// 2. Hoist temporary string if applicable
-			arg.Expr = a.maybeHoistSubExpr(arg.Expr, preStmts, postFrees, report)
+			arg.Expr = a.maybeHoistSubExpr(arg.Expr, inArena, preStmts, postFrees, report)
 		}
 		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
-			a.walkAndHoistCallArgs(sel.Left, preStmts, postFrees, report)
+			a.walkAndHoistCallArgs(sel.Left, inArena, preStmts, postFrees, report)
 		}
 
 	case *ast.BinaryExpr:
-		e.Left = a.maybeHoistSubExpr(e.Left, preStmts, postFrees, report)
-		e.Right = a.maybeHoistSubExpr(e.Right, preStmts, postFrees, report)
-		a.walkAndHoistCallArgs(e.Left, preStmts, postFrees, report)
-		a.walkAndHoistCallArgs(e.Right, preStmts, postFrees, report)
+		e.Left = a.maybeHoistSubExpr(e.Left, inArena, preStmts, postFrees, report)
+		e.Right = a.maybeHoistSubExpr(e.Right, inArena, preStmts, postFrees, report)
+		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
+		a.walkAndHoistCallArgs(e.Right, inArena, preStmts, postFrees, report)
 
 	case *ast.UnaryExpr:
-		e.Expr = a.maybeHoistSubExpr(e.Expr, preStmts, postFrees, report)
-		a.walkAndHoistCallArgs(e.Expr, preStmts, postFrees, report)
+		e.Expr = a.maybeHoistSubExpr(e.Expr, inArena, preStmts, postFrees, report)
+		a.walkAndHoistCallArgs(e.Expr, inArena, preStmts, postFrees, report)
 
 	case *ast.SelectorExpr:
-		a.walkAndHoistCallArgs(e.Left, preStmts, postFrees, report)
+		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
 	}
 }
 
@@ -681,9 +753,17 @@ func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar st
 			continue
 		}
 		if tv.State == StateScopedLocal {
+			typeName := tv.Type.String()
+			if st, ok := tv.Type.(*checker.StructType); ok && st.Module != "" {
+				typeName = st.Module + "." + st.Name
+			} else if sl, ok := tv.Type.(*checker.SliceType); ok {
+				if elemSt, ok := sl.Elem.(*checker.StructType); ok && elemSt.Module != "" {
+					typeName = "[]" + elemSt.Module + "." + elemSt.Name
+				}
+			}
 			frees = append(frees, &ast.DeferFreeStmt{
 				VarName:  tv.Name,
-				TypeName: tv.Type.String(),
+				TypeName: typeName,
 				Kind:     tv.CleanupKind,
 				Reason:   reason,
 				StmtSpan: tv.DeclSpan,

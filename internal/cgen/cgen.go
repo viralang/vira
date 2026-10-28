@@ -519,7 +519,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
 			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
 				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
-			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
+			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && g.af.StructTypeNeedsFree(subSt) {
 				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
 				if subSt.Module == "" {
 					cSub = g.cStructName(subSt.Name)
@@ -532,12 +532,12 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 		return
 	}
 
-	// Emit deterministic _autofree function if the struct transitively owns heap fields
-	if g.af.StructNeedsFree[st.Name] {
+	// Emit deterministic _autofree and _clone functions if the struct transitively owns heap fields
+	if g.af.StructTypeNeedsFree(st) {
 		out.WriteString(fmt.Sprintf("static inline void %s_autofree(%s* self) {\n", cStructName, cStructName))
 		out.WriteString("    if (!self) return;\n")
 		for _, emb := range st.Embeds {
-			if g.af.StructNeedsFree[emb.Name] {
+			if g.af.StructTypeNeedsFree(emb) {
 				cEmb := fmt.Sprintf("%s__%s", emb.Module, emb.Name)
 				if emb.Module == "" {
 					cEmb = g.cStructName(emb.Name)
@@ -553,7 +553,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
 			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
 				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
-			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && (subSt.IsActor || g.af.StructNeedsFree[subSt.Name]) {
+			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && g.af.StructTypeNeedsFree(subSt) {
 				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
 				if subSt.Module == "" {
 					cSub = g.cStructName(subSt.Name)
@@ -562,11 +562,42 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 			}
 		}
 		out.WriteString("}\n\n")
+
+		out.WriteString(fmt.Sprintf("static inline %s %s_clone(const %s* self) {\n", cStructName, cStructName, cStructName))
+		out.WriteString(fmt.Sprintf("    %s copy = *self;\n", cStructName))
+		for _, emb := range st.Embeds {
+			if g.af.StructTypeNeedsFree(emb) && !emb.IsActor {
+				cEmb := fmt.Sprintf("%s__%s", emb.Module, emb.Name)
+				if emb.Module == "" {
+					cEmb = g.cStructName(emb.Name)
+				}
+				out.WriteString(fmt.Sprintf("    copy.%s = %s_clone(&self->%s);\n", emb.Name, cEmb, emb.Name))
+			}
+		}
+		for _, fname := range st.FieldOrder {
+			finfo := st.Fields[fname]
+			if finfo.Type.Equals(checker.TypeString) {
+				out.WriteString(fmt.Sprintf("    copy.%s = vira_str_clone(self->%s);\n", fname, fname))
+			} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {
+				out.WriteString(fmt.Sprintf("    copy.%s = vira_tensor_f32_clone(self->%s);\n", fname, fname))
+			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
+				out.WriteString(fmt.Sprintf("    copy.%s = %s_clone(&self->%s);\n", fname, g.cSliceName(sl.Elem), fname))
+			} else if subSt, isSt := finfo.Type.(*checker.StructType); isSt && !subSt.IsActor && g.af.StructTypeNeedsFree(subSt) {
+				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
+				if subSt.Module == "" {
+					cSub = g.cStructName(subSt.Name)
+				}
+				out.WriteString(fmt.Sprintf("    copy.%s = %s_clone(&self->%s);\n", fname, cSub, fname))
+			}
+		}
+		out.WriteString("    return copy;\n")
+		out.WriteString("}\n\n")
 	}
 	g.emitStructSliceDefinition(out, st, cStructName)
 }
 
 func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.StructType, cStructName string) {
+	needsFree := g.af.StructTypeNeedsFree(st)
 	out.WriteString(fmt.Sprintf("#ifndef _vira_slice_%s_DEFINED\n#define _vira_slice_%s_DEFINED\n", cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("typedef struct {\n"))
 	out.WriteString(fmt.Sprintf("    %s*     data;\n", cStructName))
@@ -601,14 +632,14 @@ func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.
 
 	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_set(vira_slice_%s* s, int32_t idx, %s val) {\n", cStructName, cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    vira_bounds_check(idx, s->len, __FILE__, __LINE__);\n"))
-	if g.af.StructNeedsFree[st.Name] {
+	if needsFree {
 		out.WriteString(fmt.Sprintf("    %s_autofree(&s->data[idx]);\n", cStructName))
 	}
 	out.WriteString(fmt.Sprintf("    s->data[idx] = val;\n"))
 	out.WriteString(fmt.Sprintf("}\n\n"))
 
 	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_clear(vira_slice_%s* s) {\n", cStructName, cStructName))
-	if g.af.StructNeedsFree[st.Name] {
+	if needsFree {
 		out.WriteString(fmt.Sprintf("    for (int32_t i = 0; i < s->len; i++) {\n"))
 		out.WriteString(fmt.Sprintf("        %s_autofree(&s->data[i]);\n", cStructName))
 		out.WriteString(fmt.Sprintf("    }\n"))
@@ -623,8 +654,15 @@ func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.
 	out.WriteString(fmt.Sprintf("static inline vira_slice_%s vira_slice_%s_clone(const vira_slice_%s* s) {\n", cStructName, cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    vira_slice_%s res = vira_slice_%s_new(s->len);\n", cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    if (s->len > 0 && s->data != NULL) {\n"))
-	out.WriteString(fmt.Sprintf("        memcpy(res.data, s->data, (size_t)s->len * sizeof(%s));\n", cStructName))
-	out.WriteString(fmt.Sprintf("        res.len = s->len;\n"))
+	if needsFree && !st.IsActor {
+		out.WriteString(fmt.Sprintf("        for (int32_t i = 0; i < s->len; i++) {\n"))
+		out.WriteString(fmt.Sprintf("            res.data[i] = %s_clone(&s->data[i]);\n", cStructName))
+		out.WriteString(fmt.Sprintf("        }\n"))
+		out.WriteString(fmt.Sprintf("        res.len = s->len;\n"))
+	} else {
+		out.WriteString(fmt.Sprintf("        memcpy(res.data, s->data, (size_t)s->len * sizeof(%s));\n", cStructName))
+		out.WriteString(fmt.Sprintf("        res.len = s->len;\n"))
+	}
 	out.WriteString(fmt.Sprintf("    }\n"))
 	out.WriteString(fmt.Sprintf("    return res;\n"))
 	out.WriteString(fmt.Sprintf("}\n\n"))
@@ -638,7 +676,7 @@ func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.
 
 	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_free(vira_slice_%s* s) {\n", cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    if (s->data != NULL && !s->is_arena) {\n"))
-	if g.af.StructNeedsFree[st.Name] {
+	if needsFree {
 		out.WriteString(fmt.Sprintf("        for (int32_t i = 0; i < s->len; i++) {\n"))
 		out.WriteString(fmt.Sprintf("            %s_autofree(&s->data[i]);\n", cStructName))
 		out.WriteString(fmt.Sprintf("        }\n"))
@@ -684,7 +722,7 @@ func (g *Generator) emitVTableAndBoxer(out *strings.Builder, st *checker.StructT
 
 	out.WriteString(fmt.Sprintf("static void _vtable_free_%s_as_%s(void* _obj) {\n", st.Name, iface.Name))
 	out.WriteString("    if (!_obj) return;\n")
-	if g.af.StructNeedsFree[st.Name] {
+	if g.af.StructTypeNeedsFree(st) {
 		out.WriteString(fmt.Sprintf("    %s_autofree((%s*)_obj);\n", cSt, cSt))
 	}
 	out.WriteString("    free(_obj);\n")
@@ -766,14 +804,14 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 		out.WriteString(fmt.Sprintf("        %s _val = %s;\n", g.cType(innerRet), callStr))
 		out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = false, .val = _val };\n", cRes))
 	}
-	out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")
+	out.WriteString("        vira_arena_reset(&self->_ctx.isolated_heap);\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
 	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
 	out.WriteString("        self->_ctx.restarts = 0;\n")
 	out.WriteString("        _vira_tls_actor = _prev_tls_actor;\n")
 	out.WriteString("    } else {\n")
 	out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Wipe actor's isolated arena slab in O(1)\n")
-	out.WriteString("        self->_ctx.isolated_heap.offset = 0;\n")
+	out.WriteString("        vira_arena_reset(&self->_ctx.isolated_heap);\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
 	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
 	out.WriteString("        _vira_tls_actor = _prev_tls_actor;\n")

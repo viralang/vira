@@ -2129,7 +2129,12 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					c.errorf(arg.ArgSpan, "cannot pass immutable variable as 'mut' argument to '%s'", callName)
 				}
 			}
-			if !param.Type.Equals(argType) {
+			if param.IsMut {
+				if !ExactEquals(param.Type, argType) {
+					c.errorf(arg.ArgSpan, "argument %d ('%s') of '%s' expects 'mut %s', got '%s'",
+						i+1, param.Name, callName, param.Type, argType)
+				}
+			} else if !param.Type.Equals(argType) {
 				c.errorf(arg.ArgSpan, "argument %d ('%s') of '%s' expects '%s', got '%s'",
 					i+1, param.Name, callName, param.Type, argType)
 			}

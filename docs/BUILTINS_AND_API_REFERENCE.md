@@ -16,6 +16,8 @@ Welcome to the definitive API reference for the **Vira Programming Language**. T
 8. [Fast JSON Field Parser](#8-fast-json-field-parser)
 9. [Native GUI & Declarative Layout Engine](#9-native-gui--declarative-layout-engine)
 10. [Memory, Bump Arenas & Autofree](#10-memory-bump-arenas--autofree)
+11. [Native Collections (`[]T` & `[N]T`) & String Methods](#11-native-collections-t--nt--string-methods)
+12. [Standard Library Packages (`io`, `net`, `http`, `viraserve`)](#12-standard-library-packages-io-net-http-viraserve)
 
 ---
 
@@ -459,10 +461,70 @@ For high-frequency temporary allocations (e.g. forward passes, string formatting
 ```v
 arena {
     // All tensor_fill and matrix multiplication calls inside this block
-    // allocate sequentially on a 64-byte aligned contiguous slab.
+    // allocate sequentially on a 64-byte aligned contiguous slab (chaining slabs automatically if exceeded).
     t1 := tensor_fill(128, 128, 1.0)
     t2 := tensor_fill(128, 128, 2.0)
     t3 := t1 @ t2
     println('Sum: ${tensor_sum(t3)}')
 } // Instant O(1) slab teardown here! 0 memory fragmentation!
 ```
+
+---
+
+## 11. Native Collections (`[]T` & `[N]T`) & String Methods
+
+### Dynamic Slices (`[]T`)
+Contiguous, heap-allocated dynamic arrays (`[]u8`, `[]int`, `[]i64`, `[]f32`, `[]f64`, `[]bool`, `[]string`, or `[]Struct`) automatically freed by Autofree at scope exit.
+
+| Property / Method | Signature | Description |
+| :--- | :--- | :--- |
+| `.len` | `int` | Current number of elements in the slice |
+| `.cap` | `int` | Allocated capacity of the underlying buffer |
+| `.is_empty()` | `fn () bool` | Returns `true` when `.len == 0` |
+| `.push(val T)` | `fn (mut s []T, val T) void` | Appends `val` to the end of `s`, growing capacity by $2\times$ if full |
+| `.pop()` | `fn (mut s []T) T` | Removes and returns the last element (panics if empty) |
+| `.get(idx int)` | `fn (s []T, idx int) !T` | Bounds-checked lookup returning `!T` Result |
+| `.contains(val T)` | `fn (s []T, val T) bool` | Returns `true` if `val` is present in `s` |
+| `.slice(start int, end int)` | `fn (s []T, start int, end int) []T` | Returns a newly allocated sub-slice `s[start..end]` |
+| `.clone()` | `fn (s []T) []T` | Deep-clones the slice and all owned element heap fields |
+| `.clear()` | `fn (mut s []T) void` | Resets `.len` to `0` while retaining allocated capacity |
+
+### Fixed-Size Stack Arrays (`[N]T`)
+Stack-allocated value arrays (`[N]T`) with zero heap overhead.
+
+| Property / Method | Signature | Description |
+| :--- | :--- | :--- |
+| `.len` | `int` | Compile-time constant length `N` |
+| `.get(idx int)` | `fn (a [N]T, idx int) !T` | Safe bounds-checked element access returning `!T` |
+| `.contains(val T)` | `fn (a [N]T, val T) bool` | Returns `true` if `val` is in the array |
+
+### Built-in `string` Methods
+Vira `string` values are immutable UTF-8 views (`data`, `len`, `is_lit`) with built-in methods:
+
+| Property / Method | Signature | Description |
+| :--- | :--- | :--- |
+| `.len` | `int` | Byte length of the UTF-8 string |
+| `.is_empty()` | `fn () bool` | Returns `true` if `.len == 0` |
+| `.contains(sub string)` | `fn (sub string) bool` | Returns `true` if `sub` occurs within the string |
+| `.starts_with(prefix string)` | `fn (prefix string) bool` | Returns `true` if the string starts with `prefix` |
+| `.ends_with(suffix string)` | `fn (suffix string) bool` | Returns `true` if the string ends with `suffix` |
+| `.index_of(needle string)` | `fn (needle string) int` | Byte index of first occurrence of `needle`, or `-1` |
+| `.substr(start int, len int)` | `fn (start int, len int) string` | Newly allocated substring of length `len` starting at `start` |
+| `.trim()` | `fn () string` | Newly allocated string with leading and trailing whitespace removed |
+| `.split(delim string)` | `fn (delim string) []string` | Splits the string by `delim` into a slice of strings (`[]string`) |
+| `.replace(old string, new string)` | `fn (old string, new string) string` | Replaces all occurrences of `old` with `new` |
+| `.to_upper()` / `.to_lower()` | `fn () string` | Returns an ASCII uppercase or lowercase copy |
+| `.to_int()` / `.to_i64()` | `fn () !int` / `fn () !i64` | Parses a base-10 integer, returning a Result |
+| `.bytes()` | `fn () []u8` | Copies the string bytes into a mutable `[]u8` slice |
+
+---
+
+## 12. Standard Library Packages (`io`, `net`, `http`, `viraserve`)
+
+Import first-party standard library modules using `import <pkg>`:
+
+- **`import io`**: `io.Buffer` growable byte buffer (`write_bytes`, `write_str`, `to_string`, `clear`), file helpers (`io.read_all`, `io.write_all`, `io.exists`).
+- **`import net`**: Cross-platform TCP (`net.TcpListener`, `net.TcpStream`), UDP (`net.UdpSocket`), DNS resolution (`net.resolve_host`), and non-blocking event readiness (`net.Poller` over `epoll` / `kqueue` / `WSAPoll`).
+- **`import http`**: Structured HTTP/1.1 request/response types (`http.Request`, `http.Response`, `http.Headers`, `http.HttpServer`, `http.get`, `http.post`).
+- **`import viraserve`**: High-concurrency actor-backed web & AI inference server framework built on `net` and `http`, supporting route registration, JSON APIs, and Server-Sent Events (SSE) token streaming.
+
