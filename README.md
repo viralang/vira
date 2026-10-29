@@ -64,10 +64,10 @@ Vira is engineered from the ground up for modern systems development, numerical 
 - **Zero-Allocation Lexer & Frontend:** Tokenizes millions of lines of code per second at **0 B/op and 0 allocs/op**, generating AST nodes with minimal memory overhead.
 - **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and read-only/mutable quadrants (`default`, `mut:`, `pub:`, `pub mut:`).
 - **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored. Failure to unwrap via `or { ... }` or propagate with `!` is a compile-time semantic error. No unhandled runtime exceptions.
-- **First-Class AI Tensors & Hardware SIMD:** 2D tensors (`tensor[f32]`) are language primitives with native `@` dot-product matrix multiplication vectorized via AVX2+FMA on x86_64 and ARM NEON on Apple Silicon/AArch64.
+- **First-Class AI Tensors & Multi-Threaded CPU SIMD:** 1D–4D strided tensors (`tensor[f32]`) are language primitives with batched & broadcast `@` matrix multiplication vectorized via AVX2+FMA / SSE2 on x86_64 and ARM NEON on Apple Silicon/AArch64, auto-parallelized across the work-stealing thread pool, and 64-byte aligned for zero-copy C99 FFI interop.
 - **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights with Q4_0/Q8_0 SIMD dequantization, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
-- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries and `OneForOne` supervisor restarts.
-- **Native Desktop GUI & Web Networking:** Built-in lightweight Canvas/Win32/X11 GUI framework and HTTP 1.1 asynchronous request processing engine with zero-copy JSON parsing.
+- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries, LIFO `defer_stack` unwinding, deep-cloned async envelopes, and `OneForOne` supervisor restarts.
+- **Native Desktop GUI, Web Networking & Pure-Vira JSON:** Built-in lightweight Canvas/Win32/X11 GUI framework, HTTP/1.1 asynchronous request processing (`packages/http`, `packages/viraserve`), and a 100% pure-Vira RFC 8259 JSON parser & $O(N)$ `JsonBuilder` (`packages/json`).
 - **Clean C99 Backend:** Lowers directly into portable, readable C99, compiled via GCC, Clang, MinGW-w64, or TCC with `-O3 -flto -march=native` optimizations.
 
 ---
@@ -184,6 +184,7 @@ The repository includes 30 comprehensive step-by-step tutorials paired directly 
 | **28** | **Standard Library Networking, HTTP & ViraServe** | Intermediate/Adv | [`29_stdlib_net_http_server.vir`](docs/examples/29_stdlib_net_http_server.vir) | [`28_standard_library_net_http_and_viraserve.md`](docs/tutorials/28_standard_library_net_http_and_viraserve.md) | Standard packages `packages/io`, `packages/net`, `packages/http`, and `packages/viraserve`, native TCP streams, non-blocking polling, SSE streaming, and sub-millisecond actor dispatch. |
 | **29** | **Control Flow & Switch Statement Patterns** | Beginner/Inter | [`30_switch_statement.vir`](docs/examples/30_switch_statement.vir) | [`29_control_flow_and_switch_patterns.md`](docs/tutorials/29_control_flow_and_switch_patterns.md) | Multi-branch `switch`, integer status code matching, string routing, multiple comma-separated cases, tagless boolean condition switches, and automatic break semantics. |
 | **30** | **Package Namespacing, Modules & Dependency Management** | Intermediate/Adv | [`31_package_namespacing_and_modules.vir`](docs/examples/31_package_namespacing_and_modules.vir) | [`30_package_namespacing_and_dependency_management.md`](docs/tutorials/30_package_namespacing_and_dependency_management.md) | First-class module isolation (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, package aliasing (`import as`), and cryptographic `vira.lock` locking. |
+| **31** | **1D–4D Strided Tensors, Batched Attention & Pure-Vira JSON** | Advanced | [`33_nd_tensors_and_stdlib_json.vir`](docs/examples/33_nd_tensors_and_stdlib_json.vir) | [`12_deep_dive_ai_tensors_and_simd.md`](docs/tutorials/12_deep_dive_ai_tensors_and_simd.md) / [`28_standard_library_net_http_and_viraserve.md`](docs/tutorials/28_standard_library_net_http_and_viraserve.md) | 4D multi-head attention (`tensor_fill_4d`, `.transpose()`, batched `@`), $O(1)$ zero-copy arena `.reshape_2d()`, trailing-dim bias broadcast (`+`), and pure-`.vir` `import json` (`json.get_*`, `json.JsonBuilder`). |
 
 ---
 
@@ -480,33 +481,39 @@ arena {
 
 ---
 
-### First-Class AI Tensors & SIMD Acceleration
+### First-Class AI Tensors & Multi-Threaded CPU SIMD Acceleration
 
-#### Tensor Types & Construction
+#### 1D–4D Strided Tensor Types & Construction
 
-Tensors are first-class primitives in Vira:
-
-```v
-w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
-x := tensor_fill(64, 64, 2.0)
-```
-
-#### Matrix Multiplication (`@`)
-
-The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
+Tensors (`tensor[f32]`) are first-class 1D–4D strided primitives (`dims[4]`, `strides[4]`, `n_dims`, plus 2D `rows`/`cols` compatibility):
 
 ```v
-y := w @ x // Performs 64x64 @ 64x64 matmul
-total := tensor_sum(y)
+w := tensor_fill(64, 64, 0.25)             // 2D matrix (64x64)
+seq := tensor_fill_3d(2, 16, 64, 0.5)      // 3D sequence batch (Batch x Seq x Hidden)
+q := tensor_fill_4d(2, 8, 16, 64, 0.125)   // 4D multi-head attention (B x H x S x D)
+k := q.transpose()                         // Swaps trailing two axes -> (2, 8, 64, 16)
 ```
 
-#### SIMD Hardware Backends
+Inside `arena { ... }` blocks, `.reshape_2d(...)`, `.reshape_3d(...)`, and `.reshape_4d(...)` create $O(1)$ zero-copy views (`is_view = true`).
 
-The Vira runtime automatically selects the fastest available vector instructions:
+#### Batched & Broadcast Matrix Multiplication (`@`)
 
-- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
-- **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
-- **Fallback:** Cache-blocked 8x8 tiling algorithm for portable C99 execution
+The `@` operator supports 2D GEMM, batched 3D/4D attention (`(B, H, M, K) @ (B, H, K, N)`), and N-D × 2D linear projections (`(B, S, K) @ (K, N)`):
+
+```v
+scores := q @ k      // (2, 8, 16, 16) batched 4D attention scores
+proj   := seq @ w    // (2, 16, 64) broadcasted linear projection
+total  := tensor_sum(proj)
+```
+
+#### Multi-Threaded CPU SIMD Hardware Backends (Zero External GPU Drivers)
+
+Vira's built-in tensor runtime is a 100% zero-dependency CPU SIMD engine:
+
+- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 `f32` per cycle) & SSE2 (128-bit)
+- **AArch64:** ARM NEON (128-bit vector registers; 4 `f32` per cycle)
+- **Multi-Core Work-Stealing GEMM:** L2 cache-blocked 64×64 tiling that automatically parallelizes row tiles across the Chase-Lev worker pool for matrices $> 128^3$ FLOPs
+- **C99 FFI Interop:** Bind external C/GPU libraries cleanly via `@[intrinsic: '...']`, 64-byte aligned `tensor.data` pointers, and `vira_str_cstr` string marshaling helpers
 
 ---
 
@@ -646,18 +653,25 @@ println(data) // Buffer freed automatically at scope exit!
 
 ---
 
-### High-Performance HTTP 1.1 Web Server & Fast JSON
+### High-Performance HTTP 1.1 Web Server & Pure-Vira RFC 8259 JSON
 
-Vira includes native primitives for building microservices:
+Vira includes the pure-`.vir` `packages/json` standard library module (`import json`) alongside lightweight single-file builtins:
 
 ```v
-// Parse JSON payloads with zero allocations
-payload := '{"model": "vira-7b", "batch_size": 32, "lr": 0.001}'
-model_name := json_get_str(payload, 'model') or { 'default' }
-batch_size := json_get_int(payload, 'batch_size') or { 1 }
+import json
+
+// Depth-aware RFC 8259 JSON parsing & O(N) JsonBuilder serialization
+payload := '{"model": "vira-7b", "meta": {"batch_size": 999}, "batch_size": 32}'
+model_name := json.get_str(payload, 'model') or { 'default' }
+batch_size := json.get_int(payload, 'batch_size') or { 1 }
+
+mut jb := json.JsonBuilder.new()
+jb.set_str('status', 'ok')
+jb.set_str('model', model_name)
+jb.set_int('batch_size', batch_size)
 
 // Return HTTP 1.1 response
-res := http_response(200, 'application/json', '{"status": "ok"}')
+res := http_response(200, 'application/json', jb.build())
 ```
 
 ---
@@ -917,7 +931,7 @@ Vira features an official Visual Studio Code extension with live Language Server
 
 To install the packaged extension:
 ```bash
-code --install-extension editors/vscode/vira-language-0.1.1.vsix
+code --install-extension editors/vscode/vira-language-0.1.8.vsix
 ```
 
 ---

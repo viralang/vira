@@ -58,7 +58,7 @@
 - **Zero-Allocation Frontend:** The compiler lexer operates at **0 B/op and 0 allocs/op**, tokenizing millions of lines per second without touching the heap.
 - **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and immutable/mutable quadrants.
 - **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored; failure to unwrap via `or { ... }` or propagate via `!` is a compile-time error.
-- **First-Class AI & Tensor Arithmetic:** 2D tensors are language primitives with hardware-accelerated matrix multiplication (`@`) running on AVX2+FMA or ARM NEON.
+- **First-Class AI & N-D Tensor Arithmetic:** 1D–4D strided `tensor[f32]` primitives with batched & broadcast matrix multiplication (`@`), executed by a zero-dependency **multi-threaded CPU SIMD engine** (`AVX2+FMA`, `SSE2`, `ARM NEON`) parallelized across the work-stealing thread pool.
 - **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), executed across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault containment.
 
 ---
@@ -77,6 +77,11 @@ vira <command> [flags] <file.vir>
 | :--- | :--- | :--- |
 | `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
 | `build` | Compile into a native standalone executable (`.exe` / ELF) | `vira build -prod -o app main.vir` |
+| `test` | Discover and execute `*_test.vir` test suites | `vira test ./...` |
+| `fmt` | Format `.vir` source files to canonical style | `vira fmt main.vir` |
+| `doc` | Generate documentation from `.vir` module declarations | `vira doc packages/http` |
+| `pkg` | Manage `vira.mod` dependencies and cryptographic `vira.lock` files | `vira pkg lock` |
+| `lsp` | Start the JSON-RPC 2.0 Language Server (`virals`) over stdio | `vira lsp` |
 | `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
 | `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vira check main.vir` |
 | `demo` | Generate and execute the built-in parallel AI actor demo | `vira demo` |
@@ -167,8 +172,9 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 
 | Type | Description | Size |
 | :--- | :--- | :--- |
+| `u8` / `byte` | Unsigned 8-bit integer (raw byte buffers, I/O, network packets) | 8-bit |
 | `int` | Default signed integer | 32-bit |
-| `i64` | Signed 64-bit integer (timestamps, currency) | 64-bit |
+| `i64` | Signed 64-bit integer (timestamps, currency, file offsets) | 64-bit |
 | `f32` | Single-precision IEEE 754 float | 32-bit |
 | `f64` | Double-precision IEEE 754 float | 64-bit |
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |
@@ -497,39 +503,59 @@ arena {
 
 ---
 
-## 8. First-Class AI Tensors & SIMD Acceleration
+## 8. First-Class AI Tensors & Multi-Threaded CPU SIMD Acceleration
 
-### Tensor Types & Construction
+### 1D–4D Strided Tensor Types & Construction
 
-Tensors are first-class primitives in Vira:
-
-```v
-w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
-x := tensor_fill(64, 64, 2.0)
-```
-
-### Matrix Multiplication (`@`)
-
-The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
+Tensors (`tensor[f32]`) are first-class 1D–4D strided primitives in Vira (`dims[4]`, `strides[4]`, `n_dims`, plus synchronized `rows`/`cols` views for 2D compatibility):
 
 ```v
-y := w @ x // Performs 64x64 @ 64x64 matmul
-total := tensor_sum(y)
+// 2D matrix (M x N)
+w := tensor_fill(64, 64, 0.25)
+
+// 3D sequence batch (Batch x Seq x Hidden)
+hidden := tensor_fill_3d(2, 16, 64, 0.5)
+
+// 4D multi-head attention tensor (Batch x Heads x Seq x HeadDim)
+q := tensor_fill_4d(2, 8, 16, 64, 0.125)
+k := q.transpose() // Swaps last two axes -> (2, 8, 64, 16)
+
+println('ndim=${q.ndim}, numel=${q.numel()}, head_dim=${q.dim(3)}')
 ```
 
-### SIMD Hardware Backends
+Inside `arena { ... }` blocks, `.reshape_2d(...)`, `.reshape_3d(...)`, and `.reshape_4d(...)` return $O(1)$ zero-copy views (`is_view = true`); outside arenas they safely allocate independent autofreed buffers.
 
-The Vira runtime automatically selects the fastest available vector instructions:
+### Batched & Broadcast Matrix Multiplication (`@`) & Bias Broadcasting
 
-- **x86_64:** AVX2 + FMA (256-bit vector registers; 8 single-precision floats per cycle)
-- **AArch64:** ARM NEON (128-bit vector registers; 4 single-precision floats per cycle)
-- **Fallback:** Cache-blocked 8x8 tiling algorithm for portable C99 execution
+The `@` operator supports:
+- **2D GEMM:** `(M, K) @ (K, N) -> (M, N)`
+- **Batched 3D / 4D Attention MatMul:** `(B, H, M, K) @ (B, H, K, N) -> (B, H, M, N)`
+- **N-D × 2D Linear Projection Broadcast:** `(B, S, K) @ (K, N) -> (B, S, N)`
+
+Element-wise `+`, `-`, and `tensor_elemwise_mul` also support trailing-dimension bias broadcasting (e.g., `(B, S, D) + (1, D)` or `(M, D) + (D)`).
+
+```v
+scores := q @ k           // (2, 8, 16, 16) multi-head attention scores
+proj   := hidden @ w      // (2, 16, 64) broadcasted linear projection
+total  := tensor_sum(proj)
+```
+
+### Multi-Threaded CPU SIMD Hardware Backends (Zero External GPU Drivers)
+
+Vira's built-in tensor runtime is an honest, **100% zero-dependency CPU SIMD engine** (requiring no CUDA, ROCm, or OpenCL installation):
+
+- **x86_64 AVX2 + FMA:** 256-bit vector registers (8 single-precision floats per FMA instruction)
+- **AArch64 NEON:** 128-bit vector registers (4 single-precision floats per cycle)
+- **x86_64 SSE2:** 128-bit vector registers (4 single-precision floats per cycle)
+- **L2 Cache Blocking:** Hierarchical 64×64 cache-tiled matrix multiplication (`@`) keeping intermediate submatrices resident within L1/L2 data cache.
+- **Work-Stealing Multi-Core GEMM:** Matrix multiplications exceeding $128^3$ operations automatically partition output row tiles across the Chase-Lev worker thread pool using zero-allocation stack job descriptors.
+- **Native C99 FFI Interop:** External C/GPU libraries can be bound cleanly via `@[intrinsic: '...']` and NUL-terminated string marshaling helpers (`vira_str_cstr` / `vira_str_to_cstr_buf` in `vira_rt.h`).
 
 ---
 
 ## 9. Actor Concurrency & Fault Supervision
 
-Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads.
+Vira features Erlang-inspired actor concurrency built for multicore machine learning workloads and microservices.
 
 ### Actor Definition
 
@@ -558,19 +584,18 @@ pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
 
 ---
 
-### Message Passing (`<-`) & Futures
+### Message Passing Modes (`<-`)
 
-Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
+Vira supports three execution modes for message passing:
+
+#### 1. Asynchronous with Futures (`fut := actor <- method()`)
+Dispatches a message onto the Chase-Lev work-stealing pool immediately returning a `Future[T]` handle. The calling thread continues execution without blocking:
 
 ```v
-mut w1 := AIWorker{ id: 1, batches_run: 0 }
-mut w2 := AIWorker{ id: 2, batches_run: 0 }
-
-// Asynchronous parallel fan-out
 fut1 := w1 <- predict(2.0, false)
-fut2 := w2 <- predict(3.0, true) // Will simulate fault
+fut2 := w2 <- predict(3.0, true) // Fault injected
 
-// Non-blocking work-stealing await
+// Non-blocking work-stealing await with cooperative work helping
 res1 := fut1.await() or { 0.0 }
 res2 := fut2.await() or {
     println('Worker 2 faulted: ${err}')
@@ -578,24 +603,54 @@ res2 := fut2.await() or {
 }
 ```
 
+#### 2. Detached Fire-and-Forget Sends (`actor <- method()`)
+When the return value is not needed (e.g. background logging, metrics emission, fire-and-forget ingestion), dispatch the call as a standalone statement or discard the handle with `_ :=`:
+
+```v
+w1 <- predict(1.0, false)       // Standalone statement send
+_ := w2 <- predict(1.5, false)  // Discarded binding
+```
+
+The compiler routes both forms to `_send_detached_` (`done = -1`). The background worker thread automatically frees the task envelope upon completion without creating or tracking a `Future[T]`, delivering maximum throughput with zero memory leaks (`active_leaks = 0`).
+
+#### 3. Zero-Alloc Synchronous Calls (`res := actor <- method() or { ... }`)
+When the caller immediately unwraps an actor call with `or { ... }`, the compiler optimizes the dispatch into a zero-allocation synchronous call. The envelope is allocated on the caller's stack frame, eliminating heap `malloc`/`free` overhead while maintaining supervisor fault containment.
+
+```v
+sync_res := w1 <- predict(2.5, false) or { 0.0 }
+```
+
 ---
 
-### Lock-Free Work-Stealing Pool
+### Lock-Free Work-Stealing Pool & Cache Optimization
 
-- Tasks are submitted to a pool of worker threads sized to `min(CPU cores, 16)`.
-- Each worker maintains a lock-free **Chase-Lev deque**.
-- Idle workers automatically steal tasks from overloaded workers using atomic compare-and-swap operations.
+- Tasks are submitted to a multicore pool of worker threads sized to `min(CPU cores, 16)`.
+- **Chase-Lev Deques with Cacheline Separation:** Worker deques place `top` and `bottom` pointers on separate 64-byte cachelines (`_Alignas(64)`), eliminating false sharing under high concurrency.
+- **Round-Robin Task Distribution:** External submissions utilize an isolated cacheline round-robin cursor to balance queue pressure across all workers.
+- **Monotonic Clocks:** Condition variables synchronize using `CLOCK_MONOTONIC` to ensure deterministic parking and wake-ups immune to system clock shifts.
+- **Work-Helping Await:** Calling `fut.await()` causes the awaiting thread to steal and execute pending tasks from victim deques instead of sleeping.
 
 ---
 
-### Erlang-Style Fault Boundaries (`panic` & `OneForOne`)
+### Erlang-Style Fault Boundaries & Actor Lifecycle
 
-When an actor encounters a `panic('...')`:
+Actors follow an Erlang-inspired supervision lifecycle:
 
-1. The per-thread TLS fault boundary (`setjmp`/`longjmp`) intercepts the panic before it can crash the process.
-2. The actor's isolated scratch arena is wiped in **O(1)** time.
-3. The supervisor applies a `OneForOne` restart strategy, resetting internal state and logging the trapped error.
-4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
+```
+[VIRA_ACTOR_RUNNING] ──(panic)──► [VIRA_ACTOR_FAULTED]
+         ▲                               │
+         │ (restarts < max_restarts)     │ (restarts >= max_restarts)
+         └─── [OneForOne Restart] ◄──────┴────────► [VIRA_ACTOR_STOPPED]
+                                                           │
+                                                           ▼
+                                                [Dead-Letter Rejection]
+```
+
+1. **Panic Interception & Stack Defer Unwinding:** Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process. Before `longjmp`, the runtime unwinds the actor's LIFO stack-frame `defer_stack`, deterministically freeing any live local heap strings, slices, tensors, structs, or nested arenas (`active_leaks = 0`).
+2. **O(1) Arena Wipe & Deep Envelope Isolation:** The actor's private scratch arena slab is cleared in $O(1)$ time (`isolated_heap.offset = 0`), and heap-owning message arguments/unconsumed results on async (`<-`) or detached sends are deep-cloned and cleaned up automatically.
+3. **OneForOne Restart:** If consecutive restarts are below `max_restarts` (default: 3), the supervisor increments the restart counter, executes `_supervisor_reset(&self)`, and restores the actor to `VIRA_ACTOR_RUNNING`.
+4. **Consecutive Fault Reset:** A successful message execution resets consecutive `restarts = 0`, ensuring intermittent faults across long-running services do not accumulate toward the limit.
+5. **Dead-Letter Containment (`VIRA_ACTOR_STOPPED`):** If an actor suffers consecutive faults exceeding `max_restarts`, it transitions to `VIRA_ACTOR_STOPPED`. Subsequent message attempts are immediately rejected with error `"Actor has stopped due to unhandled faults"`, protecting downstream queues from cascade failures.
 
 ```text
 [vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly on parallel batch') -> O(1) arena wipe & OneForOne restart [1/3]
@@ -632,6 +687,15 @@ data := read_file('log.txt') or {
 }
 println(data) // Buffer freed automatically at scope exit!
 ```
+
+### Standard Library Packages (`packages/`)
+
+Vira's compiler resolves built-in pure-Vira standard library packages automatically under `packages/`:
+- `import io` — Unified `Reader`/`Writer`/`Closer` streams and `io.File` handles.
+- `import net` — Cross-platform TCP/UDP sockets, DNS resolution, and non-blocking pollers.
+- `import http` — HTTP/1.1 request parser, response builder, header maps, and SSE streaming.
+- `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
+- `import viraserve` — Work-stealing actor HTTP microframework.
 
 ---
 

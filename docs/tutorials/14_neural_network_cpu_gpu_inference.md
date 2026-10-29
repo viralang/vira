@@ -107,6 +107,9 @@ pub fn (mut cpu CpuInferenceEngine) forward(inputs tensor[f32]) f32 {
 
 ## 4. GPU Device Actor Engine: Asynchronous Streams & Fault Containment
 
+> [!NOTE]
+> **Portable Standalone Simulation vs. Production C99 FFI:** Vira's built-in `@` runtime executes 100% on zero-dependency multi-threaded CPU SIMD (`AVX2+FMA`, `SSE2`, `ARM NEON`) so [`14_neural_network_cpu_gpu.vir`](../examples/14_neural_network_cpu_gpu.vir) runs out-of-the-box on any machine without requiring CUDA or ROCm drivers. In production heterogeneous services, `GpuInferenceEngine` wraps `@[intrinsic: '...']` C99 FFI calls (`cuBLAS` / `Metal` / `OpenCL`) using the exact same actor supervision and CPU fallback pattern shown below.
+
 Discrete GPUs are managed as **Supervised Actors**. Each actor encapsulates a GPU device queue and stream:
 
 ```v

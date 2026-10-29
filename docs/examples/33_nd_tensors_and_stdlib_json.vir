@@ -1,0 +1,60 @@
+// ============================================================================
+// VIRA TUTORIAL 33: 1D-4D STRIDED TENSORS, BATCHED ATTENTION & PURE-VIRA JSON
+// ============================================================================
+// Run via: vira run docs/examples/33_nd_tensors_and_stdlib_json.vir
+// ============================================================================
+module main
+
+import json
+
+pub actor TelemetryWorker {
+pub:
+	worker_id int
+mut:
+	reports_built int = 0
+}
+
+pub fn (mut w TelemetryWorker) build_report(model string, heads int, attn_numel int, proj_sum f32) string {
+	w.reports_built += 1
+	mut jb := json.JsonBuilder.new()
+	jb.set_str('model', model)
+	jb.set_int('heads', heads)
+	jb.set_int('attn_numel', attn_numel)
+	jb.set_raw('proj_sum', '${proj_sum}')
+	jb.set_bool('zero_copy_arena', true)
+	return jb.build()
+}
+
+fn main() {
+	println('=== 1. 4D MULTI-HEAD ATTENTION & BATCHED MATMUL (@) ===')
+	// Shape: (Batch=2, Heads=4, Seq=8, HeadDim=16)
+	q := tensor_fill_4d(2, 4, 8, 16, 0.25)
+	k := q.transpose()
+	scores := q @ k
+	println('Q rank=${q.ndim}, K shape=(${k.dim(0)}x${k.dim(1)}x${k.dim(2)}x${k.dim(3)})')
+	println('Scores numel=${scores.numel()}, sum=${tensor_sum(scores)}')
+
+	println('=== 2. ZERO-COPY ARENA RESHAPE & TRAILING-DIM BIAS BROADCAST ===')
+	mut proj_total := 0.0f32
+	arena {
+		seq := tensor_fill_3d(2, 8, 16, 0.5)
+		flat_view := seq.reshape_2d(16, 16)
+		w_proj := tensor_fill(16, 8, 0.25)
+		bias := tensor_fill(1, 8, 1.0)
+		projected := (seq @ w_proj) + bias
+		proj_total = tensor_sum(projected)
+		println('Arena 2D view=(${flat_view.rows}x${flat_view.cols}), projected rank=${projected.ndim}, sum=${proj_total}')
+	}
+
+	println('=== 3. PURE-VIRA RFC 8259 JSON PARSER & ACTOR JSONBUILDER ===')
+	req_payload := '{"model": "vira-attn-4d", "meta": {"heads": 999}, "heads": 4, "tag": "simd\\"cpu"}'
+	model := json.get_str(req_payload, 'model') or { 'unknown' }
+	heads := json.get_int(req_payload, 'heads') or { 0 }
+	tag := json.get_str(req_payload, 'tag') or { '' }
+	println('Parsed model=${model}, heads=${heads}, unescaped_tag=${tag}')
+
+	mut worker := TelemetryWorker{ worker_id: 1, reports_built: 0 }
+	fut := worker <- build_report(model, heads, scores.numel(), proj_total)
+	report_json := fut.await() or { '{"error":"worker_fault"}' }
+	println('Valid RFC 8259 JSON=${json.is_valid(report_json)} -> ${report_json}')
+}

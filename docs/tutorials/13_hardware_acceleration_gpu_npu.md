@@ -47,19 +47,26 @@ In standard C++ or PyTorch servers, if a batch exceeds GPU VRAM, CUDA raises a f
 
 ## 3. How Vira Solves the Hardware Interop Problem
 
+> [!IMPORTANT]
+> **CPU SIMD Built-in vs. C99 FFI Accelerator Offload:** Vira's single-header runtime (`runtime/vira_rt.h`) is an honest, **100% zero-dependency multi-threaded CPU SIMD engine** (`AVX2+FMA`, `SSE2`, `ARM NEON`)—it never requires CUDA, ROCm, or OpenCL drivers to compile or run. Discrete GPU/NPU kernels (`cuBLAS`, `hipBLAS`, `Metal`, `OpenCL`) integrate cleanly as external C99 libraries via `@[intrinsic: '...']`, 64-byte aligned `tensor.data` pointers, and `vira_str_cstr` FFI helpers, supervised by Vira actors as demonstrated below.
+
 Vira addresses hardware acceleration at the type system, memory layout, and concurrency levels:
 
-### 1. Strict 64-Byte Cache-Line & DMA Alignment
-Every `tensor[f32]` in Vira is allocated on a 64-byte aligned boundary:
+### 1. Strict 64-Byte Cache-Line Alignment & 1D–4D Strided Layout
+Every `tensor[f32]` in Vira is allocated on a 64-byte aligned boundary with explicit 1D–4D shape and stride metadata:
 
 ```c
-// Vira runtime tensor layout (runtime/vira_rt.h)
+// Vira runtime 1D-4D strided tensor layout (runtime/vira_rt.h)
 typedef struct {
-    vira_f32* data;      // 64-byte cache-line aligned pointer
-    void*    raw_alloc; // underlying pointer for free()
-    int32_t  rows;
-    int32_t  cols;
-    bool     is_arena;
+    vira_f32* data;       // 64-byte cache-line aligned pointer
+    void*     raw_alloc;  // underlying pointer for free()
+    int32_t   dims[4];    // 1D-4D shape extents (e.g. Batch, Heads, Seq, Dim)
+    int32_t   strides[4]; // row-major element strides
+    int32_t   n_dims;     // active rank (1..4)
+    int32_t   rows;       // 2D leading-dimension compatibility view
+    int32_t   cols;       // 2D trailing-dimension compatibility view
+    bool      is_arena;   // bump-arena lifetime flag
+    bool      is_view;    // O(1) zero-copy arena reshape view flag
 } vira_tensor_f32;
 ```
 

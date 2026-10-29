@@ -9,24 +9,32 @@
 
 Most general-purpose programming languages treat matrix math and tensor operations as third-party library extensions (e.g. NumPy, PyTorch).
 
-Vira integrates **2D numerical tensors directly into the language syntax and type system**:
-- Native `tensor[f32]` and `tensor[bf16]` types
-- First-class matrix multiplication operator (`@`)
-- Automatic hardware SIMD vectorization (AVX2, FMA, ARM NEON)
+Vira integrates **1D–4D strided numerical tensors directly into the language syntax and type system**:
+- Native `tensor[f32]` and `tensor[bf16]` types (`dims[4]`, `strides[4]`, `n_dims`, plus 2D `rows`/`cols` compatibility)
+- First-class batched & broadcast matrix multiplication operator (`@`)
+- Zero-copy `.reshape_2d/3d/4d()` views inside `arena { ... }` and trailing-axis `.transpose()`
+- Multi-threaded CPU SIMD vectorization (AVX2+FMA, SSE2, ARM NEON) across the work-stealing thread pool
 - Zero-leak lifecycle tracking via Autofree
 
 ---
 
-## 2. Tensor Creation & Initialization
+## 2. Tensor Creation & Initialization (2D, 3D & 4D)
 
-Create 2D tensors using the built-in `tensor_fill` primitive:
+Create 2D, 3D, or 4D strided tensors using the built-in `tensor_fill*` primitives:
 
 ```v
-// Allocate a 64x64 matrix filled with 0.50
+// Allocate a 64x64 2D matrix filled with 0.50
 w := tensor_fill(64, 64, 0.50)
 
-// Allocate a 64x64 input matrix filled with 2.00
+// Allocate a 64x64 2D input matrix filled with 2.00
 x := tensor_fill(64, 64, 2.00)
+
+// Allocate a 3D sequence batch (Batch=2, Seq=16, Hidden=64)
+seq := tensor_fill_3d(2, 16, 64, 0.25)
+
+// Allocate a 4D multi-head attention tensor (Batch=2, Heads=4, Seq=16, HeadDim=64)
+q := tensor_fill_4d(2, 4, 16, 64, 0.125)
+println('Rank=${q.ndim}, Numel=${q.numel()}, HeadDim=${q.dim(3)}')
 ```
 
 Tensors store data in a contiguous 64-byte aligned memory slab, enabling vector instructions to load memory directly without unaligned-load penalties.

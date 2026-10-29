@@ -61,5 +61,33 @@
       "import ${1:package} as ${2:alias}"
     ],
     "description": "Import package with local namespace alias"
+  },
+  "3D Strided Tensor": {
+    "prefix": "tensor3d",
+    "body": [
+      "${1:hidden} := tensor_fill_3d(${2:2}, ${3:16}, ${4:64}, ${5:0.5})"
+    ],
+    "description": "Allocate 3D strided tensor[f32] (Batch x Seq x Hidden)"
+  },
+  "4D Multi-Head Attention Arena": {
+    "prefix": "tensor4d",
+    "body": [
+      "arena {",
+      "\t${1:q} := tensor_fill_4d(${2:2}, ${3:8}, ${4:16}, ${5:64}, ${6:0.125})",
+      "\t${7:k} := ${1:q}.transpose()",
+      "\t${8:scores} := ${1:q} @ ${7:k}",
+      "\t$0",
+      "}"
+    ],
+    "description": "4D batched multi-head attention inside O(1) bump arena"
+  },
+  "JSON Builder": {
+    "prefix": "jsonb",
+    "body": [
+      "mut ${1:jb} := json.JsonBuilder.new()",
+      "${1:jb}.set_str('${2:status}', '${3:ok}')",
+      "${4:payload} := ${1:jb}.build()"
+    ],
+    "description": "Build RFC 8259 JSON object using stdlib json.JsonBuilder"
   }
 }

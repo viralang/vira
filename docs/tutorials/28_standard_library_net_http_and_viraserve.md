@@ -1,6 +1,6 @@
-# Tutorial 28: Standard Library Networking, HTTP, & ViraServe
+# Tutorial 28: Standard Library Networking, HTTP, JSON, & ViraServe
 
-In this tutorial, you will learn how to use Vira's native standard library packages—`io`, `net`, and `http`—and build high-performance microservices with `viraserve`.
+In this tutorial, you will learn how to use Vira's native standard library packages—`io`, `net`, `http`, and `json`—and build high-performance microservices with `viraserve`.
 
 ---
 
@@ -13,6 +13,7 @@ packages/
 ├── io/          # Stream abstractions, File handles, BufReader/BufWriter
 ├── net/         # TCP Listener/Stream, UDP Socket, Poller, DNS resolver
 ├── http/        # HTTP/1.1 request parser, response builder, header maps, SSE writer
+├── json/        # Pure-Vira RFC 8259 JSON validator, depth-aware parser & O(N) JsonBuilder
 └── viraserve/   # Actor-driven HTTP server microframework with worker pools
 ```
 
@@ -55,7 +56,7 @@ fn run_server() {
     mut listener := net.TcpListener.bind('127.0.0.1:8080') or { panic(err) }
     println('Listening on 8080...')
     mut conn := listener.accept() or { panic(err) }
-    
+
     msg := conn.read_string(1024) or { panic(err) }
     println('Received: ${msg}')
     conn.write_str('Echo: ${msg}') or { panic(err) }
@@ -73,13 +74,17 @@ The `http` package provides zero-allocation parsing and formatting of HTTP/1.1 r
 ### Handling Requests:
 ```vira
 import http
+import json
 
 fn handle_request(req http.Request) http.Response {
     switch req.method {
     case 'GET':
         switch req.path {
         case '/health':
-            return http.Response.json('{"status":"ok"}')
+            mut jb := json.JsonBuilder.new()
+            jb.set_str('status', 'ok')
+            jb.set_bool('healthy', true)
+            return http.Response.json(jb.build())
         default:
             return http.Response.with_status(404, '{"error":"not_found"}')
         }
@@ -107,7 +112,33 @@ fn main() {
 
 ---
 
-## 5. ViraServe Microframework (`packages/viraserve`)
+## 5. Pure-Vira RFC 8259 JSON Codec (`packages/json`)
+
+`packages/json` is implemented in **100% pure Vira** (`.vir`) without C parser bloat, providing:
+- Full RFC 8259 syntax validation (`json.is_valid`)
+- `{}` / `[]` depth-aware key queries (`json.has_key`, `json.get_raw`, `json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`)
+- JSON array inspection (`json.array_len`, `json.array_get_raw`, `json.array_get_str`)
+- String escaping/unescaping (`json.escape`, `json.unescape`, including `\uXXXX`)
+- $O(N)$ byte-buffered `json.JsonBuilder` serialization with `active_leaks=0`
+
+```vira
+import json
+
+fn parse_and_reply(raw string) !string {
+    model := json.get_str(raw, 'model')!
+    heads := json.get_int(raw, 'heads')!
+
+    mut jb := json.JsonBuilder.new()
+    jb.set_str('model', model)
+    jb.set_int('heads', heads)
+    jb.set_bool('accepted', true)
+    return jb.build()
+}
+```
+
+---
+
+## 6. ViraServe Microframework (`packages/viraserve`)
 
 `viraserve` builds on top of `http.HttpServer` and actor concurrency to provide:
 - Work-stealing request worker pools (`RequestWorker`)

@@ -928,7 +928,31 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	case "arena":
 		return "**Vira Bump Arena (`arena { ... }`)**\n\nAllocates intermediate objects and tensors inside an ultra-fast O(1) contiguous memory slab. Wiped instantly on block exit without `free()`."
 	case "tensor":
-		return "**Vira First-Class SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 2D tensor supporting hardware-accelerated matrix multiplication (`@`) and zero-copy DMA to GPUs."
+		return "**Vira First-Class Strided SIMD Tensor (`tensor[f32]`)**\n\n64-byte cache-line aligned 1D–4D strided tensor (`dims[4]`, `strides[4]`, `n_dims`) supporting batched/broadcast matrix multiplication (`@`) parallelized across the multi-threaded CPU SIMD engine (`AVX2+FMA`, `SSE2`, `ARM NEON`) and zero-copy C99 FFI pointer interop."
+	case "tensor_fill":
+		return "**`tensor_fill(rows: int, cols: int, val: f32) -> tensor[f32]`**\n\nAllocates a 64-byte cache-line aligned 2D `tensor[f32]` (`n_dims = 2`) initialized to `val`."
+	case "tensor_fill_3d":
+		return "**`tensor_fill_3d(d0: int, d1: int, d2: int, val: f32) -> tensor[f32]`**\n\nAllocates a 64-byte cache-line aligned 3D strided `tensor[f32]` (`n_dims = 3`, e.g. `Batch x Seq x Hidden`) initialized to `val`."
+	case "tensor_fill_4d":
+		return "**`tensor_fill_4d(d0: int, d1: int, d2: int, d3: int, val: f32) -> tensor[f32]`**\n\nAllocates a 64-byte cache-line aligned 4D strided `tensor[f32]` (`n_dims = 4`, e.g. `Batch x Heads x Seq x HeadDim`) initialized to `val`."
+	case "ndim":
+		return "**`tensor.ndim -> int`**\n\nReturns the active rank (`1` to `4`) of the strided tensor."
+	case "numel":
+		return "**`tensor.numel() -> int`**\n\nReturns the total element count across all active dimensions of the tensor."
+	case "dim":
+		return "**`tensor.dim(axis: int) -> int`**\n\nReturns the extent of dimension `axis` (`0 <= axis < tensor.ndim`)."
+	case "stride":
+		return "**`tensor.stride(axis: int) -> int`**\n\nReturns the row-major element stride along dimension `axis`."
+	case "reshape_2d":
+		return "**`tensor.reshape_2d(d0: int, d1: int) -> tensor[f32]`**\n\nReshapes tensor into 2D `(d0, d1)`. Returns an O(1) zero-copy view inside `arena { ... }`, or an independent autofreed buffer outside arenas."
+	case "reshape_3d":
+		return "**`tensor.reshape_3d(d0: int, d1: int, d2: int) -> tensor[f32]`**\n\nReshapes tensor into 3D `(d0, d1, d2)`. Returns an O(1) zero-copy view inside `arena { ... }`, or an independent autofreed buffer outside arenas."
+	case "reshape_4d":
+		return "**`tensor.reshape_4d(d0: int, d1: int, d2: int, d3: int) -> tensor[f32]`**\n\nReshapes tensor into 4D `(d0, d1, d2, d3)`. Returns an O(1) zero-copy view inside `arena { ... }`, or an independent autofreed buffer outside arenas."
+	case "transpose":
+		return "**`tensor.transpose() -> tensor[f32]`**\n\nTransposes the trailing two matrix axes `(..., M, N) -> (..., N, M)` for 2D, 3D, or 4D strided tensors."
+	case "await":
+		return "**`future.await() -> !T`**\n\nSynchronizes an asynchronous actor `Future[T]` with cooperative Chase-Lev work helping, returning `!T` for `or { ... }` fault recovery."
 	case "switch":
 		return "**Vira Switch Statement (`switch expr { case ... }`)**\n\nMulti-branch control flow evaluating integer, string, or boolean conditions with automatic break semantics."
 	case "case":
@@ -1017,7 +1041,7 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	if pos.Line >= 0 && pos.Line < len(lines) {
 		line := lines[pos.Line]
 		if strings.Contains(line, "@") {
-			return "**Vira Hardware MatMul Operator (`@`)**\n\nCompiles directly to 256-bit AVX2+FMA or 128-bit ARM NEON vector instructions."
+			return "**Vira Hardware MatMul Operator (`@`)**\n\nBatched & broadcast 1D–4D strided matrix multiplication parallelized across the multi-threaded CPU SIMD engine (`AVX2+FMA`, `SSE2`, `ARM NEON`)."
 		}
 		if strings.Contains(line, "<-") {
 			return "**Vira Asynchronous Actor Send Operator (`<-`)**\n\nNon-blocking message dispatch returning a `Future[T]` without stalling the caller thread."
@@ -1247,6 +1271,54 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 			return items
 		}
 
+		// 1B0. Check if receiver is a 1D-4D strided tensor[f32]
+		isTensorReceiver := false
+		for _, decl := range astFile.Decls {
+			if fn, ok := decl.(*ast.FnDecl); ok {
+				for _, param := range fn.Params {
+					if param.Name.Name == receiverIdent && strings.HasPrefix(formatTypeExpr(param.Type), "tensor[") {
+						isTensorReceiver = true
+						break
+					}
+				}
+			}
+			if isTensorReceiver {
+				break
+			}
+		}
+		if !isTensorReceiver {
+			for _, l := range lines {
+				lTrim := strings.TrimSpace(l)
+				if strings.Contains(lTrim, receiverIdent) && strings.Contains(lTrim, ":=") {
+					for _, marker := range []string{"tensor_fill(", "tensor_fill_3d(", "tensor_fill_4d(", ".reshape_2d(", ".reshape_3d(", ".reshape_4d(", ".transpose(", " @ ", "tensor_relu(", "tensor_add(", "tensor_scale(", "tensor_elemwise_mul(", "safetensors_load(", "gguf_tensor_dequant("} {
+						if strings.Contains(lTrim, marker) {
+							isTensorReceiver = true
+							break
+						}
+					}
+				}
+				if isTensorReceiver {
+					break
+				}
+			}
+		}
+		if isTensorReceiver {
+			items = append(items,
+				CompletionItem{Label: "ndim", Kind: 10, Detail: "ndim: int", Documentation: "Active rank (1 to 4) of the strided tensor"},
+				CompletionItem{Label: "rows", Kind: 10, Detail: "rows: int", Documentation: "Leading row count (2D compatibility view)"},
+				CompletionItem{Label: "cols", Kind: 10, Detail: "cols: int", Documentation: "Trailing column count (2D compatibility view)"},
+				CompletionItem{Label: "numel", Kind: 2, Detail: "numel() -> int", Documentation: "Total element count across all active dimensions"},
+				CompletionItem{Label: "dim", Kind: 2, Detail: "dim(axis: int) -> int", Documentation: "Dimension size along axis (0 <= axis < ndim)"},
+				CompletionItem{Label: "stride", Kind: 2, Detail: "stride(axis: int) -> int", Documentation: "Row-major element stride along axis"},
+				CompletionItem{Label: "reshape_2d", Kind: 2, Detail: "reshape_2d(d0: int, d1: int) -> tensor[f32]", Documentation: "Reshape to 2D (O(1) zero-copy view inside arena)"},
+				CompletionItem{Label: "reshape_3d", Kind: 2, Detail: "reshape_3d(d0: int, d1: int, d2: int) -> tensor[f32]", Documentation: "Reshape to 3D (O(1) zero-copy view inside arena)"},
+				CompletionItem{Label: "reshape_4d", Kind: 2, Detail: "reshape_4d(d0: int, d1: int, d2: int, d3: int) -> tensor[f32]", Documentation: "Reshape to 4D (O(1) zero-copy view inside arena)"},
+				CompletionItem{Label: "transpose", Kind: 2, Detail: "transpose() -> tensor[f32]", Documentation: "Swap trailing two matrix axes (..., M, N) -> (..., N, M)"},
+				CompletionItem{Label: "clone", Kind: 2, Detail: "clone() -> tensor[f32]", Documentation: "Allocate an independent deep copy of the tensor"},
+			)
+			return items
+		}
+
 		// 1B. Check if receiver is an array or slice collection
 		for _, l := range lines {
 			lTrim := strings.TrimSpace(l)
@@ -1405,7 +1477,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		})
 	}
 
-	for _, bi := range []string{"println", "print", "time_now_us", "time_now_ms", "tensor_fill", "tensor_scale", "tensor_sum", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
+	for _, bi := range []string{"println", "print", "eprintln", "panic", "time_now_us", "time_now_ms", "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_transpose", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
 		items = append(items, CompletionItem{
 			Label:  bi,
 			Kind:   3, // Function

@@ -63,17 +63,36 @@ Vira is designed from the hardware up to saturate modern CPU vector registers:
    AVX2 YMM Register   AVX2 YMM Register   AVX2 YMM Register   AVX2 YMM Register
 ```
 
-### The Three Hardware Execution Tiers
+### The Three Hardware Execution Tiers & Multi-Core GEMM
 
 1. **x86_64 AVX2 + FMA (Advanced Vector Extensions 2):**
    - 256-bit vector registers (`__m256`).
    - Executes 8 single-precision float operations per cycle.
    - Hardware Fused Multiply-Add (`_mm256_fmadd_ps(va, vb, vc)`): Computes $a \times b + c$ in a single CPU cycle with zero intermediate rounding error.
-2. **ARM64 NEON (Apple Silicon M1/M2/M3/M4, AWS Graviton):**
-   - 128-bit vector registers (`float32x4_t`).
-   - Double-pumped unrolling executes 8 floats per loop step using `vfmaq_n_f32`.
-3. **Universal Scalar Fallback:**
-   - Cache-blocked $M \times K \times N$ row traversal designed to keep L1 cache hit ratios at > 98%.
+2. **ARM64 NEON (Apple Silicon M1/M2/M3/M4, AWS Graviton) & x86_64 SSE2:**
+   - 128-bit vector registers (`float32x4_t` / `__m128`).
+   - Double-pumped unrolling executes 8 floats per loop step using `vfmaq_n_f32` / `_mm_mul_ps`.
+3. **Hierarchical Cache Blocking & Work-Stealing Multi-Core GEMM:**
+   - 64×64 L2 cache blocking keeps submatrices hot in L1/L2 cache.
+   - Matrix multiplications exceeding $128^3$ FLOPs automatically partition row tiles across Vira's Chase-Lev work-stealing thread pool using zero-allocation stack job descriptors.
+
+### 1D–4D Strided Tensors, Batched Attention & Zero-Copy Arena Views
+
+Vira tensors natively support up to 4 strided dimensions (`dims[4]`, `strides[4]`, `n_dims`) for modern Transformer workloads without external C++ frameworks:
+
+```v
+arena {
+    // 4D Multi-Head Attention: (Batch=2, Heads=8, Seq=16, HeadDim=64)
+    q := tensor_fill_4d(2, 8, 16, 64, 0.125f32)
+    k := q.transpose()     // Swaps last two axes -> (2, 8, 64, 16)
+    scores := q @ k        // Batched 4D MatMul -> (2, 8, 16, 16)
+
+    // O(1) zero-copy view inside arena (is_view = true, 0 allocations)
+    flat := scores.reshape_2d(256, 16)
+    println('Scores rank=${scores.ndim}, view=(${flat.rows}x${flat.cols})')
+}
+```
+*(See [`docs/examples/33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir) for a complete runnable 4D attention & JSON telemetry example.)*
 
 ---
 

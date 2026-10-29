@@ -8,15 +8,41 @@ In this tutorial, you will master Vira's built-in HTTP and JSON standard library
 
 ---
 
-## 1. Fast JSON Field Parsing Primitives
+## 1. Pure-Vira Standard Library JSON (`import json`) & Fast JSON Shims
 
-Vira standard library provides fast, zero-allocation field parsers for JSON payloads:
+Vira provides two tiers of JSON tooling depending on your service needs:
+
+### A. Pure-Vira RFC 8259 Standard Library (`import json` — Recommended)
+The `packages/json` standard library module is implemented in **100% pure Vira** (`.vir`) with `{}`/`[]` depth-aware key lookup, full RFC 8259 string escaping/unescaping (`\"`, `\\`, `\n`, `\uXXXX`), JSON array traversal, and an $O(N)$ byte-buffered `json.JsonBuilder`:
+
+```v
+import json
+
+raw_payload := '{"model": "deepseek-coder", "meta": {"max_tokens": 9999}, "max_tokens": 2048, "active": true}'
+
+// Depth-aware top-level parsing (ignores nested "meta.max_tokens")
+model_name := json.get_str(raw_payload, 'model') or { 'default' }
+tokens := json.get_int(raw_payload, 'max_tokens') or { 0 }
+active := json.get_bool(raw_payload, 'active') or { false }
+
+// O(N) RFC 8259 JSON serialization without manual string interpolation bugs
+mut jb := json.JsonBuilder.new()
+jb.set_str('model', model_name)
+jb.set_int('max_tokens', tokens)
+jb.set_bool('active', active)
+out_json := jb.build()
+println('Valid=${json.is_valid(out_json)} -> ${out_json}')
+```
+*(See [`docs/examples/33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir) and `packages/json/tests/json_test.vir` for complete runnable examples.)*
+
+### B. Lightweight Single-File JSON Built-in Shims
+For quick single-file scripts without imports, Vira also exposes depth-aware C runtime shims:
 
 | Built-in Function | Return Type | Description |
 | :--- | :--- | :--- |
-| `json_get_str(json, key)` | `string` | Extracts string value matching `"key": "value"` |
-| `json_get_int(json, key)` | `i64` | Extracts 64-bit integer matching `"key": 123` |
-| `json_get_f32(json, key)` | `f32` | Extracts 32-bit float matching `"key": 0.75` |
+| `json_get_str(json, key)` | `string` | Extracts top-level string value matching `"key": "value"` |
+| `json_get_int(json, key)` | `i64` | Extracts top-level 64-bit integer matching `"key": 123` |
+| `json_get_f32(json, key)` | `f32` | Extracts top-level 32-bit float matching `"key": 0.75` |
 
 ```v
 raw_payload := '{"model": "deepseek-coder", "max_tokens": 2048, "temp": 0.7}'

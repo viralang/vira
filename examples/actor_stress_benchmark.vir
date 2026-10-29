@@ -218,13 +218,13 @@ fn main() {
 	// 1. Sequential Execution Baseline (1 core at a time)
 	t0_seq := time_now_us()
 	f_s0 := p0 <- heavy_crunch(9008)
-	 
+
 	f_s1 := p1 <- heavy_crunch(56765)
-	 
+
 	f_s2 := p2 <- heavy_crunch(6689)
-	 
+
 	f_s3 := p3 <- heavy_crunch(8777)
-	 
+
 	elapsed_seq_us := time_now_us() - t0_seq
 
 	println('✓ Sequential Execution Time (1 core): ${elapsed_seq_us} µs')

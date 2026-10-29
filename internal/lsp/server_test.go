@@ -465,3 +465,64 @@ func TestLSPSwitchHoverModuleSymbolsAndCompletion(t *testing.T) {
 		t.Errorf("expected document symbols to include 'import http as web', got: %s", res)
 	}
 }
+
+func TestLSPTensorAndJsonHoverAndCompletions(t *testing.T) {
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	sendRPC(&in, "initialize", map[string]interface{}{}, 1)
+
+	appPath, err := filepath.Abs("../../docs/examples/33_virtual_lsp_probe.vir")
+	if err != nil {
+		t.Fatalf("failed to resolve probe path: %v", err)
+	}
+	uri := "file:///" + filepath.ToSlash(appPath)
+	code := "module main\n\nimport json\n\nfn run_attn(x tensor[f32]) {\n\tq := tensor_fill_4d(2, 4, 8, 16, 0.25)\n\tq.\n\tjson.\n}\n"
+
+	sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
+		"textDocument": map[string]interface{}{
+			"uri":  uri,
+			"text": code,
+		},
+	}, nil)
+
+	// 1. Hover on `tensor` at line 4, col 16
+	sendRPC(&in, "textDocument/hover", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": uri},
+		"position":     map[string]interface{}{"line": 4, "character": 16},
+	}, 2)
+
+	// 2. Dot completion on `q.` at line 6, col 3
+	sendRPC(&in, "textDocument/completion", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": uri},
+		"position":     map[string]interface{}{"line": 6, "character": 3},
+	}, 3)
+
+	// 3. Dot completion on `json.` at line 7, col 6
+	sendRPC(&in, "textDocument/completion", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": uri},
+		"position":     map[string]interface{}{"line": 7, "character": 6},
+	}, 4)
+
+	sendRPC(&in, "shutdown", map[string]interface{}{}, 5)
+
+	server := lsp.NewServer(&in, &out)
+	if err := server.Run(); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	res := out.String()
+	if !strings.Contains(res, "1D–4D strided tensor") {
+		t.Errorf("expected tensor hover to mention 1D–4D strided tensor, got: %s", res)
+	}
+	for _, member := range []string{`"ndim"`, `"numel"`, `"reshape_4d"`, `"transpose"`} {
+		if !strings.Contains(res, member) {
+			t.Errorf("expected tensor dot-completion to include %s, got: %s", member, res)
+		}
+	}
+	for _, jsonSym := range []string{`"JsonBuilder"`, `"get_str"`, `"escape"`} {
+		if !strings.Contains(res, jsonSym) {
+			t.Errorf("expected json package dot-completion to include %s, got: %s", jsonSym, res)
+		}
+	}
+}

@@ -688,6 +688,15 @@ data := read_file('log.txt') or {
 println(data) // Buffer freed automatically at scope exit!
 ```
 
+### Standard Library Packages (`packages/`)
+
+Vira's compiler resolves built-in pure-Vira standard library packages automatically under `packages/`:
+- `import io` — Unified `Reader`/`Writer`/`Closer` streams and `io.File` handles.
+- `import net` — Cross-platform TCP/UDP sockets, DNS resolution, and non-blocking pollers.
+- `import http` — HTTP/1.1 request parser, response builder, header maps, and SSE streaming.
+- `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
+- `import viraserve` — Work-stealing actor HTTP microframework.
+
 ---
 
 ## 11. Diagnostic Engine
