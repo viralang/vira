@@ -232,7 +232,7 @@ func (a *Analyzer) rewriteBlock(
 		switch s := stmt.(type) {
 		case *ast.VarDeclStmt:
 			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
-			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+			a.inspectExprMovesAndOrBlocksWithMode(s.Value, scope, report, s.Name.Name != "_")
 
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			rewritten = append(rewritten, preStmts...)
@@ -276,7 +276,11 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, postStmts...)
 
 		case *ast.AssignStmt:
-			a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
+			isBlankTarget := false
+			if id, ok := s.Target.(*ast.IdentExpr); ok && id.Ident.Name == "_" {
+				isBlankTarget = true
+			}
+			a.inspectExprMovesAndOrBlocksWithMode(s.Value, scope, report, !isBlankTarget)
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
@@ -483,6 +487,90 @@ func (a *Analyzer) rewriteBlock(
 }
 
 func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScope, report *FnReport) {
+	a.inspectExprMovesAndOrBlocksWithMode(expr, scope, report, false)
+}
+
+func isDivergentExpr(expr ast.Expr) bool {
+	if callExpr, isCall := expr.(*ast.CallExpr); isCall {
+		if id, isId := callExpr.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Analyzer) rewriteOrBlock(orBlock *ast.BlockStmt, yieldsVal bool, parentScope *LexicalScope, report *FnReport) {
+	orScope := &LexicalScope{Parent: parentScope, InArena: parentScope.InArena}
+	if !yieldsVal || orBlock == nil || len(orBlock.Stmts) == 0 {
+		a.rewriteBlock(orBlock, orScope, false, report)
+		return
+	}
+	lastStmt := orBlock.Stmts[len(orBlock.Stmts)-1]
+	tailExprStmt, isExprStmt := lastStmt.(*ast.ExprStmt)
+	if !isExprStmt || isDivergentExpr(tailExprStmt.Expr) {
+		a.rewriteBlock(orBlock, orScope, false, report)
+		return
+	}
+
+	// Rewrite all statements preceding the yielded fallback expression without premature scope-exit frees
+	prefixBlock := &ast.BlockStmt{
+		Stmts:     append([]ast.Stmt(nil), orBlock.Stmts[:len(orBlock.Stmts)-1]...),
+		BlockSpan: orBlock.BlockSpan,
+	}
+	// Run statement rewrites on prefixBlock, then strip prefixBlock's trailing scope-exit frees so we can place them AFTER tailExprStmt
+	a.rewriteOrPrefixStmts(prefixBlock, orScope, report)
+
+	a.inspectExprMovesAndOrBlocksWithMode(tailExprStmt.Expr, orScope, report, false)
+	preStmts, postStmts := a.hoistTemporaryStrings(tailExprStmt.Expr, orScope, report, true)
+
+	skipVar := ""
+	if ident, ok := tailExprStmt.Expr.(*ast.IdentExpr); ok {
+		if tv := orScope.Find(ident.Ident.Name); tv != nil && tv.State == StateScopedLocal {
+			tv.State = StateEscapesViaReturn
+			skipVar = ident.Ident.Name
+		}
+	}
+
+	var combined []ast.Stmt
+	combined = append(combined, prefixBlock.Stmts...)
+	combined = append(combined, preStmts...)
+	combined = append(combined, tailExprStmt)
+	combined = append(combined, postStmts...)
+	frees := a.collectSingleScopeFreesExcept(orScope, skipVar, "or-block scope exit")
+	for _, f := range frees {
+		combined = append(combined, f)
+		report.InjectedFrees = append(report.InjectedFrees, f)
+	}
+	orBlock.Stmts = combined
+}
+
+func (a *Analyzer) rewriteOrPrefixStmts(block *ast.BlockStmt, scope *LexicalScope, report *FnReport) {
+	if len(block.Stmts) == 0 {
+		return
+	}
+	// Temporarily append a dummy ReturnStmt? No — rewriteBlock only appends scope-exit frees at the end if !diverged.
+	// Recording len(report.InjectedFrees) before/after lets us strip only the trailing single-scope exit frees if needed,
+	// or simpler: run rewriteBlock and strip the trailing single-scope frees matching reason == "block scope exit".
+	prevInjected := len(report.InjectedFrees)
+	a.rewriteBlock(block, scope, false, report)
+	cutStmtIdx := len(block.Stmts)
+	for cutStmtIdx > 0 {
+		df, ok := block.Stmts[cutStmtIdx-1].(*ast.DeferFreeStmt)
+		if !ok || df.Reason != "block scope exit" {
+			break
+		}
+		cutStmtIdx--
+	}
+	removed := len(block.Stmts) - cutStmtIdx
+	if removed > 0 {
+		block.Stmts = block.Stmts[:cutStmtIdx]
+		if len(report.InjectedFrees)-removed >= prevInjected {
+			report.InjectedFrees = report.InjectedFrees[:len(report.InjectedFrees)-removed]
+		}
+	}
+}
+
+func (a *Analyzer) inspectExprMovesAndOrBlocksWithMode(expr ast.Expr, scope *LexicalScope, report *FnReport, yieldsOrValue bool) {
 	if expr == nil {
 		return
 	}
@@ -515,8 +603,9 @@ func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScop
 			a.inspectExprMovesAndOrBlocks(arg.Expr, scope, report)
 		}
 		if e.OrBlock != nil {
-			orScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
-			a.rewriteBlock(e.OrBlock, orScope, false, report)
+			valType := a.chk.ExprTypes[e]
+			shouldYield := yieldsOrValue && valType != nil && !valType.Equals(checker.TypeVoid)
+			a.rewriteOrBlock(e.OrBlock, shouldYield, scope, report)
 		}
 
 	case *ast.UnaryExpr:
@@ -533,8 +622,16 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 		if call, ok := rhs.(*ast.CallExpr); ok {
 			if ident, ok := call.Callee.(*ast.IdentExpr); ok {
 				switch ident.Ident.Name {
-				case "tensor_fill", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin":
+				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin":
 					return true
+				}
+			}
+			if sel, ok := call.Callee.(*ast.SelectorExpr); ok {
+				if _, isTensor := a.chk.ExprTypes[sel.Left].(*checker.TensorType); isTensor {
+					switch sel.Field.Name {
+					case "reshape_2d", "reshape_3d", "reshape_4d", "transpose":
+						return true
+					}
 				}
 			}
 			return false
@@ -610,6 +707,54 @@ func (a *Analyzer) hoistTemporaryStrings(
 	return preStmts, postStmts
 }
 
+func (a *Analyzer) formatCleanupTypeName(t checker.Type) string {
+	typeName := t.String()
+	if st, ok := t.(*checker.StructType); ok && st.Module != "" {
+		typeName = st.Module + "." + st.Name
+	} else if sl, ok := t.(*checker.SliceType); ok {
+		if elemSt, ok := sl.Elem.(*checker.StructType); ok && elemSt.Module != "" {
+			typeName = "[]" + elemSt.Module + "." + elemSt.Name
+		}
+	}
+	return typeName
+}
+
+func (a *Analyzer) hoistExprToTemp(
+	expr ast.Expr,
+	exprType checker.Type,
+	kind ast.CleanupKind,
+	prefix string,
+	reason string,
+	preStmts *[]ast.Stmt,
+	postFrees *[]*ast.DeferFreeStmt,
+	report *FnReport,
+) ast.Expr {
+	a.tmpCounter++
+	tmpName := fmt.Sprintf("_%s_%d", prefix, a.tmpCounter)
+	tmpIdent := ast.Ident{Name: tmpName, NamePos: expr.Span()}
+	varDecl := &ast.VarDeclStmt{
+		Name:     tmpIdent,
+		Value:    expr,
+		IsMut:    false,
+		StmtSpan: expr.Span(),
+	}
+	a.chk.ExprTypes[varDecl.Value] = exprType
+	identExpr := &ast.IdentExpr{Ident: tmpIdent}
+	a.chk.ExprTypes[identExpr] = exprType
+
+	freeStmt := &ast.DeferFreeStmt{
+		VarName:  tmpName,
+		TypeName: a.formatCleanupTypeName(exprType),
+		Kind:     kind,
+		Reason:   reason,
+		StmtSpan: expr.Span(),
+	}
+	*preStmts = append(*preStmts, varDecl)
+	*postFrees = append(*postFrees, freeStmt)
+	report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+	return identExpr
+}
+
 func (a *Analyzer) maybeHoistSubExpr(
 	expr ast.Expr,
 	inArena bool,
@@ -624,62 +769,46 @@ func (a *Analyzer) maybeHoistSubExpr(
 		if inArena {
 			return expr
 		}
-		a.tmpCounter++
-		tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
-		tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
-		varDecl := &ast.VarDeclStmt{
-			Name:     tmpIdent,
-			Value:    interp,
-			IsMut:    false,
-			StmtSpan: interp.Span(),
-		}
-		a.chk.ExprTypes[varDecl.Value] = checker.TypeString
-		identExpr := &ast.IdentExpr{Ident: tmpIdent}
-		a.chk.ExprTypes[identExpr] = checker.TypeString
+		return a.hoistExprToTemp(interp, checker.TypeString, ast.CleanupString, "vira_tmp_str", "zero-leak temporary string operand cleanup", preStmts, postFrees, report)
+	}
 
-		freeStmt := &ast.DeferFreeStmt{
-			VarName:  tmpName,
-			TypeName: "string",
-			Kind:     ast.CleanupString,
-			Reason:   "zero-leak temporary string operand cleanup",
-			StmtSpan: interp.Span(),
+	if stInit, ok := expr.(*ast.StructInitExpr); ok {
+		exprType := a.chk.ExprTypes[stInit]
+		if needsFree, kind := a.typeNeedsCleanup(exprType); needsFree {
+			return a.hoistExprToTemp(stInit, exprType, kind, "vira_tmp_obj", "zero-leak temporary struct argument cleanup", preStmts, postFrees, report)
 		}
-		*preStmts = append(*preStmts, varDecl)
-		*postFrees = append(*postFrees, freeStmt)
-		report.InjectedFrees = append(report.InjectedFrees, freeStmt)
-		return identExpr
+		return expr
+	}
+
+	if arrLit, ok := expr.(*ast.ArrayLitExpr); ok {
+		exprType := a.chk.ExprTypes[arrLit]
+		if _, isSlice := exprType.(*checker.SliceType); isSlice {
+			return a.hoistExprToTemp(arrLit, exprType, ast.CleanupSlice, "vira_tmp_sl", "zero-leak temporary slice argument cleanup", preStmts, postFrees, report)
+		}
+		return expr
+	}
+
+	if binExpr, ok := expr.(*ast.BinaryExpr); ok {
+		exprType := a.chk.ExprTypes[binExpr]
+		if _, isTensor := exprType.(*checker.TensorType); isTensor && !inArena {
+			return a.hoistExprToTemp(binExpr, exprType, ast.CleanupTensor, "vira_tmp_ten", "zero-leak temporary tensor operand cleanup", preStmts, postFrees, report)
+		}
+		return expr
 	}
 
 	if call, ok := expr.(*ast.CallExpr); ok {
 		if sel, isSel := call.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
 			return expr
 		}
+		if call.OrBlock != nil {
+			return expr
+		}
 		retType := a.chk.ExprTypes[call]
-		if retType != nil && retType.Equals(checker.TypeString) {
-			a.tmpCounter++
-			tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
-			tmpIdent := ast.Ident{Name: tmpName, NamePos: call.Span()}
-			varDecl := &ast.VarDeclStmt{
-				Name:     tmpIdent,
-				Value:    call,
-				IsMut:    false,
-				StmtSpan: call.Span(),
+		if needsFree, kind := a.typeNeedsCleanup(retType); needsFree {
+			if inArena && a.isAllocatedOnArena(kind, call) {
+				return expr
 			}
-			a.chk.ExprTypes[varDecl.Value] = checker.TypeString
-			identExpr := &ast.IdentExpr{Ident: tmpIdent}
-			a.chk.ExprTypes[identExpr] = checker.TypeString
-
-			freeStmt := &ast.DeferFreeStmt{
-				VarName:  tmpName,
-				TypeName: "string",
-				Kind:     ast.CleanupString,
-				Reason:   "zero-leak temporary string operand cleanup",
-				StmtSpan: call.Span(),
-			}
-			*preStmts = append(*preStmts, varDecl)
-			*postFrees = append(*postFrees, freeStmt)
-			report.InjectedFrees = append(report.InjectedFrees, freeStmt)
-			return identExpr
+			return a.hoistExprToTemp(call, retType, kind, "vira_tmp_val", "zero-leak temporary call result cleanup", preStmts, postFrees, report)
 		}
 	}
 	return expr
@@ -711,6 +840,9 @@ func (a *Analyzer) walkAndHoistCallArgs(
 		if _, isStruct := callRetType.(*checker.StructType); isStruct {
 			isContainerStore = true
 		}
+		if _, isIface := callRetType.(*checker.InterfaceType); isIface {
+			isContainerStore = true
+		}
 		if isContainerStore {
 			return
 		}
@@ -722,7 +854,7 @@ func (a *Analyzer) walkAndHoistCallArgs(
 			// 1. Recursively walk nested subexpressions
 			a.walkAndHoistCallArgs(arg.Expr, inArena, preStmts, postFrees, report)
 
-			// 2. Hoist temporary string if applicable
+			// 2. Hoist temporary heap argument if applicable
 			arg.Expr = a.maybeHoistSubExpr(arg.Expr, inArena, preStmts, postFrees, report)
 		}
 		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
@@ -730,14 +862,14 @@ func (a *Analyzer) walkAndHoistCallArgs(
 		}
 
 	case *ast.BinaryExpr:
-		e.Left = a.maybeHoistSubExpr(e.Left, inArena, preStmts, postFrees, report)
-		e.Right = a.maybeHoistSubExpr(e.Right, inArena, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Right, inArena, preStmts, postFrees, report)
+		e.Left = a.maybeHoistSubExpr(e.Left, inArena, preStmts, postFrees, report)
+		e.Right = a.maybeHoistSubExpr(e.Right, inArena, preStmts, postFrees, report)
 
 	case *ast.UnaryExpr:
-		e.Expr = a.maybeHoistSubExpr(e.Expr, inArena, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Expr, inArena, preStmts, postFrees, report)
+		e.Expr = a.maybeHoistSubExpr(e.Expr, inArena, preStmts, postFrees, report)
 
 	case *ast.SelectorExpr:
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)

@@ -190,6 +190,70 @@ static inline void vira_str_free(vira_string *s) {
   }
 }
 
+// --- C FFI NUL-TERMINATED STRING MARSHALING HELPERS ---
+// Fast-path uses caller-provided stack buffer when `s.len + 1 <= stack_cap`;
+// falls back to exact-sized heap allocation for arbitrarily long paths/strings.
+typedef struct {
+  char *ptr;
+  bool heap;
+} vira_cstr_buf;
+
+static inline vira_cstr_buf vira_str_to_cstr_buf(vira_string s, char *stack_buf,
+                                                 size_t stack_cap) {
+  size_t len = (s.data != NULL && s.len > 0) ? (size_t)s.len : 0;
+  if (stack_buf != NULL && len + 1 <= stack_cap) {
+    if (len > 0) {
+      memcpy(stack_buf, s.data, len);
+    }
+    stack_buf[len] = '\0';
+    return (vira_cstr_buf){.ptr = stack_buf, .heap = false};
+  }
+  char *h = (char *)malloc(len + 1);
+  if (!h) {
+    fprintf(stderr, "vira panic: out of memory in vira_str_to_cstr_buf\n");
+    exit(1);
+  }
+  if (len > 0) {
+    memcpy(h, s.data, len);
+  }
+  h[len] = '\0';
+  _vira_record_alloc();
+  return (vira_cstr_buf){.ptr = h, .heap = true};
+}
+
+static inline void vira_cstr_buf_free(vira_cstr_buf *b) {
+  if (b != NULL && b->heap && b->ptr != NULL) {
+    free(b->ptr);
+    b->ptr = NULL;
+    b->heap = false;
+    _vira_record_free();
+  }
+}
+
+// Public C FFI helper: allocates a NUL-terminated heap C string copy of `s`.
+// Release with `vira_cstr_free(ptr)`.
+static inline char *vira_str_cstr(vira_string s) {
+  size_t len = (s.data != NULL && s.len > 0) ? (size_t)s.len : 0;
+  char *h = (char *)malloc(len + 1);
+  if (!h) {
+    fprintf(stderr, "vira panic: out of memory in vira_str_cstr\n");
+    exit(1);
+  }
+  if (len > 0) {
+    memcpy(h, s.data, len);
+  }
+  h[len] = '\0';
+  _vira_record_alloc();
+  return h;
+}
+
+static inline void vira_cstr_free(char *cstr) {
+  if (cstr != NULL) {
+    free(cstr);
+    _vira_record_free();
+  }
+}
+
 // ============================================================================
 // 1.5. VIRA DYNAMIC SLICE RUNTIME (`[]T`) & FIXED ARRAYS (`[N]T`)
 // ============================================================================
@@ -790,28 +854,162 @@ static inline void vira_arena_destroy(vira_arena *a) {
 }
 
 // ============================================================================
-// 3. AI TENSORS + HARDWARE SIMD (`AVX2` / `SSE2` / `ARM NEON`) `@` MATMUL
+// 3. N-D AI TENSORS + MULTI-THREADED CPU SIMD (`AVX2` / `SSE2` / `ARM NEON`)
 // ============================================================================
+
+#ifndef _VIRA_TASK_DEFINED
+#define _VIRA_TASK_DEFINED
+typedef void (*vira_task_fn)(void *env);
+
+typedef struct _vira_task {
+  vira_task_fn fn;
+  void *env;
+  struct _vira_task *next_actor_msg; // Intrusive MPSC link
+  volatile int32_t done;             // 0 = pending, 1 = completed on worker pool
+} vira_task;
+#endif
+
+typedef struct _vira_actor_ctx vira_actor_ctx;
+static __thread vira_actor_ctx *_vira_tls_actor;
+static inline bool _vira_in_active_actor(void);
+static inline void vira_scheduler_ensure_init(void);
+static inline void vira_scheduler_submit_async(vira_task *task);
+static inline void vira_scheduler_await(vira_task *task);
+static inline int32_t vira_scheduler_num_workers(void);
 
 static inline const char *vira_simd_backend_name(void) {
 #if defined(__AVX2__)
-  return "x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle)";
+  return "x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle, Multi-Threaded)";
 #elif defined(__ARM_NEON) || defined(__aarch64__)
-  return "ARM64 NEON (128-bit 2x-Unrolled / 8x f32 per step)";
+  return "ARM64 NEON (128-bit 2x-Unrolled / 8x f32 per step, Multi-Threaded)";
 #elif defined(__SSE2__)
-  return "x86_64 SSE2 (128-bit / 4x f32 per cycle)";
+  return "x86_64 SSE2 (128-bit / 4x f32 per cycle, Multi-Threaded)";
 #else
-  return "Scalar C99 Fallback";
+  return "Scalar C99 Fallback (Multi-Threaded)";
 #endif
 }
 
 typedef struct {
   vira_f32 *data;  // 64-byte cache-line aligned pointer
   void *raw_alloc; // underlying pointer for free()
-  int32_t rows;
-  int32_t cols;
+  int32_t rows;    // flattened outer product (1 for 1D) for 2D compatibility
+  int32_t cols;    // trailing dimension dims[n_dims - 1] for 2D compatibility
+  int32_t dims[4];
+  int32_t strides[4];
+  int32_t n_dims;
   bool is_arena;
+  bool is_view;
 } vira_tensor_f32;
+
+static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
+                                           const int32_t *dims) {
+  if (n_dims < 1 || n_dims > 4 || dims == NULL) {
+    fprintf(stderr, "vira tensor error: unsupported rank %d (expected 1..4)\n",
+            n_dims);
+    exit(1);
+  }
+  t->n_dims = n_dims;
+  for (int32_t d = 0; d < 4; d++) {
+    t->dims[d] = 0;
+    t->strides[d] = 0;
+  }
+  for (int32_t d = 0; d < n_dims; d++) {
+    if (dims[d] <= 0) {
+      fprintf(stderr,
+              "vira tensor error: invalid dimension %d at axis %d (rank %d)\n",
+              dims[d], d, n_dims);
+      exit(1);
+    }
+    t->dims[d] = dims[d];
+  }
+  int32_t st = 1;
+  for (int32_t d = n_dims - 1; d >= 0; d--) {
+    t->strides[d] = st;
+    st *= dims[d];
+  }
+  if (n_dims == 1) {
+    t->rows = 1;
+    t->cols = dims[0];
+  } else {
+    int32_t outer = 1;
+    for (int32_t d = 0; d < n_dims - 1; d++) {
+      outer *= dims[d];
+    }
+    t->rows = outer;
+    t->cols = dims[n_dims - 1];
+  }
+}
+
+static inline void _vira_tensor_norm_shape(vira_tensor_f32 *t) {
+  if (t->n_dims <= 0 && t->rows > 0 && t->cols > 0) {
+    int32_t d[2] = {t->rows, t->cols};
+    _vira_tensor_init_shape(t, 2, d);
+  }
+}
+
+static inline int32_t vira_tensor_numel(vira_tensor_f32 t) {
+  _vira_tensor_norm_shape(&t);
+  return t.rows * t.cols;
+}
+
+static inline int32_t vira_tensor_dim(vira_tensor_f32 t, int32_t axis) {
+  _vira_tensor_norm_shape(&t);
+  int32_t ax = axis < 0 ? (t.n_dims + axis) : axis;
+  if (ax < 0 || ax >= t.n_dims) {
+    fprintf(stderr,
+            "vira tensor error: dim axis %d out of bounds for %dD tensor\n",
+            axis, t.n_dims);
+    exit(1);
+  }
+  return t.dims[ax];
+}
+
+static inline int32_t vira_tensor_stride(vira_tensor_f32 t, int32_t axis) {
+  _vira_tensor_norm_shape(&t);
+  int32_t ax = axis < 0 ? (t.n_dims + axis) : axis;
+  if (ax < 0 || ax >= t.n_dims) {
+    fprintf(stderr,
+            "vira tensor error: stride axis %d out of bounds for %dD tensor\n",
+            axis, t.n_dims);
+    exit(1);
+  }
+  return t.strides[ax];
+}
+
+static inline vira_tensor_f32 vira_tensor_f32_alloc_nd(int32_t n_dims,
+                                                       const int32_t *dims) {
+  vira_tensor_f32 t = {0};
+  _vira_tensor_init_shape(&t, n_dims, dims);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  void *raw = malloc(bytes + 64);
+  if (!raw) {
+    fprintf(stderr, "vira panic: tensor allocation failed (%zu bytes)\n",
+            bytes);
+    exit(1);
+  }
+  uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;
+  t.data = (vira_f32 *)aligned;
+  t.raw_alloc = raw;
+  t.is_arena = false;
+  t.is_view = false;
+  memset(t.data, 0, bytes);
+  _vira_record_alloc();
+  return t;
+}
+
+static inline vira_tensor_f32
+vira_tensor_f32_arena_alloc_nd(vira_arena *a, int32_t n_dims,
+                               const int32_t *dims) {
+  vira_tensor_f32 t = {0};
+  _vira_tensor_init_shape(&t, n_dims, dims);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  t.data = (vira_f32 *)vira_arena_alloc(a, bytes);
+  t.raw_alloc = NULL;
+  t.is_arena = true;
+  t.is_view = false;
+  memset(t.data, 0, bytes);
+  return t;
+}
 
 static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows,
                                                     int32_t cols) {
@@ -820,34 +1018,38 @@ static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows,
             cols);
     exit(1);
   }
-  size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
-  void *raw = malloc(bytes + 64);
-  if (!raw) {
-    fprintf(stderr, "vira panic: tensor allocation failed (%d x %d)\n", rows,
-            cols);
-    exit(1);
-  }
-  uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;
-  vira_f32 *data = (vira_f32 *)aligned;
-  memset(data, 0, bytes);
-  _vira_record_alloc();
-  return (vira_tensor_f32){.data = data,
-                           .raw_alloc = raw,
-                           .rows = rows,
-                           .cols = cols,
-                           .is_arena = false};
+  int32_t dims[2] = {rows, cols};
+  return vira_tensor_f32_alloc_nd(2, dims);
 }
 
 static inline vira_tensor_f32
 vira_tensor_f32_arena_alloc(vira_arena *a, int32_t rows, int32_t cols) {
-  size_t bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
-  vira_f32 *data = (vira_f32 *)vira_arena_alloc(a, bytes);
-  memset(data, 0, bytes);
-  return (vira_tensor_f32){.data = data,
-                           .raw_alloc = NULL,
-                           .rows = rows,
-                           .cols = cols,
-                           .is_arena = true};
+  if (rows <= 0 || cols <= 0) {
+    fprintf(stderr, "vira tensor error: invalid dimensions (%d x %d)\n", rows,
+            cols);
+    exit(1);
+  }
+  int32_t dims[2] = {rows, cols};
+  return vira_tensor_f32_arena_alloc_nd(a, 2, dims);
+}
+
+static inline void _vira_tensor_fill_data(vira_f32 *data, int32_t total,
+                                          vira_f32 val) {
+  int32_t i = 0;
+#if defined(__AVX2__)
+  __m256 vval = _mm256_set1_ps(val);
+  for (; i + 8 <= total; i += 8) {
+    _mm256_storeu_ps(&data[i], vval);
+  }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  float32x4_t vval = vdupq_n_f32(val);
+  for (; i + 4 <= total; i += 4) {
+    vst1q_f32(&data[i], vval);
+  }
+#endif
+  for (; i < total; i++) {
+    data[i] = val;
+  }
 }
 
 static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena *opt_arena,
@@ -856,56 +1058,148 @@ static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena *opt_arena,
   vira_tensor_f32 t = opt_arena
                           ? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)
                           : vira_tensor_f32_alloc(rows, cols);
-  int32_t total = rows * cols;
-  int32_t i = 0;
-
-#if defined(__AVX2__)
-  __m256 vval = _mm256_set1_ps(val);
-  for (; i + 8 <= total; i += 8) {
-    _mm256_storeu_ps(&t.data[i], vval);
-  }
-#elif defined(__ARM_NEON) || defined(__aarch64__)
-  float32x4_t vval = vdupq_n_f32(val);
-  for (; i + 4 <= total; i += 4) {
-    vst1q_f32(&t.data[i], vval);
-  }
-#endif
-  for (; i < total; i++) {
-    t.data[i] = val;
-  }
+  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
   return t;
 }
 
-// Hardware-accelerated `@` Matrix Multiplication (C = A @ B)
-static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
-                                                     vira_tensor_f32 a,
-                                                     vira_tensor_f32 b) {
-  if (a.cols != b.rows) {
+static inline vira_tensor_f32 vira_tensor_f32_fill_3d(vira_arena *opt_arena,
+                                                      int32_t d0, int32_t d1,
+                                                      int32_t d2,
+                                                      vira_f32 val) {
+  int32_t dims[3] = {d0, d1, d2};
+  vira_tensor_f32 t =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 3, dims)
+                : vira_tensor_f32_alloc_nd(3, dims);
+  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
+  return t;
+}
+
+static inline vira_tensor_f32 vira_tensor_f32_fill_4d(vira_arena *opt_arena,
+                                                      int32_t d0, int32_t d1,
+                                                      int32_t d2, int32_t d3,
+                                                      vira_f32 val) {
+  int32_t dims[4] = {d0, d1, d2, d3};
+  vira_tensor_f32 t =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 4, dims)
+                : vira_tensor_f32_alloc_nd(4, dims);
+  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
+  return t;
+}
+
+// Low-level C FFI zero-copy view (is_view = true; caller ensures `t` outlives view)
+static inline vira_tensor_f32 vira_tensor_view_nd(vira_tensor_f32 t,
+                                                  int32_t n_dims,
+                                                  const int32_t *dims) {
+  _vira_tensor_norm_shape(&t);
+  vira_tensor_f32 v = {0};
+  _vira_tensor_init_shape(&v, n_dims, dims);
+  if (v.rows * v.cols != t.rows * t.cols) {
     fprintf(stderr,
-            "vira tensor error: matmul '@' shape mismatch (%dx%d) @ (%dx%d)\n",
-            a.rows, a.cols, b.rows, b.cols);
+            "vira tensor error: reshape element count mismatch (%d -> %d)\n",
+            t.rows * t.cols, v.rows * v.cols);
     exit(1);
   }
+  v.data = t.data;
+  v.raw_alloc = NULL;
+  v.is_arena = t.is_arena;
+  v.is_view = true;
+  return v;
+}
+
+static inline vira_tensor_f32
+_vira_tensor_reshape_safe(vira_arena *opt_arena, vira_tensor_f32 t,
+                          int32_t n_dims, const int32_t *dims) {
+  _vira_tensor_norm_shape(&t);
+  if (t.is_arena && opt_arena != NULL && vira_arena_contains(opt_arena, t.data)) {
+    return vira_tensor_view_nd(t, n_dims, dims);
+  }
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, b.cols)
-                : vira_tensor_f32_alloc(a.rows, b.cols);
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, n_dims, dims)
+                : vira_tensor_f32_alloc_nd(n_dims, dims);
+  if (out.rows * out.cols != t.rows * t.cols) {
+    fprintf(stderr,
+            "vira tensor error: reshape element count mismatch (%d -> %d)\n",
+            t.rows * t.cols, out.rows * out.cols);
+    exit(1);
+  }
+  memcpy(out.data, t.data, (size_t)out.rows * (size_t)out.cols * sizeof(vira_f32));
+  return out;
+}
 
-  const int32_t M = a.rows;
-  const int32_t K = a.cols;
-  const int32_t N = b.cols;
+static inline vira_tensor_f32 vira_tensor_reshape_2d(vira_arena *opt_arena,
+                                                     vira_tensor_f32 t,
+                                                     int32_t d0, int32_t d1) {
+  int32_t dims[2] = {d0, d1};
+  return _vira_tensor_reshape_safe(opt_arena, t, 2, dims);
+}
 
-  for (int32_t si = 0; si < M; si += 64) {
-    int32_t imax = (si + 64 < M) ? (si + 64) : M;
+static inline vira_tensor_f32 vira_tensor_reshape_3d(vira_arena *opt_arena,
+                                                     vira_tensor_f32 t,
+                                                     int32_t d0, int32_t d1,
+                                                     int32_t d2) {
+  int32_t dims[3] = {d0, d1, d2};
+  return _vira_tensor_reshape_safe(opt_arena, t, 3, dims);
+}
+
+static inline vira_tensor_f32 vira_tensor_reshape_4d(vira_arena *opt_arena,
+                                                     vira_tensor_f32 t,
+                                                     int32_t d0, int32_t d1,
+                                                     int32_t d2, int32_t d3) {
+  int32_t dims[4] = {d0, d1, d2, d3};
+  return _vira_tensor_reshape_safe(opt_arena, t, 4, dims);
+}
+
+// Transposes the last two dimensions `(..., R, C) -> (..., C, R)` for 2D/3D/4D tensors
+static inline vira_tensor_f32 vira_tensor_transpose_nd(vira_arena *opt_arena,
+                                                       vira_tensor_f32 a) {
+  _vira_tensor_norm_shape(&a);
+  if (a.n_dims == 1) {
+    int32_t dims[2] = {a.dims[0], 1};
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, dims)
+                  : vira_tensor_f32_alloc_nd(2, dims);
+    memcpy(out.data, a.data, (size_t)a.dims[0] * sizeof(vira_f32));
+    return out;
+  }
+  int32_t out_dims[4] = {a.dims[0], a.dims[1], a.dims[2], a.dims[3]};
+  int32_t R = a.dims[a.n_dims - 2];
+  int32_t C = a.dims[a.n_dims - 1];
+  out_dims[a.n_dims - 2] = C;
+  out_dims[a.n_dims - 1] = R;
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, a.n_dims, out_dims)
+                : vira_tensor_f32_alloc_nd(a.n_dims, out_dims);
+  int32_t batches = a.rows / R;
+  size_t slice_elems = (size_t)R * (size_t)C;
+  for (int32_t b = 0; b < batches; b++) {
+    const vira_f32 *src = a.data + (size_t)b * slice_elems;
+    vira_f32 *dst = out.data + (size_t)b * slice_elems;
+    for (int32_t r = 0; r < R; r++) {
+      for (int32_t c = 0; c < C; c++) {
+        dst[c * R + r] = src[r * C + c];
+      }
+    }
+  }
+  return out;
+}
+
+static inline void _vira_matmul_kernel_2d_rows(const vira_f32 *a_data,
+                                               const vira_f32 *b_data,
+                                               vira_f32 *c_data,
+                                               int32_t r_start, int32_t r_end,
+                                               int32_t K, int32_t N) {
+  for (int32_t si = r_start; si < r_end; si += 64) {
+    int32_t imax = (si + 64 < r_end) ? (si + 64) : r_end;
     for (int32_t sk = 0; sk < K; sk += 64) {
       int32_t kmax = (sk + 64 < K) ? (sk + 64) : K;
       for (int32_t sj = 0; sj < N; sj += 64) {
         int32_t jmax = (sj + 64 < N) ? (sj + 64) : N;
 
         for (int32_t i = si; i < imax; i++) {
-          vira_f32 *c_row = &out.data[i * N];
+          vira_f32 *c_row = &c_data[(size_t)i * (size_t)N];
           for (int32_t k = sk; k < kmax; k++) {
-            const vira_f32 a_ik = a.data[i * K + k];
-            const vira_f32 *b_row = &b.data[k * N];
+            const vira_f32 a_ik = a_data[(size_t)i * (size_t)K + (size_t)k];
+            const vira_f32 *b_row = &b_data[(size_t)k * (size_t)N];
             int32_t j = sj;
 
 #if defined(__AVX2__)
@@ -954,11 +1248,199 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
       }
     }
   }
+}
+
+typedef struct {
+  const vira_f32 *a_base;
+  const vira_f32 *b_base;
+  vira_f32 *c_base;
+  int32_t M;
+  int32_t K;
+  int32_t N;
+  int32_t B1;
+  int32_t A_B0;
+  int32_t A_B1;
+  int32_t B_B0;
+  int32_t B_B1;
+  int32_t gr_start; // global row start in [0, total_batches * M)
+  int32_t gr_end;   // global row end
+} _vira_matmul_job;
+
+static void _vira_matmul_job_fn(void *raw) {
+  const _vira_matmul_job *job = (const _vira_matmul_job *)raw;
+  const int32_t M = job->M;
+  const int32_t K = job->K;
+  const int32_t N = job->N;
+  int32_t cur = job->gr_start;
+  while (cur < job->gr_end) {
+    int32_t b_idx = cur / M;
+    int32_t r_start = cur % M;
+    int32_t rem_in_batch = M - r_start;
+    int32_t rem_total = job->gr_end - cur;
+    int32_t r_end = r_start + ((rem_total < rem_in_batch) ? rem_total : rem_in_batch);
+
+    int32_t i0 = b_idx / job->B1;
+    int32_t i1 = b_idx % job->B1;
+    int32_t a_b = ((job->A_B0 == 1) ? 0 : i0) * job->A_B1 +
+                  ((job->A_B1 == 1) ? 0 : i1);
+    int32_t b_b = ((job->B_B0 == 1) ? 0 : i0) * job->B_B1 +
+                  ((job->B_B1 == 1) ? 0 : i1);
+
+    const vira_f32 *a_ptr = job->a_base + (size_t)a_b * (size_t)M * (size_t)K;
+    const vira_f32 *b_ptr = job->b_base + (size_t)b_b * (size_t)K * (size_t)N;
+    vira_f32 *c_ptr = job->c_base + (size_t)b_idx * (size_t)M * (size_t)N;
+
+    _vira_matmul_kernel_2d_rows(a_ptr, b_ptr, c_ptr, r_start, r_end, K, N);
+    cur += (r_end - r_start);
+  }
+}
+
+#define VIRA_MATMUL_MT_THRESHOLD (128LL * 128LL * 128LL)
+
+// Hardware-accelerated 2D/3D/4D Batched + Multi-Threaded `@` Matrix Multiplication
+static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
+                                                     vira_tensor_f32 a,
+                                                     vira_tensor_f32 b) {
+  _vira_tensor_norm_shape(&a);
+  _vira_tensor_norm_shape(&b);
+
+  int32_t a_nd = a.n_dims;
+  int32_t b_nd = b.n_dims;
+  int32_t M = (a_nd == 1) ? 1 : a.dims[a_nd - 2];
+  int32_t K_a = a.dims[a_nd - 1];
+  int32_t K_b = (b_nd == 1) ? b.dims[0] : b.dims[b_nd - 2];
+  int32_t N = (b_nd == 1) ? 1 : b.dims[b_nd - 1];
+
+  if (K_a != K_b) {
+    fprintf(stderr,
+            "vira tensor error: matmul '@' inner dimension mismatch (%d vs %d)\n",
+            K_a, K_b);
+    exit(1);
+  }
+
+  int32_t a_batch_nd = (a_nd > 2) ? (a_nd - 2) : 0;
+  int32_t b_batch_nd = (b_nd > 2) ? (b_nd - 2) : 0;
+  int32_t batch_nd = (a_batch_nd > b_batch_nd) ? a_batch_nd : b_batch_nd;
+
+  // Normalize leading batch dims into 2 slots [B0, B1]
+  int32_t A_B0 = 1, A_B1 = 1;
+  if (a_batch_nd == 1) {
+    A_B1 = a.dims[0];
+  } else if (a_batch_nd == 2) {
+    A_B0 = a.dims[0];
+    A_B1 = a.dims[1];
+  }
+
+  int32_t B_B0 = 1, B_B1 = 1;
+  if (b_batch_nd == 1) {
+    B_B1 = b.dims[0];
+  } else if (b_batch_nd == 2) {
+    B_B0 = b.dims[0];
+    B_B1 = b.dims[1];
+  }
+
+  if ((A_B0 != B_B0 && A_B0 != 1 && B_B0 != 1) ||
+      (A_B1 != B_B1 && A_B1 != 1 && B_B1 != 1)) {
+    fprintf(stderr,
+            "vira tensor error: matmul '@' batch broadcast mismatch (%dx%d) vs (%dx%d)\n",
+            A_B0, A_B1, B_B0, B_B1);
+    exit(1);
+  }
+
+  int32_t B0 = (A_B0 > B_B0) ? A_B0 : B_B0;
+  int32_t B1 = (A_B1 > B_B1) ? A_B1 : B_B1;
+  int32_t total_batches = B0 * B1;
+
+  int32_t out_nd = batch_nd + 2;
+  int32_t out_dims[4] = {0, 0, 0, 0};
+  if (batch_nd == 0) {
+    out_dims[0] = M;
+    out_dims[1] = N;
+  } else if (batch_nd == 1) {
+    out_dims[0] = B1;
+    out_dims[1] = M;
+    out_dims[2] = N;
+  } else {
+    out_dims[0] = B0;
+    out_dims[1] = B1;
+    out_dims[2] = M;
+    out_dims[3] = N;
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, out_nd, out_dims)
+                : vira_tensor_f32_alloc_nd(out_nd, out_dims);
+
+  int32_t total_rows = total_batches * M;
+  int64_t total_ops =
+      (int64_t)total_rows * (int64_t)K_a * (int64_t)N;
+
+  if (total_ops >= VIRA_MATMUL_MT_THRESHOLD && total_rows >= 4 &&
+      !_vira_in_active_actor()) {
+    vira_scheduler_ensure_init();
+    int32_t nw = vira_scheduler_num_workers();
+    if (nw > 16)
+      nw = 16;
+    if (nw > total_rows)
+      nw = total_rows;
+    if (nw > 1) {
+      _vira_matmul_job jobs[16];
+      vira_task tasks[16];
+      int32_t base_rows = total_rows / nw;
+      int32_t extra = total_rows % nw;
+      int32_t cur = 0;
+      for (int32_t w = 0; w < nw; w++) {
+        int32_t cnt = base_rows + (w < extra ? 1 : 0);
+        jobs[w] = (_vira_matmul_job){.a_base = a.data,
+                                     .b_base = b.data,
+                                     .c_base = out.data,
+                                     .M = M,
+                                     .K = K_a,
+                                     .N = N,
+                                     .B1 = B1,
+                                     .A_B0 = A_B0,
+                                     .A_B1 = A_B1,
+                                     .B_B0 = B_B0,
+                                     .B_B1 = B_B1,
+                                     .gr_start = cur,
+                                     .gr_end = cur + cnt};
+        cur += cnt;
+        if (w > 0) {
+          tasks[w] = (vira_task){.fn = _vira_matmul_job_fn,
+                                 .env = &jobs[w],
+                                 .next_actor_msg = NULL,
+                                 .done = 0};
+          vira_scheduler_submit_async(&tasks[w]);
+        }
+      }
+      _vira_matmul_job_fn(&jobs[0]);
+      for (int32_t w = 1; w < nw; w++) {
+        vira_scheduler_await(&tasks[w]);
+      }
+      return out;
+    }
+  }
+
+  _vira_matmul_job single = {.a_base = a.data,
+                             .b_base = b.data,
+                             .c_base = out.data,
+                             .M = M,
+                             .K = K_a,
+                             .N = N,
+                             .B1 = B1,
+                             .A_B0 = A_B0,
+                             .A_B1 = A_B1,
+                             .B_B0 = B_B0,
+                             .B_B1 = B_B1,
+                             .gr_start = 0,
+                             .gr_end = total_rows};
+  _vira_matmul_job_fn(&single);
   return out;
 }
 
 // SIMD-accelerated tensor sum reduction
 static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
+  _vira_tensor_norm_shape(&t);
   int32_t total = t.rows * t.cols;
   int32_t i = 0;
   vira_f32 sum = 0.0f;
@@ -987,12 +1469,13 @@ static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
   return sum;
 }
 
-// SIMD-accelerated ReLU activation: out = max(0, t)
+// SIMD-accelerated ReLU activation: out = max(0, t) (preserves 1D..4D shape)
 static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
                                                vira_tensor_f32 t) {
+  _vira_tensor_norm_shape(&t);
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
-                : vira_tensor_f32_alloc(t.rows, t.cols);
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
+                : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
   int32_t total = t.rows * t.cols;
   int32_t i = 0;
 
@@ -1024,90 +1507,143 @@ static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
   return out;
 }
 
-// SIMD-accelerated tensor addition: out = a + b
+static inline void _vira_vec_add_f32(vira_f32 *dst, const vira_f32 *pa,
+                                     const vira_f32 *pb, int32_t count) {
+  int32_t i = 0;
+#if defined(__AVX2__)
+  for (; i + 8 <= count; i += 8) {
+    __m256 va = _mm256_loadu_ps(&pa[i]);
+    __m256 vb = _mm256_loadu_ps(&pb[i]);
+    _mm256_storeu_ps(&dst[i], _mm256_add_ps(va, vb));
+  }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  for (; i + 4 <= count; i += 4) {
+    float32x4_t va = vld1q_f32(&pa[i]);
+    float32x4_t vb = vld1q_f32(&pb[i]);
+    vst1q_f32(&dst[i], vaddq_f32(va, vb));
+  }
+#elif defined(__SSE2__)
+  for (; i + 4 <= count; i += 4) {
+    __m128 va = _mm_loadu_ps(&pa[i]);
+    __m128 vb = _mm_loadu_ps(&pb[i]);
+    _mm_storeu_ps(&dst[i], _mm_add_ps(va, vb));
+  }
+#endif
+  for (; i < count; i++) {
+    dst[i] = pa[i] + pb[i];
+  }
+}
+
+static inline void _vira_vec_sub_f32(vira_f32 *dst, const vira_f32 *pa,
+                                     const vira_f32 *pb, int32_t count) {
+  int32_t i = 0;
+#if defined(__AVX2__)
+  for (; i + 8 <= count; i += 8) {
+    __m256 va = _mm256_loadu_ps(&pa[i]);
+    __m256 vb = _mm256_loadu_ps(&pb[i]);
+    _mm256_storeu_ps(&dst[i], _mm256_sub_ps(va, vb));
+  }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  for (; i + 4 <= count; i += 4) {
+    float32x4_t va = vld1q_f32(&pa[i]);
+    float32x4_t vb = vld1q_f32(&pb[i]);
+    vst1q_f32(&dst[i], vsubq_f32(va, vb));
+  }
+#elif defined(__SSE2__)
+  for (; i + 4 <= count; i += 4) {
+    __m128 va = _mm_loadu_ps(&pa[i]);
+    __m128 vb = _mm_loadu_ps(&pb[i]);
+    _mm_storeu_ps(&dst[i], _mm_sub_ps(va, vb));
+  }
+#endif
+  for (; i < count; i++) {
+    dst[i] = pa[i] - pb[i];
+  }
+}
+
+// SIMD-accelerated tensor addition: out = a + b (supports 1D..4D + trailing-dim bias broadcast)
 static inline vira_tensor_f32
 vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
-  if (a.rows != b.rows || a.cols != b.cols) {
-    fprintf(stderr, "vira tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
-            a.rows, a.cols, b.rows, b.cols);
-    exit(1);
+  _vira_tensor_norm_shape(&a);
+  _vira_tensor_norm_shape(&b);
+  if (a.rows == b.rows && a.cols == b.cols) {
+    const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
+                  : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
+    _vira_vec_add_f32(out.data, a.data, b.data, a.rows * a.cols);
+    return out;
   }
-  vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
-                : vira_tensor_f32_alloc(a.rows, a.cols);
-  int32_t total = a.rows * a.cols;
-  int32_t i = 0;
-
-#if defined(__AVX2__)
-  for (; i + 8 <= total; i += 8) {
-    __m256 va = _mm256_loadu_ps(&a.data[i]);
-    __m256 vb = _mm256_loadu_ps(&b.data[i]);
-    _mm256_storeu_ps(&out.data[i], _mm256_add_ps(va, vb));
+  if (b.rows == 1 && b.cols == a.cols) {
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, a.n_dims, a.dims)
+                  : vira_tensor_f32_alloc_nd(a.n_dims, a.dims);
+    for (int32_t r = 0; r < a.rows; r++) {
+      _vira_vec_add_f32(&out.data[(size_t)r * (size_t)a.cols],
+                        &a.data[(size_t)r * (size_t)a.cols], b.data, a.cols);
+    }
+    return out;
   }
-#elif defined(__ARM_NEON) || defined(__aarch64__)
-  for (; i + 4 <= total; i += 4) {
-    float32x4_t va = vld1q_f32(&a.data[i]);
-    float32x4_t vb = vld1q_f32(&b.data[i]);
-    vst1q_f32(&out.data[i], vaddq_f32(va, vb));
+  if (a.rows == 1 && a.cols == b.cols) {
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, b.n_dims, b.dims)
+                  : vira_tensor_f32_alloc_nd(b.n_dims, b.dims);
+    for (int32_t r = 0; r < b.rows; r++) {
+      _vira_vec_add_f32(&out.data[(size_t)r * (size_t)b.cols], a.data,
+                        &b.data[(size_t)r * (size_t)b.cols], b.cols);
+    }
+    return out;
   }
-#elif defined(__SSE2__)
-  for (; i + 4 <= total; i += 4) {
-    __m128 va = _mm_loadu_ps(&a.data[i]);
-    __m128 vb = _mm_loadu_ps(&b.data[i]);
-    _mm_storeu_ps(&out.data[i], _mm_add_ps(va, vb));
-  }
-#endif
-  for (; i < total; i++) {
-    out.data[i] = a.data[i] + b.data[i];
-  }
-  return out;
+  fprintf(stderr, "vira tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
+          a.rows, a.cols, b.rows, b.cols);
+  exit(1);
 }
 
-// SIMD-accelerated tensor subtraction: out = a - b
+// SIMD-accelerated tensor subtraction: out = a - b (supports 1D..4D + trailing-dim bias broadcast)
 static inline vira_tensor_f32
 vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
-  if (a.rows != b.rows || a.cols != b.cols) {
-    fprintf(stderr, "vira tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
-            a.rows, a.cols, b.rows, b.cols);
-    exit(1);
+  _vira_tensor_norm_shape(&a);
+  _vira_tensor_norm_shape(&b);
+  if (a.rows == b.rows && a.cols == b.cols) {
+    const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
+                  : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
+    _vira_vec_sub_f32(out.data, a.data, b.data, a.rows * a.cols);
+    return out;
   }
-  vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, a.rows, a.cols)
-                : vira_tensor_f32_alloc(a.rows, a.cols);
-  int32_t total = a.rows * a.cols;
-  int32_t i = 0;
-
-#if defined(__AVX2__)
-  for (; i + 8 <= total; i += 8) {
-    __m256 va = _mm256_loadu_ps(&a.data[i]);
-    __m256 vb = _mm256_loadu_ps(&b.data[i]);
-    _mm256_storeu_ps(&out.data[i], _mm256_sub_ps(va, vb));
+  if (b.rows == 1 && b.cols == a.cols) {
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, a.n_dims, a.dims)
+                  : vira_tensor_f32_alloc_nd(a.n_dims, a.dims);
+    for (int32_t r = 0; r < a.rows; r++) {
+      _vira_vec_sub_f32(&out.data[(size_t)r * (size_t)a.cols],
+                        &a.data[(size_t)r * (size_t)a.cols], b.data, a.cols);
+    }
+    return out;
   }
-#elif defined(__ARM_NEON) || defined(__aarch64__)
-  for (; i + 4 <= total; i += 4) {
-    float32x4_t va = vld1q_f32(&a.data[i]);
-    float32x4_t vb = vld1q_f32(&b.data[i]);
-    vst1q_f32(&out.data[i], vsubq_f32(va, vb));
+  if (a.rows == 1 && a.cols == b.cols) {
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, b.n_dims, b.dims)
+                  : vira_tensor_f32_alloc_nd(b.n_dims, b.dims);
+    for (int32_t r = 0; r < b.rows; r++) {
+      _vira_vec_sub_f32(&out.data[(size_t)r * (size_t)b.cols], a.data,
+                        &b.data[(size_t)r * (size_t)b.cols], b.cols);
+    }
+    return out;
   }
-#elif defined(__SSE2__)
-  for (; i + 4 <= total; i += 4) {
-    __m128 va = _mm_loadu_ps(&a.data[i]);
-    __m128 vb = _mm_loadu_ps(&b.data[i]);
-    _mm_storeu_ps(&out.data[i], _mm_sub_ps(va, vb));
-  }
-#endif
-  for (; i < total; i++) {
-    out.data[i] = a.data[i] - b.data[i];
-  }
-  return out;
+  fprintf(stderr, "vira tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
+          a.rows, a.cols, b.rows, b.cols);
+  exit(1);
 }
 
-// SIMD-accelerated tensor scalar scaling: out = t * scale
+// SIMD-accelerated tensor scalar scaling: out = t * scale (preserves 1D..4D shape)
 static inline vira_tensor_f32
 vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
+  _vira_tensor_norm_shape(&t);
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, t.rows, t.cols)
-                : vira_tensor_f32_alloc(t.rows, t.cols);
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
+                : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
   int32_t total = t.rows * t.cols;
   int32_t i = 0;
 
@@ -1137,7 +1673,7 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
 }
 
 static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
-  if (t != NULL && !t->is_arena && t->raw_alloc != NULL) {
+  if (t != NULL && !t->is_arena && !t->is_view && t->raw_alloc != NULL) {
     free(t->raw_alloc);
     t->raw_alloc = NULL;
     t->data = NULL;
@@ -1149,7 +1685,8 @@ static inline vira_tensor_f32 vira_tensor_f32_clone(vira_tensor_f32 t) {
   if (t.data == NULL || t.rows <= 0 || t.cols <= 0) {
     return (vira_tensor_f32){0};
   }
-  vira_tensor_f32 copy = vira_tensor_f32_alloc(t.rows, t.cols);
+  _vira_tensor_norm_shape(&t);
+  vira_tensor_f32 copy = vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
   size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
   memcpy(copy.data, t.data, bytes);
   return copy;
@@ -1162,7 +1699,10 @@ static inline vira_tensor_f32 vira_tensor_f32_clone(vira_tensor_f32 t) {
 #define VIRA_WS_CAP 4096
 #define VIRA_WS_MASK (VIRA_WS_CAP - 1)
 #define VIRA_MAX_WORKERS 32
+#define VIRA_ACTOR_MAX_DEFERS 128
 
+#ifndef _VIRA_TASK_DEFINED
+#define _VIRA_TASK_DEFINED
 typedef void (*vira_task_fn)(void *env);
 
 typedef struct _vira_task {
@@ -1171,6 +1711,15 @@ typedef struct _vira_task {
   struct _vira_task *next_actor_msg; // Intrusive MPSC link
   volatile int32_t done;             // 0 = pending, 1 = completed on worker pool
 } vira_task;
+#endif
+
+typedef void (*vira_defer_fn)(void *ptr);
+
+typedef struct {
+  vira_defer_fn fn;
+  void *ptr;
+  bool is_arena;
+} vira_defer_entry;
 
 static void _vira_actor_drain_task(void *env);
 static inline void vira_scheduler_await(vira_task *task);
@@ -1181,7 +1730,7 @@ typedef enum {
   VIRA_ACTOR_STOPPED = 2,
 } vira_actor_state;
 
-typedef struct {
+struct _vira_actor_ctx {
   int32_t id;
   const char *name;
   vira_actor_state state;
@@ -1197,11 +1746,88 @@ typedef struct {
   vira_task * volatile mbox_tail;
   volatile int32_t scheduled;
   vira_task drain_task;
-} vira_actor_ctx;
+  vira_defer_entry defer_stack[VIRA_ACTOR_MAX_DEFERS];
+  int32_t defer_top;
+};
 
 // Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!
 static __thread vira_actor_ctx *_vira_tls_actor = NULL;
 static __thread int32_t _vira_tls_worker_id = -1;
+
+static inline bool _vira_in_active_actor(void) {
+  return _vira_tls_actor != NULL && _vira_tls_actor->in_actor;
+}
+
+static inline int32_t _vira_actor_defer_mark(void) {
+  if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
+    return _vira_tls_actor->defer_top;
+  }
+  return 0;
+}
+
+static inline void _vira_actor_defer_restore(int32_t base) {
+  if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
+    if (base >= 0 && base <= _vira_tls_actor->defer_top) {
+      _vira_tls_actor->defer_top = base;
+    }
+  }
+}
+
+static inline void _vira_actor_defer_push_ex(vira_defer_fn fn, void *ptr,
+                                             bool is_arena) {
+  if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor && ptr != NULL &&
+      fn != NULL) {
+    if (_vira_tls_actor->defer_top < VIRA_ACTOR_MAX_DEFERS) {
+      _vira_tls_actor->defer_stack[_vira_tls_actor->defer_top++] =
+          (vira_defer_entry){.fn = fn, .ptr = ptr, .is_arena = is_arena};
+    }
+  }
+}
+
+static inline void _vira_actor_defer_push(vira_defer_fn fn, void *ptr) {
+  _vira_actor_defer_push_ex(fn, ptr, false);
+}
+
+static inline void _vira_actor_defer_pop(const void *ptr) {
+  if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor && ptr != NULL) {
+    for (int32_t i = _vira_tls_actor->defer_top - 1; i >= 0; i--) {
+      if (_vira_tls_actor->defer_stack[i].ptr == ptr) {
+        for (int32_t j = i; j < _vira_tls_actor->defer_top - 1; j++) {
+          _vira_tls_actor->defer_stack[j] = _vira_tls_actor->defer_stack[j + 1];
+        }
+        _vira_tls_actor->defer_top--;
+        return;
+      }
+    }
+  }
+}
+
+static inline bool _vira_actor_defer_arenas_contain(const vira_actor_ctx *ctx,
+                                                    const void *ptr) {
+  if (ctx == NULL || ptr == NULL)
+    return false;
+  for (int32_t i = 0; i < ctx->defer_top; i++) {
+    if (ctx->defer_stack[i].is_arena && ctx->defer_stack[i].ptr != NULL) {
+      if (vira_arena_contains((const vira_arena *)ctx->defer_stack[i].ptr,
+                              ptr)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static inline void _vira_actor_defer_unwind(vira_actor_ctx *ctx) {
+  if (ctx == NULL)
+    return;
+  while (ctx->defer_top > 0) {
+    ctx->defer_top--;
+    vira_defer_entry e = ctx->defer_stack[ctx->defer_top];
+    if (e.fn != NULL && e.ptr != NULL) {
+      e.fn(e.ptr);
+    }
+  }
+}
 
 static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
                                        const char *name, int32_t max_restarts) {
@@ -1213,7 +1839,8 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->isolated_heap =
       (vira_arena){.buf = NULL,
                    .cap = 0,
-                   .offset = 0}; // Lazy SIMD-aligned scratch arena per actor
+                   .offset = 0,
+                   .overflow_slabs = NULL}; // Lazy SIMD-aligned scratch arena
   ctx->last_error = vira_str_lit("", 0);
   ctx->in_actor = false;
   ctx->mailbox_lock = 0;
@@ -1225,6 +1852,7 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->drain_task.env = ctx;
   ctx->drain_task.next_actor_msg = NULL;
   ctx->drain_task.done = 0;
+  ctx->defer_top = 0;
 }
 
 static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
@@ -1237,28 +1865,40 @@ static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
   if (!ctx->last_error.is_lit && ctx->last_error.data != NULL) {
     vira_str_free(&ctx->last_error);
   }
+  ctx->defer_top = 0;
   vira_arena_destroy(&ctx->isolated_heap);
 }
 
 static inline void vira_panic(vira_string msg) {
   if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
-    _vira_tls_actor->state = VIRA_ACTOR_FAULTED;
-    if (!_vira_tls_actor->last_error.is_lit && _vira_tls_actor->last_error.data != NULL) {
-      vira_str_free(&_vira_tls_actor->last_error);
+    vira_actor_ctx *ctx = _vira_tls_actor;
+    ctx->state = VIRA_ACTOR_FAULTED;
+    if (!ctx->last_error.is_lit && ctx->last_error.data != NULL) {
+      vira_str_free(&ctx->last_error);
     }
-    if (vira_arena_contains(&_vira_tls_actor->isolated_heap, msg.data)) {
+    bool in_arena = vira_arena_contains(&ctx->isolated_heap, msg.data) ||
+                    _vira_actor_defer_arenas_contain(ctx, msg.data);
+    vira_string saved_err;
+    if (msg.data == NULL || msg.len <= 0) {
+      saved_err = vira_str_lit("", 0);
+    } else if (msg.is_lit && !in_arena) {
+      saved_err = msg;
+    } else {
       char *buf = (char *)malloc((size_t)msg.len + 1);
       if (buf != NULL) {
         memcpy(buf, msg.data, (size_t)msg.len);
         buf[msg.len] = '\0';
         _vira_record_alloc();
+        saved_err = (vira_string){
+            .data = (const uint8_t *)buf, .len = msg.len, .is_lit = false};
+      } else {
+        saved_err = vira_str_lit("out of memory during panic", 26);
       }
-      _vira_tls_actor->last_error = (vira_string){
-          .data = (const uint8_t *)buf, .len = msg.len, .is_lit = false};
-    } else {
-      _vira_tls_actor->last_error = msg;
     }
-    longjmp(_vira_tls_actor->fault_boundary, 1);
+    // Unwind all live stack-frame heap allocations BEFORE longjmp!
+    _vira_actor_defer_unwind(ctx);
+    ctx->last_error = saved_err;
+    longjmp(ctx->fault_boundary, 1);
   }
   fprintf(stderr, "vira unrecoverable panic: %.*s\n", msg.len,
           (const char *)msg.data);
@@ -1669,11 +2309,16 @@ static inline void vira_scheduler_ensure_init(void) {
   pthread_mutex_unlock(&_vira_sched_init_mu);
 }
 
+static inline int32_t vira_scheduler_num_workers(void) {
+  return _vira_sched.num_workers;
+}
+
 // --- ASYNCHRONOUS FUTURE[T] PRIMITIVES (FAN-OUT + WORK-HELPING AWAIT) ---
 
 typedef struct {
   vira_task *task;
   void *env;
+  void (*drop_fn)(void *env);
 } vira_future;
 
 // Pushes a task onto a worker deque and returns immediately (non-blocking)
@@ -1850,9 +2495,13 @@ static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void *env) {
 static inline void vira_future_free(vira_future *f) {
   if (f != NULL && f->env != NULL) {
     // If an early return skipped `.await()`, wait for the worker thread to
-    // finish before freeing
+    // finish before freeing unconsumed result and envelope
     if (f->task != NULL) {
       vira_scheduler_await(f->task);
+    }
+    if (f->drop_fn != NULL) {
+      f->drop_fn(f->env);
+      f->drop_fn = NULL;
     }
     free(f->env);
     f->env = NULL;
@@ -1941,13 +2590,10 @@ typedef struct {
 #endif
 
 static inline bool vira_file_exists(vira_string path) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
-  FILE *f = fopen(path_buf, "rb");
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
+  FILE *f = fopen(pbuf.ptr, "rb");
+  vira_cstr_buf_free(&pbuf);
   if (f) {
     fclose(f);
     return true;
@@ -1956,28 +2602,26 @@ static inline bool vira_file_exists(vira_string path) {
 }
 
 static inline Result_string vira_read_file(vira_string path) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  FILE *f = fopen(path_buf, "rb");
+  FILE *f = fopen(pbuf.ptr, "rb");
   if (!f) {
-    return (Result_string){
-        .is_err = true,
-        .err = vira_str_format("failed to open file '%s'", path_buf)};
+    vira_string err = vira_str_format("failed to open file '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_string){.is_err = true, .err = err};
   }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
   if (sz < 0) {
     fclose(f);
-    return (Result_string){
-        .is_err = true,
-        .err = vira_str_format("failed to seek in '%s'", path_buf)};
+    vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_string){.is_err = true, .err = err};
   }
+  vira_cstr_buf_free(&pbuf);
+
   char *buf = (char *)malloc((size_t)sz + 1);
   if (!buf) {
     fclose(f);
@@ -1996,77 +2640,69 @@ static inline Result_string vira_read_file(vira_string path) {
 
 static inline Result_bool vira_write_file(vira_string path,
                                           vira_string content) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  FILE *f = fopen(path_buf, "wb");
+  FILE *f = fopen(pbuf.ptr, "wb");
   if (!f) {
-    return (Result_bool){.is_err = true,
-                         .err = vira_str_format(
-                             "failed to open file '%s' for writing", path_buf)};
+    vira_string err =
+        vira_str_format("failed to open file '%s' for writing", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_bool){.is_err = true, .err = err};
   }
   if (content.len > 0 && content.data != NULL) {
     size_t written = fwrite(content.data, 1, (size_t)content.len, f);
     if (written != (size_t)content.len) {
       fclose(f);
-      return (Result_bool){
-          .is_err = true,
-          .err = vira_str_format("failed to write complete content to '%s'",
-                                 path_buf)};
+      vira_string err = vira_str_format(
+          "failed to write complete content to '%s'", pbuf.ptr);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_bool){.is_err = true, .err = err};
     }
   }
   fclose(f);
+  vira_cstr_buf_free(&pbuf);
   return (Result_bool){.is_err = false, .val = true};
 }
 
 static inline Result_bool vira_append_file(vira_string path,
                                            vira_string content) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  FILE *f = fopen(path_buf, "ab");
+  FILE *f = fopen(pbuf.ptr, "ab");
   if (!f) {
-    return (Result_bool){
-        .is_err = true,
-        .err = vira_str_format("failed to open file '%s' for appending",
-                               path_buf)};
+    vira_string err =
+        vira_str_format("failed to open file '%s' for appending", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_bool){.is_err = true, .err = err};
   }
   if (content.len > 0 && content.data != NULL) {
     size_t written = fwrite(content.data, 1, (size_t)content.len, f);
     if (written != (size_t)content.len) {
       fclose(f);
-      return (Result_bool){
-          .is_err = true,
-          .err = vira_str_format("failed to append complete content to '%s'",
-                                 path_buf)};
+      vira_string err = vira_str_format(
+          "failed to append complete content to '%s'", pbuf.ptr);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_bool){.is_err = true, .err = err};
     }
   }
   fclose(f);
+  vira_cstr_buf_free(&pbuf);
   return (Result_bool){.is_err = false, .val = true};
 }
 
 static inline Result_bool vira_remove_file(vira_string path) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  if (remove(path_buf) == 0) {
+  if (remove(pbuf.ptr) == 0) {
+    vira_cstr_buf_free(&pbuf);
     return (Result_bool){.is_err = false, .val = true};
   }
-  return (Result_bool){
-      .is_err = true,
-      .err = vira_str_format("failed to remove file '%s'", path_buf)};
+  vira_string err = vira_str_format("failed to remove file '%s'", pbuf.ptr);
+  vira_cstr_buf_free(&pbuf);
+  return (Result_bool){.is_err = true, .err = err};
 }
 
 static inline int64_t vira_io_file_open(vira_string path, vira_string mode) {
@@ -2074,17 +2710,15 @@ static inline int64_t vira_io_file_open(vira_string path, vira_string mode) {
       mode.data == NULL) {
     return 0;
   }
-  char path_buf[1024];
-  int32_t plen = path.len < 1023 ? path.len : 1023;
-  memcpy(path_buf, path.data, (size_t)plen);
-  path_buf[plen] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  char mode_buf[16];
-  int32_t mlen = mode.len < 15 ? mode.len : 15;
-  memcpy(mode_buf, mode.data, (size_t)mlen);
-  mode_buf[mlen] = '\0';
+  char stack_mode[16];
+  vira_cstr_buf mbuf = vira_str_to_cstr_buf(mode, stack_mode, sizeof(stack_mode));
 
-  FILE *f = fopen(path_buf, mode_buf);
+  FILE *f = fopen(pbuf.ptr, mbuf.ptr);
+  vira_cstr_buf_free(&mbuf);
+  vira_cstr_buf_free(&pbuf);
   return (int64_t)(uintptr_t)f;
 }
 
@@ -2174,19 +2808,16 @@ typedef struct {
 static inline Result_tensor_f32 vira_tensor_load_bin(vira_arena *opt_arena,
                                                      int32_t rows, int32_t cols,
                                                      vira_string path) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  FILE *f = fopen(path_buf, "rb");
+  FILE *f = fopen(pbuf.ptr, "rb");
   if (!f) {
+    vira_string err =
+        vira_str_format("could not open weight file '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("could not open weight file '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
   vira_tensor_f32 t = opt_arena
@@ -2200,34 +2831,30 @@ static inline Result_tensor_f32 vira_tensor_load_bin(vira_arena *opt_arena,
   if (read_count != expected) {
     if (!opt_arena)
       vira_tensor_f32_free(&t);
+    vira_string err = vira_str_format(
+        "weight file '%s' size mismatch: expected %zu floats, read %zu",
+        pbuf.ptr, expected, read_count);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format(
-            "weight file '%s' size mismatch: expected %zu floats, read %zu",
-            path_buf, expected, read_count),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
+  vira_cstr_buf_free(&pbuf);
   return (Result_tensor_f32){
       .is_err = false, .err = vira_str_lit("", 0), .val = t};
 }
 
 static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t,
                                                vira_string path) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  FILE *f = fopen(path_buf, "wb");
+  FILE *f = fopen(pbuf.ptr, "wb");
   if (!f) {
-    return (Result_bool){
-        .is_err = true,
-        .err = vira_str_format("failed to open file '%s' for writing weights",
-                               path_buf),
-        .val = false};
+    vira_string err = vira_str_format(
+        "failed to open file '%s' for writing weights", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_bool){.is_err = true, .err = err, .val = false};
   }
 
   size_t total = (size_t)t.rows * (size_t)t.cols;
@@ -2235,13 +2862,13 @@ static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t,
   fclose(f);
 
   if (written != total) {
-    return (Result_bool){
-        .is_err = true,
-        .err = vira_str_format("failed to write complete weights to '%s'",
-                               path_buf),
-        .val = false};
+    vira_string err =
+        vira_str_format("failed to write complete weights to '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_bool){.is_err = true, .err = err, .val = false};
   }
 
+  vira_cstr_buf_free(&pbuf);
   return (Result_bool){
       .is_err = false, .err = vira_str_lit("", 0), .val = true};
 }
@@ -2352,14 +2979,8 @@ static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port,
   if (backlog <= 0)
     backlog = 128;
 
-  char host_buf[256];
-  int hlen = host.len < 255 ? host.len : 255;
-  if (host.data && hlen > 0) {
-    memcpy(host_buf, host.data, hlen);
-    host_buf[hlen] = '\0';
-  } else {
-    host_buf[0] = '\0';
-  }
+  char stack_host[256];
+  vira_cstr_buf hbuf = vira_str_to_cstr_buf(host, stack_host, sizeof(stack_host));
 
   char port_buf[16];
   snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
@@ -2371,8 +2992,10 @@ static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port,
   hints.ai_flags = AI_PASSIVE;
 
   const char *node =
-      (hlen > 0 && strcmp(host_buf, "0.0.0.0") != 0) ? host_buf : NULL;
-  if (getaddrinfo(node, port_buf, &hints, &res) != 0) {
+      (host.len > 0 && strcmp(hbuf.ptr, "0.0.0.0") != 0) ? hbuf.ptr : NULL;
+  int gai = getaddrinfo(node, port_buf, &hints, &res);
+  vira_cstr_buf_free(&hbuf);
+  if (gai != 0) {
     return -1;
   }
 
@@ -2480,14 +3103,8 @@ static inline int64_t vira_net_tcp_connect(vira_string host, int32_t port,
   if (port <= 0 || port > 65535)
     return -1;
 
-  char host_buf[256];
-  int hlen = host.len < 255 ? host.len : 255;
-  if (host.data && hlen > 0) {
-    memcpy(host_buf, host.data, hlen);
-    host_buf[hlen] = '\0';
-  } else {
-    host_buf[0] = '\0';
-  }
+  char stack_host[256];
+  vira_cstr_buf hbuf = vira_str_to_cstr_buf(host, stack_host, sizeof(stack_host));
 
   char port_buf[16];
   snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
@@ -2497,7 +3114,9 @@ static inline int64_t vira_net_tcp_connect(vira_string host, int32_t port,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  if (getaddrinfo(host_buf, port_buf, &hints, &res) != 0) {
+  int gai = getaddrinfo(hbuf.ptr, port_buf, &hints, &res);
+  vira_cstr_buf_free(&hbuf);
+  if (gai != 0) {
     return -1;
   }
 
@@ -2737,14 +3356,8 @@ static inline int64_t vira_net_udp_bind(vira_string host, int32_t port) {
   if (port < 0 || port > 65535)
     return -1;
 
-  char host_buf[256];
-  int hlen = host.len < 255 ? host.len : 255;
-  if (host.data && hlen > 0) {
-    memcpy(host_buf, host.data, hlen);
-    host_buf[hlen] = '\0';
-  } else {
-    host_buf[0] = '\0';
-  }
+  char stack_host[256];
+  vira_cstr_buf hbuf = vira_str_to_cstr_buf(host, stack_host, sizeof(stack_host));
 
   char port_buf[16];
   snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
@@ -2756,8 +3369,10 @@ static inline int64_t vira_net_udp_bind(vira_string host, int32_t port) {
   hints.ai_flags = AI_PASSIVE;
 
   const char *node =
-      (hlen > 0 && strcmp(host_buf, "0.0.0.0") != 0) ? host_buf : NULL;
-  if (getaddrinfo(node, port_buf, &hints, &res) != 0) {
+      (host.len > 0 && strcmp(hbuf.ptr, "0.0.0.0") != 0) ? hbuf.ptr : NULL;
+  int gai = getaddrinfo(node, port_buf, &hints, &res);
+  vira_cstr_buf_free(&hbuf);
+  if (gai != 0) {
     return -1;
   }
 
@@ -2802,14 +3417,8 @@ static inline int32_t vira_net_udp_send_to(int64_t fd, vira_slice_u8 buf,
   if (to_write <= 0)
     return 0;
 
-  char host_buf[256];
-  int hlen = host.len < 255 ? host.len : 255;
-  if (host.data && hlen > 0) {
-    memcpy(host_buf, host.data, hlen);
-    host_buf[hlen] = '\0';
-  } else {
-    host_buf[0] = '\0';
-  }
+  char stack_host[256];
+  vira_cstr_buf hbuf = vira_str_to_cstr_buf(host, stack_host, sizeof(stack_host));
 
   char port_buf[16];
   snprintf(port_buf, sizeof(port_buf), "%lld", (long long)port);
@@ -2819,7 +3428,9 @@ static inline int32_t vira_net_udp_send_to(int64_t fd, vira_slice_u8 buf,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_DGRAM;
 
-  if (getaddrinfo(host_buf, port_buf, &hints, &res) != 0 || !res) {
+  int gai = getaddrinfo(hbuf.ptr, port_buf, &hints, &res);
+  vira_cstr_buf_free(&hbuf);
+  if (gai != 0 || !res) {
     return -1;
   }
 
@@ -2884,31 +3495,33 @@ static inline vira_string vira_http_response(int64_t status_code,
   else if (status_code == 500)
     status_text = "Internal Server Error";
 
-  char ctype_buf[128];
-  int ctype_len = content_type.len < 127 ? content_type.len : 127;
-  if (content_type.data && ctype_len > 0) {
-    memcpy(ctype_buf, content_type.data, ctype_len);
-  }
-  ctype_buf[ctype_len] = '\0';
+  char stack_ctype[128];
+  vira_cstr_buf cbuf =
+      vira_str_to_cstr_buf(content_type, stack_ctype, sizeof(stack_ctype));
 
   int32_t body_len = body.len > 0 ? body.len : 0;
-  size_t alloc_sz = 512 + (size_t)body_len + 1;
+  size_t ctype_len = content_type.len > 0 ? (size_t)content_type.len : 0;
+  size_t hdr_cap = 256 + ctype_len;
+  size_t alloc_sz = hdr_cap + (size_t)body_len + 1;
   char *res = (char *)malloc(alloc_sz);
-  if (!res)
+  if (!res) {
+    vira_cstr_buf_free(&cbuf);
     return vira_str_lit("", 0);
+  }
   _vira_record_alloc();
 
-  int n = snprintf(res, 512,
+  int n = snprintf(res, hdr_cap,
                    "HTTP/1.1 %lld %s\r\n"
                    "Content-Type: %s\r\n"
                    "Content-Length: %d\r\n"
                    "Connection: close\r\n"
                    "\r\n",
-                   (long long)status_code, status_text, ctype_buf, body_len);
+                   (long long)status_code, status_text, cbuf.ptr, body_len);
+  vira_cstr_buf_free(&cbuf);
   if (n < 0)
     n = 0;
-  if (n > 511)
-    n = 511;
+  if ((size_t)n >= hdr_cap)
+    n = (int)(hdr_cap - 1);
 
   if (body_len > 0 && body.data) {
     memcpy(res + n, body.data, (size_t)body_len);
@@ -2919,174 +3532,237 @@ static inline vira_string vira_http_response(int64_t status_code,
 }
 
 // ============================================================================
-// 13. FAST JSON FIELD PARSER
+// 13. DEPTH- & ESCAPE-AWARE JSON FIELD HELPERS (SEE ALSO `import json`)
 // ============================================================================
 
-static inline const char *_vira_memmem(const char *haystack, size_t hlen,
-                                       const char *needle, size_t nlen) {
-  if (nlen == 0)
-    return haystack;
-  if (hlen < nlen || !haystack || !needle)
+static inline size_t _vira_json_skip_string(const char *s, size_t len,
+                                            size_t open_quote_idx) {
+  size_t i = open_quote_idx + 1;
+  while (i < len) {
+    if (s[i] == '\\') {
+      i += 2;
+      continue;
+    }
+    if (s[i] == '"') {
+      return i + 1;
+    }
+    i++;
+  }
+  return len;
+}
+
+static inline bool _vira_json_key_matches(const char *s, size_t len,
+                                          size_t open_quote_idx,
+                                          vira_string key) {
+  size_t i = open_quote_idx + 1;
+  int32_t ki = 0;
+  while (i < len && s[i] != '"') {
+    char c = s[i];
+    if (c == '\\') {
+      i++;
+      if (i >= len)
+        return false;
+      switch (s[i]) {
+      case '"':
+        c = '"';
+        break;
+      case '\\':
+        c = '\\';
+        break;
+      case '/':
+        c = '/';
+        break;
+      case 'n':
+        c = '\n';
+        break;
+      case 'r':
+        c = '\r';
+        break;
+      case 't':
+        c = '\t';
+        break;
+      default:
+        c = s[i];
+        break;
+      }
+    }
+    if (ki >= key.len || (uint8_t)c != key.data[ki]) {
+      return false;
+    }
+    ki++;
+    i++;
+  }
+  return (i < len && s[i] == '"' && ki == key.len);
+}
+
+// Finds the value start offset for `key`. Prefers top-level object (`target_depth == 1`);
+// falls back to nested object match when `target_depth == 0`.
+static inline const char *_vira_json_find_val_at_depth(vira_string json,
+                                                       vira_string key,
+                                                       int32_t target_depth) {
+  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
     return NULL;
-  for (size_t i = 0; i <= hlen - nlen; i++) {
-    if (haystack[i] == needle[0] && memcmp(haystack + i, needle, nlen) == 0) {
-      return haystack + i;
+  }
+  const char *s = (const char *)json.data;
+  size_t len = (size_t)json.len;
+  int32_t obj_depth = 0;
+  int32_t arr_depth = 0;
+  size_t i = 0;
+
+  while (i < len) {
+    char c = s[i];
+    if (c == '{') {
+      obj_depth++;
+      i++;
+    } else if (c == '}') {
+      if (obj_depth > 0)
+        obj_depth--;
+      i++;
+    } else if (c == '[') {
+      arr_depth++;
+      i++;
+    } else if (c == ']') {
+      if (arr_depth > 0)
+        arr_depth--;
+      i++;
+    } else if (c == '"') {
+      size_t after_str = _vira_json_skip_string(s, len, i);
+      size_t j = after_str;
+      while (j < len &&
+             (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\n')) {
+        j++;
+      }
+      bool is_obj_key = (j < len && s[j] == ':' && obj_depth >= 1);
+      bool depth_ok = (target_depth == 0) ||
+                      (obj_depth == target_depth && arr_depth == 0);
+      if (is_obj_key && depth_ok && _vira_json_key_matches(s, len, i, key)) {
+        j++; // skip ':'
+        while (j < len &&
+               (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\n')) {
+          j++;
+        }
+        return (j < len) ? (s + j) : NULL;
+      }
+      i = after_str;
+    } else {
+      i++;
     }
   }
   return NULL;
 }
 
+static inline const char *_vira_json_find_val(vira_string json,
+                                              vira_string key) {
+  const char *v = _vira_json_find_val_at_depth(json, key, 1);
+  if (v != NULL)
+    return v;
+  return _vira_json_find_val_at_depth(json, key, 0);
+}
+
 static inline vira_string vira_json_get_str(vira_string json, vira_string key) {
-  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+  const char *val = _vira_json_find_val(json, key);
+  if (!val || *val != '"')
     return vira_str_lit("", 0);
-  }
-  char search_quote[260];
-  int klen = key.len < 250 ? key.len : 250;
-  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
-                        (const char *)key.data);
-  if (sq_len <= 0)
-    return vira_str_lit("", 0);
+  const char *end = (const char *)json.data + json.len;
+  const char *p = val + 1;
 
-  const char *hay = (const char *)json.data;
-  size_t hlen = (size_t)json.len;
-
-  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
-  if (!found)
-    return vira_str_lit("", 0);
-
-  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
-  if (offset >= hlen)
-    return vira_str_lit("", 0);
-
-  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
-  if (!colon)
-    return vira_str_lit("", 0);
-
-  offset = (size_t)(colon - hay) + 1;
-  if (offset >= hlen)
-    return vira_str_lit("", 0);
-
-  const char *val_start =
-      (const char *)memchr(hay + offset, '"', hlen - offset);
-  if (!val_start)
-    return vira_str_lit("", 0);
-  val_start++;
-
-  offset = (size_t)(val_start - hay);
-  if (offset >= hlen)
-    return vira_str_lit("", 0);
-
-  const char *val_end =
-      (const char *)memchr(hay + offset, '"', hlen - offset);
-  if (!val_end)
-    return vira_str_lit("", 0);
-
-  int val_len = (int)(val_end - val_start);
-  char *out = (char *)malloc((size_t)val_len + 1);
+  size_t max_len = (size_t)(end - p);
+  char *out = (char *)malloc(max_len + 1);
   if (!out)
     return vira_str_lit("", 0);
+
+  int32_t out_len = 0;
+  bool closed = false;
+  while (p < end) {
+    char c = *p++;
+    if (c == '"') {
+      closed = true;
+      break;
+    }
+    if (c == '\\' && p < end) {
+      char esc = *p++;
+      switch (esc) {
+      case '"':
+        out[out_len++] = '"';
+        break;
+      case '\\':
+        out[out_len++] = '\\';
+        break;
+      case '/':
+        out[out_len++] = '/';
+        break;
+      case 'b':
+        out[out_len++] = '\b';
+        break;
+      case 'f':
+        out[out_len++] = '\f';
+        break;
+      case 'n':
+        out[out_len++] = '\n';
+        break;
+      case 'r':
+        out[out_len++] = '\r';
+        break;
+      case 't':
+        out[out_len++] = '\t';
+        break;
+      default:
+        out[out_len++] = esc;
+        break;
+      }
+    } else {
+      out[out_len++] = c;
+    }
+  }
+  if (!closed) {
+    free(out);
+    return vira_str_lit("", 0);
+  }
+  out[out_len] = '\0';
   _vira_record_alloc();
-  memcpy(out, val_start, (size_t)val_len);
-  out[val_len] = '\0';
   return (vira_string){
-      .data = (const uint8_t *)out, .len = val_len, .is_lit = false};
+      .data = (const uint8_t *)out, .len = out_len, .is_lit = false};
 }
 
 static inline int64_t vira_json_get_int(vira_string json, vira_string key) {
-  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+  const char *val = _vira_json_find_val(json, key);
+  if (!val)
     return 0;
-  }
-  char search_quote[260];
-  int klen = key.len < 250 ? key.len : 250;
-  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
-                        (const char *)key.data);
-  if (sq_len <= 0)
-    return 0;
-
-  const char *hay = (const char *)json.data;
-  size_t hlen = (size_t)json.len;
-
-  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
-  if (!found)
-    return 0;
-
-  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
-  if (offset >= hlen)
-    return 0;
-
-  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
-  if (!colon)
-    return 0;
-  colon++;
-
-  while (colon < hay + hlen && (*colon == ' ' || *colon == '\t' ||
-                                *colon == '\r' || *colon == '\n')) {
-    colon++;
-  }
-  if (colon >= hay + hlen)
-    return 0;
-
+  const char *end = (const char *)json.data + json.len;
   char num_buf[64];
   int nlen = 0;
-  while (colon + nlen < hay + hlen && nlen < 63) {
-    char c = colon[nlen];
+  while (val + nlen < end && nlen < 63) {
+    char c = val[nlen];
     if ((c >= '0' && c <= '9') || c == '-' || c == '+') {
-      num_buf[nlen] = c;
-      nlen++;
+      num_buf[nlen++] = c;
     } else {
       break;
     }
   }
+  if (nlen == 0)
+    return 0;
   num_buf[nlen] = '\0';
   return (int64_t)strtoll(num_buf, NULL, 10);
 }
 
 static inline float vira_json_get_f32(vira_string json, vira_string key) {
-  if (json.data == NULL || json.len <= 0 || key.data == NULL || key.len <= 0) {
+  const char *val = _vira_json_find_val(json, key);
+  if (!val)
     return 0.0f;
-  }
-  char search_quote[260];
-  int klen = key.len < 250 ? key.len : 250;
-  int sq_len = snprintf(search_quote, sizeof(search_quote), "\"%.*s\"", klen,
-                        (const char *)key.data);
-  if (sq_len <= 0)
-    return 0.0f;
-
-  const char *hay = (const char *)json.data;
-  size_t hlen = (size_t)json.len;
-
-  const char *found = _vira_memmem(hay, hlen, search_quote, (size_t)sq_len);
-  if (!found)
-    return 0.0f;
-
-  size_t offset = (size_t)(found - hay) + (size_t)sq_len;
-  if (offset >= hlen)
-    return 0.0f;
-
-  const char *colon = (const char *)memchr(hay + offset, ':', hlen - offset);
-  if (!colon)
-    return 0.0f;
-  colon++;
-
-  while (colon < hay + hlen && (*colon == ' ' || *colon == '\t' ||
-                                *colon == '\r' || *colon == '\n')) {
-    colon++;
-  }
-  if (colon >= hay + hlen)
-    return 0.0f;
-
+  const char *end = (const char *)json.data + json.len;
   char num_buf[64];
   int nlen = 0;
-  while (colon + nlen < hay + hlen && nlen < 63) {
-    char c = colon[nlen];
+  while (val + nlen < end && nlen < 63) {
+    char c = val[nlen];
     if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
         c == 'e' || c == 'E') {
-      num_buf[nlen] = c;
-      nlen++;
+      num_buf[nlen++] = c;
     } else {
       break;
     }
   }
+  if (nlen == 0)
+    return 0.0f;
   num_buf[nlen] = '\0';
   return (float)strtod(num_buf, NULL);
 }
@@ -3097,42 +3773,40 @@ static inline float vira_json_get_f32(vira_string json, vira_string key) {
 
 static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
                                                       vira_string tensor_name) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data != NULL && len > 0) {
-    memcpy(path_buf, path.data, len);
-  }
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  char name_buf[256];
-  int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
-  if (tensor_name.data != NULL && nlen > 0) {
-    memcpy(name_buf, tensor_name.data, nlen);
-  }
-  name_buf[nlen] = '\0';
+  char stack_name[256];
+  vira_cstr_buf nbuf =
+      vira_str_to_cstr_buf(tensor_name, stack_name, sizeof(stack_name));
 
-  FILE *f = fopen(path_buf, "rb");
+  FILE *f = fopen(pbuf.ptr, "rb");
   if (!f) {
+    vira_string err =
+        vira_str_format("failed to open safetensors file '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err =
-            vira_str_format("failed to open safetensors file '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
   uint64_t header_len = 0;
   if (fread(&header_len, sizeof(uint64_t), 1, f) != 1 ||
       header_len > 100 * 1024 * 1024) {
     fclose(f);
+    vira_string err =
+        vira_str_format("corrupt safetensors header in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("corrupt safetensors header in '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
   char *header_json = (char *)malloc(header_len + 1);
   if (!header_json) {
     fclose(f);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
         .is_err = true,
         .err =
@@ -3144,49 +3818,62 @@ static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
   if (fread(header_json, 1, header_len, f) != header_len) {
     free(header_json);
     fclose(f);
+    vira_string err = vira_str_format(
+        "incomplete read of safetensors header in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("incomplete read of safetensors header in '%s'",
-                               path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
   header_json[header_len] = '\0';
 
-  char tensor_key[300];
-  snprintf(tensor_key, sizeof(tensor_key), "\"%s\"", name_buf);
-  char *t_entry = strstr(header_json, tensor_key);
+  vira_string hstr = {.data = (const uint8_t *)header_json,
+                      .len = (int32_t)header_len,
+                      .is_lit = true};
+  const char *t_entry = _vira_json_find_val_at_depth(hstr, tensor_name, 1);
   if (!t_entry) {
     free(header_json);
     fclose(f);
+    vira_string err =
+        vira_str_format("tensor '%s' not found in '%s'", nbuf.ptr, pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("tensor '%s' not found in '%s'", name_buf,
-                               path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
-  int rows = 1, cols = 1;
-  char *shape_ptr = strstr(t_entry, "\"shape\"");
+  int32_t parsed_dims[4] = {1, 1, 1, 1};
+  int32_t parsed_ndims = 0;
+  const char *shape_ptr = strstr(t_entry, "\"shape\"");
   if (shape_ptr) {
-    char *lbracket = strchr(shape_ptr, '[');
-    if (lbracket) {
-      rows = (int)strtol(lbracket + 1, &lbracket, 10);
-      while (*lbracket == ' ' || *lbracket == ',')
-        lbracket++;
-      if (*lbracket != ']' && *lbracket != '\0') {
-        cols = (int)strtol(lbracket, NULL, 10);
+    const char *cur = strchr(shape_ptr, '[');
+    if (cur) {
+      cur++;
+      while (*cur != '\0' && *cur != ']' && parsed_ndims < 4) {
+        while (*cur == ' ' || *cur == ',' || *cur == '\t' || *cur == '\n' ||
+               *cur == '\r') {
+          cur++;
+        }
+        if (*cur == ']' || *cur == '\0')
+          break;
+        char *endp = NULL;
+        long dval = strtol(cur, &endp, 10);
+        if (endp == cur)
+          break;
+        parsed_dims[parsed_ndims++] = (dval > 0) ? (int32_t)dval : 1;
+        cur = endp;
       }
     }
   }
-  if (rows <= 0)
-    rows = 1;
-  if (cols <= 0)
-    cols = 1;
+  if (parsed_ndims == 0) {
+    parsed_ndims = 1;
+    parsed_dims[0] = 1;
+  }
 
   uint64_t begin_off = 0;
-  char *off_ptr = strstr(t_entry, "\"data_offsets\"");
+  const char *off_ptr = strstr(t_entry, "\"data_offsets\"");
   if (off_ptr) {
-    char *lbracket = strchr(off_ptr, '[');
+    const char *lbracket = strchr(off_ptr, '[');
     if (lbracket) {
       begin_off = (uint64_t)strtoull(lbracket + 1, NULL, 10);
     }
@@ -3200,21 +3887,24 @@ static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
   fseeko(f, file_offset, SEEK_SET);
 #endif
 
-  vira_tensor_f32 t = vira_tensor_f32_alloc(rows, cols);
-  size_t expected_bytes = (size_t)rows * (size_t)cols * sizeof(float);
+  vira_tensor_f32 t = vira_tensor_f32_alloc_nd(parsed_ndims, parsed_dims);
+  size_t expected_bytes = (size_t)t.rows * (size_t)t.cols * sizeof(float);
   size_t read_bytes = fread(t.data, 1, expected_bytes, f);
   fclose(f);
 
   if (read_bytes != expected_bytes) {
     vira_tensor_f32_free(&t);
+    vira_string err = vira_str_format(
+        "tensor '%s' data truncated: expected %zu bytes, read %zu", nbuf.ptr,
+        expected_bytes, read_bytes);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format(
-            "tensor '%s' data truncated: expected %zu bytes, read %zu",
-            name_buf, expected_bytes, read_bytes),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
+  vira_cstr_buf_free(&nbuf);
+  vira_cstr_buf_free(&pbuf);
   return (Result_tensor_f32){
       .is_err = false, .err = vira_str_lit("", 0), .val = t};
 }
@@ -3224,13 +3914,7 @@ static inline Result_tensor_f32 vira_safetensors_load(vira_string path,
 // ============================================================================
 
 static inline vira_tensor_f32 vira_tensor_transpose(vira_tensor_f32 a) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(a.cols, a.rows);
-  for (int r = 0; r < a.rows; ++r) {
-    for (int c = 0; c < a.cols; ++c) {
-      out.data[c * out.cols + r] = a.data[r * a.cols + c];
-    }
-  }
-  return out;
+  return vira_tensor_transpose_nd(NULL, a);
 }
 
 static inline vira_tensor_f32
@@ -3251,7 +3935,8 @@ vira_tensor_matmul_grad_b(vira_tensor_f32 a, vira_tensor_f32 grad_out) {
 
 static inline vira_tensor_f32
 vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(input.rows, input.cols);
+  _vira_tensor_norm_shape(&input);
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(input.n_dims, input.dims);
   int total = input.rows * input.cols;
   int i = 0;
 
@@ -3375,24 +4060,21 @@ static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
 
 static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
                                                       vira_string tensor_name) {
-  char path_buf[1024];
-  int len = path.len < 1023 ? path.len : 1023;
-  if (path.data && len > 0)
-    memcpy(path_buf, path.data, len);
-  path_buf[len] = '\0';
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
 
-  char name_buf[256];
-  int nlen = tensor_name.len < 255 ? tensor_name.len : 255;
-  if (tensor_name.data && nlen > 0)
-    memcpy(name_buf, tensor_name.data, nlen);
-  name_buf[nlen] = '\0';
+  char stack_name[256];
+  vira_cstr_buf nbuf =
+      vira_str_to_cstr_buf(tensor_name, stack_name, sizeof(stack_name));
 
-  FILE *f = fopen(path_buf, "rb");
+  FILE *f = fopen(pbuf.ptr, "rb");
   if (!f) {
+    vira_string err =
+        vira_str_format("failed to open GGUF file '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("failed to open GGUF file '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
   uint32_t magic = 0;
@@ -3402,25 +4084,28 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 
   if (fread(&magic, 4, 1, f) != 1 || magic != 0x46554747) {
     fclose(f);
+    vira_string err = vira_str_format("invalid GGUF magic in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("invalid GGUF magic in '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
   if (fread(&version, 4, 1, f) != 1 || (version != 2 && version != 3)) {
     fclose(f);
+    vira_string err = vira_str_format("unsupported GGUF version %u in '%s'",
+                                      version, pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("unsupported GGUF version %u in '%s'", version,
-                               path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
   if (fread(&tensor_count, 8, 1, f) != 1 || fread(&kv_count, 8, 1, f) != 1) {
     fclose(f);
+    vira_string err = vira_str_format("corrupt GGUF header in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("corrupt GGUF header in '%s'", path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
   uint32_t alignment = 32;
@@ -3453,7 +4138,8 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   bool found = false;
   uint32_t matched_type = 0;
   uint64_t matched_offset = 0;
-  int32_t t_rows = 1, t_cols = 1;
+  int32_t matched_ndims = 2;
+  int32_t matched_dims[4] = {1, 1, 1, 1};
 
   for (uint64_t t = 0; t < tensor_count; ++t) {
     uint64_t n_len = 0;
@@ -3487,28 +4173,33 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     if (fread(&offset, 8, 1, f) != 1)
       break;
 
-    if (strcmp(cur_name, name_buf) == 0) {
+    if (n_len == (uint64_t)tensor_name.len &&
+        strcmp(cur_name, nbuf.ptr) == 0) {
       found = true;
       matched_type = dtype;
       matched_offset = offset;
-      if (n_dims == 1) {
-        t_rows = 1;
-        t_cols = (int32_t)dims[0];
-      } else {
-        t_cols = (int32_t)dims[0];
-        t_rows = (int32_t)dims[1];
+      uint32_t clamped_nd = (n_dims == 0) ? 1 : ((n_dims > 4) ? 4 : n_dims);
+      matched_ndims = (int32_t)clamped_nd;
+      // GGUF stores dimensions inner-to-outer (dims[0] = trailing cols)
+      for (uint32_t d = 0; d < clamped_nd; ++d) {
+        int32_t dv = (int32_t)dims[clamped_nd - 1 - d];
+        matched_dims[d] = (dv > 0) ? dv : 1;
       }
     }
   }
 
   if (!found) {
     fclose(f);
+    vira_string err = vira_str_format(
+        "tensor '%s' not found in GGUF file '%s'", nbuf.ptr, pbuf.ptr);
+    vira_cstr_buf_free(&nbuf);
+    vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
-        .is_err = true,
-        .err = vira_str_format("tensor '%s' not found in GGUF file '%s'",
-                               name_buf, path_buf),
-        .val = (vira_tensor_f32){0}};
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
+
+  vira_cstr_buf_free(&nbuf);
+  vira_cstr_buf_free(&pbuf);
 
   int64_t cur_pos = ftell(f);
   int64_t pad = (alignment - (cur_pos % alignment)) % alignment;
@@ -3521,8 +4212,8 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   fseeko(f, tensor_file_pos, SEEK_SET);
 #endif
 
-  vira_tensor_f32 t = vira_tensor_f32_alloc(t_rows, t_cols);
-  int32_t total = t_rows * t_cols;
+  vira_tensor_f32 t = vira_tensor_f32_alloc_nd(matched_ndims, matched_dims);
+  int32_t total = t.rows * t.cols;
 
   if (matched_type == 0) {
     fread(t.data, sizeof(float), total, f);
@@ -3580,7 +4271,8 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 
 static inline vira_tensor_f32
 vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(x.rows, x.cols);
+  _vira_tensor_norm_shape(&x);
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t r = 0; r < x.rows; ++r) {
     float *x_row = &x.data[r * x.cols];
     float *out_row = &out.data[r * x.cols];
@@ -3633,7 +4325,8 @@ vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
 
 static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
                                                float freq_base) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(q.rows, q.cols);
+  _vira_tensor_norm_shape(&q);
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
   int32_t half_dim = q.cols / 2;
 
   for (int32_t r = 0; r < q.rows; ++r) {
@@ -3658,7 +4351,8 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
 }
 
 static inline vira_tensor_f32 vira_tensor_silu(vira_tensor_f32 x) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(x.rows, x.cols);
+  _vira_tensor_norm_shape(&x);
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   int32_t total = x.rows * x.cols;
   for (int32_t i = 0; i < total; ++i) {
     float v = x.data[i];
@@ -3667,33 +4361,68 @@ static inline vira_tensor_f32 vira_tensor_silu(vira_tensor_f32 x) {
   return out;
 }
 
-static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
-                                                       vira_tensor_f32 b) {
-  if (a.rows != b.rows || a.cols != b.cols) {
-    fprintf(stderr,
-            "vira tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
-            a.rows, a.cols, b.rows, b.cols);
-    exit(1);
-  }
-  vira_tensor_f32 out = vira_tensor_f32_alloc(a.rows, a.cols);
-  int32_t total = a.rows * a.cols;
+static inline void _vira_vec_mul_f32(vira_f32 *dst, const vira_f32 *pa,
+                                     const vira_f32 *pb, int32_t count) {
   int32_t i = 0;
-
 #if defined(__AVX2__)
-  for (; i + 7 < total; i += 8) {
-    __m256 va = _mm256_loadu_ps(&a.data[i]);
-    __m256 vb = _mm256_loadu_ps(&b.data[i]);
-    _mm256_storeu_ps(&out.data[i], _mm256_mul_ps(va, vb));
+  for (; i + 8 <= count; i += 8) {
+    __m256 va = _mm256_loadu_ps(&pa[i]);
+    __m256 vb = _mm256_loadu_ps(&pb[i]);
+    _mm256_storeu_ps(&dst[i], _mm256_mul_ps(va, vb));
+  }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  for (; i + 4 <= count; i += 4) {
+    float32x4_t va = vld1q_f32(&pa[i]);
+    float32x4_t vb = vld1q_f32(&pb[i]);
+    vst1q_f32(&dst[i], vmulq_f32(va, vb));
+  }
+#elif defined(__SSE2__)
+  for (; i + 4 <= count; i += 4) {
+    __m128 va = _mm_loadu_ps(&pa[i]);
+    __m128 vb = _mm_loadu_ps(&pb[i]);
+    _mm_storeu_ps(&dst[i], _mm_mul_ps(va, vb));
   }
 #endif
-  for (; i < total; ++i) {
-    out.data[i] = a.data[i] * b.data[i];
+  for (; i < count; i++) {
+    dst[i] = pa[i] * pb[i];
   }
-  return out;
+}
+
+static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
+                                                       vira_tensor_f32 b) {
+  _vira_tensor_norm_shape(&a);
+  _vira_tensor_norm_shape(&b);
+  if (a.rows == b.rows && a.cols == b.cols) {
+    const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
+    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
+    _vira_vec_mul_f32(out.data, a.data, b.data, a.rows * a.cols);
+    return out;
+  }
+  if (b.rows == 1 && b.cols == a.cols) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(a.n_dims, a.dims);
+    for (int32_t r = 0; r < a.rows; r++) {
+      _vira_vec_mul_f32(&out.data[(size_t)r * (size_t)a.cols],
+                        &a.data[(size_t)r * (size_t)a.cols], b.data, a.cols);
+    }
+    return out;
+  }
+  if (a.rows == 1 && a.cols == b.cols) {
+    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(b.n_dims, b.dims);
+    for (int32_t r = 0; r < b.rows; r++) {
+      _vira_vec_mul_f32(&out.data[(size_t)r * (size_t)b.cols], a.data,
+                        &b.data[(size_t)r * (size_t)b.cols], b.cols);
+    }
+    return out;
+  }
+  fprintf(stderr,
+          "vira tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
+          a.rows, a.cols, b.rows, b.cols);
+  exit(1);
 }
 
 static inline vira_tensor_f32 vira_tensor_softmax(vira_tensor_f32 logits) {
-  vira_tensor_f32 out = vira_tensor_f32_alloc(logits.rows, logits.cols);
+  _vira_tensor_norm_shape(&logits);
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(logits.n_dims, logits.dims);
   for (int32_t r = 0; r < logits.rows; ++r) {
     float *in_row = &logits.data[r * logits.cols];
     float *out_row = &out.data[r * logits.cols];

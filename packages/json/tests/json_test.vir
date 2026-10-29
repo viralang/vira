@@ -1,0 +1,117 @@
+module main
+
+import json
+
+fn test_validation_and_escaping() {
+	if !json.is_valid('{"ok":true,"items":[1,2,{"nested":"a\\"b"}],"empty":{}}') {
+		panic('expected valid JSON payload to pass is_valid')
+	}
+	if json.is_valid('{"unterminated": "abc}') {
+		panic('expected unterminated string to fail is_valid')
+	}
+	if json.is_valid('{"trailing": 1,}') {
+		panic('expected trailing comma to fail is_valid')
+	}
+
+	raw := 'hello "vira"\nline2\t\\end'
+	esc := json.escape(raw)
+	round := json.unescape(esc)
+	if round != raw {
+		panic('escape/unescape roundtrip mismatch: ${round}')
+	}
+
+	u_decoded := json.unescape('Vira \u0041\u0049')
+	if u_decoded != 'Vira AI' {
+		panic('unicode hex unescape mismatch: ${u_decoded}')
+	}
+	println('✓ test_validation_and_escaping passed')
+}
+
+fn test_depth_aware_lookup_and_arrays() {
+	payload := '{"meta":{"name":"inner_shadow","tokens":999},"tags":["simd","actors","4d-tensors"],"name":"outer \\"real\\" model","tokens":4096,"big_id":9000000001,"stream":true}'
+
+	// Must NOT return "inner_shadow" or 999 from nested `meta` object!
+	name := json.get_str(payload, 'name') or { panic('missing outer name: ${err}') }
+	if name != 'outer "real" model' {
+		panic('depth-aware get_str mismatch: ${name}')
+	}
+
+	tokens := json.get_int(payload, 'tokens') or { panic('missing outer tokens: ${err}') }
+	if tokens != 4096 {
+		panic('depth-aware get_int mismatch: ${tokens}')
+	}
+
+	big_id := json.get_i64(payload, 'big_id') or { panic('missing big_id: ${err}') }
+	if big_id != 9000000001 {
+		panic('get_i64 mismatch: ${big_id}')
+	}
+
+	stream := json.get_bool(payload, 'stream') or { panic('missing stream: ${err}') }
+	if !stream {
+		panic('get_bool mismatch')
+	}
+
+	if !json.has_key(payload, 'meta') || json.has_key(payload, 'nonexistent') {
+		panic('has_key mismatch')
+	}
+
+	meta_raw := json.get_raw(payload, 'meta') or { panic('missing meta raw: ${err}') }
+	inner_name := json.get_str(meta_raw, 'name') or { panic('missing inner name: ${err}') }
+	if inner_name != 'inner_shadow' {
+		panic('nested get_raw -> get_str mismatch: ${inner_name}')
+	}
+
+	tags_raw := json.get_raw(payload, 'tags') or { panic('missing tags: ${err}') }
+	n_tags := json.array_len(tags_raw) or { panic('array_len failed: ${err}') }
+	if n_tags != 3 {
+		panic('array_len mismatch: ${n_tags}')
+	}
+	tag2 := json.array_get_str(tags_raw, 2) or { panic('array_get_str failed: ${err}') }
+	if tag2 != '4d-tensors' {
+		panic('array_get_str mismatch: ${tag2}')
+	}
+	println('✓ test_depth_aware_lookup_and_arrays passed')
+}
+
+fn test_json_builder() {
+	mut inner := json.JsonBuilder.new()
+	inner.set_str('arch', 'avx2')
+	inner.set_int('ndim', 4)
+	inner_str := inner.build()
+
+	mut jb := json.JsonBuilder.new()
+	jb.set_str('prompt', 'say "hi"\nnow')
+	jb.set_int('max_tokens', 256)
+	jb.set_i64('seed', 1234567890123)
+	jb.set_bool('stream', false)
+	jb.set_null('stop')
+	jb.set_raw('engine', inner_str)
+
+	built := jb.build()
+	if !json.is_valid(built) {
+		panic('JsonBuilder produced invalid JSON: ${built}')
+	}
+
+	p := json.get_str(built, 'prompt') or { panic('builder prompt failed: ${err}') }
+	if p != 'say "hi"\nnow' {
+		panic('builder prompt roundtrip mismatch: ${p}')
+	}
+	mt := json.get_int(built, 'max_tokens') or { panic('builder max_tokens failed') }
+	if mt != 256 {
+		panic('builder max_tokens mismatch: ${mt}')
+	}
+	eng := json.get_raw(built, 'engine') or { panic('builder engine failed') }
+	ndim := json.get_int(eng, 'ndim') or { panic('builder engine.ndim failed') }
+	if ndim != 4 {
+		panic('builder engine.ndim mismatch: ${ndim}')
+	}
+	println('✓ test_json_builder passed')
+}
+
+fn main() {
+	test_validation_and_escaping()
+	test_depth_aware_lookup_and_arrays()
+	test_json_builder()
+	println('=== All packages/json tests PASSED ===')
+}
+

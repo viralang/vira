@@ -10,17 +10,27 @@ import (
 	"github.com/viralang/vira/internal/token"
 )
 
+type activeErrScope struct {
+	varName   string
+	loopDepth int
+}
+
 type Generator struct {
-	chk         *checker.Checker
-	af          *autofree.Analyzer
-	mod         string
-	currentMod  string
-	tmpCounter  int
-	activeArena string // non-empty inside arena { ... } or actor step
-	inMainFn    bool
-	curReceiver string // current receiver variable name if inside a method
+	chk          *checker.Checker
+	af           *autofree.Analyzer
+	mod          string
+	currentMod   string
+	tmpCounter   int
+	activeArena  string          // non-empty inside arena { ... } or actor step
+	inMainFn     bool
+	curReceiver  string          // current receiver variable name if inside a method
 	curPtrParams map[string]bool // current mutable pointer parameter names in fn
-	usesGUI     bool   // true if any gui_* builtin is called in the file
+	usesGUI      bool            // true if any gui_* builtin is called in the file
+
+	fnDeferVarNames map[string]bool  // variables in current fn that have a DeferFreeStmt
+	hasFnDeferBase  bool             // true if current fn emitted _vira_defer_base
+	loopDepth       int              // current loop nesting depth
+	activeErrVars   []activeErrScope // active `err` strings in enclosing `or { ... }` blocks
 
 	resultTypes  map[string]checker.Type             // C Result name -> Inner Type
 	vtablePairs  map[string]vtablePair               // "Struct_Iface" -> pair metadata
@@ -166,6 +176,7 @@ func (g *Generator) EmitFile(file *ast.File) string {
 			out.WriteString("    free(f->env);\n")
 			out.WriteString("    f->env = NULL;\n")
 			out.WriteString("    f->task = NULL;\n")
+			out.WriteString("    f->drop_fn = NULL;\n")
 			out.WriteString("    _vira_record_free();\n")
 			out.WriteString("    return res;\n")
 			out.WriteString("}\n\n")
@@ -501,9 +512,29 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 	// If this is an Actor, emit a default state reset function for Supervisor OneForOne restarts
 	if st.IsActor {
 		out.WriteString(fmt.Sprintf("static inline void %s_supervisor_reset(%s* self) {\n", cStructName, cStructName))
+		defaultExprs := make(map[string]ast.Expr)
 		for _, f := range sd.Fields {
 			if f.DefaultExpr != nil {
-				out.WriteString(fmt.Sprintf("    self->%s = %s;\n", f.Name.Name, g.emitExpr(f.DefaultExpr)))
+				defaultExprs[f.Name.Name] = f.DefaultExpr
+			}
+		}
+		for _, fname := range st.FieldOrder {
+			f := st.Fields[fname]
+			if f.Type.Equals(checker.TypeString) {
+				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
+			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
+				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
+				out.WriteString(fmt.Sprintf("    %s_free(&self->%s);\n", g.cSliceName(sl.Elem), fname))
+			} else if subSt, isSt := f.Type.(*checker.StructType); isSt && g.af.StructTypeNeedsFree(subSt) {
+				cSub := fmt.Sprintf("%s__%s", subSt.Module, subSt.Name)
+				if subSt.Module == "" {
+					cSub = g.cStructName(subSt.Name)
+				}
+				out.WriteString(fmt.Sprintf("    %s_autofree(&self->%s);\n", cSub, fname))
+			}
+			if defExpr, hasDef := defaultExprs[fname]; hasDef {
+				out.WriteString(fmt.Sprintf("    self->%s = %s;\n", fname, g.emitExpr(defExpr)))
 			}
 		}
 		out.WriteString("}\n\n")
@@ -714,6 +745,13 @@ func (g *Generator) emitInterfaceTypedef(out *strings.Builder, id *ast.Interface
 	out.WriteString("    void* _object;\n")
 	out.WriteString(fmt.Sprintf("    const %s_vtable* _vtable;\n", cIface))
 	out.WriteString(fmt.Sprintf("} %s;\n\n", cIface))
+
+	out.WriteString(fmt.Sprintf("static inline void %s_autofree(%s* self) {\n", cIface, cIface))
+	out.WriteString("    if (self && self->_vtable && self->_vtable->_autofree && self->_object) {\n")
+	out.WriteString("        self->_vtable->_autofree(self->_object);\n")
+	out.WriteString("        self->_object = NULL;\n")
+	out.WriteString("    }\n")
+	out.WriteString("}\n\n")
 }
 
 func (g *Generator) emitVTableAndBoxer(out *strings.Builder, st *checker.StructType, iface *checker.InterfaceType) {
@@ -757,6 +795,84 @@ func (g *Generator) emitVTableAndBoxer(out *strings.Builder, st *checker.StructT
 
 // --- 3. MULTI-THREADED WORK-STEALING ACTOR SUPERVISOR WRAPPERS ---
 
+func (g *Generator) emitCloneExpr(t checker.Type, expr string) string {
+	if t == nil {
+		return expr
+	}
+	if t.Equals(checker.TypeString) {
+		return fmt.Sprintf("vira_str_clone(%s)", expr)
+	}
+	if _, isTensor := t.(*checker.TensorType); isTensor {
+		return fmt.Sprintf("vira_tensor_f32_clone(%s)", expr)
+	}
+	if sl, isSl := t.(*checker.SliceType); isSl {
+		return fmt.Sprintf("%s_clone(&(%s))", g.cSliceName(sl.Elem), expr)
+	}
+	if st, isSt := t.(*checker.StructType); isSt && !st.IsActor && g.af.StructTypeNeedsFree(st) {
+		return fmt.Sprintf("%s_clone(&(%s))", g.cType(st), expr)
+	}
+	return expr
+}
+
+func (g *Generator) emitFreeLValueStmt(out *strings.Builder, indent string, t checker.Type, lval string) {
+	if t == nil {
+		return
+	}
+	if t.Equals(checker.TypeString) {
+		out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, lval))
+	} else if _, isTensor := t.(*checker.TensorType); isTensor {
+		out.WriteString(fmt.Sprintf("%svira_tensor_f32_free(&%s);\n", indent, lval))
+	} else if _, isFut := t.(*checker.FutureType); isFut {
+		out.WriteString(fmt.Sprintf("%svira_future_free(&%s);\n", indent, lval))
+	} else if sl, isSl := t.(*checker.SliceType); isSl {
+		out.WriteString(fmt.Sprintf("%s%s_free(&%s);\n", indent, g.cSliceName(sl.Elem), lval))
+	} else if st, isSt := t.(*checker.StructType); isSt && (st.IsActor || g.af.StructTypeNeedsFree(st)) {
+		out.WriteString(fmt.Sprintf("%s%s_autofree(&%s);\n", indent, g.cType(st), lval))
+	} else if iface, isIf := t.(*checker.InterfaceType); isIf {
+		out.WriteString(fmt.Sprintf("%s%s_autofree(&%s);\n", indent, g.cType(iface), lval))
+	}
+}
+
+func (g *Generator) typeOwnsHeap(t checker.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Equals(checker.TypeString) {
+		return true
+	}
+	switch v := t.(type) {
+	case *checker.TensorType, *checker.FutureType, *checker.SliceType, *checker.InterfaceType:
+		return true
+	case *checker.StructType:
+		return v.IsActor || g.af.StructTypeNeedsFree(v)
+	}
+	return false
+}
+
+func (g *Generator) typeDeferFreeFn(t checker.Type) string {
+	if t == nil {
+		return ""
+	}
+	if t.Equals(checker.TypeString) {
+		return "(vira_defer_fn)vira_str_free"
+	}
+	switch v := t.(type) {
+	case *checker.TensorType:
+		return "(vira_defer_fn)vira_tensor_f32_free"
+	case *checker.FutureType:
+		return "(vira_defer_fn)vira_future_free"
+	case *checker.SliceType:
+		return fmt.Sprintf("(vira_defer_fn)%s_free", g.cSliceName(v.Elem))
+	case *checker.StructType:
+		if v.IsActor || g.af.StructTypeNeedsFree(v) {
+			return fmt.Sprintf("(vira_defer_fn)%s_autofree", g.cType(v))
+		}
+	case *checker.InterfaceType:
+		return fmt.Sprintf("(vira_defer_fn)%s_autofree", g.cType(v))
+	}
+	return ""
+}
+
 func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *checker.StructType, method *checker.FnSig) {
 	cActor := g.cStructName(actor.Name)
 	innerRet := method.ReturnType
@@ -767,11 +883,58 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	envName := fmt.Sprintf("_%s_%s_msg_env", cActor, method.Name)
 
 	// 1. Emit heap-allocated message envelope starting with _FutureHeader_<cRes> _hdr;
-	out.WriteString(fmt.Sprintf("typedef struct {\n    _FutureHeader_%s _hdr;\n    %s* self;\n", cRes, cActor))
+	out.WriteString(fmt.Sprintf("typedef struct {\n    _FutureHeader_%s _hdr;\n    %s* self;\n    bool owns_params;\n", cRes, cActor))
 	for _, p := range method.Params {
 		out.WriteString(fmt.Sprintf("    %s %s;\n", g.cType(p.Type), p.Name))
 	}
 	out.WriteString(fmt.Sprintf("} %s;\n\n", envName))
+
+	// 1b. Emit drop hook for unconsumed result (used by detached sends and dropped un-awaited Futures)
+	out.WriteString(fmt.Sprintf("static void _%s_%s_drop_result(void* _raw_env) {\n", cActor, method.Name))
+	out.WriteString(fmt.Sprintf("    %s* env = (%s*)_raw_env;\n", envName, envName))
+	out.WriteString("    if (!env) return;\n")
+	out.WriteString("    if (env->_hdr.result.is_err) {\n")
+	out.WriteString("        vira_str_free(&env->_hdr.result.err);\n")
+	if !innerRet.Equals(checker.TypeVoid) && g.typeOwnsHeap(innerRet) {
+		out.WriteString("    } else {\n")
+		g.emitFreeLValueStmt(out, "        ", innerRet, "env->_hdr.result.val")
+	}
+	out.WriteString("    }\n")
+	out.WriteString("}\n\n")
+
+	// 1c. Emit cloned envelope parameter cleanup (skipping any param aliased directly into result.val)
+	out.WriteString(fmt.Sprintf("static void _%s_%s_free_params(%s* env, bool check_ret_alias) {\n", cActor, method.Name, envName))
+	out.WriteString("    if (!env || !env->owns_params) return;\n")
+	out.WriteString("    (void)check_ret_alias;\n")
+	for _, p := range method.Params {
+		if !g.typeOwnsHeap(p.Type) {
+			continue
+		}
+		canAliasRet := !innerRet.Equals(checker.TypeVoid) && innerRet.Equals(p.Type)
+		if canAliasRet {
+			if p.Type.Equals(checker.TypeString) {
+				out.WriteString(fmt.Sprintf("    if (!check_ret_alias || (const void*)env->%s.data != (const void*)env->_hdr.result.val.data) {\n", p.Name))
+				g.emitFreeLValueStmt(out, "        ", p.Type, "env->"+p.Name)
+				out.WriteString("    }\n")
+			} else if _, isTensor := p.Type.(*checker.TensorType); isTensor {
+				out.WriteString(fmt.Sprintf("    if (!check_ret_alias || (const void*)env->%s.data != (const void*)env->_hdr.result.val.data) {\n", p.Name))
+				g.emitFreeLValueStmt(out, "        ", p.Type, "env->"+p.Name)
+				out.WriteString("    }\n")
+			} else if _, isSl := p.Type.(*checker.SliceType); isSl {
+				out.WriteString(fmt.Sprintf("    if (!check_ret_alias || (const void*)env->%s.data != (const void*)env->_hdr.result.val.data) {\n", p.Name))
+				g.emitFreeLValueStmt(out, "        ", p.Type, "env->"+p.Name)
+				out.WriteString("    }\n")
+			} else {
+				out.WriteString(fmt.Sprintf("    if (!check_ret_alias || memcmp(&env->%s, &env->_hdr.result.val, sizeof(env->%s)) != 0) {\n", p.Name, p.Name))
+				g.emitFreeLValueStmt(out, "        ", p.Type, "env->"+p.Name)
+				out.WriteString("    }\n")
+			}
+		} else {
+			g.emitFreeLValueStmt(out, "    ", p.Type, "env->"+p.Name)
+		}
+	}
+	out.WriteString("    env->owns_params = false;\n")
+	out.WriteString("}\n\n")
 
 	// 2. Emit worker-thread task callback with per-thread TLS fault boundary (_vira_tls_actor)
 	var envArgs []string
@@ -783,8 +946,13 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("static void _%s_%s_worker_task(void* _raw_env) {\n", cActor, method.Name))
 	out.WriteString(fmt.Sprintf("    %s* env = (%s*)_raw_env;\n", envName, envName))
 	out.WriteString(fmt.Sprintf("    %s* self = env->self;\n", cActor))
+	out.WriteString("    bool _is_detached = (__atomic_load_n(&env->_hdr._task.done, __ATOMIC_RELAXED) == -1);\n")
 	out.WriteString("    if (self->_ctx.state == VIRA_ACTOR_STOPPED) {\n")
+	out.WriteString(fmt.Sprintf("        _%s_%s_free_params(env, false);\n", cActor, method.Name))
 	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = vira_str_lit(\"Actor has stopped due to unhandled faults\", 41) };\n", cRes))
+	out.WriteString("        if (_is_detached) {\n")
+	out.WriteString(fmt.Sprintf("            _%s_%s_drop_result(env);\n", cActor, method.Name))
+	out.WriteString("        }\n")
 	out.WriteString("        return;\n")
 	out.WriteString("    }\n")
 	out.WriteString("    vira_actor_ctx* _prev_tls_actor = _vira_tls_actor;\n")
@@ -792,6 +960,7 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString("    self->_ctx.in_actor = true;\n")
 	out.WriteString("    self->_ctx.mailbox_lock = 1;\n")
 	out.WriteString("    self->_ctx.last_worker_id = _vira_tls_worker_id;\n")
+	out.WriteString("    self->_ctx.defer_top = 0;\n")
 	out.WriteString("    if (setjmp(self->_ctx.fault_boundary) == 0) {\n")
 
 	callStr := fmt.Sprintf("%s_%s(%s)", cActor, method.Name, strings.Join(envArgs, ", "))
@@ -804,13 +973,15 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 		out.WriteString(fmt.Sprintf("        %s _val = %s;\n", g.cType(innerRet), callStr))
 		out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = false, .val = _val };\n", cRes))
 	}
+	out.WriteString("        self->_ctx.defer_top = 0;\n")
 	out.WriteString("        vira_arena_reset(&self->_ctx.isolated_heap);\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
 	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
 	out.WriteString("        self->_ctx.restarts = 0;\n")
 	out.WriteString("        _vira_tls_actor = _prev_tls_actor;\n")
 	out.WriteString("    } else {\n")
-	out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Wipe actor's isolated arena slab in O(1)\n")
+	out.WriteString("        // FAULT TRAPPED ON WORKER THREAD! Stack heap locals already unwound; wipe actor's isolated arena slab in O(1)\n")
+	out.WriteString("        self->_ctx.defer_top = 0;\n")
 	out.WriteString("        vira_arena_reset(&self->_ctx.isolated_heap);\n")
 	out.WriteString("        self->_ctx.in_actor = false;\n")
 	out.WriteString("        self->_ctx.mailbox_lock = 0;\n")
@@ -828,9 +999,13 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString("        }\n")
 	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = _err };\n", cRes))
 	out.WriteString("    }\n")
+	out.WriteString(fmt.Sprintf("    _%s_%s_free_params(env, !env->_hdr.result.is_err);\n", cActor, method.Name))
+	out.WriteString("    if (_is_detached) {\n")
+	out.WriteString(fmt.Sprintf("        _%s_%s_drop_result(env);\n", cActor, method.Name))
+	out.WriteString("    }\n")
 	out.WriteString("}\n\n")
 
-	// 3. Emit Non-Blocking Future[T] Spawner (_spawn_)
+	// 3. Emit Non-Blocking Future[T] Spawner (_spawn_) — deep-clones heap arguments for concurrent safety
 	var paramList []string
 	paramList = append(paramList, fmt.Sprintf("%s* self", cActor))
 	for _, p := range method.Params {
@@ -842,24 +1017,34 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("    %s* env = (%s*)malloc(sizeof(%s));\n", envName, envName, envName))
 	out.WriteString("    _vira_record_alloc();\n")
 	out.WriteString("    env->self = self;\n")
+	out.WriteString("    env->owns_params = true;\n")
 	for _, p := range method.Params {
-		out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))
+		if p.IsMut {
+			out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))
+		} else {
+			out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, g.emitCloneExpr(p.Type, p.Name)))
+		}
 	}
 	out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
 	out.WriteString("    env->_hdr._task.env = env;\n")
 	out.WriteString("    env->_hdr._task.done = 0;\n")
 	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
-	out.WriteString("    return (vira_future){ .task = &env->_hdr._task, .env = env };\n")
+	out.WriteString(fmt.Sprintf("    return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result };\n", cActor, method.Name))
 	out.WriteString("}\n\n")
 
-	// 4. Emit Fire-and-Forget Detached Sender (_send_detached_)
+	// 4. Emit Fire-and-Forget Detached Sender (_send_detached_) — deep-clones heap arguments & auto-frees result
 	out.WriteString(fmt.Sprintf("static inline void %s_send_detached_%s(%s) {\n",
 		cActor, method.Name, strings.Join(paramList, ", ")))
 	out.WriteString(fmt.Sprintf("    %s* env = (%s*)malloc(sizeof(%s));\n", envName, envName, envName))
 	out.WriteString("    _vira_record_alloc();\n")
 	out.WriteString("    env->self = self;\n")
+	out.WriteString("    env->owns_params = true;\n")
 	for _, p := range method.Params {
-		out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))
+		if p.IsMut {
+			out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, p.Name))
+		} else {
+			out.WriteString(fmt.Sprintf("    env->%s = %s;\n", p.Name, g.emitCloneExpr(p.Type, p.Name)))
+		}
 	}
 	out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
 	out.WriteString("    env->_hdr._task.env = env;\n")
@@ -873,6 +1058,7 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 		cRes, cActor, method.Name, strings.Join(paramList, ", ")))
 	out.WriteString(fmt.Sprintf("    %s env;\n", envName))
 	out.WriteString("    env.self = self;\n")
+	out.WriteString("    env.owns_params = false;\n")
 	for _, p := range method.Params {
 		out.WriteString(fmt.Sprintf("    env.%s = %s;\n", p.Name, p.Name))
 	}
@@ -949,6 +1135,46 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 	return fmt.Sprintf("%s %s(%s)", cRet, cName, strings.Join(params, ", "))
 }
 
+func collectFnDeferVarNames(b *ast.BlockStmt, out map[string]bool) {
+	if b == nil {
+		return
+	}
+	for _, stmt := range b.Stmts {
+		switch s := stmt.(type) {
+		case *ast.DeferFreeStmt:
+			out[s.VarName] = true
+		case *ast.VarDeclStmt:
+			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
+				out["__or_err__"] = true
+				collectFnDeferVarNames(call.OrBlock, out)
+			}
+		case *ast.AssignStmt:
+			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
+				out["__or_err__"] = true
+				collectFnDeferVarNames(call.OrBlock, out)
+			}
+		case *ast.ExprStmt:
+			if call, ok := s.Expr.(*ast.CallExpr); ok && call.OrBlock != nil {
+				out["__or_err__"] = true
+				collectFnDeferVarNames(call.OrBlock, out)
+			}
+		case *ast.IfStmt:
+			collectFnDeferVarNames(s.Then, out)
+			collectFnDeferVarNames(s.Else, out)
+		case *ast.SwitchStmt:
+			for _, cs := range s.Cases {
+				collectFnDeferVarNames(&ast.BlockStmt{Stmts: cs.Body}, out)
+			}
+		case *ast.ForStmt:
+			collectFnDeferVarNames(s.Body, out)
+		case *ast.ForInStmt:
+			collectFnDeferVarNames(s.Body, out)
+		case *ast.ArenaStmt:
+			collectFnDeferVarNames(s.Body, out)
+		}
+	}
+}
+
 func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 	if fn.Intrinsic != "" && fn.Body == nil {
 		return
@@ -958,6 +1184,22 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 		g.currentMod = fn.Module
 	}
 	defer func() { g.currentMod = prevMod }()
+
+	prevDeferVars := g.fnDeferVarNames
+	prevHasDeferBase := g.hasFnDeferBase
+	prevLoopDepth := g.loopDepth
+	prevActiveErrs := g.activeErrVars
+	g.fnDeferVarNames = make(map[string]bool)
+	g.hasFnDeferBase = false
+	g.loopDepth = 0
+	g.activeErrVars = nil
+	collectFnDeferVarNames(fn.Body, g.fnDeferVarNames)
+	defer func() {
+		g.fnDeferVarNames = prevDeferVars
+		g.hasFnDeferBase = prevHasDeferBase
+		g.loopDepth = prevLoopDepth
+		g.activeErrVars = prevActiveErrs
+	}()
 
 	if fn.Name.Name == "main" {
 		g.inMainFn = true
@@ -996,7 +1238,23 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 
 	retType := g.resolveCheckType(fn)
 	out.WriteString(g.fnSignature(fn) + " {\n")
+	if len(g.fnDeferVarNames) > 0 {
+		g.hasFnDeferBase = true
+		out.WriteString("    int32_t _vira_defer_base = _vira_actor_defer_mark();\n")
+		out.WriteString("    (void)_vira_defer_base;\n")
+	}
 	g.emitBlockStmts(out, fn.Body, "    ", retType)
+	if g.hasFnDeferBase {
+		endsWithRet := false
+		if fn.Body != nil && len(fn.Body.Stmts) > 0 {
+			if _, ok := fn.Body.Stmts[len(fn.Body.Stmts)-1].(*ast.ReturnStmt); ok {
+				endsWithRet = true
+			}
+		}
+		if !endsWithRet {
+			out.WriteString("    _vira_actor_defer_restore(_vira_defer_base);\n")
+		}
+	}
 	out.WriteString("}\n\n")
 
 	g.activeArena = prevArena
@@ -1056,6 +1314,14 @@ func (g *Generator) tryEmitDetachedActorSend(expr ast.Expr) (string, bool) {
 		g.cStructName(targetStruct), callee.Field.Name, strings.Join(allArgs, ", ")), true
 }
 
+func isFreshOwningRValue(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.CallExpr, *ast.StringInterpExpr, *ast.StructInitExpr, *ast.ArrayLitExpr, *ast.BinaryExpr:
+		return true
+	}
+	return false
+}
+
 func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string, fnRet checker.Type) {
 	switch s := stmt.(type) {
 	case *ast.VarDeclStmt:
@@ -1067,6 +1333,13 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
 				valType := g.chk.ExprTypes[s.Value]
 				g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)
+				return
+			}
+			valType := g.chk.ExprTypes[s.Value]
+			if isFreshOwningRValue(s.Value) && g.typeOwnsHeap(valType) {
+				tmpDiscard := g.nextTmp("discard")
+				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(valType), tmpDiscard, g.emitExpr(s.Value)))
+				g.emitFreeLValueStmt(out, indent, valType, tmpDiscard)
 				return
 			}
 			out.WriteString(fmt.Sprintf("%s(void)(%s);\n", indent, g.emitExpr(s.Value)))
@@ -1085,6 +1358,11 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		}
 		out.WriteString(fmt.Sprintf("%s%s%s %s = %s;\n",
 			indent, qual, g.cType(valType), s.Name.Name, g.emitExpr(s.Value)))
+		if !g.inMainFn && g.fnDeferVarNames[s.Name.Name] {
+			if fnExpr := g.typeDeferFreeFn(valType); fnExpr != "" {
+				out.WriteString(fmt.Sprintf("%s_vira_actor_defer_push(%s, &%s);\n", indent, fnExpr, s.Name.Name))
+			}
+		}
 
 	case *ast.AssignStmt:
 		if ident, ok := s.Target.(*ast.IdentExpr); ok && ident.Ident.Name == "_" {
@@ -1095,6 +1373,13 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
 				valType := g.chk.ExprTypes[s.Value]
 				g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)
+				return
+			}
+			valType := g.chk.ExprTypes[s.Value]
+			if isFreshOwningRValue(s.Value) && g.typeOwnsHeap(valType) {
+				tmpDiscard := g.nextTmp("discard")
+				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(valType), tmpDiscard, g.emitExpr(s.Value)))
+				g.emitFreeLValueStmt(out, indent, valType, tmpDiscard)
 				return
 			}
 			out.WriteString(fmt.Sprintf("%s(void)(%s);\n", indent, g.emitExpr(s.Value)))
@@ -1163,6 +1448,7 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		g.emitSwitchStmt(out, s, indent, fnRet)
 
 	case *ast.ForStmt:
+		g.loopDepth++
 		if s.Init != nil {
 			out.WriteString(fmt.Sprintf("%s{\n", indent))
 			g.emitStmt(out, s.Init, indent+"    ", fnRet)
@@ -1191,8 +1477,10 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			g.emitBlockStmts(out, s.Body, indent+"    ", fnRet)
 			out.WriteString(fmt.Sprintf("%s}\n", indent))
 		}
+		g.loopDepth--
 
 	case *ast.ForInStmt:
+		g.loopDepth++
 		iterType := g.chk.ExprTypes[s.Iter]
 		var elemType checker.Type
 		var isFixedArray bool
@@ -1241,8 +1529,17 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			}
 		}
 		out.WriteString(fmt.Sprintf("%s}\n", indent))
+		g.loopDepth--
 
 	case *ast.BranchStmt:
+		for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+			if g.activeErrVars[i].loopDepth == g.loopDepth {
+				if !g.inMainFn {
+					out.WriteString(fmt.Sprintf("%s_vira_actor_defer_pop(&%s);\n", indent, g.activeErrVars[i].varName))
+				}
+				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+			}
+		}
 		if s.Tok == token.TokBreak {
 			out.WriteString(fmt.Sprintf("%sbreak;\n", indent))
 		} else if s.Tok == token.TokContinue {
@@ -1252,6 +1549,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 	case *ast.ArenaStmt:
 		out.WriteString(fmt.Sprintf("%s{\n", indent))
 		out.WriteString(fmt.Sprintf("%s    vira_arena %s = vira_arena_init(1024 * 1024); // 1MB high-speed tensor bump slab\n", indent, s.ArenaVar))
+		if !g.inMainFn && g.fnDeferVarNames[s.ArenaVar] {
+			out.WriteString(fmt.Sprintf("%s    _vira_actor_defer_push_ex((vira_defer_fn)vira_arena_destroy, &%s, true);\n", indent, s.ArenaVar))
+		}
 		prevArena := g.activeArena
 		g.activeArena = "&" + s.ArenaVar
 		g.emitBlockStmts(out, s.Body, indent+"    ", fnRet)
@@ -1259,6 +1559,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		out.WriteString(fmt.Sprintf("%s}\n", indent))
 
 	case *ast.DeferFreeStmt:
+		if !g.inMainFn {
+			out.WriteString(fmt.Sprintf("%s_vira_actor_defer_pop(&%s);\n", indent, s.VarName))
+		}
 		switch s.Kind {
 		case ast.CleanupString:
 			out.WriteString(fmt.Sprintf("%svira_str_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
@@ -1268,8 +1571,8 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			out.WriteString(fmt.Sprintf("%s%s_autofree(&%s); // autofree: %s\n",
 				indent, g.cStructName(s.TypeName), s.VarName, s.Reason))
 		case ast.CleanupInterface:
-			out.WriteString(fmt.Sprintf("%s%s._vtable->_autofree(%s._object); // autofree: %s\n",
-				indent, s.VarName, s.VarName, s.Reason))
+			out.WriteString(fmt.Sprintf("%s%s_autofree(&%s); // autofree: %s\n",
+				indent, g.cStructName(s.TypeName), s.VarName, s.Reason))
 		case ast.CleanupArena:
 			out.WriteString(fmt.Sprintf("%svira_arena_destroy(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
 		case ast.CleanupFuture:
@@ -1280,12 +1583,25 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		}
 
 	case *ast.ReturnStmt:
+		skipErrName := ""
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			skipErrName = ident.Ident.Name
+		}
 		if g.inMainFn && s.Value == nil {
+			for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+			}
 			out.WriteString(fmt.Sprintf("%svira_report_mem_stats();\n", indent))
 			out.WriteString(fmt.Sprintf("%sreturn 0;\n", indent))
 			return
 		}
 		if s.Value == nil {
+			for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+			}
+			if g.hasFnDeferBase {
+				out.WriteString(fmt.Sprintf("%s_vira_actor_defer_restore(_vira_defer_base);\n", indent))
+			}
 			out.WriteString(fmt.Sprintf("%sreturn;\n", indent))
 			return
 		}
@@ -1293,16 +1609,63 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			cRes := g.cResultName(resRet.Inner)
 			if call, isCall := s.Value.(*ast.CallExpr); isCall {
 				if ident, isId := call.Callee.(*ast.IdentExpr); isId && ident.Ident.Name == "error" {
+					if identArg, ok := call.Args[0].Expr.(*ast.IdentExpr); ok {
+						skipErrName = identArg.Ident.Name
+					}
 					errMsg := g.emitExpr(call.Args[0].Expr)
+					if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
+						tmpErr := g.nextTmp("ret_err")
+						out.WriteString(fmt.Sprintf("%svira_string %s = %s;\n", indent, tmpErr, errMsg))
+						for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+							if g.activeErrVars[i].varName != skipErrName {
+								out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+							}
+						}
+						if g.hasFnDeferBase {
+							out.WriteString(fmt.Sprintf("%s_vira_actor_defer_restore(_vira_defer_base);\n", indent))
+						}
+						out.WriteString(fmt.Sprintf("%sreturn (%s){ .is_err = true, .err = %s };\n", indent, cRes, tmpErr))
+						return
+					}
 					out.WriteString(fmt.Sprintf("%sreturn (%s){ .is_err = true, .err = %s };\n", indent, cRes, errMsg))
 					return
 				}
 			}
+			valExpr := g.emitExpr(s.Value)
+			if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
+				tmpVal := g.nextTmp("ret_ok")
+				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(resRet.Inner), tmpVal, valExpr))
+				for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+					if g.activeErrVars[i].varName != skipErrName {
+						out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+					}
+				}
+				if g.hasFnDeferBase {
+					out.WriteString(fmt.Sprintf("%s_vira_actor_defer_restore(_vira_defer_base);\n", indent))
+				}
+				out.WriteString(fmt.Sprintf("%sreturn (%s){ .is_err = false, .val = %s };\n", indent, cRes, tmpVal))
+				return
+			}
 			out.WriteString(fmt.Sprintf("%sreturn (%s){ .is_err = false, .val = %s };\n",
-				indent, cRes, g.emitExpr(s.Value)))
+				indent, cRes, valExpr))
 			return
 		}
-		out.WriteString(fmt.Sprintf("%sreturn %s;\n", indent, g.emitExpr(s.Value)))
+		valExpr := g.emitExpr(s.Value)
+		if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
+			tmpRet := g.nextTmp("ret")
+			out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(fnRet), tmpRet, valExpr))
+			for i := len(g.activeErrVars) - 1; i >= 0; i-- {
+				if g.activeErrVars[i].varName != skipErrName {
+					out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.activeErrVars[i].varName))
+				}
+			}
+			if g.hasFnDeferBase {
+				out.WriteString(fmt.Sprintf("%s_vira_actor_defer_restore(_vira_defer_base);\n", indent))
+			}
+			out.WriteString(fmt.Sprintf("%sreturn %s;\n", indent, tmpRet))
+			return
+		}
+		out.WriteString(fmt.Sprintf("%sreturn %s;\n", indent, valExpr))
 
 	case *ast.ExprStmt:
 		if detached, ok := g.tryEmitDetachedActorSend(s.Expr); ok {
@@ -1466,16 +1829,29 @@ func (g *Generator) emitUnwrappedCall(
 
 	if varName != "" && !valType.Equals(checker.TypeVoid) {
 		out.WriteString(fmt.Sprintf("%s%s %s;\n", indent, g.cType(valType), varName))
+		out.WriteString(fmt.Sprintf("%smemset(&%s, 0, sizeof(%s));\n", indent, varName, varName))
 		_ = isMut
 	}
 
 	out.WriteString(fmt.Sprintf("%sif (%s.is_err) {\n", indent, tmpRes))
 	out.WriteString(fmt.Sprintf("%s    vira_string err = %s.err;\n", indent, tmpRes))
 	out.WriteString(fmt.Sprintf("%s    (void)err;\n", indent))
+	if !g.inMainFn {
+		out.WriteString(fmt.Sprintf("%s    _vira_actor_defer_push((vira_defer_fn)vira_str_free, &err);\n", indent))
+	}
 
+	yieldIdx := len(call.OrBlock.Stmts) - 1
+	for yieldIdx >= 0 {
+		if _, isDF := call.OrBlock.Stmts[yieldIdx].(*ast.DeferFreeStmt); isDF {
+			yieldIdx--
+			continue
+		}
+		break
+	}
+
+	g.activeErrVars = append(g.activeErrVars, activeErrScope{varName: "err", loopDepth: g.loopDepth})
 	for i, st := range call.OrBlock.Stmts {
-		isLast := i == len(call.OrBlock.Stmts)-1
-		if isLast {
+		if i == yieldIdx {
 			if exprSt, ok := st.(*ast.ExprStmt); ok && varName != "" && !valType.Equals(checker.TypeVoid) {
 				isDivergent := false
 				if callExpr, isCall := exprSt.Expr.(*ast.CallExpr); isCall {
@@ -1491,13 +1867,26 @@ func (g *Generator) emitUnwrappedCall(
 		}
 		g.emitStmt(out, st, indent+"    ", fnRet)
 	}
+	g.activeErrVars = g.activeErrVars[:len(g.activeErrVars)-1]
+
+	if !g.inMainFn {
+		out.WriteString(fmt.Sprintf("%s    _vira_actor_defer_pop(&err);\n", indent))
+	}
 	out.WriteString(fmt.Sprintf("%s    vira_str_free(&err);\n", indent))
 
 	if varName != "" && !valType.Equals(checker.TypeVoid) {
 		out.WriteString(fmt.Sprintf("%s} else {\n", indent))
 		out.WriteString(fmt.Sprintf("%s    %s = %s.val;\n", indent, varName, tmpRes))
+	} else if varName == "" && !valType.Equals(checker.TypeVoid) && g.typeOwnsHeap(valType) {
+		out.WriteString(fmt.Sprintf("%s} else {\n", indent))
+		g.emitFreeLValueStmt(out, indent+"    ", valType, tmpRes+".val")
 	}
 	out.WriteString(fmt.Sprintf("%s}\n", indent))
+	if varName != "" && !valType.Equals(checker.TypeVoid) && !g.inMainFn && g.fnDeferVarNames[varName] {
+		if fnExpr := g.typeDeferFreeFn(valType); fnExpr != "" {
+			out.WriteString(fmt.Sprintf("%s_vira_actor_defer_push(%s, &%s);\n", indent, fnExpr, varName))
+		}
+	}
 }
 
 func (g *Generator) emitUnwrappedAssign(
@@ -1515,10 +1904,22 @@ func (g *Generator) emitUnwrappedAssign(
 	out.WriteString(fmt.Sprintf("%sif (%s.is_err) {\n", indent, tmpRes))
 	out.WriteString(fmt.Sprintf("%s    vira_string err = %s.err;\n", indent, tmpRes))
 	out.WriteString(fmt.Sprintf("%s    (void)err;\n", indent))
+	if !g.inMainFn {
+		out.WriteString(fmt.Sprintf("%s    _vira_actor_defer_push((vira_defer_fn)vira_str_free, &err);\n", indent))
+	}
 
+	yieldIdx := len(call.OrBlock.Stmts) - 1
+	for yieldIdx >= 0 {
+		if _, isDF := call.OrBlock.Stmts[yieldIdx].(*ast.DeferFreeStmt); isDF {
+			yieldIdx--
+			continue
+		}
+		break
+	}
+
+	g.activeErrVars = append(g.activeErrVars, activeErrScope{varName: "err", loopDepth: g.loopDepth})
 	for i, st := range call.OrBlock.Stmts {
-		isLast := i == len(call.OrBlock.Stmts)-1
-		if isLast {
+		if i == yieldIdx {
 			if exprSt, ok := st.(*ast.ExprStmt); ok && targetLValue != "" && !valType.Equals(checker.TypeVoid) {
 				isDivergent := false
 				if callExpr, isCall := exprSt.Expr.(*ast.CallExpr); isCall {
@@ -1527,12 +1928,24 @@ func (g *Generator) emitUnwrappedAssign(
 					}
 				}
 				if !isDivergent {
-					out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+					if valType.Equals(checker.TypeString) {
+						tmpOld := g.nextTmp("old_str")
+						out.WriteString(fmt.Sprintf("%s    vira_string %s = %s;\n", indent, tmpOld, targetLValue))
+						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+						out.WriteString(fmt.Sprintf("%s    vira_str_free(&%s);\n", indent, tmpOld))
+					} else {
+						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+					}
 					continue
 				}
 			}
 		}
 		g.emitStmt(out, st, indent+"    ", fnRet)
+	}
+	g.activeErrVars = g.activeErrVars[:len(g.activeErrVars)-1]
+
+	if !g.inMainFn {
+		out.WriteString(fmt.Sprintf("%s    _vira_actor_defer_pop(&err);\n", indent))
 	}
 	out.WriteString(fmt.Sprintf("%s    vira_str_free(&err);\n", indent))
 
@@ -1745,6 +2158,16 @@ func (g *Generator) emitLValue(expr ast.Expr) string {
 		if leftType != nil && leftType.Equals(checker.TypeString) && e.Field.Name == "len" {
 			return fmt.Sprintf("%s.len", g.emitExpr(e.Left))
 		}
+		if _, isTensor := leftType.(*checker.TensorType); isTensor {
+			cField := e.Field.Name
+			if cField == "ndim" {
+				cField = "n_dims"
+			}
+			if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				return fmt.Sprintf("%s->%s", ident.Ident.Name, cField)
+			}
+			return fmt.Sprintf("(%s).%s", g.emitExpr(e.Left), cField)
+		}
 		leftStr := g.emitLValue(e.Left)
 		sep := "."
 		if ident, ok := e.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
@@ -1779,6 +2202,8 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			argVal := g.emitExpr(arg.Expr)
 			if ident, ok := arg.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
 				if _, isSt := g.chk.ExprTypes[arg.Expr].(*checker.StructType); isSt {
+					argVal = "*" + argVal
+				} else if _, isTen := g.chk.ExprTypes[arg.Expr].(*checker.TensorType); isTen {
 					argVal = "*" + argVal
 				}
 			}
@@ -1818,6 +2243,18 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_tensor_f32_fill(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "tensor_fill_3d":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_tensor_f32_fill_3d(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "tensor_fill_4d":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_tensor_f32_fill_4d(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "tensor_relu":
 			arenaArg := "NULL"
 			if g.activeArena != "" {
@@ -2272,6 +2709,42 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				return fmt.Sprintf("vira_str_clone(%s)", strExpr)
 			case "bytes", "to_bytes":
 				return fmt.Sprintf("vira_str_to_bytes(%s)", strExpr)
+			}
+		}
+
+		// 8. Tensor receiver methods
+		if _, isTensor := leftType.(*checker.TensorType); isTensor {
+			tExpr := g.emitExpr(callee.Left)
+			if ident, ok := callee.Left.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+				tExpr = "*" + ident.Ident.Name
+			}
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			switch callee.Field.Name {
+			case "rows":
+				return fmt.Sprintf("(%s).rows", tExpr)
+			case "cols":
+				return fmt.Sprintf("(%s).cols", tExpr)
+			case "ndim":
+				return fmt.Sprintf("(%s).n_dims", tExpr)
+			case "numel":
+				return fmt.Sprintf("vira_tensor_numel(%s)", tExpr)
+			case "dim":
+				return fmt.Sprintf("vira_tensor_dim(%s, %s)", tExpr, argStrs[0])
+			case "stride":
+				return fmt.Sprintf("vira_tensor_stride(%s, %s)", tExpr, argStrs[0])
+			case "reshape_2d":
+				return fmt.Sprintf("vira_tensor_reshape_2d(%s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1])
+			case "reshape_3d":
+				return fmt.Sprintf("vira_tensor_reshape_3d(%s, %s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1], argStrs[2])
+			case "reshape_4d":
+				return fmt.Sprintf("vira_tensor_reshape_4d(%s, %s, %s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1], argStrs[2], argStrs[3])
+			case "transpose":
+				return fmt.Sprintf("vira_tensor_transpose_nd(%s, %s)", arenaArg, tExpr)
+			case "clone":
+				return fmt.Sprintf("vira_tensor_f32_clone(%s)", tExpr)
 			}
 		}
 	}

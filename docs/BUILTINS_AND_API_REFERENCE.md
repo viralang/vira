@@ -7,17 +7,17 @@ Welcome to the definitive API reference for the **Vira Programming Language**. T
 ## Table of Contents
 
 1. [Core Runtime & Diagnostics](#1-core-runtime--diagnostics)
-2. [AI Tensors & SIMD Math](#2-ai-tensors--simd-math)
+2. [AI Tensors (1D–4D) & Multi-Threaded CPU SIMD Math](#2-ai-tensors-1d4d--multi-threaded-cpu-simd-math)
 3. [Autograd Backpropagation & Optimizers](#3-autograd-backpropagation--optimizers)
 4. [SafeTensors & GGUF Local LLM Inference](#4-safetensors--gguf-local-llm-inference)
 5. [Actor Concurrency & Supervisors](#5-actor-concurrency--supervisors)
 6. [Native File I/O & Filesystem](#6-native-file-io--filesystem)
 7. [Networking & HTTP 1.1 Web Engine](#7-networking--http-11-web-engine)
-8. [Fast JSON Field Parser](#8-fast-json-field-parser)
+8. [RFC 8259 JSON (`import json`) & Fast JSON Builtins](#8-rfc-8259-json-import-json--fast-json-builtins)
 9. [Native GUI & Declarative Layout Engine](#9-native-gui--declarative-layout-engine)
-10. [Memory, Bump Arenas & Autofree](#10-memory-bump-arenas--autofree)
+10. [Memory, Bump Arenas, Autofree & C FFI Helpers](#10-memory-bump-arenas-autofree--c-ffi-helpers)
 11. [Native Collections (`[]T` & `[N]T`) & String Methods](#11-native-collections-t--nt--string-methods)
-12. [Standard Library Packages (`io`, `net`, `http`, `viraserve`)](#12-standard-library-packages-io-net-http-viraserve)
+12. [Standard Library Packages (`io`, `net`, `http`, `json`, `viraserve`)](#12-standard-library-packages-io-net-http-json-viraserve)
 
 ---
 
@@ -65,28 +65,59 @@ start_ms := time_now_ms()
 
 ---
 
-## 2. AI Tensors & SIMD Math
+## 2. AI Tensors (1D–4D) & Multi-Threaded CPU SIMD Math
 
-2D numerical tensors are first-class primitives in Vira (`tensor[f32]`). All tensor memory is 64-byte aligned to maximize AVX2 (256-bit) and ARM NEON (128-bit) vector load/store throughput.
+1D–4D strided numerical tensors are first-class primitives in Vira (`tensor[f32]`, backed by `dims[4]`, `strides[4]`, `n_dims`, and 64-byte aligned buffers). The built-in tensor runtime is a **zero-dependency multi-threaded CPU SIMD engine** (`AVX2+FMA`, `SSE2`, `ARM NEON`) requiring no external GPU drivers.
 
 ### `tensor_fill(rows int, cols int, val f32) tensor[f32]`
 Allocates a 2D tensor of dimensions `rows × cols` and fills every element with scalar value `val`.
-- **Hardware Acceleration:** Uses `_mm256_set1_ps` and `_mm256_storeu_ps` on x86_64; uses `vdupq_n_f32` on ARM.
+- **Hardware Acceleration:** Uses `_mm256_set1_ps` and `_mm256_storeu_ps` on x86_64; uses `vdupq_n_f32` on ARM NEON.
 - **Memory Ownership:** If called inside an `arena { ... }` block, allocation occurs on the bump arena with $O(1)$ slab teardown; otherwise, tracked and freed automatically by Autofree upon scope exit.
 ```v
-// Create a 64x64 matrix filled with 0.25
 weights := tensor_fill(64, 64, 0.25)
 ```
 
-### Matrix Multiplication Operator: `@`
-Computes the hardware-accelerated matrix multiplication $C = A @ B$.
-- **Shape Requirement:** $A$'s column count must equal $B$'s row count: $(M \times K) @ (K \times N) \to (M \times N)$. Shape mismatch triggers a panic.
-- **Hardware Kernel:** Tiled register-blocked Fused Multiply-Add (FMA3) delivering up to 8 single-precision FLOPs per cycle per core.
+### `tensor_fill_3d(d0 int, d1 int, d2 int, val f32) tensor[f32]`
+Allocates a 3D contiguous tensor of shape `(d0, d1, d2)` (e.g., `(Batch, Seq, Hidden)`) filled with `val`.
 ```v
-w := tensor_fill(64, 32, 0.5)
-x := tensor_fill(32, 16, 1.0)
-y := w @ x // Result shape: 64x16
+hidden := tensor_fill_3d(2, 16, 64, 0.5)
 ```
+
+### `tensor_fill_4d(d0 int, d1 int, d2 int, d3 int, val f32) tensor[f32]`
+Allocates a 4D contiguous tensor of shape `(d0, d1, d2, d3)` (e.g., `(Batch, Heads, Seq, HeadDim)`) filled with `val`.
+```v
+q := tensor_fill_4d(2, 8, 16, 64, 0.125)
+```
+
+### N-D Tensor Properties & Receiver Methods
+| Property / Method | Signature | Description |
+| :--- | :--- | :--- |
+| `.ndim` | `int` | Number of active dimensions (`1..4`) |
+| `.rows` / `.cols` | `int` | Flattened outer rows and trailing inner dimension (`dims[ndim-1]`) |
+| `.numel()` | `fn () int` | Total element count across all dimensions |
+| `.dim(axis int)` | `fn (axis int) int` | Extent along `axis` (`0..ndim-1`) |
+| `.stride(axis int)` | `fn (axis int) int` | Element stride along `axis` |
+| `.reshape_2d(d0, d1 int)` | `fn (int, int) tensor[f32]` | Reshapes to 2D (`O(1)` zero-copy view inside `arena {}`, safe copy on heap) |
+| `.reshape_3d(d0, d1, d2 int)` | `fn (int, int, int) tensor[f32]` | Reshapes to 3D preserving element count |
+| `.reshape_4d(d0, d1, d2, d3 int)` | `fn (int, int, int, int) tensor[f32]` | Reshapes to 4D preserving element count |
+| `.transpose()` | `fn () tensor[f32]` | Swaps the last two axes `(..., M, N) -> (..., N, M)` |
+| `.clone()` | `fn () tensor[f32]` | Deep-clones tensor data and N-D shape metadata |
+
+### Matrix Multiplication Operator: `@`
+Computes hardware-accelerated 2D, batched 3D/4D, or broadcast N-D × 2D matrix multiplication $C = A @ B$.
+- **Supported Shapes:**
+  - **2D × 2D:** $(M, K) @ (K, N) \to (M, N)$
+  - **Batched 3D / 4D:** $(B, H, M, K) @ (B, H, K, N) \to (B, H, M, N)$
+  - **Broadcast N-D × 2D:** $(B, S, K) @ (K, N) \to (B, S, N)$
+- **Multi-Core CPU SIMD Kernel:** 64×64 L2 cache-tiled FMA3 / SSE2 / NEON kernel; automatically parallelizes row tiles across the Chase-Lev work-stealing thread pool when $M \times K \times N \ge 128^3$.
+```v
+q := tensor_fill_4d(2, 4, 16, 32, 0.25)
+k := tensor_fill_4d(2, 4, 16, 32, 0.5)
+attn_scores := q @ k.transpose() // Shape: (2, 4, 16, 16)
+```
+
+### Element-Wise Operators (`+`, `-`, `tensor_add`, `tensor_elemwise_mul`) & Bias Broadcasting
+`a + b`, `a - b`, `tensor_add(a, b)`, and `tensor_elemwise_mul(a, b)` preserve N-D shapes on exact match and also support trailing-dimension bias broadcasting (e.g., `(B, S, D) + (1, D)` or `(M, D) + (D)`).
 
 ### `tensor_sum(t tensor[f32]) f32`
 Computes the scalar sum of all elements in tensor `t` using horizontal vector additions (`_mm256_add_ps` + `_mm_hadd_ps`).
@@ -365,28 +396,40 @@ net_close(client)
 
 ---
 
-## 8. Fast JSON Field Parser
+## 8. RFC 8259 JSON (`import json`) & Fast JSON Builtins
 
-Zero-allocation string search extracting values from JSON payloads without external libraries.
+### Standard Library `import json` (Pure `.vir`, Recommended)
+Full RFC 8259 JSON validation, `{}`/`[]` depth-aware key & array queries, string escaping/unescaping (including `\uXXXX`), and $O(N)$ `JsonBuilder` serialization written in 100% pure Vira:
 
-### `json_get_str(json string, key string) string`
-Extracts a string property value matching `"key": "value"`.
+| Function / Method | Signature | Description |
+| :--- | :--- | :--- |
+| `json.is_valid` | `(raw string) bool` | Validates RFC 8259 JSON syntax |
+| `json.has_key` | `(raw string, key string) bool` | Depth-aware top-level object key check |
+| `json.get_raw` | `(raw string, key string) !string` | Extracts raw nested JSON object/array/token at `key` |
+| `json.get_str` | `(raw string, key string) !string` | Extracts and unescapes a string field at `key` |
+| `json.get_int` / `json.get_i64` | `(raw string, key string) !int` / `!i64` | Extracts a 32-bit or 64-bit integer field at `key` |
+| `json.get_bool` | `(raw string, key string) !bool` | Extracts `true` or `false` at `key` |
+| `json.array_len` | `(raw string) !int` | Element count of a JSON array `[...]` |
+| `json.array_get_raw` / `array_get_str` | `(raw string, idx int) !string` | Extracts raw or unescaped string element at `idx` |
+| `json.escape` / `json.unescape` | `(s string) string` | Escapes or unescapes RFC 8259 JSON string content |
+| `json.JsonBuilder.new()` | `() json.JsonBuilder` | Creates an $O(N)$ byte-buffered JSON object serializer (`.set_str`, `.set_int`, `.set_i64`, `.set_bool`, `.set_null`, `.set_raw`, `.build`) |
+
 ```v
-payload := '{"model": "llama-3", "prompt": "Hello"}'
-model_name := json_get_str(payload, 'model') // 'llama-3'
+import json
+
+mut jb := json.JsonBuilder.new()
+jb.set_str('model', 'llama-3.2')
+jb.set_int('max_tokens', 512)
+payload := jb.build()
+
+model := json.get_str(payload, 'model') or { 'default' }
 ```
 
-### `json_get_int(json string, key string) i64`
-Extracts an integer property value matching `"key": 1234`.
-```v
-tokens := json_get_int(payload, 'max_tokens')
-```
-
-### `json_get_f32(json string, key string) f32`
-Extracts a floating-point property value matching `"key": 0.85`.
-```v
-temp := json_get_f32(payload, 'temperature')
-```
+### Lightweight Builtin Shims (`json_get_str`, `json_get_int`, `json_get_f32`)
+Depth-aware and escape-aware convenience builtins available without imports:
+- `json_get_str(json string, key string) string`
+- `json_get_int(json string, key string) i64`
+- `json_get_f32(json string, key string) f32`
 
 ---
 
@@ -446,15 +489,20 @@ gui_close()
 
 ---
 
-## 10. Memory, Bump Arenas & Autofree
+## 10. Memory, Bump Arenas, Autofree & C FFI Helpers
 
 Vira eliminates both manual `free()` and garbage collection pauses through **Static Escape Analysis (Autofree)** and **64-byte aligned Bump Arenas**.
 
 ### Deterministic Autofree (No GC)
 Every variable has an escape state determined at compile time:
-- `ScopedLocal`: Destroyed immediately at scope exit via LIFO destructors (`vira_str_free`, `vira_tensor_f32_free`).
+- `ScopedLocal`: Destroyed immediately at scope exit via LIFO destructors (`vira_str_free`, `vira_tensor_f32_free`, `vira_future_free`). Inside actors, active stack allocations are also registered on `_vira_actor_ctx.defer_stack` so `panic()` unwinds them cleanly before `longjmp`.
 - `EscapesViaReturn`: Transferred to the caller without destructor injection.
 - `MovedToContainer`: Transferred to a struct or collection; freed when the parent container exits scope.
+
+### C FFI NUL-Terminated String Marshaling (`vira_rt.h`)
+When writing C99 intrinsics (`@[intrinsic: '...']`), `vira_rt.h` provides zero-truncation NUL-terminated string marshaling helpers:
+- `char *cstr = vira_str_cstr(s);` ... `vira_cstr_free(cstr);` — exact-length heap C string copy.
+- `vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf))` / `vira_cstr_buf_free(&cb)` — zero-malloc stack fast-path with automatic exact-size heap fallback for arbitrarily long paths and payloads.
 
 ### Bump Arenas (`arena { ... }`)
 For high-frequency temporary allocations (e.g. forward passes, string formatting in tight loops):
@@ -509,7 +557,7 @@ Vira `string` values are immutable UTF-8 views (`data`, `len`, `is_lit`) with bu
 | `.starts_with(prefix string)` | `fn (prefix string) bool` | Returns `true` if the string starts with `prefix` |
 | `.ends_with(suffix string)` | `fn (suffix string) bool` | Returns `true` if the string ends with `suffix` |
 | `.index_of(needle string)` | `fn (needle string) int` | Byte index of first occurrence of `needle`, or `-1` |
-| `.substr(start int, len int)` | `fn (start int, len int) string` | Newly allocated substring of length `len` starting at `start` |
+| `.substr(start int, end int)` | `fn (start int, end int) string` | Newly allocated substring covering half-open byte range `[start, end)` |
 | `.trim()` | `fn () string` | Newly allocated string with leading and trailing whitespace removed |
 | `.split(delim string)` | `fn (delim string) []string` | Splits the string by `delim` into a slice of strings (`[]string`) |
 | `.replace(old string, new string)` | `fn (old string, new string) string` | Replaces all occurrences of `old` with `new` |
@@ -519,12 +567,13 @@ Vira `string` values are immutable UTF-8 views (`data`, `len`, `is_lit`) with bu
 
 ---
 
-## 12. Standard Library Packages (`io`, `net`, `http`, `viraserve`)
+## 12. Standard Library Packages (`io`, `net`, `http`, `json`, `viraserve`)
 
 Import first-party standard library modules using `import <pkg>`:
 
-- **`import io`**: `io.Buffer` growable byte buffer (`write_bytes`, `write_str`, `to_string`, `clear`), file helpers (`io.read_all`, `io.write_all`, `io.exists`).
-- **`import net`**: Cross-platform TCP (`net.TcpListener`, `net.TcpStream`), UDP (`net.UdpSocket`), DNS resolution (`net.resolve_host`), and non-blocking event readiness (`net.Poller` over `epoll` / `kqueue` / `WSAPoll`).
-- **`import http`**: Structured HTTP/1.1 request/response types (`http.Request`, `http.Response`, `http.Headers`, `http.HttpServer`, `http.get`, `http.post`).
+- **`import io`**: `io.BufReader` buffered reader (`read_byte`, `read_line`, `read_exact`, `read_all`), `io.File` handles, and streaming traits.
+- **`import net`**: Cross-platform TCP (`net.TcpListener`, `net.TcpStream`), UDP (`net.UdpSocket`), socket addresses (`net.SocketAddr`), and non-blocking event readiness (`net.Poller` over `epoll` / `kqueue` / `WSAPoll`).
+- **`import http`**: Structured HTTP/1.1 request/response types (`http.Request`, `http.Response`, `http.HeaderMap`, `http.HttpServer`, and `http.SseStream`).
+- **`import json`**: Pure-`.vir` RFC 8259 JSON validator, `{}`/`[]` depth-aware field & array extractor, string escaper/unescaper, and $O(N)$ `json.JsonBuilder`.
 - **`import viraserve`**: High-concurrency actor-backed web & AI inference server framework built on `net` and `http`, supporting route registration, JSON APIs, and Server-Sent Events (SSE) token streaming.
 

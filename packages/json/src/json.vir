@@ -1,0 +1,685 @@
+module json
+
+fn is_ws(c u8) bool {
+	return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+fn is_digit(c u8) bool {
+	return c >= 48 && c <= 57
+}
+
+fn hex_val(c u8) int {
+	if c >= 48 && c <= 57 {
+		return c - 48
+	}
+	if c >= 65 && c <= 70 {
+		return c - 65 + 10
+	}
+	if c >= 97 && c <= 102 {
+		return c - 97 + 10
+	}
+	return -1
+}
+
+fn skip_ws(b []u8, start int) int {
+	mut i := start
+	for i < b.len && is_ws(b[i]) {
+		i = i + 1
+	}
+	return i
+}
+
+// skip_string expects b[quote_pos] == '"' (34) and returns the index right after
+// the matching unescaped closing '"', or -1 if unterminated/invalid.
+fn skip_string(b []u8, quote_pos int) int {
+	if quote_pos >= b.len || b[quote_pos] != 34 {
+		return -1
+	}
+	mut i := quote_pos + 1
+	for i < b.len {
+		ch := b[i]
+		if ch == 92 {
+			// Escape sequence: must have at least one following byte
+			if i + 1 >= b.len {
+				return -1
+			}
+			esc := b[i + 1]
+			if esc == 117 {
+				// \uXXXX requires 4 hex digits
+				if i + 5 >= b.len {
+					return -1
+				}
+				if hex_val(b[i + 2]) < 0 || hex_val(b[i + 3]) < 0 || hex_val(b[i + 4]) < 0 || hex_val(b[i + 5]) < 0 {
+					return -1
+				}
+				i = i + 6
+				continue
+			}
+			i = i + 2
+			continue
+		}
+		if ch == 34 {
+			return i + 1
+		}
+		if ch < 32 {
+			// Unescaped ASCII control character inside JSON string
+			return -1
+		}
+		i = i + 1
+	}
+	return -1
+}
+
+// skip_value skips a single JSON value starting at pos (after whitespace) and
+// returns the index immediately following the value, or -1 if malformed.
+fn skip_value(b []u8, pos int) int {
+	i := skip_ws(b, pos)
+	if i >= b.len {
+		return -1
+	}
+	ch := b[i]
+	if ch == 34 {
+		return skip_string(b, i)
+	}
+	if ch == 123 || ch == 91 {
+		mut depth := 0
+		mut cur := i
+		for cur < b.len {
+			c := b[cur]
+			if c == 34 {
+				next_str := skip_string(b, cur)
+				if next_str < 0 {
+					return -1
+				}
+				cur = next_str
+				continue
+			}
+			if c == 123 || c == 91 {
+				depth = depth + 1
+			} else if c == 125 || c == 93 {
+				depth = depth - 1
+				if depth == 0 {
+					return cur + 1
+				}
+				if depth < 0 {
+					return -1
+				}
+			}
+			cur = cur + 1
+		}
+		return -1
+	}
+	// Primitive token: number, true, false, null
+	mut end := i
+	for end < b.len {
+		c := b[end]
+		if is_ws(c) || c == 44 || c == 125 || c == 93 {
+			break
+		}
+		end = end + 1
+	}
+	if end == i {
+		return -1
+	}
+	return end
+}
+
+fn validate_number(b []u8, pos int) int {
+	mut i := pos
+	if i < b.len && b[i] == 45 {
+		i = i + 1
+	}
+	if i >= b.len {
+		return -1
+	}
+	if b[i] == 48 {
+		i = i + 1
+	} else if is_digit(b[i]) {
+		for i < b.len && is_digit(b[i]) {
+			i = i + 1
+		}
+	} else {
+		return -1
+	}
+	if i < b.len && b[i] == 46 {
+		i = i + 1
+		if i >= b.len || !is_digit(b[i]) {
+			return -1
+		}
+		for i < b.len && is_digit(b[i]) {
+			i = i + 1
+		}
+	}
+	if i < b.len && (b[i] == 101 || b[i] == 69) {
+		i = i + 1
+		if i < b.len && (b[i] == 43 || b[i] == 45) {
+			i = i + 1
+		}
+		if i >= b.len || !is_digit(b[i]) {
+			return -1
+		}
+		for i < b.len && is_digit(b[i]) {
+			i = i + 1
+		}
+	}
+	return i
+}
+
+fn validate_value(b []u8, pos int) int {
+	i := skip_ws(b, pos)
+	if i >= b.len {
+		return -1
+	}
+	ch := b[i]
+	if ch == 34 {
+		return skip_string(b, i)
+	}
+	if ch == 123 {
+		mut cur := skip_ws(b, i + 1)
+		if cur < b.len && b[cur] == 125 {
+			return cur + 1
+		}
+		for cur < b.len {
+			cur = skip_ws(b, cur)
+			if cur >= b.len || b[cur] != 34 {
+				return -1
+			}
+			after_key := skip_string(b, cur)
+			if after_key < 0 {
+				return -1
+			}
+			colon := skip_ws(b, after_key)
+			if colon >= b.len || b[colon] != 58 {
+				return -1
+			}
+			after_val := validate_value(b, colon + 1)
+			if after_val < 0 {
+				return -1
+			}
+			next_tok := skip_ws(b, after_val)
+			if next_tok >= b.len {
+				return -1
+			}
+			if b[next_tok] == 125 {
+				return next_tok + 1
+			}
+			if b[next_tok] != 44 {
+				return -1
+			}
+			cur = next_tok + 1
+		}
+		return -1
+	}
+	if ch == 91 {
+		mut cur := skip_ws(b, i + 1)
+		if cur < b.len && b[cur] == 93 {
+			return cur + 1
+		}
+		for cur < b.len {
+			after_elem := validate_value(b, cur)
+			if after_elem < 0 {
+				return -1
+			}
+			next_tok := skip_ws(b, after_elem)
+			if next_tok >= b.len {
+				return -1
+			}
+			if b[next_tok] == 93 {
+				return next_tok + 1
+			}
+			if b[next_tok] != 44 {
+				return -1
+			}
+			cur = next_tok + 1
+		}
+		return -1
+	}
+	if ch == 116 {
+		if i + 3 < b.len && b[i + 1] == 114 && b[i + 2] == 117 && b[i + 3] == 101 {
+			return i + 4
+		}
+		return -1
+	}
+	if ch == 102 {
+		if i + 4 < b.len && b[i + 1] == 97 && b[i + 2] == 108 && b[i + 3] == 115 && b[i + 4] == 101 {
+			return i + 5
+		}
+		return -1
+	}
+	if ch == 110 {
+		if i + 3 < b.len && b[i + 1] == 117 && b[i + 2] == 108 && b[i + 3] == 108 {
+			return i + 4
+		}
+		return -1
+	}
+	if ch == 45 || is_digit(ch) {
+		return validate_number(b, i)
+	}
+	return -1
+}
+
+// is_valid validates whether raw is syntactically valid RFC 8259 JSON.
+pub fn is_valid(raw string) bool {
+	if raw.len == 0 {
+		return false
+	}
+	b := raw.bytes()
+	end := validate_value(b, 0)
+	if end < 0 {
+		return false
+	}
+	rem := skip_ws(b, end)
+	return rem == b.len
+}
+
+fn append_escaped_bytes(mut out []u8, s string) {
+	b := s.bytes()
+	mut i := 0
+	for i < b.len {
+		ch := b[i]
+		if ch == 34 {
+			out.push(92)
+			out.push(34)
+		} else if ch == 92 {
+			out.push(92)
+			out.push(92)
+		} else if ch == 10 {
+			out.push(92)
+			out.push(110)
+		} else if ch == 13 {
+			out.push(92)
+			out.push(114)
+		} else if ch == 9 {
+			out.push(92)
+			out.push(116)
+		} else if ch == 8 {
+			out.push(92)
+			out.push(98)
+		} else if ch == 12 {
+			out.push(92)
+			out.push(102)
+		} else {
+			out.push(ch)
+		}
+		i = i + 1
+	}
+}
+
+// escape escapes special RFC 8259 characters (", \, \n, \r, \t, \b, \f) in s.
+pub fn escape(s string) string {
+	mut out := []u8{}
+	append_escaped_bytes(mut out, s)
+	return out.to_string()
+}
+
+fn unescape_slice(b []u8, start int, end int) string {
+	mut out := []u8{}
+	mut i := start
+	for i < end {
+		ch := b[i]
+		if ch == 92 && i + 1 < end {
+			esc := b[i + 1]
+			if esc == 34 {
+				out.push(34)
+				i = i + 2
+				continue
+			}
+			if esc == 92 {
+				out.push(92)
+				i = i + 2
+				continue
+			}
+			if esc == 47 {
+				out.push(47)
+				i = i + 2
+				continue
+			}
+			if esc == 110 {
+				out.push(10)
+				i = i + 2
+				continue
+			}
+			if esc == 114 {
+				out.push(13)
+				i = i + 2
+				continue
+			}
+			if esc == 116 {
+				out.push(9)
+				i = i + 2
+				continue
+			}
+			if esc == 98 {
+				out.push(8)
+				i = i + 2
+				continue
+			}
+			if esc == 102 {
+				out.push(12)
+				i = i + 2
+				continue
+			}
+			if esc == 117 && i + 5 < end {
+				h0 := hex_val(b[i + 2])
+				h1 := hex_val(b[i + 3])
+				h2 := hex_val(b[i + 4])
+				h3 := hex_val(b[i + 5])
+				if h0 >= 0 && h1 >= 0 && h2 >= 0 && h3 >= 0 {
+					cp := h0 * 4096 + h1 * 256 + h2 * 16 + h3
+					if cp <= 127 {
+						out.push(cp)
+					} else if cp <= 2047 {
+						b1 := 192 + (cp / 64)
+						b2 := 128 + (cp - (cp / 64) * 64)
+						out.push(b1)
+						out.push(b2)
+					} else {
+						b1 := 224 + (cp / 4096)
+						rem := cp - (cp / 4096) * 4096
+						b2 := 128 + (rem / 64)
+						b3 := 128 + (rem - (rem / 64) * 64)
+						out.push(b1)
+						out.push(b2)
+						out.push(b3)
+					}
+					i = i + 6
+					continue
+				}
+			}
+			out.push(esc)
+			i = i + 2
+			continue
+		}
+		out.push(ch)
+		i = i + 1
+	}
+	return out.to_string()
+}
+
+// unescape decodes RFC 8259 JSON escape sequences (including \uXXXX) inside s.
+pub fn unescape(s string) string {
+	b := s.bytes()
+	return unescape_slice(b, 0, b.len)
+}
+
+// get_raw extracts the raw JSON token/object/array/literal at top-level object member `key`.
+// Nested objects and arrays are skipped depth-aware so inner keys never shadow outer keys.
+pub fn get_raw(raw string, key string) !string {
+	if raw.len == 0 {
+		return error('empty JSON payload')
+	}
+	b := raw.bytes()
+	mut cur := skip_ws(b, 0)
+	if cur >= b.len || b[cur] != 123 {
+		return error('expected JSON object')
+	}
+	cur = skip_ws(b, cur + 1)
+	if cur < b.len && b[cur] == 125 {
+		return error('json key not found: ${key}')
+	}
+
+	for cur < b.len {
+		cur = skip_ws(b, cur)
+		if cur >= b.len || b[cur] != 34 {
+			return error('malformed JSON object key')
+		}
+		key_end := skip_string(b, cur)
+		if key_end < 0 {
+			return error('unterminated JSON key string')
+		}
+		parsed_key := unescape_slice(b, cur + 1, key_end - 1)
+		colon := skip_ws(b, key_end)
+		if colon >= b.len || b[colon] != 58 {
+			return error('expected colon after JSON key')
+		}
+		val_start := skip_ws(b, colon + 1)
+		val_end := skip_value(b, val_start)
+		if val_end < 0 {
+			return error('malformed JSON value for key: ${key}')
+		}
+		if parsed_key == key {
+			return raw.substr(val_start, val_end)
+		}
+		next_tok := skip_ws(b, val_end)
+		if next_tok >= b.len || b[next_tok] == 125 {
+			break
+		}
+		if b[next_tok] != 44 {
+			return error('expected comma or closing brace in JSON object')
+		}
+		cur = next_tok + 1
+	}
+	return error('json key not found: ${key}')
+}
+
+// has_key reports whether top-level JSON object `raw` contains member `key`.
+pub fn has_key(raw string, key string) bool {
+	_ := get_raw(raw, key) or {
+		return false
+	}
+	return true
+}
+
+// get_str extracts and unescapes a JSON string value at top-level `key`.
+pub fn get_str(raw string, key string) !string {
+	val_raw := get_raw(raw, key) or {
+		return error(err)
+	}
+	if val_raw.len < 2 {
+		return error('json field is not a string: ${key}')
+	}
+	vb := val_raw.bytes()
+	if vb[0] != 34 || vb[vb.len - 1] != 34 {
+		return error('json field is not a string: ${key}')
+	}
+	return unescape_slice(vb, 1, vb.len - 1)
+}
+
+// get_int extracts a 32-bit integer value at top-level `key`.
+pub fn get_int(raw string, key string) !int {
+	val_raw := get_raw(raw, key) or {
+		return error(err)
+	}
+	n := val_raw.to_int() or {
+		return error('json field is not a valid int: ${key}')
+	}
+	return n
+}
+
+// get_i64 extracts a 64-bit integer value at top-level `key`.
+pub fn get_i64(raw string, key string) !i64 {
+	val_raw := get_raw(raw, key) or {
+		return error(err)
+	}
+	n := val_raw.to_i64() or {
+		return error('json field is not a valid i64: ${key}')
+	}
+	return n
+}
+
+// get_bool extracts a boolean (`true` or `false`) at top-level `key`.
+pub fn get_bool(raw string, key string) !bool {
+	val_raw := get_raw(raw, key) or {
+		return error(err)
+	}
+	if val_raw == 'true' {
+		return true
+	}
+	if val_raw == 'false' {
+		return false
+	}
+	return error('json field is not a boolean: ${key}')
+}
+
+// array_len returns the number of elements in a top-level JSON array `[...]`.
+pub fn array_len(raw string) !int {
+	if raw.len == 0 {
+		return error('empty JSON array')
+	}
+	b := raw.bytes()
+	mut cur := skip_ws(b, 0)
+	if cur >= b.len || b[cur] != 91 {
+		return error('expected JSON array')
+	}
+	cur = skip_ws(b, cur + 1)
+	if cur < b.len && b[cur] == 93 {
+		return 0
+	}
+	mut count := 0
+	for cur < b.len {
+		elem_end := skip_value(b, cur)
+		if elem_end < 0 {
+			return error('malformed JSON array element')
+		}
+		count = count + 1
+		next_tok := skip_ws(b, elem_end)
+		if next_tok >= b.len {
+			return error('unterminated JSON array')
+		}
+		if b[next_tok] == 93 {
+			return count
+		}
+		if b[next_tok] != 44 {
+			return error('expected comma or closing bracket in JSON array')
+		}
+		cur = next_tok + 1
+	}
+	return error('unterminated JSON array')
+}
+
+// array_get_raw returns the raw JSON representation of element `idx` in a JSON array `[...]`.
+pub fn array_get_raw(raw string, idx int) !string {
+	if idx < 0 {
+		return error('negative JSON array index')
+	}
+	b := raw.bytes()
+	mut cur := skip_ws(b, 0)
+	if cur >= b.len || b[cur] != 91 {
+		return error('expected JSON array')
+	}
+	cur = skip_ws(b, cur + 1)
+	if cur < b.len && b[cur] == 93 {
+		return error('JSON array index out of bounds')
+	}
+	mut cur_idx := 0
+	for cur < b.len {
+		elem_start := skip_ws(b, cur)
+		elem_end := skip_value(b, elem_start)
+		if elem_end < 0 {
+			return error('malformed JSON array element')
+		}
+		if cur_idx == idx {
+			return raw.substr(elem_start, elem_end)
+		}
+		cur_idx = cur_idx + 1
+		next_tok := skip_ws(b, elem_end)
+		if next_tok >= b.len || b[next_tok] == 93 {
+			break
+		}
+		if b[next_tok] != 44 {
+			return error('expected comma in JSON array')
+		}
+		cur = next_tok + 1
+	}
+	return error('JSON array index out of bounds')
+}
+
+// array_get_str returns the unescaped string element at `idx` in a JSON array `[...]`.
+pub fn array_get_str(raw string, idx int) !string {
+	elem_raw := array_get_raw(raw, idx) or {
+		return error(err)
+	}
+	if elem_raw.len < 2 {
+		return error('JSON array element is not a string')
+	}
+	eb := elem_raw.bytes()
+	if eb[0] != 34 || eb[eb.len - 1] != 34 {
+		return error('JSON array element is not a string')
+	}
+	return unescape_slice(eb, 1, eb.len - 1)
+}
+
+// JsonBuilder builds RFC 8259 JSON objects in O(N) byte buffer space without quadratic copies.
+pub struct JsonBuilder {
+pub mut:
+	buf []u8
+	count int
+}
+
+pub fn JsonBuilder.new() JsonBuilder {
+	return JsonBuilder{
+		buf: []u8{},
+		count: 0,
+	}
+}
+
+fn (mut jb JsonBuilder) write_key_prefix(key string) {
+	if jb.count > 0 {
+		jb.buf.push(44) // ','
+	}
+	jb.buf.push(34) // '"'
+	append_escaped_bytes(mut jb.buf, key)
+	jb.buf.push(34) // '"'
+	jb.buf.push(58) // ':'
+	jb.count = jb.count + 1
+}
+
+fn (mut jb JsonBuilder) append_raw_bytes(s string) {
+	b := s.bytes()
+	mut i := 0
+	for i < b.len {
+		jb.buf.push(b[i])
+		i = i + 1
+	}
+}
+
+pub fn (mut jb JsonBuilder) set_str(key string, val string) {
+	jb.write_key_prefix(key)
+	jb.buf.push(34) // '"'
+	append_escaped_bytes(mut jb.buf, val)
+	jb.buf.push(34) // '"'
+}
+
+pub fn (mut jb JsonBuilder) set_int(key string, val int) {
+	jb.write_key_prefix(key)
+	s := '${val}'
+	jb.append_raw_bytes(s)
+}
+
+pub fn (mut jb JsonBuilder) set_i64(key string, val i64) {
+	jb.write_key_prefix(key)
+	s := '${val}'
+	jb.append_raw_bytes(s)
+}
+
+pub fn (mut jb JsonBuilder) set_bool(key string, val bool) {
+	jb.write_key_prefix(key)
+	if val {
+		jb.append_raw_bytes('true')
+	} else {
+		jb.append_raw_bytes('false')
+	}
+}
+
+pub fn (mut jb JsonBuilder) set_null(key string) {
+	jb.write_key_prefix(key)
+	jb.append_raw_bytes('null')
+}
+
+pub fn (mut jb JsonBuilder) set_raw(key string, raw_json string) {
+	jb.write_key_prefix(key)
+	jb.append_raw_bytes(raw_json)
+}
+
+pub fn (jb JsonBuilder) build() string {
+	mut out := []u8{}
+	out.push(123) // '{'
+	mut i := 0
+	for i < jb.buf.len {
+		out.push(jb.buf[i])
+		i = i + 1
+	}
+	out.push(125) // '}'
+	return out.to_string()
+}
+

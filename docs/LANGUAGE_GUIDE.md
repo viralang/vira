@@ -58,7 +58,7 @@
 - **Zero-Allocation Frontend:** The compiler lexer operates at **0 B/op and 0 allocs/op**, tokenizing millions of lines per second without touching the heap.
 - **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and immutable/mutable quadrants.
 - **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored; failure to unwrap via `or { ... }` or propagate via `!` is a compile-time error.
-- **First-Class AI & Tensor Arithmetic:** 2D tensors are language primitives with hardware-accelerated matrix multiplication (`@`) running on AVX2+FMA or ARM NEON.
+- **First-Class AI & N-D Tensor Arithmetic:** 1D–4D strided `tensor[f32]` primitives with batched & broadcast matrix multiplication (`@`), executed by a zero-dependency **multi-threaded CPU SIMD engine** (`AVX2+FMA`, `SSE2`, `ARM NEON`) parallelized across the work-stealing thread pool.
 - **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), executed across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault containment.
 
 ---
@@ -503,34 +503,53 @@ arena {
 
 ---
 
-## 8. First-Class AI Tensors & SIMD Acceleration
+## 8. First-Class AI Tensors & Multi-Threaded CPU SIMD Acceleration
 
-### Tensor Types & Construction
+### 1D–4D Strided Tensor Types & Construction
 
-Tensors are first-class primitives in Vira:
-
-```v
-w := tensor_fill(64, 64, 0.25) // 64x64 tensor filled with 0.25
-x := tensor_fill(64, 64, 2.0)
-```
-
-### Matrix Multiplication (`@`)
-
-The `@` operator computes the dot-product matrix multiplication of two 2D tensors:
+Tensors (`tensor[f32]`) are first-class 1D–4D strided primitives in Vira (`dims[4]`, `strides[4]`, `n_dims`, plus synchronized `rows`/`cols` views for 2D compatibility):
 
 ```v
-y := w @ x // Performs 64x64 @ 64x64 matmul
-total := tensor_sum(y)
+// 2D matrix (M x N)
+w := tensor_fill(64, 64, 0.25)
+
+// 3D sequence batch (Batch x Seq x Hidden)
+hidden := tensor_fill_3d(2, 16, 64, 0.5)
+
+// 4D multi-head attention tensor (Batch x Heads x Seq x HeadDim)
+q := tensor_fill_4d(2, 8, 16, 64, 0.125)
+k := q.transpose() // Swaps last two axes -> (2, 8, 64, 16)
+
+println('ndim=${q.ndim}, numel=${q.numel()}, head_dim=${q.dim(3)}')
 ```
 
-### SIMD Hardware Backends
+Inside `arena { ... }` blocks, `.reshape_2d(...)`, `.reshape_3d(...)`, and `.reshape_4d(...)` return $O(1)$ zero-copy views (`is_view = true`); outside arenas they safely allocate independent autofreed buffers.
 
-The Vira runtime automatically selects the fastest available vector instructions:
+### Batched & Broadcast Matrix Multiplication (`@`) & Bias Broadcasting
 
-- **x86_64 AVX2 + FMA:** 256-bit vector registers (8 single-precision floats per cycle)
+The `@` operator supports:
+- **2D GEMM:** `(M, K) @ (K, N) -> (M, N)`
+- **Batched 3D / 4D Attention MatMul:** `(B, H, M, K) @ (B, H, K, N) -> (B, H, M, N)`
+- **N-D × 2D Linear Projection Broadcast:** `(B, S, K) @ (K, N) -> (B, S, N)`
+
+Element-wise `+`, `-`, and `tensor_elemwise_mul` also support trailing-dimension bias broadcasting (e.g., `(B, S, D) + (1, D)` or `(M, D) + (D)`).
+
+```v
+scores := q @ k           // (2, 8, 16, 16) multi-head attention scores
+proj   := hidden @ w      // (2, 16, 64) broadcasted linear projection
+total  := tensor_sum(proj)
+```
+
+### Multi-Threaded CPU SIMD Hardware Backends (Zero External GPU Drivers)
+
+Vira's built-in tensor runtime is an honest, **100% zero-dependency CPU SIMD engine** (requiring no CUDA, ROCm, or OpenCL installation):
+
+- **x86_64 AVX2 + FMA:** 256-bit vector registers (8 single-precision floats per FMA instruction)
 - **AArch64 NEON:** 128-bit vector registers (4 single-precision floats per cycle)
 - **x86_64 SSE2:** 128-bit vector registers (4 single-precision floats per cycle)
-- **L2 Cache Blocking:** Hierarchical 64×64 cache-tiled matrix multiplication (`@`) keeping intermediate submatrices resident within L1/L2 data cache across all SIMD backends.
+- **L2 Cache Blocking:** Hierarchical 64×64 cache-tiled matrix multiplication (`@`) keeping intermediate submatrices resident within L1/L2 data cache.
+- **Work-Stealing Multi-Core GEMM:** Matrix multiplications exceeding $128^3$ operations automatically partition output row tiles across the Chase-Lev worker thread pool using zero-allocation stack job descriptors.
+- **Native C99 FFI Interop:** External C/GPU libraries can be bound cleanly via `@[intrinsic: '...']` and NUL-terminated string marshaling helpers (`vira_str_cstr` / `vira_str_to_cstr_buf` in `vira_rt.h`).
 
 ---
 
@@ -627,8 +646,8 @@ Actors follow an Erlang-inspired supervision lifecycle:
                                                 [Dead-Letter Rejection]
 ```
 
-1. **Panic Interception:** Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process.
-2. **O(1) Arena Wipe:** The actor's private scratch arena slab is cleared in $O(1)$ time (`isolated_heap.offset = 0`), wiping temporary tensors and state.
+1. **Panic Interception & Stack Defer Unwinding:** Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process. Before `longjmp`, the runtime unwinds the actor's LIFO stack-frame `defer_stack`, deterministically freeing any live local heap strings, slices, tensors, structs, or nested arenas (`active_leaks = 0`).
+2. **O(1) Arena Wipe & Deep Envelope Isolation:** The actor's private scratch arena slab is cleared in $O(1)$ time (`isolated_heap.offset = 0`), and heap-owning message arguments/unconsumed results on async (`<-`) or detached sends are deep-cloned and cleaned up automatically.
 3. **OneForOne Restart:** If consecutive restarts are below `max_restarts` (default: 3), the supervisor increments the restart counter, executes `_supervisor_reset(&self)`, and restores the actor to `VIRA_ACTOR_RUNNING`.
 4. **Consecutive Fault Reset:** A successful message execution resets consecutive `restarts = 0`, ensuring intermittent faults across long-running services do not accumulate toward the limit.
 5. **Dead-Letter Containment (`VIRA_ACTOR_STOPPED`):** If an actor suffers consecutive faults exceeding `max_restarts`, it transitions to `VIRA_ACTOR_STOPPED`. Subsequent message attempts are immediately rejected with error `"Actor has stopped due to unhandled faults"`, protecting downstream queues from cascade failures.

@@ -1808,6 +1808,170 @@ fn main() {
 	})
 }
 
+func TestScorecardAllFiveUpgrades(t *testing.T) {
+	scorecardSrc := `module main
+
+import json
+
+pub struct JobPayload {
+pub:
+	tag string
+	scores []int
+}
+
+fn format_helper_tag(prefix string, n int) string {
+	tmp := 'helper_${prefix}'
+	return '${tmp}_${n}'
+}
+
+pub actor PipelineActor {
+pub:
+	id int
+mut:
+	runs int = 0
+	last_tag string = ''
+}
+
+pub fn (mut p PipelineActor) process(job JobPayload, note string, should_fault bool) string {
+	p.runs = p.runs + 1
+	p.last_tag = job.tag.clone()
+
+	// Allocate multiple heap locals (strings, slices, helper return) BEFORE panic/longjmp!
+	helper_out := format_helper_tag(note, job.scores.len)
+	local_str := 'alloc_${job.tag}_${helper_out}'
+	mut local_sl := []int{10, 20, 30}
+	local_sl.push(40)
+
+	if should_fault {
+		panic('actor_fault:${local_str}')
+	}
+	return 'ok:${local_str}:${local_sl[3]}'
+}
+
+fn main() {
+	// 1. Actor + Autofree + Detached Envelope Deep-Clone + Un-awaited Future Drop + longjmp Stack Unwind
+	mut worker := PipelineActor{ id: 7, runs: 0, last_tag: '' }
+
+	// 1a. Detached send with temporary heap-owning struct, slice, and string args + unconsumed heap return
+	worker <- process(JobPayload{ tag: 'detached_${1}', scores: []int{1, 2} }, 'fire_${1}', false)
+
+	// 1b. Un-awaited Future[string] dropped at block scope exit
+	if true {
+		unawaited := worker <- process(JobPayload{ tag: 'dropped_${2}', scores: []int{3, 4, 5} }, 'drop_${2}', false)
+		println('spawned_unawaited_ok')
+	}
+
+	// 1c. Faulting async message (tests LIFO defer_stack unwind before longjmp + supervisor_reset freeing last_tag)
+	fault_fut := worker <- process(JobPayload{ tag: 'fault_${3}', scores: []int{7, 8} }, 'boom_${3}', true)
+	fault_res := fault_fut.await() or {
+		'caught:${err}'
+	}
+	println('actor_fault_res=${fault_res}')
+
+	// 1d. Post-fault recovery message
+	ok_fut := worker <- process(JobPayload{ tag: 'recov_${4}', scores: []int{9} }, 'clean_${4}', false)
+	ok_res := ok_fut.await() or { 'unexpected_err:${err}' }
+	println('actor_ok_res=${ok_res}')
+
+	// 2. Pure-.vir import json stdlib package + depth-aware C JSON builtin shims
+	mut inner := json.JsonBuilder.new()
+	inner.set_str('name', 'shadow_inner')
+	inner.set_int('count', 999)
+	inner_raw := inner.build()
+
+	mut root := json.JsonBuilder.new()
+	root.set_raw('nested', inner_raw)
+	root.set_raw('arr', '["avx2","4d"]')
+	root.set_str('name', 'vira "nd" engine')
+	root.set_int('count', 42)
+	doc := root.build()
+
+	if !json.is_valid(doc) {
+		panic('invalid built json: ${doc}')
+	}
+	j_name := json.get_str(doc, 'name') or { panic(err) }
+	j_count := json.get_int(doc, 'count') or { panic(err) }
+	arr_raw := json.get_raw(doc, 'arr') or { panic(err) }
+	arr_item := json.array_get_str(arr_raw, 1) or { panic(err) }
+	c_name := json_get_str(doc, 'name')
+	c_count := json_get_int(doc, 'count')
+	println('json_ok=${j_name}|${j_count}|${arr_item}|${c_name}|${c_count}')
+
+	// 3. Multi-threaded CPU SIMD MatMul (>= 128^3 ops fans out across Chase-Lev worker pool)
+	m_a := tensor_fill(256, 256, 0.5)
+	m_b := tensor_fill(256, 256, 0.25)
+	m_c := m_a @ m_b
+	println('mt_matmul_sum=${tensor_sum(m_c)}')
+
+	// 4. Long (>1100 byte) path marshaling via vira_str_to_cstr_buf (no char[1024] truncation)
+	mut long_seg := 'a'
+	mut rep := 0
+	for rep < 11 {
+		long_seg = '${long_seg}${long_seg}'
+		rep = rep + 1
+	}
+	long_missing_path := 'nonexistent_${long_seg}.tmp'
+	exists_long := file_exists(long_missing_path)
+	println('long_path_len=${long_missing_path.len}|exists=${exists_long}')
+
+	// 5. 1D-4D Strided Tensors: 4D batched attention Q @ K.transpose() + 3D @ 2D broadcast + bias broadcast
+	q := tensor_fill_4d(2, 4, 8, 16, 0.25)
+	k := tensor_fill_4d(2, 4, 8, 16, 0.5)
+	kt := k.transpose()
+	scores := q @ kt
+	println('nd_4d=${scores.ndim}|${scores.dim(0)}x${scores.dim(1)}x${scores.dim(2)}x${scores.dim(3)}|sum=${tensor_sum(scores)}')
+
+	arena {
+		flat := tensor_fill(16, 32, 0.5)
+		seq3d := flat.reshape_3d(2, 8, 32)
+		w_proj := tensor_fill(32, 16, 0.25)
+		bias := tensor_fill(1, 16, 1.0)
+		proj3d := (seq3d @ w_proj) + bias
+		println('nd_3d=${proj3d.ndim}|numel=${proj3d.numel()}|sum=${tensor_sum(proj3d)}')
+	}
+}
+`
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "scorecard_all_five.vir")
+	if err := os.WriteFile(srcFile, []byte(scorecardSrc), 0644); err != nil {
+		t.Fatalf("failed to write scorecard test file: %v", err)
+	}
+
+	binName := "vira"
+	if runtime.GOOS == "windows" {
+		binName = "vira.exe"
+	}
+	viraBin, err := filepath.Abs(binName)
+	if err != nil {
+		t.Fatalf("failed to get absolute path to vira: %v", err)
+	}
+
+	runCmd := exec.Command(viraBin, "run", srcFile)
+	runCmd.Dir = "."
+	out, err := runCmd.CombinedOutput()
+	outStr := string(out)
+	if err != nil {
+		t.Fatalf("Scorecard integration test failed (%v):\n%s", err, outStr)
+	}
+
+	expectedSubstrings := []string{
+		"actor_fault_res=caught:actor_fault:alloc_fault_3_helper_boom_3_2",
+		"actor_ok_res=ok:alloc_recov_4_helper_clean_4_1:40",
+		"json_ok=vira \"nd\" engine|42|4d|vira \"nd\" engine|42",
+		"mt_matmul_sum=2097152.00",
+		"long_path_len=2064|exists=false",
+		"nd_4d=4|2x4x8x8|sum=1024.00",
+		"nd_3d=3|numel=256|sum=1280.00",
+		"active_leaks=0",
+	}
+	for _, exp := range expectedSubstrings {
+		if !strings.Contains(outStr, exp) {
+			t.Errorf("missing expected output %q in:\n%s", exp, outStr)
+		}
+	}
+}
+
+
 
 
 

@@ -275,6 +275,29 @@ func (c *Checker) registerBuiltins() {
 		},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["tensor_fill_3d"] = &FnSig{
+		Name:  "tensor_fill_3d",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "d0", Type: TypeInt},
+			{Name: "d1", Type: TypeInt},
+			{Name: "d2", Type: TypeInt},
+			{Name: "val", Type: TypeF32},
+		},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["tensor_fill_4d"] = &FnSig{
+		Name:  "tensor_fill_4d",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "d0", Type: TypeInt},
+			{Name: "d1", Type: TypeInt},
+			{Name: "d2", Type: TypeInt},
+			{Name: "d3", Type: TypeInt},
+			{Name: "val", Type: TypeF32},
+		},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["tensor_sum"] = &FnSig{
 		Name:       "tensor_sum",
 		IsPub:      true,
@@ -1559,6 +1582,15 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		if leftType.Equals(TypeString) && e.Field.Name == "len" {
 			return TypeInt
 		}
+		if tt, ok := leftType.(*TensorType); ok {
+			switch e.Field.Name {
+			case "rows", "cols", "ndim", "n_dims":
+				return TypeInt
+			default:
+				c.errorf(e.SelSpan, "tensor '%s' has no field '%s' (available: .rows, .cols, .ndim)", tt, e.Field.Name)
+				return TypeVoid
+			}
+		}
 		if st, ok := leftType.(*StructType); ok {
 			finfo, path, ambig := st.LookupField(e.Field.Name)
 			if ambig {
@@ -2031,6 +2063,55 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					callName = "string." + callee.Field.Name
 				default:
 					c.errorf(callee.SelSpan, "string has no method '%s'", callee.Field.Name)
+					return TypeVoid
+				}
+			} else if tt, isTensor := recvType.(*TensorType); isTensor {
+				switch callee.Field.Name {
+				case "rows", "cols", "ndim", "numel":
+					sig = &FnSig{Name: callee.Field.Name, Params: nil, ReturnType: TypeInt, Span: callee.SelSpan}
+					callName = "tensor." + callee.Field.Name
+				case "dim", "stride":
+					sig = &FnSig{
+						Name:       callee.Field.Name,
+						Params:     []ParamInfo{{Name: "axis", Type: TypeInt}},
+						ReturnType: TypeInt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor." + callee.Field.Name
+				case "reshape_2d":
+					sig = &FnSig{
+						Name:       "reshape_2d",
+						Params:     []ParamInfo{{Name: "d0", Type: TypeInt}, {Name: "d1", Type: TypeInt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.reshape_2d"
+				case "reshape_3d":
+					sig = &FnSig{
+						Name:       "reshape_3d",
+						Params:     []ParamInfo{{Name: "d0", Type: TypeInt}, {Name: "d1", Type: TypeInt}, {Name: "d2", Type: TypeInt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.reshape_3d"
+				case "reshape_4d":
+					sig = &FnSig{
+						Name:       "reshape_4d",
+						Params:     []ParamInfo{{Name: "d0", Type: TypeInt}, {Name: "d1", Type: TypeInt}, {Name: "d2", Type: TypeInt}, {Name: "d3", Type: TypeInt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.reshape_4d"
+				case "transpose", "clone":
+					sig = &FnSig{
+						Name:       callee.Field.Name,
+						Params:     nil,
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor." + callee.Field.Name
+				default:
+					c.errorf(callee.SelSpan, "tensor '%s' has no method '%s'", tt, callee.Field.Name)
 					return TypeVoid
 				}
 			} else if st, ok := recvType.(*StructType); ok {
