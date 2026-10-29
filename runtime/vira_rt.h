@@ -25,6 +25,13 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <direct.h>
+#include <sys/stat.h>
+#include <process.h>
+#include <ctype.h>
 typedef SOCKET vira_socket_t;
 #define VIRA_INVALID_SOCKET INVALID_SOCKET
 #define VIRA_SOCKET_ERROR SOCKET_ERROR
@@ -39,6 +46,17 @@ typedef SOCKET vira_socket_t;
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <dirent.h>
+#include <ctype.h>
+#if defined(__linux__)
+#include <sys/mount.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#endif
 
 typedef int vira_socket_t;
 #define VIRA_INVALID_SOCKET -1
@@ -113,6 +131,28 @@ static inline void _vira_record_free(void) {
 typedef float vira_f32;
 typedef uint16_t vira_bf16;
 
+static int _vira_argc = 0;
+static char **_vira_argv = NULL;
+static bool _vira_quiet_rt = false;
+
+static inline void _vira_rt_init_args(int argc, char **argv) {
+  _vira_argc = argc;
+  _vira_argv = argv;
+}
+
+static inline void _vira_rt_free_args(void) {
+  // Global argv pointers are borrowed from OS process heap
+}
+
+static inline void vira_os_set_quiet_rt(bool q) {
+  _vira_quiet_rt = q;
+}
+
+static inline void vira_os_exit(int32_t code) {
+  _vira_rt_free_args();
+  exit(code);
+}
+
 // ============================================================================
 // 1. VEX STRING (16 BYTES: ZERO-ALLOC LITERALS + HEAP STRINGS)
 // ============================================================================
@@ -138,6 +178,17 @@ static inline bool vira_str_eq(vira_string a, vira_string b) {
   if (a.data == NULL || b.data == NULL)
     return false;
   return memcmp(a.data, b.data, (size_t)a.len) == 0;
+}
+
+static inline int32_t vira_str_cmp(vira_string a, vira_string b) {
+  int32_t min_len = a.len < b.len ? a.len : b.len;
+  if (min_len > 0 && a.data && b.data) {
+    int res = memcmp(a.data, b.data, (size_t)min_len);
+    if (res != 0) return res < 0 ? -1 : 1;
+  }
+  if (a.len < b.len) return -1;
+  if (a.len > b.len) return 1;
+  return 0;
 }
 
 static inline vira_string vira_str_format(const char *fmt, ...) {
@@ -254,6 +305,20 @@ static inline void vira_cstr_free(char *cstr) {
   }
 }
 
+static inline vira_string vira_str_from_cstr(const char *cstr) {
+  if (cstr == NULL) return vira_str_lit("", 0);
+  size_t len = strlen(cstr);
+  char *buf = (char *)malloc(len + 1);
+  if (!buf) {
+    fprintf(stderr, "vira panic: out of memory in vira_str_from_cstr\n");
+    exit(1);
+  }
+  memcpy(buf, cstr, len);
+  buf[len] = '\0';
+  _vira_record_alloc();
+  return (vira_string){.data = (const uint8_t *)buf, .len = (int32_t)len, .is_lit = false};
+}
+
 // ============================================================================
 // 1.5. VIRA DYNAMIC SLICE RUNTIME (`[]T`) & FIXED ARRAYS (`[N]T`)
 // ============================================================================
@@ -367,6 +432,20 @@ static inline void _vira_slice_free_raw(void **data_ptr, int32_t *len_ptr,
     return res;                                                                \
   }                                                                            \
                                                                                \
+  static inline vira_slice_##TYPE_NAME vira_slice_##TYPE_NAME##_subslice(      \
+      const vira_slice_##TYPE_NAME *s, int32_t start, int32_t end) {          \
+    if (start < 0) start = 0;                                                  \
+    if (end > s->len) end = s->len;                                            \
+    if (start > end) start = end;                                              \
+    int32_t count = end - start;                                               \
+    vira_slice_##TYPE_NAME res = vira_slice_##TYPE_NAME##_new(count);          \
+    if (count > 0 && s->data != NULL) {                                        \
+      memcpy(res.data, s->data + start, (size_t)count * sizeof(C_TYPE));       \
+      res.len = count;                                                         \
+    }                                                                          \
+    return res;                                                                \
+  }                                                                            \
+                                                                               \
   static inline bool vira_slice_##TYPE_NAME##_contains(                        \
       const vira_slice_##TYPE_NAME *s, C_TYPE val) {                           \
     for (int32_t i = 0; i < s->len; i++) {                                     \
@@ -381,18 +460,38 @@ static inline void _vira_slice_free_raw(void **data_ptr, int32_t *len_ptr,
     _vira_slice_free_raw((void **)&s->data, &s->len, &s->cap, s->is_arena);    \
   }
 
+#ifndef _vira_slice_u8_DEFINED
+#define _vira_slice_u8_DEFINED
 VIRA_DEFINE_SLICE_TYPE(u8, uint8_t)
+#endif
+#ifndef _vira_slice_int_DEFINED
+#define _vira_slice_int_DEFINED
 VIRA_DEFINE_SLICE_TYPE(int, int32_t)
+#endif
+#ifndef _vira_slice_i64_DEFINED
+#define _vira_slice_i64_DEFINED
 VIRA_DEFINE_SLICE_TYPE(i64, int64_t)
+#endif
+#ifndef _vira_slice_f32_DEFINED
+#define _vira_slice_f32_DEFINED
 VIRA_DEFINE_SLICE_TYPE(f32, vira_f32)
+#endif
+#ifndef _vira_slice_f64_DEFINED
+#define _vira_slice_f64_DEFINED
 VIRA_DEFINE_SLICE_TYPE(f64, double)
+#endif
+#ifndef _vira_slice_bool_DEFINED
+#define _vira_slice_bool_DEFINED
 VIRA_DEFINE_SLICE_TYPE(bool, bool)
+#endif
 
 static inline vira_string vira_str_char_at(vira_string s, int32_t idx) {
   vira_bounds_check(idx, s.len, __FILE__, __LINE__);
   return (vira_string){.data = &s.data[idx], .len = 1, .is_lit = true};
 }
 
+#ifndef _vira_slice_string_DEFINED
+#define _vira_slice_string_DEFINED
 // Slice for vira_string
 typedef struct {
   vira_string *data;
@@ -400,6 +499,7 @@ typedef struct {
   int32_t cap;
   bool is_arena;
 } vira_slice_string;
+#endif
 
 static inline vira_slice_string vira_slice_string_new(int32_t initial_cap) {
   vira_slice_string s = {.data = NULL, .len = 0, .cap = 0, .is_arena = false};
@@ -466,6 +566,19 @@ vira_slice_string_clone(const vira_slice_string *s) {
   return res;
 }
 
+static inline vira_slice_string
+vira_slice_string_subslice(const vira_slice_string *s, int32_t start, int32_t end) {
+  if (start < 0) start = 0;
+  if (end > s->len) end = s->len;
+  if (start > end) start = end;
+  int32_t count = end - start;
+  vira_slice_string res = vira_slice_string_new(count);
+  for (int32_t i = 0; i < count; i++) {
+    vira_slice_string_push(&res, vira_str_clone(s->data[start + i]));
+  }
+  return res;
+}
+
 static inline void vira_slice_string_free(vira_slice_string *s) {
   if (s->data != NULL && !s->is_arena) {
     for (int32_t i = 0; i < s->len; i++) {
@@ -478,6 +591,41 @@ static inline void vira_slice_string_free(vira_slice_string *s) {
   s->len = 0;
   s->cap = 0;
 }
+
+static inline vira_slice_string vira_os_args(void) {
+  vira_slice_string s = vira_slice_string_new(_vira_argc);
+  for (int i = 0; i < _vira_argc; i++) {
+    vira_slice_string_push(&s, vira_str_from_cstr(_vira_argv[i]));
+  }
+  return s;
+}
+
+#ifndef _Result_u8_DEFINED
+#define _Result_u8_DEFINED
+typedef struct {
+  bool is_err;
+  vira_string err;
+  uint8_t val;
+} Result_u8;
+#endif
+
+#ifndef _Result_f32_DEFINED
+#define _Result_f32_DEFINED
+typedef struct {
+  bool is_err;
+  vira_string err;
+  vira_f32 val;
+} Result_f32;
+#endif
+
+#ifndef _Result_f64_DEFINED
+#define _Result_f64_DEFINED
+typedef struct {
+  bool is_err;
+  vira_string err;
+  double val;
+} Result_f64;
+#endif
 
 #ifndef _Result_int_DEFINED
 #define _Result_int_DEFINED
@@ -622,13 +770,13 @@ static inline Result_int vira_str_to_int(vira_string s) {
     return (Result_int){.is_err = true,
                         .err = vira_str_lit("empty string", 12)};
   }
-  char buf[64];
-  int32_t copy_len = s.len < 63 ? s.len : 63;
-  memcpy(buf, s.data, (size_t)copy_len);
-  buf[copy_len] = '\0';
+  char stack_buf[128];
+  vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
   char *endptr = NULL;
-  long val = strtol(buf, &endptr, 10);
-  if (endptr == buf || *endptr != '\0') {
+  long val = strtol(b.ptr, &endptr, 10);
+  bool valid = (endptr != b.ptr && *endptr == '\0');
+  vira_cstr_buf_free(&b);
+  if (!valid) {
     return (Result_int){.is_err = true,
                         .err = vira_str_lit("invalid integer format", 22)};
   }
@@ -640,17 +788,210 @@ static inline Result_i64 vira_str_to_i64(vira_string s) {
     return (Result_i64){.is_err = true,
                         .err = vira_str_lit("empty string", 12)};
   }
-  char buf[64];
-  int32_t copy_len = s.len < 63 ? s.len : 63;
-  memcpy(buf, s.data, (size_t)copy_len);
-  buf[copy_len] = '\0';
+  char stack_buf[128];
+  vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
   char *endptr = NULL;
-  long long val = strtoll(buf, &endptr, 10);
-  if (endptr == buf || *endptr != '\0') {
+  long long val = strtoll(b.ptr, &endptr, 10);
+  bool valid = (endptr != b.ptr && *endptr == '\0');
+  vira_cstr_buf_free(&b);
+  if (!valid) {
     return (Result_i64){.is_err = true,
                         .err = vira_str_lit("invalid integer format", 22)};
   }
   return (Result_i64){.is_err = false, .val = (int64_t)val};
+}
+
+static inline Result_f64 vira_str_to_f64(vira_string s) {
+  if (s.len == 0 || s.data == NULL) {
+    return (Result_f64){.is_err = true, .err = vira_str_lit("empty string", 12)};
+  }
+  char stack_buf[128];
+  vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
+  char *endptr = NULL;
+  double val = strtod(b.ptr, &endptr);
+  bool valid = (endptr != b.ptr && *endptr == '\0');
+  vira_cstr_buf_free(&b);
+  if (!valid) {
+    return (Result_f64){.is_err = true, .err = vira_str_lit("invalid float format", 20)};
+  }
+  return (Result_f64){.is_err = false, .val = val};
+}
+
+static inline Result_f32 vira_str_to_f32(vira_string s) {
+  Result_f64 r = vira_str_to_f64(s);
+  if (r.is_err) {
+    return (Result_f32){.is_err = true, .err = r.err};
+  }
+  return (Result_f32){.is_err = false, .val = (vira_f32)r.val};
+}
+
+static inline Result_i64 vira_str_parse_i64_base(vira_string s, int32_t base) {
+  if (s.len == 0 || s.data == NULL || base < 2 || base > 36) {
+    return (Result_i64){.is_err = true, .err = vira_str_lit("invalid base or empty string", 28)};
+  }
+  char stack_buf[128];
+  vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
+  char *endptr = NULL;
+  errno = 0;
+  long long val = strtoll(b.ptr, &endptr, base);
+  bool valid = (endptr != b.ptr && *endptr == '\0' && errno == 0);
+  vira_cstr_buf_free(&b);
+  if (!valid) {
+    return (Result_i64){.is_err = true, .err = vira_str_lit("invalid integer format for base", 31)};
+  }
+  return (Result_i64){.is_err = false, .val = (int64_t)val};
+}
+
+static inline vira_string vira_str_format_i64_base(int64_t v, int32_t base) {
+  if (base < 2 || base > 36) base = 10;
+  if (base == 10) {
+    return vira_str_format("%lld", (long long)v);
+  }
+  if (base == 16) {
+    return vira_str_format("%llx", (unsigned long long)v);
+  }
+  if (base == 8) {
+    return vira_str_format("%llo", (unsigned long long)v);
+  }
+  char buf[70];
+  int idx = 69;
+  buf[idx--] = '\0';
+  bool neg = (v < 0 && base == 10);
+  uint64_t uv = neg ? (uint64_t)(-v) : (uint64_t)v;
+  if (uv == 0) {
+    buf[idx--] = '0';
+  } else {
+    const char *digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    while (uv > 0) {
+      buf[idx--] = digits[uv % (uint64_t)base];
+      uv /= (uint64_t)base;
+    }
+    if (neg) {
+      buf[idx--] = '-';
+    }
+  }
+  return vira_str_from_cstr(&buf[idx + 1]);
+}
+
+static inline Result_u8 vira_str_byte_at(vira_string s, int32_t idx) {
+  if (idx < 0 || idx >= s.len || s.data == NULL) {
+    return (Result_u8){.is_err = true, .err = vira_str_lit("index out of bounds", 19)};
+  }
+  return (Result_u8){.is_err = false, .val = (uint8_t)s.data[idx]};
+}
+
+static inline int32_t vira_str_last_index_of(vira_string s, vira_string sub) {
+  if (sub.len == 0) return s.len;
+  if (s.len < sub.len || s.data == NULL || sub.data == NULL) return -1;
+  for (int32_t i = s.len - sub.len; i >= 0; i--) {
+    if (memcmp(s.data + i, sub.data, (size_t)sub.len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static inline vira_string vira_str_trim_left(vira_string s) {
+  if (s.len == 0 || s.data == NULL) return s;
+  int32_t start = 0;
+  while (start < s.len && (s.data[start] == ' ' || s.data[start] == '\t' || s.data[start] == '\n' || s.data[start] == '\r')) {
+    start++;
+  }
+  return (vira_string){.data = s.data + start, .len = s.len - start, .is_lit = true};
+}
+
+static inline vira_string vira_str_trim_right(vira_string s) {
+  if (s.len == 0 || s.data == NULL) return s;
+  int32_t end = s.len;
+  while (end > 0 && (s.data[end - 1] == ' ' || s.data[end - 1] == '\t' || s.data[end - 1] == '\n' || s.data[end - 1] == '\r')) {
+    end--;
+  }
+  return (vira_string){.data = s.data, .len = end, .is_lit = true};
+}
+
+static inline vira_string vira_str_repeat(vira_string s, int32_t count) {
+  if (count <= 0 || s.len == 0 || s.data == NULL) {
+    return vira_str_lit("", 0);
+  }
+  size_t total = (size_t)s.len * (size_t)count;
+  char *buf = (char *)malloc(total + 1);
+  if (!buf) {
+    fprintf(stderr, "vira panic: out of memory in str.repeat\n");
+    exit(1);
+  }
+  for (int32_t i = 0; i < count; i++) {
+    memcpy(buf + ((size_t)i * (size_t)s.len), s.data, (size_t)s.len);
+  }
+  buf[total] = '\0';
+  _vira_record_alloc();
+  return (vira_string){.data = (const uint8_t *)buf, .len = (int32_t)total, .is_lit = false};
+}
+
+static inline vira_string vira_str_replace(vira_string s, vira_string old_sub, vira_string new_sub) {
+  if (s.len == 0 || s.data == NULL || old_sub.len == 0 || old_sub.data == NULL) {
+    return vira_str_clone(s);
+  }
+  int32_t count = 0;
+  int32_t idx = 0;
+  while (idx <= s.len - old_sub.len) {
+    if (memcmp(s.data + idx, old_sub.data, (size_t)old_sub.len) == 0) {
+      count++;
+      idx += old_sub.len;
+    } else {
+      idx++;
+    }
+  }
+  if (count == 0) {
+    return vira_str_clone(s);
+  }
+  size_t new_len = (size_t)s.len + (size_t)count * (size_t)(new_sub.len - old_sub.len);
+  char *buf = (char *)malloc(new_len + 1);
+  if (!buf) {
+    fprintf(stderr, "vira panic: out of memory in str.replace\n");
+    exit(1);
+  }
+  size_t dst = 0;
+  idx = 0;
+  while (idx < s.len) {
+    if (idx <= s.len - old_sub.len && memcmp(s.data + idx, old_sub.data, (size_t)old_sub.len) == 0) {
+      if (new_sub.len > 0) {
+        memcpy(buf + dst, new_sub.data, (size_t)new_sub.len);
+        dst += (size_t)new_sub.len;
+      }
+      idx += old_sub.len;
+    } else {
+      buf[dst++] = s.data[idx++];
+    }
+  }
+  buf[new_len] = '\0';
+  _vira_record_alloc();
+  return (vira_string){.data = (const uint8_t *)buf, .len = (int32_t)new_len, .is_lit = false};
+}
+
+static inline vira_slice_string vira_str_lines(vira_string s) {
+  vira_slice_string res = vira_slice_string_new(8);
+  if (s.len == 0 || s.data == NULL) {
+    return res;
+  }
+  int32_t start = 0;
+  for (int32_t i = 0; i < s.len; i++) {
+    if (s.data[i] == '\n') {
+      int32_t line_end = i;
+      if (line_end > start && s.data[line_end - 1] == '\r') {
+        line_end--;
+      }
+      vira_slice_string_push(&res, vira_str_substr(s, start, line_end));
+      start = i + 1;
+    }
+  }
+  if (start <= s.len) {
+    int32_t line_end = s.len;
+    if (line_end > start && s.data[line_end - 1] == '\r') {
+      line_end--;
+    }
+    vira_slice_string_push(&res, vira_str_substr(s, start, line_end));
+  }
+  return res;
 }
 
 static inline vira_slice_string vira_str_split(vira_string s, vira_string sep) {
@@ -2514,6 +2855,21 @@ static inline void vira_future_free(vira_future *f) {
 // 5. BUILTIN I/O & DIAGNOSTICS
 // ============================================================================
 
+static inline void vira_print(vira_string s) {
+  if (s.data != NULL && s.len > 0) {
+    fwrite(s.data, 1, (size_t)s.len, stdout);
+    fflush(stdout);
+  }
+}
+
+static inline void vira_print_temp(vira_string s) {
+  vira_print(s);
+  if (!s.is_lit && s.data != NULL) {
+    free((void *)s.data);
+    _vira_record_free();
+  }
+}
+
 static inline void vira_println(vira_string s) {
   if (s.data != NULL && s.len > 0) {
     fwrite(s.data, 1, (size_t)s.len, stdout);
@@ -2530,11 +2886,27 @@ static inline void vira_println_temp(vira_string s) {
   }
 }
 
+static inline void vira_eprint(vira_string s) {
+  if (s.data != NULL && s.len > 0) {
+    fwrite(s.data, 1, (size_t)s.len, stderr);
+    fflush(stderr);
+  }
+}
+
+static inline void vira_eprint_temp(vira_string s) {
+  vira_eprint(s);
+  if (!s.is_lit && s.data != NULL) {
+    free((void *)s.data);
+    _vira_record_free();
+  }
+}
+
 static inline void vira_eprintln(vira_string s) {
   if (s.data != NULL && s.len > 0) {
     fwrite(s.data, 1, (size_t)s.len, stderr);
   }
   fputc('\n', stderr);
+  fflush(stderr);
 }
 
 static inline void vira_eprintln_temp(vira_string s) {
@@ -2543,6 +2915,30 @@ static inline void vira_eprintln_temp(vira_string s) {
     free((void *)s.data);
     _vira_record_free();
   }
+}
+
+static inline void vira_time_sleep_ms(int64_t ms) {
+  if (ms <= 0) return;
+#ifdef _WIN32
+  Sleep((DWORD)ms);
+#else
+  struct timespec ts;
+  ts.tv_sec = ms / 1000;
+  ts.tv_nsec = (ms % 1000) * 1000000L;
+  nanosleep(&ts, NULL);
+#endif
+}
+
+static inline void vira_time_sleep_us(int64_t us) {
+  if (us <= 0) return;
+#ifdef _WIN32
+  Sleep((DWORD)((us + 999) / 1000));
+#else
+  struct timespec ts;
+  ts.tv_sec = us / 1000000;
+  ts.tv_nsec = (us % 1000000) * 1000L;
+  nanosleep(&ts, NULL);
+#endif
 }
 
 static inline int64_t vira_time_now_us(void) {
@@ -2599,6 +2995,21 @@ static inline bool vira_file_exists(vira_string path) {
     return true;
   }
   return false;
+}
+
+static inline bool vira_dir_exists(vira_string path) {
+  char stack_path[1024];
+  vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
+#ifdef _WIN32
+  DWORD attr = GetFileAttributesA(pbuf.ptr);
+  vira_cstr_buf_free(&pbuf);
+  return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0);
+#else
+  struct stat st;
+  int res = stat(pbuf.ptr, &st);
+  vira_cstr_buf_free(&pbuf);
+  return (res == 0 && S_ISDIR(st.st_mode));
+#endif
 }
 
 static inline Result_string vira_read_file(vira_string path) {
@@ -4500,9 +4911,1168 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_tensor_f32 table,
   return out;
 }
 
+// ============================================================================
+// 8. C STANDARD LIBRARY SHIMS (STDIO, CTYPE, MATH, TIME)
+// ============================================================================
+
+static inline Result_string vira_io_read_line(void) {
+  size_t cap = 128;
+  size_t len = 0;
+  char *buf = (char *)malloc(cap);
+  if (!buf) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("out of memory reading stdin", 27)};
+  }
+  int c;
+  while ((c = fgetc(stdin)) != EOF) {
+    if (c == '\r') continue;
+    if (c == '\n') break;
+    if (len + 1 >= cap) {
+      cap *= 2;
+      char *nb = (char *)realloc(buf, cap);
+      if (!nb) {
+        free(buf);
+        return (Result_string){.is_err = true, .err = vira_str_lit("out of memory reading line", 26)};
+      }
+      buf = nb;
+    }
+    buf[len++] = (char)c;
+  }
+  if (len == 0 && c == EOF) {
+    free(buf);
+    return (Result_string){.is_err = true, .err = vira_str_lit("EOF", 3)};
+  }
+  buf[len] = '\0';
+  _vira_record_alloc();
+  return (Result_string){.is_err = false, .val = (vira_string){.data = (const uint8_t *)buf, .len = (int32_t)len, .is_lit = false}};
+}
+
+static inline Result_string vira_io_read_all_stdin(void) {
+  size_t cap = 1024;
+  size_t len = 0;
+  char *buf = (char *)malloc(cap);
+  if (!buf) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("out of memory", 13)};
+  }
+  char chunk[4096];
+  size_t n;
+  while ((n = fread(chunk, 1, sizeof(chunk), stdin)) > 0) {
+    if (len + n + 1 > cap) {
+      while (len + n + 1 > cap) cap *= 2;
+      char *nb = (char *)realloc(buf, cap);
+      if (!nb) {
+        free(buf);
+        return (Result_string){.is_err = true, .err = vira_str_lit("out of memory", 13)};
+      }
+      buf = nb;
+    }
+    memcpy(buf + len, chunk, n);
+    len += n;
+  }
+  buf[len] = '\0';
+  _vira_record_alloc();
+  return (Result_string){.is_err = false, .val = (vira_string){.data = (const uint8_t *)buf, .len = (int32_t)len, .is_lit = false}};
+}
+
+static inline Result_bool vira_io_rename(vira_string old_p, vira_string new_p) {
+  char s_old[1024], s_new[1024];
+  vira_cstr_buf b_old = vira_str_to_cstr_buf(old_p, s_old, sizeof(s_old));
+  vira_cstr_buf b_new = vira_str_to_cstr_buf(new_p, s_new, sizeof(s_new));
+  int res = rename(b_old.ptr, b_new.ptr);
+  vira_cstr_buf_free(&b_old);
+  vira_cstr_buf_free(&b_new);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("rename error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_bool vira_io_remove(vira_string path) {
+  char s_p[1024];
+  vira_cstr_buf b = vira_str_to_cstr_buf(path, s_p, sizeof(s_p));
+  int res = remove(b.ptr);
+  vira_cstr_buf_free(&b);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("remove error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_string vira_io_temp_file(void) {
+#ifdef _WIN32
+  char tmp_dir[MAX_PATH];
+  GetTempPathA(MAX_PATH, tmp_dir);
+  char tmp_file[MAX_PATH];
+  if (GetTempFileNameA(tmp_dir, "vir", 0, tmp_file) == 0) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("failed to create temp file", 26)};
+  }
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(tmp_file)};
+#else
+  char pattern[] = "/tmp/vira_tmp_XXXXXX";
+  int fd = mkstemp(pattern);
+  if (fd < 0) {
+    return (Result_string){.is_err = true, .err = vira_str_format("mkstemp error: %s", strerror(errno))};
+  }
+  close(fd);
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(pattern)};
+#endif
+}
+
+static inline bool vira_ctype_is_alpha(int32_t c) { return isalpha((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_digit(int32_t c) { return isdigit((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_alnum(int32_t c) { return isalnum((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_space(int32_t c) { return isspace((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_upper(int32_t c) { return isupper((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_lower(int32_t c) { return islower((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_xdigit(int32_t c) { return isxdigit((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_print(int32_t c) { return isprint((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_punct(int32_t c) { return ispunct((unsigned char)c) != 0; }
+static inline bool vira_ctype_is_cntrl(int32_t c) { return iscntrl((unsigned char)c) != 0; }
+static inline int32_t vira_ctype_to_lower(int32_t c) { return tolower((unsigned char)c); }
+static inline int32_t vira_ctype_to_upper(int32_t c) { return toupper((unsigned char)c); }
+
+static inline double vira_math_sin(double x) { return sin(x); }
+static inline double vira_math_cos(double x) { return cos(x); }
+static inline double vira_math_tan(double x) { return tan(x); }
+static inline double vira_math_asin(double x) { return asin(x); }
+static inline double vira_math_acos(double x) { return acos(x); }
+static inline double vira_math_atan(double x) { return atan(x); }
+static inline double vira_math_atan2(double y, double x) { return atan2(y, x); }
+static inline double vira_math_sinh(double x) { return sinh(x); }
+static inline double vira_math_cosh(double x) { return cosh(x); }
+static inline double vira_math_tanh(double x) { return tanh(x); }
+static inline double vira_math_exp(double x) { return exp(x); }
+static inline double vira_math_exp2(double x) { return exp2(x); }
+static inline double vira_math_log(double x) { return log(x); }
+static inline double vira_math_log2(double x) { return log2(x); }
+static inline double vira_math_log10(double x) { return log10(x); }
+static inline double vira_math_pow(double x, double y) { return pow(x, y); }
+static inline double vira_math_sqrt(double x) { return sqrt(x); }
+static inline double vira_math_cbrt(double x) { return cbrt(x); }
+static inline double vira_math_hypot(double x, double y) { return hypot(x, y); }
+static inline double vira_math_abs(double x) { return fabs(x); }
+static inline int32_t vira_math_abs_int(int32_t x) { return x < 0 ? -x : x; }
+static inline int64_t vira_math_abs_i64(int64_t x) { return x < 0 ? -x : x; }
+static inline double vira_math_floor(double x) { return floor(x); }
+static inline double vira_math_ceil(double x) { return ceil(x); }
+static inline double vira_math_round(double x) { return round(x); }
+static inline double vira_math_trunc(double x) { return trunc(x); }
+static inline double vira_math_fmod(double x, double y) { return fmod(x, y); }
+static inline bool vira_math_is_nan(double x) { return isnan(x) != 0; }
+static inline bool vira_math_is_inf(double x) { return isinf(x) != 0; }
+static inline void vira_math_srand(uint32_t seed) { srand((unsigned int)seed); }
+static inline int32_t vira_math_rand_int(int32_t min_v, int32_t max_v) {
+  if (min_v >= max_v) return min_v;
+  return min_v + (rand() % (max_v - min_v + 1));
+}
+static inline double vira_math_rand_f64(void) {
+  return (double)rand() / (double)RAND_MAX;
+}
+
+static int _cmp_vira_int(const void *a, const void *b) {
+  int32_t ia = *(const int32_t *)a;
+  int32_t ib = *(const int32_t *)b;
+  return (ia > ib) - (ia < ib);
+}
+static inline void vira_math_sort_ints(vira_slice_int *s) {
+  if (s != NULL && s->data != NULL && s->len > 1) {
+    qsort(s->data, (size_t)s->len, sizeof(int32_t), _cmp_vira_int);
+  }
+}
+
+static int _cmp_vira_f64(const void *a, const void *b) {
+  double fa = *(const double *)a;
+  double fb = *(const double *)b;
+  return (fa > fb) - (fa < fb);
+}
+static inline void vira_math_sort_f64s(vira_slice_f64 *s) {
+  if (s != NULL && s->data != NULL && s->len > 1) {
+    qsort(s->data, (size_t)s->len, sizeof(double), _cmp_vira_f64);
+  }
+}
+
+static int _cmp_vira_str(const void *a, const void *b) {
+  const vira_string *sa = (const vira_string *)a;
+  const vira_string *sb = (const vira_string *)b;
+  int32_t min_len = sa->len < sb->len ? sa->len : sb->len;
+  if (min_len > 0 && sa->data != NULL && sb->data != NULL) {
+    int c = memcmp(sa->data, sb->data, (size_t)min_len);
+    if (c != 0) return c;
+  }
+  return sa->len - sb->len;
+}
+static inline void vira_strings_sort(vira_slice_string *s) {
+  if (s != NULL && s->data != NULL && s->len > 1) {
+    qsort(s->data, (size_t)s->len, sizeof(vira_string), _cmp_vira_str);
+  }
+}
+
+static inline int64_t vira_time_now_unix(void) {
+  return (int64_t)time(NULL);
+}
+
+static inline int64_t vira_time_now_ns(void) {
+#if defined(_WIN32)
+  static LARGE_INTEGER freq;
+  static int init = 0;
+  if (!init) {
+    QueryPerformanceFrequency(&freq);
+    init = 1;
+  }
+  LARGE_INTEGER counter;
+  QueryPerformanceCounter(&counter);
+  return (int64_t)((counter.QuadPart * 1000000000LL) / freq.QuadPart);
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
+}
+
+static inline int64_t vira_time_monotonic_ns(void) {
+#if defined(_WIN32)
+  static LARGE_INTEGER freq;
+  static int init = 0;
+  if (!init) {
+    QueryPerformanceFrequency(&freq);
+    init = 1;
+  }
+  LARGE_INTEGER counter;
+  QueryPerformanceCounter(&counter);
+  return (int64_t)((counter.QuadPart * 1000000000LL) / freq.QuadPart);
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
+}
+
+static inline Result_string vira_time_strftime(vira_string fmt, int64_t unix_sec, bool utc) {
+  char stack_fmt[256];
+  vira_cstr_buf fb = vira_str_to_cstr_buf(fmt, stack_fmt, sizeof(stack_fmt));
+  time_t t = (time_t)unix_sec;
+  struct tm tm_buf;
+#ifdef _WIN32
+  if (utc) gmtime_s(&tm_buf, &t);
+  else localtime_s(&tm_buf, &t);
+#else
+  if (utc) gmtime_r(&t, &tm_buf);
+  else localtime_r(&t, &tm_buf);
+#endif
+  char out_buf[256];
+  size_t n = strftime(out_buf, sizeof(out_buf), fb.ptr, &tm_buf);
+  vira_cstr_buf_free(&fb);
+  if (n == 0) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("strftime formatting failed", 26)};
+  }
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(out_buf)};
+}
+
+// ============================================================================
+// 9. SYSTEMS, PROCESS, SIGNALS & CONTAINER RUNTIME SHIMS
+// ============================================================================
+
+#define _VIRA_SIG_QUEUE_CAP 16
+static volatile sig_atomic_t _vira_sig_queue[_VIRA_SIG_QUEUE_CAP];
+static volatile sig_atomic_t _vira_sig_head = 0;
+static volatile sig_atomic_t _vira_sig_tail = 0;
+
+static void _vira_sig_handler(int sig) {
+  int next = (_vira_sig_head + 1) % _VIRA_SIG_QUEUE_CAP;
+  if (next != _vira_sig_tail) {
+    _vira_sig_queue[_vira_sig_head] = sig;
+    _vira_sig_head = next;
+  }
+}
+
+static inline Result_bool vira_sys_signal_notify(vira_slice_int sigs) {
+  for (int32_t i = 0; i < sigs.len; i++) {
+    signal(sigs.data[i], _vira_sig_handler);
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline int32_t vira_sys_signal_poll(void) {
+  if (_vira_sig_tail == _vira_sig_head) {
+    return 0;
+  }
+  int sig = _vira_sig_queue[_vira_sig_tail];
+  _vira_sig_tail = (_vira_sig_tail + 1) % _VIRA_SIG_QUEUE_CAP;
+  return sig;
+}
+
+static inline int32_t vira_sys_signal_wait(void) {
+  while (1) {
+    int sig = vira_sys_signal_poll();
+    if (sig != 0) return sig;
+    vira_time_sleep_ms(10);
+  }
+}
+
+static inline int32_t vira_sys_errno(void) {
+  return (int32_t)errno;
+}
+
+static inline vira_string vira_sys_strerror(int32_t err) {
+  return vira_str_from_cstr(strerror(err));
+}
+
+#define VIRA_O_RDONLY   0
+#define VIRA_O_WRONLY   1
+#define VIRA_O_RDWR     2
+#define VIRA_O_CREAT    0x40
+#define VIRA_O_EXCL     0x80
+#define VIRA_O_TRUNC    0x200
+#define VIRA_O_APPEND   0x400
+
+static inline Result_int vira_sys_open(vira_string path, int32_t flags, int32_t mode) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+  int native_flags = 0;
+  int acc = flags & 3;
+#ifdef _WIN32
+  if (acc == VIRA_O_WRONLY) native_flags |= _O_WRONLY;
+  else if (acc == VIRA_O_RDWR) native_flags |= _O_RDWR;
+  else native_flags |= _O_RDONLY;
+  if (flags & VIRA_O_CREAT) native_flags |= _O_CREAT;
+  if (flags & VIRA_O_EXCL) native_flags |= _O_EXCL;
+  if (flags & VIRA_O_TRUNC) native_flags |= _O_TRUNC;
+  if (flags & VIRA_O_APPEND) native_flags |= _O_APPEND;
+  native_flags |= _O_BINARY;
+  int fd = _open(p.ptr, native_flags, mode == 0 ? 0666 : mode);
+#else
+  if (acc == VIRA_O_WRONLY) native_flags |= O_WRONLY;
+  else if (acc == VIRA_O_RDWR) native_flags |= O_RDWR;
+  else native_flags |= O_RDONLY;
+  if (flags & VIRA_O_CREAT) native_flags |= O_CREAT;
+  if (flags & VIRA_O_EXCL) native_flags |= O_EXCL;
+  if (flags & VIRA_O_TRUNC) native_flags |= O_TRUNC;
+  if (flags & VIRA_O_APPEND) native_flags |= O_APPEND;
+  int fd = open(p.ptr, native_flags, mode == 0 ? 0666 : (mode_t)mode);
+#endif
+  vira_cstr_buf_free(&p);
+  if (fd < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("open error: %s", strerror(errno))};
+  }
+  return (Result_int){.is_err = false, .val = fd};
+}
+
+static inline Result_int vira_sys_read(int32_t fd, vira_slice_u8 *buf, int32_t max_bytes) {
+  if (buf == NULL || max_bytes <= 0) return (Result_int){.is_err = false, .val = 0};
+  if (buf->cap < max_bytes) {
+    while (buf->cap < max_bytes) {
+      _vira_slice_grow((void**)&buf->data, &buf->cap, sizeof(uint8_t), buf->is_arena);
+    }
+  }
+#ifdef _WIN32
+  int n = _read(fd, buf->data, (unsigned int)max_bytes);
+#else
+  ssize_t n = read(fd, buf->data, (size_t)max_bytes);
+#endif
+  if (n < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("read error: %s", strerror(errno))};
+  }
+  buf->len = (int32_t)n;
+  return (Result_int){.is_err = false, .val = (int32_t)n};
+}
+
+static inline Result_int vira_sys_write(int32_t fd, vira_slice_u8 buf, int32_t count) {
+  if (buf.data == NULL || count <= 0) return (Result_int){.is_err = false, .val = 0};
+  if (count > buf.len) count = buf.len;
+#ifdef _WIN32
+  int n = _write(fd, buf.data, (unsigned int)count);
+#else
+  ssize_t n = write(fd, buf.data, (size_t)count);
+#endif
+  if (n < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("write error: %s", strerror(errno))};
+  }
+  return (Result_int){.is_err = false, .val = (int32_t)n};
+}
+
+static inline Result_bool vira_sys_close(int32_t fd) {
+#ifdef _WIN32
+  int res = _close(fd);
+#else
+  int res = close(fd);
+#endif
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("close error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_i64 vira_sys_lseek(int32_t fd, int64_t offset, int32_t whence) {
+#ifdef _WIN32
+  __int64 res = _lseeki64(fd, offset, whence);
+#else
+  off_t res = lseek(fd, (off_t)offset, whence);
+#endif
+  if (res < 0) {
+    return (Result_i64){.is_err = true, .err = vira_str_format("lseek error: %s", strerror(errno))};
+  }
+  return (Result_i64){.is_err = false, .val = (int64_t)res};
+}
+
+static inline Result_bool vira_sys_pipe(vira_slice_int *fds) {
+  if (fds == NULL) return (Result_bool){.is_err = true, .err = vira_str_lit("null slice", 10)};
+  int p[2];
+#ifdef _WIN32
+  if (_pipe(p, 4096, _O_BINARY) != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("pipe error: %s", strerror(errno))};
+  }
+#else
+  if (pipe(p) != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("pipe error: %s", strerror(errno))};
+  }
+#endif
+  vira_slice_int_clear(fds);
+  vira_slice_int_push(fds, p[0]);
+  vira_slice_int_push(fds, p[1]);
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_int vira_sys_dup(int32_t fd) {
+#ifdef _WIN32
+  int res = _dup(fd);
+#else
+  int res = dup(fd);
+#endif
+  if (res < 0) return (Result_int){.is_err = true, .err = vira_str_format("dup error: %s", strerror(errno))};
+  return (Result_int){.is_err = false, .val = res};
+}
+
+static inline Result_int vira_sys_dup2(int32_t oldfd, int32_t newfd) {
+#ifdef _WIN32
+  int res = _dup2(oldfd, newfd);
+#else
+  int res = dup2(oldfd, newfd);
+#endif
+  if (res < 0) return (Result_int){.is_err = true, .err = vira_str_format("dup2 error: %s", strerror(errno))};
+  return (Result_int){.is_err = false, .val = res};
+}
+
+static inline bool vira_sys_isatty(int32_t fd) {
+#ifdef _WIN32
+  return _isatty(fd) != 0;
+#else
+  return isatty(fd) != 0;
+#endif
+}
+
+static inline int32_t vira_sys_getpid(void) {
+#ifdef _WIN32
+  return (int32_t)GetCurrentProcessId();
+#else
+  return (int32_t)getpid();
+#endif
+}
+
+static inline int32_t vira_sys_getppid(void) {
+#ifdef _WIN32
+  return 0;
+#else
+  return (int32_t)getppid();
+#endif
+}
+
+static inline int32_t vira_sys_getuid(void) {
+#ifdef _WIN32
+  return 0;
+#else
+  return (int32_t)getuid();
+#endif
+}
+
+static inline int32_t vira_sys_getgid(void) {
+#ifdef _WIN32
+  return 0;
+#else
+  return (int32_t)getgid();
+#endif
+}
+
+static inline Result_bool vira_sys_kill(int32_t pid, int32_t sig) {
+#ifdef _WIN32
+  HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+  if (!h) return (Result_bool){.is_err = true, .err = vira_str_lit("failed to open process", 22)};
+  BOOL ok = TerminateProcess(h, (UINT)sig);
+  CloseHandle(h);
+  if (!ok) return (Result_bool){.is_err = true, .err = vira_str_lit("failed to terminate process", 27)};
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  if (kill(pid, sig) != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("kill error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#endif
+}
+
+static inline int32_t vira_sys_system(vira_string cmd) {
+  char stack_buf[1024];
+  vira_cstr_buf c = vira_str_to_cstr_buf(cmd, stack_buf, sizeof(stack_buf));
+  int res = system(c.ptr);
+  vira_cstr_buf_free(&c);
+  return res;
+}
+
+static inline Result_string vira_sys_getenv(vira_string name) {
+  char stack_buf[256];
+  vira_cstr_buf n = vira_str_to_cstr_buf(name, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  char win_buf[32767];
+  DWORD win_len = GetEnvironmentVariableA(n.ptr, win_buf, sizeof(win_buf));
+  if (win_len > 0) {
+    vira_cstr_buf_free(&n);
+    return (Result_string){.is_err = false, .val = vira_str_from_cstr(win_buf)};
+  }
+#endif
+  const char *val = getenv(n.ptr);
+  vira_cstr_buf_free(&n);
+  if (!val) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("environment variable not found", 30)};
+  }
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(val)};
+}
+
+static inline Result_bool vira_sys_setenv(vira_string name, vira_string val) {
+  char stack_n[256], stack_v[1024];
+  vira_cstr_buf n = vira_str_to_cstr_buf(name, stack_n, sizeof(stack_n));
+  vira_cstr_buf v = vira_str_to_cstr_buf(val, stack_v, sizeof(stack_v));
+#ifdef _WIN32
+  _putenv_s(n.ptr, v.ptr);
+  BOOL ok = SetEnvironmentVariableA(n.ptr, v.ptr);
+  vira_cstr_buf_free(&n);
+  vira_cstr_buf_free(&v);
+  if (!ok) return (Result_bool){.is_err = true, .err = vira_str_lit("SetEnvironmentVariable failed", 29)};
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  int res = setenv(n.ptr, v.ptr, 1);
+  vira_cstr_buf_free(&n);
+  vira_cstr_buf_free(&v);
+  if (res != 0) return (Result_bool){.is_err = true, .err = vira_str_format("setenv error: %s", strerror(errno))};
+  return (Result_bool){.is_err = false, .val = true};
+#endif
+}
+
+static inline Result_bool vira_sys_unsetenv(vira_string name) {
+  char stack_n[256];
+  vira_cstr_buf n = vira_str_to_cstr_buf(name, stack_n, sizeof(stack_n));
+#ifdef _WIN32
+  _putenv_s(n.ptr, "");
+  SetEnvironmentVariableA(n.ptr, NULL);
+  vira_cstr_buf_free(&n);
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  int res = unsetenv(n.ptr);
+  vira_cstr_buf_free(&n);
+  if (res != 0) return (Result_bool){.is_err = true, .err = vira_str_format("unsetenv error: %s", strerror(errno))};
+  return (Result_bool){.is_err = false, .val = true};
+#endif
+}
+
+static inline vira_slice_string vira_sys_environ(void) {
+  vira_slice_string res = vira_slice_string_new(16);
+#ifdef _WIN32
+  char *env_block = GetEnvironmentStringsA();
+  if (env_block) {
+    char *p = env_block;
+    while (*p) {
+      vira_slice_string_push(&res, vira_str_from_cstr(p));
+      p += strlen(p) + 1;
+    }
+    FreeEnvironmentStringsA(env_block);
+  }
+#else
+  extern char **environ;
+  if (environ) {
+    for (char **p = environ; *p != NULL; p++) {
+      vira_slice_string_push(&res, vira_str_from_cstr(*p));
+    }
+  }
+#endif
+  return res;
+}
+
+static inline Result_string vira_sys_hostname(void) {
+  char buf[256];
+  if (gethostname(buf, sizeof(buf)) != 0) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("failed to get hostname", 22)};
+  }
+  buf[sizeof(buf) - 1] = '\0';
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(buf)};
+}
+
+static inline Result_string vira_sys_executable_path(void) {
+#ifdef _WIN32
+  char buf[MAX_PATH];
+  DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+  if (len == 0 || len >= MAX_PATH) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("GetModuleFileName failed", 24)};
+  }
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(buf)};
+#elif defined(__linux__)
+  char buf[4096];
+  ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (len <= 0) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("readlink /proc/self/exe failed", 30)};
+  }
+  buf[len] = '\0';
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(buf)};
+#else
+  return (Result_string){.is_err = true, .err = vira_str_lit("executable_path not supported on this platform", 46)};
+#endif
+}
+
+static inline Result_bool vira_sys_mkdir(vira_string path, int32_t perm) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  (void)perm;
+  int res = _mkdir(p.ptr);
+#else
+  int res = mkdir(p.ptr, (mode_t)perm);
+#endif
+  vira_cstr_buf_free(&p);
+  if (res != 0 && errno != EEXIST) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("mkdir error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_bool vira_sys_rmdir(vira_string path) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  int res = _rmdir(p.ptr);
+#else
+  int res = rmdir(p.ptr);
+#endif
+  vira_cstr_buf_free(&p);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("rmdir error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_bool vira_sys_unlink(vira_string path) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  int res = _unlink(p.ptr);
+#else
+  int res = unlink(p.ptr);
+#endif
+  vira_cstr_buf_free(&p);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("unlink error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_bool vira_sys_chdir(vira_string path) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  int res = _chdir(p.ptr);
+#else
+  int res = chdir(p.ptr);
+#endif
+  vira_cstr_buf_free(&p);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("chdir error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline Result_string vira_sys_getcwd(void) {
+  char buf[4096];
+#ifdef _WIN32
+  char *res = _getcwd(buf, sizeof(buf));
+#else
+  char *res = getcwd(buf, sizeof(buf));
+#endif
+  if (!res) {
+    return (Result_string){.is_err = true, .err = vira_str_format("getcwd error: %s", strerror(errno))};
+  }
+  return (Result_string){.is_err = false, .val = vira_str_from_cstr(buf)};
+}
+
+static inline Result_bool vira_sys_chmod(vira_string path, int32_t perm) {
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  int res = _chmod(p.ptr, perm);
+#else
+  int res = chmod(p.ptr, (mode_t)perm);
+#endif
+  vira_cstr_buf_free(&p);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("chmod error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+}
+
+static inline vira_slice_string vira_sys_readdir(vira_string path) {
+  vira_slice_string res = vira_slice_string_new(16);
+  char stack_buf[1024];
+  vira_cstr_buf p = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+#ifdef _WIN32
+  char search_path[MAX_PATH];
+  snprintf(search_path, sizeof(search_path), "%s\\*", p.ptr);
+  WIN32_FIND_DATAA fd;
+  HANDLE hFind = FindFirstFileA(search_path, &fd);
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (strcmp(fd.cFileName, ".") != 0 && strcmp(fd.cFileName, "..") != 0) {
+        vira_slice_string_push(&res, vira_str_from_cstr(fd.cFileName));
+      }
+    } while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+  }
+#else
+  DIR *d = opendir(p.ptr);
+  if (d) {
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+      if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+        vira_slice_string_push(&res, vira_str_from_cstr(de->d_name));
+      }
+    }
+    closedir(d);
+  }
+#endif
+  vira_cstr_buf_free(&p);
+  return res;
+}
+
+static inline Result_bool vira_sys_mount(vira_string source, vira_string target, vira_string fstype, int64_t flags, vira_string data) {
+#if defined(__linux__)
+  char s_src[1024], s_tgt[1024], s_fst[64], s_dat[1024];
+  vira_cstr_buf b_src = vira_str_to_cstr_buf(source, s_src, sizeof(s_src));
+  vira_cstr_buf b_tgt = vira_str_to_cstr_buf(target, s_tgt, sizeof(s_tgt));
+  vira_cstr_buf b_fst = vira_str_to_cstr_buf(fstype, s_fst, sizeof(s_fst));
+  vira_cstr_buf b_dat = vira_str_to_cstr_buf(data, s_dat, sizeof(s_dat));
+  const char *p_src = (source.len > 0) ? b_src.ptr : NULL;
+  const char *p_fst = (fstype.len > 0) ? b_fst.ptr : NULL;
+  const void *p_dat = (data.len > 0) ? b_dat.ptr : NULL;
+  int res = mount(p_src, b_tgt.ptr, p_fst, (unsigned long)flags, p_dat);
+  vira_cstr_buf_free(&b_src);
+  vira_cstr_buf_free(&b_tgt);
+  vira_cstr_buf_free(&b_fst);
+  vira_cstr_buf_free(&b_dat);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("mount error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)source; (void)target; (void)fstype; (void)flags; (void)data;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("mount: only supported on Linux", 30)};
+#endif
+}
+
+static inline Result_bool vira_sys_unmount(vira_string target, int32_t flags) {
+#if defined(__linux__)
+  char stack_buf[1024];
+  vira_cstr_buf b = vira_str_to_cstr_buf(target, stack_buf, sizeof(stack_buf));
+  int res = umount2(b.ptr, flags);
+  vira_cstr_buf_free(&b);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("umount2 error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)target; (void)flags;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("umount2: only supported on Linux", 32)};
+#endif
+}
+
+static inline Result_bool vira_sys_chroot(vira_string path) {
+#if defined(__linux__)
+  char stack_buf[1024];
+  vira_cstr_buf b = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+  int res = chroot(b.ptr);
+  vira_cstr_buf_free(&b);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("chroot error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)path;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("chroot: only supported on Linux", 31)};
+#endif
+}
+
+static inline Result_bool vira_sys_mknod(vira_string path, int32_t mode, int64_t dev) {
+#if defined(__linux__)
+  char stack_buf[1024];
+  vira_cstr_buf b = vira_str_to_cstr_buf(path, stack_buf, sizeof(stack_buf));
+  int res = mknod(b.ptr, (mode_t)mode, (dev_t)dev);
+  vira_cstr_buf_free(&b);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("mknod error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)path; (void)mode; (void)dev;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("mknod: only supported on Linux", 30)};
+#endif
+}
+
+static inline int64_t vira_sys_makedev(int32_t major, int32_t minor) {
+#if defined(__linux__)
+  return (int64_t)gnu_dev_makedev((unsigned int)major, (unsigned int)minor);
+#else
+  return ((int64_t)(major) << 8) | (int64_t)(minor);
+#endif
+}
+
+static inline Result_bool vira_sys_unshare(int32_t flags) {
+#if defined(__linux__)
+  if (unshare(flags) != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("unshare error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)flags;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("unshare: only supported on Linux", 32)};
+#endif
+}
+
+static inline Result_bool vira_sys_sethostname(vira_string name) {
+#if defined(__linux__)
+  char stack_buf[256];
+  vira_cstr_buf b = vira_str_to_cstr_buf(name, stack_buf, sizeof(stack_buf));
+  int res = sethostname(b.ptr, strlen(b.ptr));
+  vira_cstr_buf_free(&b);
+  if (res != 0) {
+    return (Result_bool){.is_err = true, .err = vira_str_format("sethostname error: %s", strerror(errno))};
+  }
+  return (Result_bool){.is_err = false, .val = true};
+#else
+  (void)name;
+  return (Result_bool){.is_err = true, .err = vira_str_lit("sethostname: only supported on Linux", 36)};
+#endif
+}
+
+static inline Result_int vira_sys_exec_run(vira_slice_string args, vira_string dir, bool inherit_stdio) {
+  if (args.data == NULL || args.len <= 0) {
+    return (Result_int){.is_err = true, .err = vira_str_lit("empty command", 13)};
+  }
+#ifdef _WIN32
+  size_t cmd_len = 0;
+  for (int32_t i = 0; i < args.len; i++) {
+    cmd_len += (size_t)args.data[i].len + 3;
+  }
+  size_t cmd_cap = (cmd_len < 4096) ? 4096 : (cmd_len + 1024);
+  char *cmd_line = (char *)calloc(1, cmd_cap);
+  for (int32_t i = 0; i < args.len; i++) {
+    char sbuf[256];
+    vira_cstr_buf b = vira_str_to_cstr_buf(args.data[i], sbuf, sizeof(sbuf));
+    if (i > 0) strcat(cmd_line, " ");
+    bool need_quotes = (strchr(b.ptr, ' ') != NULL || b.ptr[0] == '\0');
+    if (need_quotes) strcat(cmd_line, "\"");
+    strcat(cmd_line, b.ptr);
+    if (need_quotes) strcat(cmd_line, "\"");
+    vira_cstr_buf_free(&b);
+  }
+
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  memset(&pi, 0, sizeof(pi));
+  si.cb = sizeof(si);
+
+  char dstack[1024];
+  vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+  const char *cdir = (dir.len > 0) ? db.ptr : NULL;
+
+  BOOL ok = CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE, 0, NULL, cdir, &si, &pi);
+  free(cmd_line);
+  vira_cstr_buf_free(&db);
+  if (!ok) {
+    return (Result_int){.is_err = true, .err = vira_str_lit("CreateProcess failed", 20)};
+  }
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD exit_code = 0;
+  GetExitCodeProcess(pi.hProcess, &exit_code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return (Result_int){.is_err = false, .val = (int32_t)exit_code};
+#else
+  (void)inherit_stdio;
+  pid_t pid = fork();
+  if (pid == 0) {
+    if (dir.len > 0) {
+      char dstack[1024];
+      vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+      chdir(db.ptr);
+      vira_cstr_buf_free(&db);
+    }
+    char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));
+    for (int32_t i = 0; i < args.len; i++) {
+      argv[i] = vira_str_cstr(args.data[i]);
+    }
+    argv[args.len] = NULL;
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  if (pid < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("fork failed: %s", strerror(errno))};
+  }
+  int status = 0;
+  waitpid(pid, &status, 0);
+  int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1);
+  return (Result_int){.is_err = false, .val = code};
+#endif
+}
+
+static inline Result_string vira_sys_exec_output(vira_slice_string args, vira_string dir, vira_string stdin_text, bool combine_err) {
+  if (args.data == NULL || args.len <= 0) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("empty command", 13)};
+  }
+#ifdef _WIN32
+  (void)stdin_text;
+  SECURITY_ATTRIBUTES sa;
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+  sa.lpSecurityDescriptor = NULL;
+
+  HANDLE hRead, hWrite;
+  if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+    return (Result_string){.is_err = true, .err = vira_str_lit("CreatePipe failed", 17)};
+  }
+  SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+  size_t cmd_len = 0;
+  for (int32_t i = 0; i < args.len; i++) {
+    cmd_len += (size_t)args.data[i].len + 3;
+  }
+  size_t cmd_cap = (cmd_len < 4096) ? 4096 : (cmd_len + 1024);
+  char *cmd_line = (char *)calloc(1, cmd_cap);
+  for (int32_t i = 0; i < args.len; i++) {
+    char sbuf[256];
+    vira_cstr_buf b = vira_str_to_cstr_buf(args.data[i], sbuf, sizeof(sbuf));
+    if (i > 0) strcat(cmd_line, " ");
+    bool need_quotes = (strchr(b.ptr, ' ') != NULL || b.ptr[0] == '\0');
+    if (need_quotes) strcat(cmd_line, "\"");
+    strcat(cmd_line, b.ptr);
+    if (need_quotes) strcat(cmd_line, "\"");
+    vira_cstr_buf_free(&b);
+  }
+
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  memset(&pi, 0, sizeof(pi));
+  si.cb = sizeof(si);
+  si.dwFlags |= STARTF_USESTDHANDLES;
+  si.hStdOutput = hWrite;
+  si.hStdError = combine_err ? hWrite : GetStdHandle(STD_ERROR_HANDLE);
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+  char dstack[1024];
+  vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+  const char *cdir = (dir.len > 0) ? db.ptr : NULL;
+
+  BOOL ok = CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE, 0, NULL, cdir, &si, &pi);
+  free(cmd_line);
+  vira_cstr_buf_free(&db);
+  CloseHandle(hWrite);
+
+  if (!ok) {
+    CloseHandle(hRead);
+    return (Result_string){.is_err = true, .err = vira_str_lit("CreateProcess failed", 20)};
+  }
+
+  size_t cap = 1024;
+  size_t len = 0;
+  char *out = (char *)malloc(cap);
+  DWORD bytes_read = 0;
+  char chunk[4096];
+  while (ReadFile(hRead, chunk, sizeof(chunk), &bytes_read, NULL) && bytes_read > 0) {
+    if (len + bytes_read + 1 > cap) {
+      while (len + bytes_read + 1 > cap) cap *= 2;
+      char *nb = (char *)realloc(out, cap);
+      if (!nb) break;
+      out = nb;
+    }
+    memcpy(out + len, chunk, bytes_read);
+    len += bytes_read;
+  }
+  out[len] = '\0';
+  CloseHandle(hRead);
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  _vira_record_alloc();
+  return (Result_string){.is_err = false, .val = (vira_string){.data = (const uint8_t *)out, .len = (int32_t)len, .is_lit = false}};
+#else
+  (void)stdin_text;
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    return (Result_string){.is_err = true, .err = vira_str_format("pipe error: %s", strerror(errno))};
+  }
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    if (combine_err) {
+      dup2(pipefd[1], STDERR_FILENO);
+    }
+    close(pipefd[1]);
+    if (dir.len > 0) {
+      char dstack[1024];
+      vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+      chdir(db.ptr);
+      vira_cstr_buf_free(&db);
+    }
+    char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));
+    for (int32_t i = 0; i < args.len; i++) {
+      argv[i] = vira_str_cstr(args.data[i]);
+    }
+    argv[args.len] = NULL;
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  if (pid < 0) {
+    close(pipefd[0]);
+    return (Result_string){.is_err = true, .err = vira_str_format("fork failed: %s", strerror(errno))};
+  }
+  size_t cap = 1024;
+  size_t len = 0;
+  char *out = (char *)malloc(cap);
+  char chunk[4096];
+  ssize_t n;
+  while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
+    if (len + (size_t)n + 1 > cap) {
+      while (len + (size_t)n + 1 > cap) cap *= 2;
+      char *nb = (char *)realloc(out, cap);
+      if (!nb) break;
+      out = nb;
+    }
+    memcpy(out + len, chunk, (size_t)n);
+    len += (size_t)n;
+  }
+  out[len] = '\0';
+  close(pipefd[0]);
+  waitpid(pid, NULL, 0);
+  _vira_record_alloc();
+  return (Result_string){.is_err = false, .val = (vira_string){.data = (const uint8_t *)out, .len = (int32_t)len, .is_lit = false}};
+#endif
+}
+
+static inline Result_int vira_sys_proc_start(vira_slice_string args, vira_string dir, int32_t clone_flags, bool inherit_stdio) {
+  if (args.data == NULL || args.len <= 0) {
+    return (Result_int){.is_err = true, .err = vira_str_lit("empty command", 13)};
+  }
+#ifdef _WIN32
+  (void)clone_flags;
+  (void)inherit_stdio;
+  size_t cmd_len = 0;
+  for (int32_t i = 0; i < args.len; i++) {
+    cmd_len += (size_t)args.data[i].len + 3;
+  }
+  size_t cmd_cap = (cmd_len < 4096) ? 4096 : (cmd_len + 1024);
+  char *cmd_line = (char *)calloc(1, cmd_cap);
+  for (int32_t i = 0; i < args.len; i++) {
+    char sbuf[256];
+    vira_cstr_buf b = vira_str_to_cstr_buf(args.data[i], sbuf, sizeof(sbuf));
+    if (i > 0) strcat(cmd_line, " ");
+    bool need_quotes = (strchr(b.ptr, ' ') != NULL || b.ptr[0] == '\0');
+    if (need_quotes) strcat(cmd_line, "\"");
+    strcat(cmd_line, b.ptr);
+    if (need_quotes) strcat(cmd_line, "\"");
+    vira_cstr_buf_free(&b);
+  }
+
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  memset(&pi, 0, sizeof(pi));
+  si.cb = sizeof(si);
+
+  char dstack[1024];
+  vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+  const char *cdir = (dir.len > 0) ? db.ptr : NULL;
+
+  BOOL ok = CreateProcessA(NULL, cmd_line, NULL, NULL, TRUE, 0, NULL, cdir, &si, &pi);
+  free(cmd_line);
+  vira_cstr_buf_free(&db);
+  if (!ok) {
+    return (Result_int){.is_err = true, .err = vira_str_lit("CreateProcess failed", 20)};
+  }
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return (Result_int){.is_err = false, .val = (int32_t)pi.dwProcessId};
+#else
+  pid_t pid;
+  if (clone_flags != 0) {
+#if defined(__linux__) && defined(SYS_clone)
+    pid = (pid_t)syscall(SYS_clone, clone_flags | SIGCHLD, NULL, NULL, NULL, 0);
+#else
+    pid = fork();
+#endif
+  } else {
+    pid = fork();
+  }
+  if (pid == 0) {
+    if (dir.len > 0) {
+      char dstack[1024];
+      vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
+      chdir(db.ptr);
+      vira_cstr_buf_free(&db);
+    }
+    char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));
+    for (int32_t i = 0; i < args.len; i++) {
+      argv[i] = vira_str_cstr(args.data[i]);
+    }
+    argv[args.len] = NULL;
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  if (pid < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("proc_start failed: %s", strerror(errno))};
+  }
+  return (Result_int){.is_err = false, .val = (int32_t)pid};
+#endif
+}
+
+static inline Result_int vira_sys_proc_wait(int32_t pid) {
+#ifdef _WIN32
+  HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
+  if (!h) {
+    return (Result_int){.is_err = true, .err = vira_str_lit("failed to open process handle for wait", 39)};
+  }
+  WaitForSingleObject(h, INFINITE);
+  DWORD exit_code = 0;
+  GetExitCodeProcess(h, &exit_code);
+  CloseHandle(h);
+  return (Result_int){.is_err = false, .val = (int32_t)exit_code};
+#else
+  int status = 0;
+  pid_t w = waitpid((pid_t)pid, &status, 0);
+  if (w < 0) {
+    return (Result_int){.is_err = true, .err = vira_str_format("waitpid error: %s", strerror(errno))};
+  }
+  int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1);
+  return (Result_int){.is_err = false, .val = code};
+#endif
+}
+
 static inline void vira_report_mem_stats(void) {
   _vira_flush_tls_mem_stats();
   vira_scheduler_shutdown();
+#if defined(VIRA_QUIET_RT)
+  return;
+#else
+  if (_vira_quiet_rt) {
+    return;
+  }
+  const char *env_stats = getenv("VIRA_RT_STATS");
+  if (env_stats != NULL && strcmp(env_stats, "0") == 0) {
+    return;
+  }
   printf("[vira_rt] simd=%s\n", vira_simd_backend_name());
   printf(
       "[vira_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",
@@ -4514,6 +6084,7 @@ static inline void vira_report_mem_stats(void) {
       (long long)__atomic_load_n(&_vira_active_heap_allocs, __ATOMIC_RELAXED),
       (long long)__atomic_load_n(&_vira_total_heap_frees, __ATOMIC_RELAXED));
   fflush(stdout);
+#endif
 }
 
 #include "vira_gui.h"

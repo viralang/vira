@@ -228,6 +228,19 @@ type FnDecl struct {
 func (d *FnDecl) Span() token.Span { return d.DeclSpan }
 func (d *FnDecl) declNode()        {}
 
+// ConstDecl models a top-level `const NAME = expr` or `pub const NAME = expr` declaration.
+type ConstDecl struct {
+	Module   string
+	IsPub    bool
+	Name     Ident
+	Type     TypeExpr // optional explicit type
+	Value    Expr
+	DeclSpan token.Span
+}
+
+func (d *ConstDecl) Span() token.Span { return d.DeclSpan }
+func (d *ConstDecl) declNode()        {}
+
 // --- STATEMENTS ---
 
 type BlockStmt struct {
@@ -345,6 +358,15 @@ type ArenaStmt struct {
 
 func (s *ArenaStmt) Span() token.Span { return s.StmtSpan }
 func (s *ArenaStmt) stmtNode()        {}
+
+// DeferStmt represents a `defer <expr>` or `defer { ... }` lexical cleanup block executed in LIFO order.
+type DeferStmt struct {
+	Body     *BlockStmt
+	StmtSpan token.Span
+}
+
+func (s *DeferStmt) Span() token.Span { return s.StmtSpan }
+func (s *DeferStmt) stmtNode()        {}
 
 // CleanupKind classifies how `cgen` lowers a synthetic scope-exit destructor.
 type CleanupKind uint8

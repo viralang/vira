@@ -53,21 +53,51 @@ func (l *Lexer) Next() token.Token {
 		return l.makeTok(token.LookupIdent(lit), start, l.pos)
 	}
 
-	// 4. Numeric Literals (integers, hex literals, floats, `_` digit separators, and precision suffixes)
+	// 4. Numeric Literals (integers, hex/octal/binary literals, floats, `_` digit separators, and precision suffixes)
 	if isDigit(ch) {
 		kind := token.TokInt
 		l.pos++
-		if ch == '0' && int(l.pos) < len(l.src) && (l.src[l.pos] == 'x' || l.src[l.pos] == 'X') {
-			l.pos++
-			for int(l.pos) < len(l.src) {
-				c := l.src[l.pos]
-				if isHexDigit(c) || c == '_' {
-					l.pos++
-				} else {
-					break
+		if ch == '0' && int(l.pos) < len(l.src) {
+			prefix := l.src[l.pos]
+			if prefix == 'x' || prefix == 'X' {
+				l.pos++
+				for int(l.pos) < len(l.src) {
+					c := l.src[l.pos]
+					if isHexDigit(c) || c == '_' {
+						l.pos++
+					} else {
+						break
+					}
 				}
+				l.consumeIntSuffix()
+				return l.makeTok(token.TokInt, start, l.pos)
 			}
-			return l.makeTok(token.TokInt, start, l.pos)
+			if prefix == 'o' || prefix == 'O' {
+				l.pos++
+				for int(l.pos) < len(l.src) {
+					c := l.src[l.pos]
+					if (c >= '0' && c <= '7') || c == '_' {
+						l.pos++
+					} else {
+						break
+					}
+				}
+				l.consumeIntSuffix()
+				return l.makeTok(token.TokInt, start, l.pos)
+			}
+			if prefix == 'b' || prefix == 'B' {
+				l.pos++
+				for int(l.pos) < len(l.src) {
+					c := l.src[l.pos]
+					if c == '0' || c == '1' || c == '_' {
+						l.pos++
+					} else {
+						break
+					}
+				}
+				l.consumeIntSuffix()
+				return l.makeTok(token.TokInt, start, l.pos)
+			}
 		}
 		for int(l.pos) < len(l.src) {
 			c := l.src[l.pos]
@@ -80,15 +110,17 @@ func (l *Lexer) Next() token.Token {
 				break
 			}
 		}
-		// Check for optional float precision suffix (e.g. 1.0f32, 0.5f16, 2.0bf16)
+		// Check for optional float or integer precision suffix (e.g. 1.0f32, 0.5f16, 2.0bf16, 0i64)
 		if int(l.pos) < len(l.src) {
 			rem := l.src[l.pos:]
-			if len(rem) >= 4 && rem[:4] == "bf16" {
+			if len(rem) >= 4 && rem[:4] == "bf16" && (len(rem) == 4 || !isIdentPart(rem[4])) {
 				l.pos += 4
 				kind = token.TokFloat
-			} else if len(rem) >= 3 && (rem[:3] == "f32" || rem[:3] == "f16" || rem[:3] == "f64") {
+			} else if len(rem) >= 3 && (rem[:3] == "f32" || rem[:3] == "f16" || rem[:3] == "f64") && (len(rem) == 3 || !isIdentPart(rem[3])) {
 				l.pos += 3
 				kind = token.TokFloat
+			} else if kind == token.TokInt {
+				l.consumeIntSuffix()
 			}
 		}
 		return l.makeTok(kind, start, l.pos)
@@ -318,6 +350,14 @@ func isDigit(ch byte) bool {
 
 func isHexDigit(ch byte) bool {
 	return isDigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
+func (l *Lexer) consumeIntSuffix() {
+	if int(l.pos)+3 <= len(l.src) && l.src[l.pos:l.pos+3] == "i64" {
+		if int(l.pos)+3 == len(l.src) || !isIdentPart(l.src[l.pos+3]) {
+			l.pos += 3
+		}
+	}
 }
 
 func isIdentPart(ch byte) bool {

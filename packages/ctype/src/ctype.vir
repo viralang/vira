@@ -1,0 +1,85 @@
+module ctype
+
+@[intrinsic: 'vira_ctype_is_alpha']
+fn c_is_alpha(c int) bool
+
+@[intrinsic: 'vira_ctype_is_digit']
+fn c_is_digit(c int) bool
+
+@[intrinsic: 'vira_ctype_is_alnum']
+fn c_is_alnum(c int) bool
+
+@[intrinsic: 'vira_ctype_is_space']
+fn c_is_space(c int) bool
+
+@[intrinsic: 'vira_ctype_is_upper']
+fn c_is_upper(c int) bool
+
+@[intrinsic: 'vira_ctype_is_lower']
+fn c_is_lower(c int) bool
+
+@[intrinsic: 'vira_ctype_is_xdigit']
+fn c_is_xdigit(c int) bool
+
+@[intrinsic: 'vira_ctype_is_print']
+fn c_is_print(c int) bool
+
+@[intrinsic: 'vira_ctype_is_punct']
+fn c_is_punct(c int) bool
+
+@[intrinsic: 'vira_ctype_is_cntrl']
+fn c_is_cntrl(c int) bool
+
+@[intrinsic: 'vira_ctype_to_lower']
+fn c_to_lower(c int) int
+
+@[intrinsic: 'vira_ctype_to_upper']
+fn c_to_upper(c int) int
+
+pub fn is_alpha(c u8) bool {
+	return c_is_alpha(int(c))
+}
+
+pub fn is_digit(c u8) bool {
+	return c_is_digit(int(c))
+}
+
+pub fn is_alnum(c u8) bool {
+	return c_is_alnum(int(c))
+}
+
+pub fn is_space(c u8) bool {
+	return c_is_space(int(c))
+}
+
+pub fn is_upper(c u8) bool {
+	return c_is_upper(int(c))
+}
+
+pub fn is_lower(c u8) bool {
+	return c_is_lower(int(c))
+}
+
+pub fn is_hex_digit(c u8) bool {
+	return c_is_xdigit(int(c))
+}
+
+pub fn is_print(c u8) bool {
+	return c_is_print(int(c))
+}
+
+pub fn is_punct(c u8) bool {
+	return c_is_punct(int(c))
+}
+
+pub fn is_cntrl(c u8) bool {
+	return c_is_cntrl(int(c))
+}
+
+pub fn to_lower(c u8) u8 {
+	return u8(c_to_lower(int(c)))
+}
+
+pub fn to_upper(c u8) u8 {
+	return u8(c_to_upper(int(c)))
+}

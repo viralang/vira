@@ -71,9 +71,30 @@ fn test_file_streaming() {
 	println('✓ test_file_streaming passed')
 }
 
+fn test_temp_and_rename() {
+	tmp := io.temp_file() or {
+		panic('failed to get temp file')
+	}
+	mut f := File.open(tmp, 'wb') or {
+		panic('failed to open temp file')
+	}
+	f.write_string('temp data') or { 0 }
+	f.close() or { panic('close failed') }
+
+	new_name := '${tmp}_renamed.txt'
+	io.rename(tmp, new_name) or {
+		panic('rename failed')
+	}
+	io.remove(new_name) or {
+		panic('remove failed')
+	}
+	println('✓ test_temp_and_rename passed')
+}
+
 fn main() {
 	test_buffered_string_reader()
 	test_buffered_exact_and_all()
 	test_file_streaming()
+	test_temp_and_rename()
 	println('=== All packages/io tests PASSED ===')
 }

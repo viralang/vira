@@ -44,6 +44,7 @@ type LexicalScope struct {
 	InArena bool
 	IsLoop  bool
 	Vars    []*TrackedVar
+	Defers  []*ast.BlockStmt
 }
 
 func (ls *LexicalScope) Find(name string) *TrackedVar {
@@ -231,11 +232,12 @@ func (a *Analyzer) rewriteBlock(
 	for _, stmt := range block.Stmts {
 		switch s := stmt.(type) {
 		case *ast.VarDeclStmt:
-			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
-			a.inspectExprMovesAndOrBlocksWithMode(s.Value, scope, report, s.Name.Name != "_")
-
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			rewritten = append(rewritten, preStmts...)
+
+			stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
+			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
+			a.inspectExprMovesAndOrBlocksWithMode(s.Value, stmtScope, report, s.Name.Name != "_")
 
 			// If initialized from an existing local variable `b := a`, transfer ownership
 			if s.Name.Name != "_" {
@@ -273,6 +275,7 @@ func (a *Analyzer) rewriteBlock(
 				}
 			}
 			rewritten = append(rewritten, s)
+			a.retireHoistedTemps(stmtScope, postStmts)
 			rewritten = append(rewritten, postStmts...)
 
 		case *ast.AssignStmt:
@@ -280,8 +283,9 @@ func (a *Analyzer) rewriteBlock(
 			if id, ok := s.Target.(*ast.IdentExpr); ok && id.Ident.Name == "_" {
 				isBlankTarget = true
 			}
-			a.inspectExprMovesAndOrBlocksWithMode(s.Value, scope, report, !isBlankTarget)
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
+			stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
+			a.inspectExprMovesAndOrBlocksWithMode(s.Value, stmtScope, report, !isBlankTarget)
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
 					srcVar.State = StateMovedToContainer
@@ -289,6 +293,7 @@ func (a *Analyzer) rewriteBlock(
 			}
 			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
+			a.retireHoistedTemps(stmtScope, postStmts)
 			rewritten = append(rewritten, postStmts...)
 
 		case *ast.IfStmt:
@@ -377,14 +382,18 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 
 		case *ast.BranchStmt:
-			// Unwind active scopes up to and including the innermost loop body scope
-			frees := a.collectLoopFrees(scope, fmt.Sprintf("before %s", s.Tok.String()))
-			for _, f := range frees {
-				rewritten = append(rewritten, f)
-				report.InjectedFrees = append(report.InjectedFrees, f)
-			}
+			// Unwind active scopes (defers + autofree) up to and including the innermost loop body scope
+			exits := a.collectLoopExits(scope, fmt.Sprintf("before %s", s.Tok.String()), report)
+			rewritten = append(rewritten, exits...)
 			rewritten = append(rewritten, s)
 			diverged = true
+
+		case *ast.DeferStmt:
+			if s.Body != nil {
+				deferScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+				a.rewriteBlock(s.Body, deferScope, false, report)
+				scope.Defers = append(scope.Defers, s.Body)
+			}
 
 		case *ast.ArenaStmt:
 			a.arenaCounter++
@@ -448,20 +457,19 @@ func (a *Analyzer) rewriteBlock(
 				}
 			}
 
-			// Unwind all active scopes up to function root in LIFO order before `return` (except returned var)
-			frees := a.collectScopeChainFreesExcept(scope, skipVar, "before return")
-			for _, f := range frees {
-				rewritten = append(rewritten, f)
-				report.InjectedFrees = append(report.InjectedFrees, f)
-			}
+			// Unwind all active scopes (LIFO defers + LIFO autofree) up to function root before `return` (except returned var)
+			exits := a.collectScopeChainExitsExcept(scope, skipVar, "before return", report)
+			rewritten = append(rewritten, exits...)
 			rewritten = append(rewritten, s)
 			diverged = true
 
 		case *ast.ExprStmt:
-			a.inspectExprMovesAndOrBlocks(s.Expr, scope, report)
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Expr, scope, report, false)
+			stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
+			a.inspectExprMovesAndOrBlocks(s.Expr, stmtScope, report)
 			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
+			a.retireHoistedTemps(stmtScope, postStmts)
 			rewritten = append(rewritten, postStmts...)
 
 		default:
@@ -470,20 +478,54 @@ func (a *Analyzer) rewriteBlock(
 	}
 
 	// If control flow reaches the end of the block without an explicit `return`,
-	// inject LIFO cleanup for variables declared in THIS lexical block.
+	// inject LIFO user defers and cleanup for variables declared in THIS lexical block.
 	if !diverged {
 		reason := "block scope exit"
 		if isFnRoot {
 			reason = "function scope exit"
 		}
-		frees := a.collectSingleScopeFrees(scope, reason)
-		for _, f := range frees {
-			rewritten = append(rewritten, f)
-			report.InjectedFrees = append(report.InjectedFrees, f)
-		}
+		exits := a.collectSingleScopeExitsExcept(scope, "", reason, report)
+		rewritten = append(rewritten, exits...)
 	}
 
 	block.Stmts = rewritten
+}
+
+func (a *Analyzer) scopeWithHoistedTemps(parent *LexicalScope, preStmts []ast.Stmt, report *FnReport) *LexicalScope {
+	if len(preStmts) == 0 {
+		return parent
+	}
+	sub := &LexicalScope{Parent: parent, InArena: parent.InArena}
+	for _, pre := range preStmts {
+		if vdecl, ok := pre.(*ast.VarDeclStmt); ok {
+			valType := a.chk.ExprTypes[vdecl.Value]
+			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree {
+				tv := &TrackedVar{
+					Name:        vdecl.Name.Name,
+					Type:        valType,
+					CleanupKind: kind,
+					State:       StateScopedLocal,
+					DeclSpan:    vdecl.StmtSpan,
+				}
+				sub.Vars = append(sub.Vars, tv)
+				report.TrackedVars = append(report.TrackedVars, tv)
+			}
+		}
+	}
+	return sub
+}
+
+func (a *Analyzer) retireHoistedTemps(stmtScope *LexicalScope, postStmts []ast.Stmt) {
+	if stmtScope == nil {
+		return
+	}
+	for _, post := range postStmts {
+		if df, ok := post.(*ast.DeferFreeStmt); ok {
+			if tv := stmtScope.Find(df.VarName); tv != nil {
+				tv.State = StateMovedToContainer
+			}
+		}
+	}
 }
 
 func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScope, report *FnReport) {
@@ -491,12 +533,7 @@ func (a *Analyzer) inspectExprMovesAndOrBlocks(expr ast.Expr, scope *LexicalScop
 }
 
 func isDivergentExpr(expr ast.Expr) bool {
-	if callExpr, isCall := expr.(*ast.CallExpr); isCall {
-		if id, isId := callExpr.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
-			return true
-		}
-	}
-	return false
+	return checker.IsDivergentExpr(expr)
 }
 
 func (a *Analyzer) rewriteOrBlock(orBlock *ast.BlockStmt, yieldsVal bool, parentScope *LexicalScope, report *FnReport) {
@@ -536,11 +573,8 @@ func (a *Analyzer) rewriteOrBlock(orBlock *ast.BlockStmt, yieldsVal bool, parent
 	combined = append(combined, preStmts...)
 	combined = append(combined, tailExprStmt)
 	combined = append(combined, postStmts...)
-	frees := a.collectSingleScopeFreesExcept(orScope, skipVar, "or-block scope exit")
-	for _, f := range frees {
-		combined = append(combined, f)
-		report.InjectedFrees = append(report.InjectedFrees, f)
-	}
+	exits := a.collectSingleScopeExitsExcept(orScope, skipVar, "or-block scope exit", report)
+	combined = append(combined, exits...)
 	orBlock.Stmts = combined
 }
 
@@ -548,18 +582,20 @@ func (a *Analyzer) rewriteOrPrefixStmts(block *ast.BlockStmt, scope *LexicalScop
 	if len(block.Stmts) == 0 {
 		return
 	}
-	// Temporarily append a dummy ReturnStmt? No — rewriteBlock only appends scope-exit frees at the end if !diverged.
-	// Recording len(report.InjectedFrees) before/after lets us strip only the trailing single-scope exit frees if needed,
-	// or simpler: run rewriteBlock and strip the trailing single-scope frees matching reason == "block scope exit".
 	prevInjected := len(report.InjectedFrees)
 	a.rewriteBlock(block, scope, false, report)
 	cutStmtIdx := len(block.Stmts)
 	for cutStmtIdx > 0 {
-		df, ok := block.Stmts[cutStmtIdx-1].(*ast.DeferFreeStmt)
-		if !ok || df.Reason != "block scope exit" {
-			break
+		last := block.Stmts[cutStmtIdx-1]
+		if df, ok := last.(*ast.DeferFreeStmt); ok && df.Reason == "block scope exit" {
+			cutStmtIdx--
+			continue
 		}
-		cutStmtIdx--
+		if _, ok := last.(*ast.DeferStmt); ok {
+			cutStmtIdx--
+			continue
+		}
+		break
 	}
 	removed := len(block.Stmts) - cutStmtIdx
 	if removed > 0 {
@@ -708,15 +744,13 @@ func (a *Analyzer) hoistTemporaryStrings(
 }
 
 func (a *Analyzer) formatCleanupTypeName(t checker.Type) string {
-	typeName := t.String()
 	if st, ok := t.(*checker.StructType); ok && st.Module != "" {
-		typeName = st.Module + "." + st.Name
-	} else if sl, ok := t.(*checker.SliceType); ok {
-		if elemSt, ok := sl.Elem.(*checker.StructType); ok && elemSt.Module != "" {
-			typeName = "[]" + elemSt.Module + "." + elemSt.Name
-		}
+		return st.Module + "." + st.Name
 	}
-	return typeName
+	if sl, ok := t.(*checker.SliceType); ok {
+		return "[]" + a.formatCleanupTypeName(sl.Elem)
+	}
+	return t.String()
 }
 
 func (a *Analyzer) hoistExprToTemp(
@@ -800,10 +834,34 @@ func (a *Analyzer) maybeHoistSubExpr(
 		if sel, isSel := call.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
 			return expr
 		}
-		if call.OrBlock != nil {
-			return expr
-		}
 		retType := a.chk.ExprTypes[call]
+		if call.OrBlock != nil {
+			a.tmpCounter++
+			tmpName := fmt.Sprintf("_vira_tmp_or_%d", a.tmpCounter)
+			tmpIdent := ast.Ident{Name: tmpName, NamePos: call.Span()}
+			varDecl := &ast.VarDeclStmt{
+				Name:     tmpIdent,
+				Value:    call,
+				IsMut:    false,
+				StmtSpan: call.Span(),
+			}
+			a.chk.ExprTypes[varDecl.Value] = retType
+			identExpr := &ast.IdentExpr{Ident: tmpIdent}
+			a.chk.ExprTypes[identExpr] = retType
+			*preStmts = append(*preStmts, varDecl)
+			if needsFree, kind := a.typeNeedsCleanup(retType); needsFree {
+				freeStmt := &ast.DeferFreeStmt{
+					VarName:  tmpName,
+					TypeName: a.formatCleanupTypeName(retType),
+					Kind:     kind,
+					Reason:   "zero-leak temporary or-call result cleanup",
+					StmtSpan: call.Span(),
+				}
+				*postFrees = append(*postFrees, freeStmt)
+				report.InjectedFrees = append(report.InjectedFrees, freeStmt)
+			}
+			return identExpr
+		}
 		if needsFree, kind := a.typeNeedsCleanup(retType); needsFree {
 			if inArena && a.isAllocatedOnArena(kind, call) {
 				return expr
@@ -885,17 +943,9 @@ func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar st
 			continue
 		}
 		if tv.State == StateScopedLocal {
-			typeName := tv.Type.String()
-			if st, ok := tv.Type.(*checker.StructType); ok && st.Module != "" {
-				typeName = st.Module + "." + st.Name
-			} else if sl, ok := tv.Type.(*checker.SliceType); ok {
-				if elemSt, ok := sl.Elem.(*checker.StructType); ok && elemSt.Module != "" {
-					typeName = "[]" + elemSt.Module + "." + elemSt.Name
-				}
-			}
 			frees = append(frees, &ast.DeferFreeStmt{
 				VarName:  tv.Name,
-				TypeName: typeName,
+				TypeName: a.formatCleanupTypeName(tv.Type),
 				Kind:     tv.CleanupKind,
 				Reason:   reason,
 				StmtSpan: tv.DeclSpan,
@@ -905,25 +955,44 @@ func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar st
 	return frees
 }
 
-// collectScopeChainFreesExcept walks from the current scope up to the function root in LIFO order for early returns, skipping skipVar.
-func (a *Analyzer) collectScopeChainFreesExcept(scope *LexicalScope, skipVar string, reason string) []*ast.DeferFreeStmt {
-	var frees []*ast.DeferFreeStmt
-	for cur := scope; cur != nil; cur = cur.Parent {
-		frees = append(frees, a.collectSingleScopeFreesExcept(cur, skipVar, reason)...)
+// collectSingleScopeExitsExcept emits LIFO user defers followed by LIFO destructors for variables in a single block scope, skipping skipVar.
+func (a *Analyzer) collectSingleScopeExitsExcept(scope *LexicalScope, skipVar string, reason string, report *FnReport) []ast.Stmt {
+	var exits []ast.Stmt
+	for i := len(scope.Defers) - 1; i >= 0; i-- {
+		exits = append(exits, &ast.DeferStmt{
+			Body:     scope.Defers[i],
+			StmtSpan: scope.Defers[i].Span(),
+		})
 	}
-	return frees
+	frees := a.collectSingleScopeFreesExcept(scope, skipVar, reason)
+	for _, f := range frees {
+		exits = append(exits, f)
+		if report != nil {
+			report.InjectedFrees = append(report.InjectedFrees, f)
+		}
+	}
+	return exits
 }
 
-// collectLoopFrees unwinds active scopes up to and including the innermost loop body scope.
-func (a *Analyzer) collectLoopFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
-	var frees []*ast.DeferFreeStmt
+// collectScopeChainExitsExcept walks from the current scope up to the function root in LIFO order for early returns, skipping skipVar.
+func (a *Analyzer) collectScopeChainExitsExcept(scope *LexicalScope, skipVar string, reason string, report *FnReport) []ast.Stmt {
+	var exits []ast.Stmt
 	for cur := scope; cur != nil; cur = cur.Parent {
-		frees = append(frees, a.collectSingleScopeFreesExcept(cur, "", reason)...)
+		exits = append(exits, a.collectSingleScopeExitsExcept(cur, skipVar, reason, report)...)
+	}
+	return exits
+}
+
+// collectLoopExits unwinds active scopes up to and including the innermost loop body scope.
+func (a *Analyzer) collectLoopExits(scope *LexicalScope, reason string, report *FnReport) []ast.Stmt {
+	var exits []ast.Stmt
+	for cur := scope; cur != nil; cur = cur.Parent {
+		exits = append(exits, a.collectSingleScopeExitsExcept(cur, "", reason, report)...)
 		if cur.IsLoop {
 			break
 		}
 	}
-	return frees
+	return exits
 }
 
 // collectSingleScopeFrees emits LIFO destructors for variables in a single block scope.
@@ -933,7 +1002,11 @@ func (a *Analyzer) collectSingleScopeFrees(scope *LexicalScope, reason string) [
 
 // collectScopeChainFrees walks from the current scope up to the function root in LIFO order for early returns.
 func (a *Analyzer) collectScopeChainFrees(scope *LexicalScope, reason string) []*ast.DeferFreeStmt {
-	return a.collectScopeChainFreesExcept(scope, "", reason)
+	var frees []*ast.DeferFreeStmt
+	for cur := scope; cur != nil; cur = cur.Parent {
+		frees = append(frees, a.collectSingleScopeFreesExcept(cur, "", reason)...)
+	}
+	return frees
 }
 
 // FormatReport renders a human-readable summary of struct destructors, escape states, and injected frees.

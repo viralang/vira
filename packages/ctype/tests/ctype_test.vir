@@ -1,0 +1,72 @@
+module main
+
+import ctype
+
+fn test_classification() {
+	// 'A' is 65, 'a' is 97, '0' is 48, ' ' is 32, '\n' is 10, '!' is 33
+	a_upper := u8(65)
+	a_lower := u8(97)
+	digit_0 := u8(48)
+	space := u8(32)
+	punct := u8(33)
+
+	if !ctype.is_alpha(a_upper) || !ctype.is_alpha(a_lower) {
+		panic("is_alpha failed")
+	}
+	if ctype.is_alpha(digit_0) {
+		panic("digit should not be alpha")
+	}
+
+	if !ctype.is_digit(digit_0) {
+		panic("is_digit failed")
+	}
+	if ctype.is_digit(a_upper) {
+		panic("alpha should not be digit")
+	}
+
+	if !ctype.is_alnum(a_upper) || !ctype.is_alnum(digit_0) {
+		panic("is_alnum failed")
+	}
+
+	if !ctype.is_space(space) {
+		panic("is_space failed")
+	}
+
+	if !ctype.is_upper(a_upper) {
+		panic("is_upper failed")
+	}
+	if ctype.is_upper(a_lower) {
+		panic("lower should not be upper")
+	}
+
+	if !ctype.is_lower(a_lower) {
+		panic("is_lower failed")
+	}
+
+	if !ctype.is_punct(punct) {
+		panic("is_punct failed")
+	}
+	println("✓ test_classification passed")
+}
+
+fn test_transformation() {
+	a_upper := u8(65)
+	a_lower := u8(97)
+
+	lowered := ctype.to_lower(a_upper)
+	if lowered != a_lower {
+		panic("to_lower failed")
+	}
+
+	uppered := ctype.to_upper(a_lower)
+	if uppered != a_upper {
+		panic("to_upper failed")
+	}
+	println("✓ test_transformation passed")
+}
+
+fn main() {
+	test_classification()
+	test_transformation()
+	println("All ctype tests passed successfully!")
+}

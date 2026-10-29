@@ -62,6 +62,7 @@ type compileOptions struct {
 	outPath      string
 	keepC        bool
 	showAutofree bool
+	quietRT      bool
 }
 
 func main() {
@@ -118,10 +119,11 @@ func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	ccFlag := fs.String("cc", "", "C compiler to use (auto-detects tcc, cc, gcc, or clang)")
 	prodFlag := fs.Bool("prod", false, "Run with -O3 -march=native optimizations")
+	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-cc compiler] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-quiet-rt] [-cc compiler] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -145,8 +147,9 @@ func runCmd(args []string) {
 	}
 
 	opts := compileOptions{
-		prod: *prodFlag,
-		cc:   *ccFlag,
+		prod:    *prodFlag,
+		cc:      *ccFlag,
+		quietRT: *quietRTFlag,
 	}
 	compiler, _ := invokeCBackend(cFile, binFile, opts)
 
@@ -173,10 +176,11 @@ func buildCmd(args []string) {
 	outPath := fs.String("o", "", "Output binary path")
 	ccFlag := fs.String("cc", "", "C compiler (cc, clang, gcc, tcc)")
 	keepC := fs.Bool("keep-c", false, "Keep generated C99 file in build/")
+	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-o out] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -205,6 +209,7 @@ func buildCmd(args []string) {
 		cc:       *ccFlag,
 		outPath:  targetBin,
 		keepC:    *keepC,
+		quietRT:  *quietRTFlag,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, targetBin, opts)
@@ -1059,6 +1064,9 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	baseIncludes = append(baseIncludes, libFlags...)
 	if hasRaylib {
 		baseIncludes = append(baseIncludes, "-DVIRA_USE_RAYLIB")
+	}
+	if opts.quietRT {
+		baseIncludes = append(baseIncludes, "-DVIRA_QUIET_RT=1")
 	}
 
 	waFlags := []string{}

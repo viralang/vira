@@ -1,0 +1,59 @@
+module io
+
+@[intrinsic: 'vira_io_read_line']
+fn c_read_line() !string
+
+@[intrinsic: 'vira_io_read_all_stdin']
+fn c_read_all_stdin() !string
+
+@[intrinsic: 'vira_io_rename']
+fn c_rename(old_path string, new_path string) !bool
+
+@[intrinsic: 'vira_io_remove']
+fn c_remove(path string) !bool
+
+@[intrinsic: 'vira_io_temp_file']
+fn c_temp_file() !string
+
+pub fn read_line() !string {
+	res := c_read_line() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn read_all_stdin() !string {
+	res := c_read_all_stdin() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn prompt(msg string) !string {
+	print(msg)
+	res := read_line() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn rename(old_path string, new_path string) !bool {
+	res := c_rename(old_path, new_path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn remove(path string) !bool {
+	res := c_remove(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn temp_file() !string {
+	res := c_temp_file() or {
+		return error(err)
+	}
+	return res
+}

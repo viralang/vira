@@ -1,0 +1,210 @@
+module strings
+
+@[intrinsic: 'vira_str_parse_i64_base']
+fn c_parse_i64_base(s string, base int) !i64
+
+@[intrinsic: 'vira_str_format_i64_base']
+fn c_format_i64_base(val i64, base int) string
+
+@[intrinsic: 'vira_strings_sort']
+fn c_sort_strings(mut s []string) void
+
+pub fn parse_i64_base(s string, base int) !i64 {
+	val := c_parse_i64_base(s, base) or {
+		return error(err)
+	}
+	return val
+}
+
+pub fn format_i64_base(val i64, base int) string {
+	return c_format_i64_base(val, base)
+}
+
+pub fn sort(mut s []string) void {
+	c_sort_strings(mut s)
+}
+
+pub fn has_prefix(s string, prefix string) bool {
+	return s.starts_with(prefix)
+}
+
+pub fn has_suffix(s string, suffix string) bool {
+	return s.ends_with(suffix)
+}
+
+pub fn trim_prefix(s string, prefix string) string {
+	if s.starts_with(prefix) {
+		return s.slice(prefix.len, s.len)
+	}
+	return s
+}
+
+pub fn trim_suffix(s string, suffix string) string {
+	if s.ends_with(suffix) {
+		return s.slice(0, s.len - suffix.len)
+	}
+	return s
+}
+
+pub fn trim(s string) string {
+	return s.trim()
+}
+
+pub fn to_lower(s string) string {
+	return s.to_lower()
+}
+
+pub fn to_upper(s string) string {
+	return s.to_upper()
+}
+
+pub fn compare(a string, b string) int {
+	if a == b {
+		return 0
+	}
+	if a < b {
+		return -1
+	}
+	return 1
+}
+
+pub fn count(s string, substr string) int {
+	if substr.len == 0 || s.len < substr.len {
+		return 0
+	}
+	mut cnt := 0
+	mut idx := 0
+	for idx <= s.len - substr.len {
+		sub := s.slice(idx, idx + substr.len)
+		if sub == substr {
+			cnt = cnt + 1
+			idx = idx + substr.len
+		} else {
+			idx = idx + 1
+		}
+	}
+	return cnt
+}
+
+pub fn pad_left(s string, total_len int, pad_char string) string {
+	if s.len >= total_len || pad_char.len == 0 {
+		return s
+	}
+	needed := total_len - s.len
+	prefix := pad_char.repeat(needed)
+	return "${prefix}${s}"
+}
+
+pub fn pad_right(s string, total_len int, pad_char string) string {
+	if s.len >= total_len || pad_char.len == 0 {
+		return s
+	}
+	needed := total_len - s.len
+	suffix := pad_char.repeat(needed)
+	return "${s}${suffix}"
+}
+
+pub fn join(parts []string, sep string) string {
+	if parts.len == 0 {
+		return ""
+	}
+	if parts.len == 1 {
+		return parts[0]
+	}
+	mut res := parts[0]
+	mut i := 1
+	for i < parts.len {
+		res = "${res}${sep}${parts[i]}"
+		i = i + 1
+	}
+	return res
+}
+
+pub fn split(s string, delim string) []string {
+	mut res := []string{}
+	if delim.len == 0 {
+		mut i := 0
+		for i < s.len {
+			res.push(s.slice(i, i + 1))
+			i = i + 1
+		}
+		return res
+	}
+	mut start := 0
+	mut i := 0
+	for i <= s.len - delim.len {
+		sub := s.slice(i, i + delim.len)
+		if sub == delim {
+			res.push(s.slice(start, i))
+			start = i + delim.len
+			i = start
+		} else {
+			i = i + 1
+		}
+	}
+	res.push(s.slice(start, s.len))
+	return res
+}
+
+pub fn fields(s string) []string {
+	mut res := []string{}
+	mut in_word := false
+	mut word_start := 0
+	mut i := 0
+	for i < s.len {
+		b := s.byte_at(i) or { 0 }
+		is_ws := (b == 32 || b == 9 || b == 10 || b == 13)
+		if is_ws {
+			if in_word {
+				res.push(s.slice(word_start, i))
+				in_word = false
+			}
+		} else {
+			if !in_word {
+				word_start = i
+				in_word = true
+			}
+		}
+		i = i + 1
+	}
+	if in_word {
+		res.push(s.slice(word_start, s.len))
+	}
+	return res
+}
+
+pub struct StringBuilder {
+pub mut:
+	parts []string
+}
+
+pub fn StringBuilder.new() StringBuilder {
+	return StringBuilder{
+		parts: []string{},
+	}
+}
+
+pub fn (mut sb StringBuilder) write(s string) {
+	sb.parts.push(s)
+}
+
+pub fn (mut sb StringBuilder) write_line(s string) {
+	sb.parts.push(s)
+	sb.parts.push("\n")
+}
+
+pub fn (sb StringBuilder) to_string() string {
+	return join(sb.parts, "")
+}
+
+pub fn (mut sb StringBuilder) clear() {
+	sb.parts.clear()
+}
+
+pub fn (sb StringBuilder) len() int {
+	mut total := 0
+	for p in sb.parts {
+		total = total + p.len
+	}
+	return total
+}
