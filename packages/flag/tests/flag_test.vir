@@ -1,0 +1,104 @@
+module main
+
+import flag
+
+fn test_flag_defaults() {
+	mut fs := flag.FlagSet.new("server")
+	fs.bool_flag("verbose", "v", false, "enable verbose logging")
+	fs.string_flag("host", "h", "127.0.0.1", "bind address")
+	fs.int_flag("port", "p", 8080, "listen port")
+	fs.i64_flag("max_bytes", "m", 1048576i64, "maximum payload bytes")
+	fs.f64_flag("timeout", "t", 30.5, "timeout in seconds")
+
+	if fs.get_bool("verbose") != false {
+		panic("expected default verbose=false")
+	}
+	if fs.get_string("host") != "127.0.0.1" {
+		panic("expected default host=127.0.0.1")
+	}
+	if fs.get_int("port") != 8080 {
+		panic("expected default port=8080")
+	}
+	if fs.get_i64("max_bytes") != 1048576i64 {
+		panic("expected default max_bytes=1048576")
+	}
+	if fs.get_f64("timeout") != 30.5 {
+		panic("expected default timeout=30.5")
+	}
+	println("✓ test_flag_defaults passed")
+}
+
+fn test_flag_parsing() {
+	mut fs := flag.FlagSet.new("runner")
+	fs.bool_flag("verbose", "v", false, "verbose mode")
+	fs.string_flag("env", "e", "dev", "target environment")
+	fs.int_flag("workers", "w", 1, "worker count")
+	fs.f64_flag("rate", "r", 1.0, "request rate")
+
+	raw := [
+		"--verbose",
+		"--env=production",
+		"-w", "8",
+		"--rate=50.25",
+		"--",
+		"file1.txt",
+		"--not-a-flag.txt",
+	]
+
+	ok := fs.parse(raw) or {
+		panic("parse failed: ${err}")
+	}
+	if !ok {
+		panic("parse returned false")
+	}
+
+	if fs.get_bool("verbose") != true {
+		panic("expected verbose=true")
+	}
+	if fs.get_string("env") != "production" {
+		panic("expected env=production")
+	}
+	if fs.get_int("workers") != 8 {
+		panic("expected workers=8")
+	}
+	if fs.get_f64("rate") != 50.25 {
+		panic("expected rate=50.25")
+	}
+
+	pos := fs.positional()
+	if pos.len != 2 {
+		panic("expected 2 positional args, got: ${pos.len}")
+	}
+	if pos[0] != "file1.txt" || pos[1] != "--not-a-flag.txt" {
+		panic("positional args mismatch")
+	}
+	println("✓ test_flag_parsing passed")
+}
+
+fn test_help_and_ansi() {
+	mut fs := flag.FlagSet.new("app")
+	fs.bool_flag("help", "h", false, "display help")
+	fs.string_flag("config", "c", "app.json", "path to config")
+
+	h := fs.help_string()
+	if !h.contains("Usage of app:") || !h.contains("--config") {
+		panic("help string missing expected content")
+	}
+
+	bold := flag.ansi_bold("Vira")
+	if !bold.contains("Vira") {
+		panic("ansi_bold mismatch")
+	}
+	green := flag.ansi_green("OK")
+	if !green.contains("OK") {
+		panic("ansi_green mismatch")
+	}
+	println("✓ test_help_and_ansi passed")
+}
+
+fn main() {
+	test_flag_defaults()
+	test_flag_parsing()
+	test_help_and_ansi()
+	println("All flag tests passed successfully!")
+}

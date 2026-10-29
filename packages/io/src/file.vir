@@ -24,7 +24,6 @@ fn c_file_size(handle i64) i64
 pub struct File {
 pub mut:
 	handle i64
-	path string
 	is_open bool
 }
 
@@ -35,7 +34,6 @@ pub fn File.open(path string, mode string) !File {
 	}
 	return File{
 		handle: h,
-		path: path,
 		is_open: true,
 	}
 }

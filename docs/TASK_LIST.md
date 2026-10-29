@@ -23,13 +23,13 @@
 - [x] `packages/io` expansion (`stdin`/`stdout`/`stderr`, `read_line`, `prompt`, `SEEK_*`, `rename`, `remove`, `temp_file`) + `tests/io_test.vir` (Verified 100% `active_leaks=0`)
 - [x] `packages/syscall` + `tests/syscall_test.vir` (Verified 100% `active_leaks=0`)
 - [x] `packages/os` + `tests/os_test.vir` (Verified 100% `active_leaks=0`)
-- [/] `packages/exec` (`src/exec.vir` written, writing test suite)
-- [ ] `packages/flag` + `tests/flag_test.vir`
-- [ ] `packages/log` + `tests/log_test.vir`
+- [x] `packages/exec` + `tests/exec_test.vir` (Verified 100% `active_leaks=0`)
+- [x] `packages/flag` + `tests/flag_test.vir` (Verified 100% `active_leaks=0`)
+- [x] `packages/log` + `tests/log_test.vir` (Verified 100% `active_leaks=0`)
 
 ## Phase 4: Tutorials, Examples, Docs & VS Code / LSP (`0.1.9`)
-- [ ] Tutorial 31 (`31_basic_cli_application_development.md`) + `docs/examples/34_basic_cli_app.vir`
-- [ ] Tutorial 32 (`32_advanced_cli_flags_syscall_and_exec.md`) + `docs/examples/35_advanced_cli_flags_syscall_exec.vir` + `docs/examples/36_linux_container_runtime_reference.vir`
-- [ ] Update `docs/BUILTINS_AND_API_REFERENCE.md`, `docs/LANGUAGE_GUIDE.md`, root `LANGUAGE_GUIDE.md`, and `README.md`
-- [ ] Update `internal/lsp/server.go` + `editors/vscode` (`0.1.9` VSIX)
-- [ ] Full verification: `go test -count=1 ./...` & `vira test` across all stdlib packages (`active_leaks=0`)
+- [x] Tutorial 31 (`31_basic_cli_application_development.md`) + `docs/examples/34_basic_cli_app.vir` (Verified 100% `active_leaks=0`)
+- [x] Tutorial 32 (`32_advanced_cli_flags_syscall_and_exec.md`) + `docs/examples/35_advanced_cli_flags_syscall_exec.vir` + `docs/examples/36_linux_container_runtime_reference.vir` (Verified 100% `active_leaks=0`)
+- [x] Update `docs/BUILTINS_AND_API_REFERENCE.md`, `docs/LANGUAGE_GUIDE.md`, root `LANGUAGE_GUIDE.md`, and `README.md`
+- [x] Update `internal/lsp/server.go` + `editors/vscode` (`0.1.9` VSIX packaged)
+- [x] Full verification: `go test -count=1 ./...` & `vira test` across all 10 stdlib packages (`active_leaks=0`)

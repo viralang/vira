@@ -251,28 +251,19 @@ func (a *Analyzer) rewriteBlock(
 			// 2. Register variable in current scope if its type owns heap memory
 			valType := a.chk.ExprTypes[s.Value]
 			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
-				// Variables initialized by borrowing from containers or struct fields do not own the memory
-				isBorrow := false
-				if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
-					isBorrow = true
-				} else if _, isSel := s.Value.(*ast.SelectorExpr); isSel {
-					isBorrow = true
+				state := StateScopedLocal
+				if scope.InArena && a.isAllocatedOnArena(kind, s.Value) {
+					state = StateManagedByArena
 				}
-				if !isBorrow {
-					state := StateScopedLocal
-					if scope.InArena && a.isAllocatedOnArena(kind, s.Value) {
-						state = StateManagedByArena
-					}
-					tv := &TrackedVar{
-						Name:        s.Name.Name,
-						Type:        valType,
-						CleanupKind: kind,
-						State:       state,
-						DeclSpan:    s.StmtSpan,
-					}
-					scope.Vars = append(scope.Vars, tv)
-					report.TrackedVars = append(report.TrackedVars, tv)
+				tv := &TrackedVar{
+					Name:        s.Name.Name,
+					Type:        valType,
+					CleanupKind: kind,
+					State:       state,
+					DeclSpan:    s.StmtSpan,
 				}
+				scope.Vars = append(scope.Vars, tv)
+				report.TrackedVars = append(report.TrackedVars, tv)
 			}
 			rewritten = append(rewritten, s)
 			a.retireHoistedTemps(stmtScope, postStmts)

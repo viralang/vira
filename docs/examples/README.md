@@ -51,6 +51,10 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`30_switch_statement.vir`](./30_switch_statement.vir)** | Switch Statements & Pattern Branching | Multi-branch switching on integer codes, string routes, comma-separated multiple matches, tagless boolean condition switches, and deterministic autofree safety. |
 | **[`31_package_namespacing_and_modules.vir`](./31_package_namespacing_and_modules.vir)** | First-Class Package Namespacing & Modules | Module declarations (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, and cryptographic `vira.lock` dependency locking. |
 | **[`32_actor_detached_and_lifecycle.vir`](./32_actor_detached_and_lifecycle.vir)** | Actor Detached Sends & Lifecycle Management | Detached fire-and-forget messaging (`w <- method()`), zero-alloc synchronous execution (`w <- method() or { ... }`), supervisor restart count reset on healthy run, `VIRA_ACTOR_STOPPED` dead-letter rejection, and 0 memory leaks. |
+| **[`33_nd_tensors_and_stdlib_json.vir`](./33_nd_tensors_and_stdlib_json.vir)** | 1D-4D Strided Tensors & Pure-Vira JSON | 4D batched attention `@`, zero-copy arena reshape, trailing-dimension bias broadcast, pure-Vira JSON serialization, and 0 memory leaks. |
+| **[`34_basic_cli_app.vir`](./34_basic_cli_app.vir)** | Basic CLI Application Development | Command-line argument inspection via `os.args()`, environment variables (`os.getenv`/`os.setenv`), path helpers, file I/O with deterministic cleanup via `defer`, and 0 memory leaks. |
+| **[`35_advanced_cli_flags_syscall_exec.vir`](./35_advanced_cli_flags_syscall_exec.vir)** | Advanced CLI Flags, Logging, Syscall & Exec | Production flag parsing with `flag.FlagSet`, leveled logging with `log.Logger`, child process execution via `exec.Command`, raw UNIX pipe IPC via `syscall.pipe`, and 0 memory leaks. |
+| **[`36_linux_container_runtime_reference.vir`](./36_linux_container_runtime_reference.vir)** | Linux Container Runtime Reference Implementation | Full Linux container engine: private namespaces (`CLONE_NEWPID/NEWUTS/NEWNS/NEWNET/NEWIPC`), cgroups v2 resource capping, virtual ethernet plumbing, `/dev` character devices via `syscall.mknod`, and 0 memory leaks. |
 
 ---
 
@@ -91,4 +95,8 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/30_switch_statement.vir
 .\vira.exe run docs/examples/31_package_namespacing_and_modules.vir
 .\vira.exe run docs/examples/32_actor_detached_and_lifecycle.vir
+.\vira.exe run docs/examples/33_nd_tensors_and_stdlib_json.vir
+.\vira.exe run docs/examples/34_basic_cli_app.vir
+.\vira.exe run docs/examples/35_advanced_cli_flags_syscall_exec.vir
+.\vira.exe run docs/examples/36_linux_container_runtime_reference.vir
 ```

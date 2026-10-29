@@ -997,10 +997,12 @@ func (g *Generator) emitCloneExpr(t checker.Type, expr string) string {
 		return fmt.Sprintf("vira_tensor_f32_clone(%s)", expr)
 	}
 	if sl, isSl := t.(*checker.SliceType); isSl {
-		return fmt.Sprintf("%s_clone(&(%s))", g.cSliceName(sl.Elem), expr)
+		cSl := g.cSliceName(sl.Elem)
+		return fmt.Sprintf("({ %s _clone_tmp = (%s); %s_clone(&_clone_tmp); })", cSl, expr, cSl)
 	}
 	if st, isSt := t.(*checker.StructType); isSt && !st.IsActor && g.af.StructTypeNeedsFree(st) {
-		return fmt.Sprintf("%s_clone(&(%s))", g.cType(st), expr)
+		cSt := g.cType(st)
+		return fmt.Sprintf("({ %s _clone_tmp = (%s); %s_clone(&_clone_tmp); })", cSt, expr, cSt)
 	}
 	return expr
 }
@@ -1731,7 +1733,8 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		g.emitBlockStmts(out, s.Body, indent+"        ", fnRet)
 		out.WriteString(fmt.Sprintf("%s    }\n", indent))
 
-		if _, isIdent := s.Iter.(*ast.IdentExpr); !isIdent {
+		switch s.Iter.(type) {
+		case *ast.CallExpr, *ast.ArrayLitExpr:
 			if _, isSlice := iterType.(*checker.SliceType); isSlice {
 				out.WriteString(fmt.Sprintf("%s    %s_free(&%s);\n", indent, g.cSliceName(elemType), tmpIter))
 			}

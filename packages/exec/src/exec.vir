@@ -24,13 +24,9 @@ pub mut:
 }
 
 pub fn Command.new(name string, extra []string) Command {
-	mut a := []string{}
-	for item in extra {
-		a.push(item)
-	}
 	return Command{
 		name: name,
-		args: a,
+		args: extra,
 		dir: "",
 		clone_flags: 0,
 		stdin_text: "",
@@ -141,6 +137,14 @@ pub fn (c Command) wait() !int {
 
 pub fn (c Command) Wait() !int {
 	res := c.wait() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn combined_output(name string, extra []string) !string {
+	c := Command.new(name, extra)
+	res := c.combined_output() or {
 		return error(err)
 	}
 	return res

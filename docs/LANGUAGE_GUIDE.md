@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.5.12)  
+> **Version:** Production Toolchain (v0.5.13)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 
@@ -180,6 +180,48 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |
 | `bool`| Boolean (`true` or `false`) | 8-bit |
 | `string`| Immutable UTF-8 string slice (16 bytes: `data`, `len`, `is_lit`) | 16 bytes |
+
+---
+
+### Numeric Literals & Type Casts
+
+Vira supports decimal, hexadecimal (`0x`), octal (`0o`), and binary (`0b`) integer literals:
+```v
+mask := 0b10110010
+permissions := 0o755
+hex_code := 0xFF
+```
+
+Convert between primitive types using explicit casts:
+```v
+val_int := 42
+val_i64 := i64(val_int)
+val_f64 := f64(val_int)
+val_u8  := u8(val_int)
+```
+
+---
+
+### Constants (`const` / `pub const`)
+
+Compile-time immutable typed constants:
+```v
+pub const MAX_CONNECTIONS = 1000
+const DEFAULT_TIMEOUT_MS = 5000
+```
+
+---
+
+### Cleanup with `defer`
+
+The `defer` statement schedules a cleanup action to execute in **LIFO** (Last-In, First-Out) order when the enclosing function or block scope exits:
+```v
+mut f := io.File.open('records.csv', 'rb') or { return }
+defer f.close()
+
+// Normal processing...
+// f.close() runs deterministically upon return, error unwrap, or panic!
+```
 
 ---
 

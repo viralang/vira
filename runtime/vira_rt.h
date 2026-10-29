@@ -600,6 +600,18 @@ static inline vira_slice_string vira_os_args(void) {
   return s;
 }
 
+static inline vira_string vira_os_platform(void) {
+#if defined(_WIN32)
+  return vira_str_lit("windows", 7);
+#elif defined(__APPLE__)
+  return vira_str_lit("darwin", 6);
+#elif defined(__linux__)
+  return vira_str_lit("linux", 5);
+#else
+  return vira_str_lit("unknown", 7);
+#endif
+}
+
 #ifndef _Result_u8_DEFINED
 #define _Result_u8_DEFINED
 typedef struct {
@@ -5805,7 +5817,7 @@ static inline Result_int vira_sys_exec_run(vira_slice_string args, vira_string d
     if (dir.len > 0) {
       char dstack[1024];
       vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
-      chdir(db.ptr);
+      if (chdir(db.ptr) != 0) { /* continue */ }
       vira_cstr_buf_free(&db);
     }
     char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));
@@ -5923,7 +5935,7 @@ static inline Result_string vira_sys_exec_output(vira_slice_string args, vira_st
     if (dir.len > 0) {
       char dstack[1024];
       vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
-      chdir(db.ptr);
+      if (chdir(db.ptr) != 0) { /* continue */ }
       vira_cstr_buf_free(&db);
     }
     char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));
@@ -6020,7 +6032,7 @@ static inline Result_int vira_sys_proc_start(vira_slice_string args, vira_string
     if (dir.len > 0) {
       char dstack[1024];
       vira_cstr_buf db = vira_str_to_cstr_buf(dir, dstack, sizeof(dstack));
-      chdir(db.ptr);
+      if (chdir(db.ptr) != 0) { /* continue */ }
       vira_cstr_buf_free(&db);
     }
     char **argv = (char **)malloc((size_t)(args.len + 1) * sizeof(char *));

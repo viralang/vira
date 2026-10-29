@@ -63,6 +63,17 @@ fn c_read_file(path string) !string
 @[intrinsic: 'vira_write_file']
 fn c_write_file(path string, content string) !bool
 
+@[intrinsic: 'vira_os_platform']
+fn c_platform() string
+
+pub fn platform() string {
+	return c_platform()
+}
+
+pub fn is_windows() bool {
+	return platform() == "windows"
+}
+
 pub fn args() []string {
 	return c_args()
 }
@@ -201,19 +212,18 @@ pub fn mkdir_all(path string, perm int) !bool {
 		return true
 	}
 	clean := clean_path(path)
-	mut cur := ""
 	mut i := 0
 	for i < clean.len {
 		b := clean.byte_at(i) or { 0 }
-		if (b == 47 || b == 92) && cur.len > 0 {
-			if !is_dir(cur) {
-				c_mkdir(cur, perm) or { false }
+		if (b == 47 || b == 92) && i > 0 {
+			sub := clean.slice(0, i)
+			if !is_dir(sub) {
+				c_mkdir(sub, perm) or { false }
 			}
 		}
-		cur = "${cur}${clean.slice(i, i + 1)}"
 		i = i + 1
 	}
-	res := c_mkdir(cur, perm) or {
+	res := c_mkdir(clean, perm) or {
 		return error(err)
 	}
 	return res

@@ -89,5 +89,53 @@
       "${4:payload} := ${1:jb}.build()"
     ],
     "description": "Build RFC 8259 JSON object using stdlib json.JsonBuilder"
+  },
+  "Constant Declaration": {
+    "prefix": "const",
+    "body": [
+      "const ${1:NAME} := ${2:value}"
+    ],
+    "description": "Compile-time constant declaration"
+  },
+  "Defer Statement": {
+    "prefix": "defer",
+    "body": [
+      "defer {",
+      "\t${1:// cleanup}",
+      "}"
+    ],
+    "description": "Execute block at function exit in LIFO order"
+  },
+  "Command-Line FlagSet": {
+    "prefix": "flagset",
+    "body": [
+      "mut ${1:fs} := flag.FlagSet.new('${2:app}')",
+      "${1:fs}.bool('${3:verbose}', false, '${4:enable verbose output}')",
+      "${1:fs}.string('${5:config}', '${6:config.json}', '${7:path to configuration file}')",
+      "${1:fs}.parse(os.args()) or {",
+      "\teprintln('Error: ${err}')",
+      "\treturn",
+      "}"
+    ],
+    "description": "Parse CLI flags using stdlib flag.FlagSet"
+  },
+  "Structured Logger": {
+    "prefix": "logger",
+    "body": [
+      "mut ${1:l} := log.Logger.new('${2:app}')",
+      "${1:l}.info('${3:Ready}')"
+    ],
+    "description": "Structured logging with prefix and severity"
+  },
+  "Process Command Execution": {
+    "prefix": "exec",
+    "body": [
+      "mut ${1:cmd} := exec.Command.new('${2:echo}', [${3:'Hello from Vira'}])",
+      "${4:res} := ${1:cmd}.run() or {",
+      "\teprintln('Command execution failed: ${err}')",
+      "\treturn",
+      "}"
+    ],
+    "description": "Spawn child process using stdlib exec.Command"
   }
 }

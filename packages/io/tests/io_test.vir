@@ -44,7 +44,7 @@ fn test_buffered_exact_and_all() {
 }
 
 fn test_file_streaming() {
-	tmp_path := 'scratch/temp_io_test.txt'
+	tmp_path := 'temp_io_test.txt'
 	mut f_out := File.open(tmp_path, 'wb') or {
 		panic('failed to create temp file')
 	}
@@ -67,6 +67,7 @@ fn test_file_streaming() {
 		panic('mismatched l2 from file')
 	}
 	buf_r.close() or { panic('failed to close buf reader') }
+	io.remove(tmp_path) or { panic('failed to remove temp file') }
 
 	println('✓ test_file_streaming passed')
 }

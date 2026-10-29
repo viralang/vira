@@ -1,9 +1,13 @@
 module main
 
+import os
 import exec
 
 fn test_command_output() {
-	cmd := exec.command("cmd", ["/c", "echo", "Vira Exec Engine"])
+	mut cmd := exec.command("echo", ["Vira Exec Engine"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "echo", "Vira Exec Engine"])
+	}
 	out := cmd.output() or {
 		panic("cmd.output failed: ${err}")
 	}
@@ -14,7 +18,10 @@ fn test_command_output() {
 }
 
 fn test_combined_output() {
-	cmd := exec.command("cmd", ["/c", "echo", "Combined Stream"])
+	mut cmd := exec.command("echo", ["Combined Stream"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "echo", "Combined Stream"])
+	}
 	out := cmd.combined_output() or {
 		println("COMBINED ERROR: ${err}")
 		panic("cmd.combined_output failed: ${err}")
@@ -27,7 +34,10 @@ fn test_combined_output() {
 }
 
 fn test_async_start_wait() {
-	mut cmd := exec.command("cmd", ["/c", "exit 0"])
+	mut cmd := exec.command("sh", ["-c", "exit 0"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "exit 0"])
+	}
 	pid := cmd.start() or {
 		panic("start failed: ${err}")
 	}
