@@ -17,7 +17,7 @@ Welcome to the definitive API reference for the **Vira Programming Language**. T
 9. [Native GUI & Declarative Layout Engine](#9-native-gui--declarative-layout-engine)
 10. [Memory, Bump Arenas, Autofree & C FFI Helpers](#10-memory-bump-arenas-autofree--c-ffi-helpers)
 11. [Native Collections (`[]T` & `[N]T`) & String Methods](#11-native-collections-t--nt--string-methods)
-12. [Standard Library Packages (`io`, `net`, `http`, `json`, `viraserve`)](#12-standard-library-packages-io-net-http-json-viraserve)
+12. [Standard Library Packages (`os`, `exec`, `syscall`, `flag`, `log`, `strings`, `math`, `time`, `ctype`, `io`, `net`, `http`, `json`, `viraserve`)](#12-standard-library-packages)
 
 ---
 

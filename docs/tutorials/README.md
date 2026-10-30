@@ -9,15 +9,19 @@ Every tutorial includes a corresponding runnable code example in the [`docs/exam
 ## Curriculum Roadmap
 
 ```
-Beginner                           Intermediate                               Advanced
+Beginner                           Intermediate                               Advanced & Systems
    │                                     │                                        │
-   ├── [1. Basics & Control Flow]        ├── [3. Interfaces & Polymorphism]       ├── [5. Autofree & Bump Arenas]
+   ├── [01. Basics & Control Flow]       ├── [03. Interfaces & Polymorphism]      ├── [05. Autofree & Bump Arenas]
    │                                     │                                        │
-   └── [2. 4-Quadrant Structs & OOP]     ├── [4. Error Handling & Results]        ├── [6. SIMD Tensors & Math]
+   ├── [02. 4-Quadrant Structs & OOP]    ├── [04. Error Handling & Results]       ├── [06. SIMD Tensors & Math]
+   │                                     │                                        │
+   ├── [11. Loops & Operators]           ├── [27. Collections & Slices]           ├── [07. Actors & Supervision]
+   │                                     │                                        │
+   ├── [29. Switch Statement]            ├── [28. Networking & HTTP]             ├── [08. Production AI Pipeline]
+   │                                     │                                        │
+   └── [31. Basic CLI Applications]      ├── [30. Package Namespacing]            ├── [32. Advanced CLI, Flags & Containers]
                                          │                                        │
-                                         └── [25. Package Management & Vendoring] ├── [7. Actors & Supervision]
-                                                                                  │
-                                                                                  └── [8. Production Systems]
+                                         └── [33. ND Tensors & JSON]              └── [Standard Library Guide]
 ```
 
 ---
@@ -26,7 +30,7 @@ Beginner                           Intermediate                               Ad
 
 | # | Tutorial Title | Level | Matching Code Example | Core Topics Covered |
 | :-: | :--- | :-: | :--- | :--- |
-| **01** | [**Getting Started, Variables & Control Flow**](./01_getting_started_and_basics.md) | Beginner | [`01_basics.vir`](../examples/01_basics.vir) | Immutability by default, `mut`, primitives (`int`, `i64`, `f32`, `bool`, `string`), string interpolation `${...}`, `if`/`else`, blank identifier `_`. |
+| **01** | [**Getting Started, Variables & Control Flow**](./01_getting_started_and_basics.md) | Beginner | [`01_basics.vir`](../examples/01_basics.vir) | Immutability by default, `mut`, top-level `const`/`pub const`, primitives (`int`, `i64`, `f32`, `bool`, `string`), octal/binary literals, numeric casts, `print`/`println`/`eprint`/`eprintln`, `.slice()`, `defer`, string interpolation `${...}`, `if`/`else`, blank identifier `_`, and stdlib imports. |
 | **02** | [**OOP, 4-Quadrant Structs & Composition**](./02_oop_and_4_quadrant_structs.md) | Intermediate | [`02_oop_composition.vir`](../examples/02_oop_composition.vir) | 4-quadrant field encapsulation (`default`, `mut:`, `pub:`, `pub mut:`), struct embedding, promoted methods/fields, value vs pointer receivers, and static factory methods. |
 | **03** | [**Structural Interfaces & Dynamic Dispatch**](./03_interfaces_and_polymorphism.md) | Intermediate | [`03_interfaces.vir`](../examples/03_interfaces.vir) | Implicit interface satisfaction (no `implements` keyword), 16-byte fat-pointer boxing, vtable dispatch, and automatic destructor chaining. |
 | **04** | [**Zero-Cost Error Handling with Results (`!T`)**](./04_error_handling_and_results.md) | Intermediate | [`04_result_handling.vir`](../examples/04_result_handling.vir) | Result return types (`!T`), `return error('...')`, mandatory unwrap blocks `or { ... }`, implicit `err` binding, default fallbacks, and compiler enforcement. |
@@ -41,7 +45,7 @@ Beginner                           Intermediate                               Ad
 | **13** | [**Hardware Acceleration, GPUs & Heterogeneous Computing**](./13_hardware_acceleration_gpu_npu.md) | Advanced | [`13_hardware_acceleration_gpu.vir`](../examples/13_hardware_acceleration_gpu.vir) | Discrete GPUs (CUDA/ROCm), Apple Metal Unified DMA, 64-byte PCIe cache alignment, zero-copy C-ABI handoff, and Erlang-style supervisor containment for GPU OOM faults. |
 | **14** | [**Neural Network Inference on CPU SIMD vs. GPU Compute Streams**](./14_neural_network_cpu_gpu_inference.md) | Advanced | [`14_neural_network_cpu_gpu.vir`](../examples/14_neural_network_cpu_gpu.vir) | 3-layer MLP classifier forward pass (Dense + Bias + ReLU + Softmax Scaling), AVX2/NEON SIMD execution, GPU device stream actors, numerical parity verification, and CPU fallback on GPU OOM. |
 | **15** | [**Loading Pretrained Model Weights (PyTorch, SafeTensors & GGUF)**](./15_loading_pretrained_models_weights.md) | Advanced | [`15_pretrained_weights_loader.vir`](../examples/15_pretrained_weights_loader.vir) | Zero-copy binary tensor ingestion (`tensor_load_bin`), bit-exact forward pass matching PyTorch reference output, asynchronous actor serving, and bidirectional export (`tensor_save_bin`). |
-| **16** | [**Compiling, Building & Deploying Vira Applications**](./16_compilation_and_deployment.md) | Beginner to Advanced | [`16_compilation_and_build_modes.vir`](../examples/16_compilation_and_build_modes.vir) | Multi-stage Ahead-Of-Time (AOT) pipeline, build flags (`-prod`, `-sanitize`, `-keep-c`, `-cc`), static linking, standalone binary distribution, and production Docker containerization. |
+| **16** | [**Compiling, Building & Deploying Vira Applications**](./16_compilation_and_deployment.md) | Beginner to Advanced | [`16_compilation_and_build_modes.vir`](../examples/16_compilation_and_build_modes.vir) | Multi-stage Ahead-Of-Time (AOT) pipeline, build flags (`-prod`, `-sanitize`, `-keep-c`, `-cc`, `-quiet-rt`), static linking, standalone binary distribution, and production Docker containerization. |
 | **17** | [**High-Performance HTTP 1.1 Web Services & Fast JSON**](./17_http_web_service_and_json.md) | Advanced | [`17_http_web_server_and_json.vir`](../examples/17_http_web_server_and_json.vir) | High-performance HTTP 1.1 networking, fast zero-copy JSON parsing (`json_get_str`, `json_get_int`, `json_get_f32`), and async actor-driven REST APIs. |
 | **18** | [**Pure Vira Autograd Engine & Native SafeTensors Loader**](./18_autograd_and_safetensors.md) | Advanced | [`18_autograd_and_safetensors.vir`](../examples/18_autograd_and_safetensors.vir) | Native Hugging Face `.safetensors` parser without Python, Autograd backward gradients (`tensor_matmul_grad_b`, `tensor_relu_backward`), and SIMD SGD optimization (`tensor_sgd_step`). |
 | **19** | [**Developer Tooling, LSP, VS Code Extension & Package Management**](./19_tooling_lsp_and_package_management.md) | Beginner to Advanced | `vira init`, `vira.mod`, `vira fmt`, `vira test`, `vira lsp` | Project scaffolding (`vira init`), manifest packages (`vira.mod`), multi-file compilation, code formatter (`vira fmt`), automated test runner (`vira test`), Language Server Protocol (`vira lsp`), and VS Code extension. |
@@ -58,6 +62,32 @@ Beginner                           Intermediate                               Ad
 | **30** | [**Package Namespacing, Modules & Dependency Management**](./30_package_namespacing_and_dependency_management.md) | Intermediate to Adv | [`31_package_namespacing_and_modules.vir`](../examples/31_package_namespacing_and_modules.vir) | First-class module isolation (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, package aliasing (`import as`), canonical `vira.mod` manifests, and cryptographic `vira.lock` locking. |
 | **31** | [**Basic CLI Application Development**](./31_basic_cli_application_development.md) | Beginner to Inter | [`34_basic_cli_app.vir`](../examples/34_basic_cli_app.vir) | Native `int main(argc, argv)` entrypoint, command-line arguments via `os.args()`, environment variables (`os.getenv`/`os.setenv`), path helpers, file I/O with deterministic cleanup via `defer`, and 0 memory leaks. |
 | **32** | [**Advanced CLI Flags, Subprocess Execution & Linux Containers**](./32_advanced_cli_flags_syscall_and_exec.md) | Advanced / Systems | [`35_advanced_cli_flags_syscall_exec.vir`](../examples/35_advanced_cli_flags_syscall_exec.vir)<br>[`36_linux_container_runtime_reference.vir`](../examples/36_linux_container_runtime_reference.vir) | Production flag parsing with `flag.FlagSet`, leveled logging with `log.Logger`, child process orchestration with `exec.Command`, raw UNIX pipe IPC, Linux namespaces (`CLONE_NEWPID/NEWUTS/NEWNS/NEWNET/NEWIPC`), cgroups v2 resource capping, and pure-Vira container runtime. |
+| **33** | [**1D-4D Strided Tensors, Batched Attention & Pure-Vira JSON**](./33_nd_tensors_and_stdlib_json.md) | Advanced / AI | [`33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir) | 4D batched multi-head attention matrix multiplication (`@`), zero-copy bump arena reshaping (`seq.reshape_2d`), trailing-dimension bias broadcasting, pure-Vira RFC 8259 JSON parsing (`json.get_str`, `json.get_int`), and concurrent actor `json.JsonBuilder`. |
+
+---
+
+## 🏛️ Standard Library Packages Guide
+
+Vira ships with 14 first-party standard library packages located under [`packages/`](file:///mnt/flutter_drive/vira/packages), resolved automatically by the compiler at compile-time:
+
+| Package | Import Path | Primary Responsibilities |
+| :--- | :--- | :--- |
+| **`os`** | [`import os`](file:///mnt/flutter_drive/vira/packages/os) | CLI arguments (`os.args()`), process ID (`os.getpid()`), environment variables, filesystem operations, platform detection (`os.is_windows()`). |
+| **`exec`** | [`import exec`](file:///mnt/flutter_drive/vira/packages/exec) | Subprocess execution, pipe redirection, `CLONE_*` namespace flags, split async lifecycle (`cmd.start()`, `cmd.wait()`), and `combined_output`. |
+| **`syscall`** | [`import syscall`](file:///mnt/flutter_drive/vira/packages/syscall) | Low-level kernel calls: file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux namespaces, mounts, `chroot`, `mknod`, signal queue. |
+| **`flag`** | [`import flag`](file:///mnt/flutter_drive/vira/packages/flag) | Declarative CLI flag parsing (`bool_flag`, `int_flag`, `string_flag`, `f64_flag`), short `-p` / long `--port` options, `--help` formatter. |
+| **`log`** | [`import log`](file:///mnt/flutter_drive/vira/packages/log) | Leveled stderr logging (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) with timestamping, custom prefixes, and process termination. |
+| **`strings`** | [`import strings`](file:///mnt/flutter_drive/vira/packages/strings) | String utilities: `fields` (like Go `strings.Fields`), `join`, `split`, `replace`, `trim_prefix`, `trim_suffix`, `pad_left`, `pad_right`, `sort`, `StringBuilder`. |
+| **`math`** | [`import math`](file:///mnt/flutter_drive/vira/packages/math) | High-performance C99 math intrinsics: trigonometry (`sin`, `cos`, `tan`), exponential, log, `pow`, `sqrt`, `hypot`, `clamp`, `PI`, `E`, `TAU`. |
+| **`time`** | [`import time`](file:///mnt/flutter_drive/vira/packages/time) | Wall-clock time (`now_unix()`, `now_ns()`), monotonic clock, high-precision sleep (`sleep_ms`, `sleep_us`), `strftime` formatting, and `Duration`. |
+| **`ctype`** | [`import ctype`](file:///mnt/flutter_drive/vira/packages/ctype) | Fast ASCII character classification (`is_alpha`, `is_digit`, `is_space`, `is_upper`, `is_lower`) and case conversion (`to_lower`, `to_upper`). |
+| **`io`** | [`import io`](file:///mnt/flutter_drive/vira/packages/io) | Stream traits (`Reader`, `Writer`, `Closer`), `File`, `BufReader`, interactive console input (`io.prompt()`, `io.read_line()`), temporary files. |
+| **`net`** | [`import net`](file:///mnt/flutter_drive/vira/packages/net) | Cross-platform networking: `TcpListener`, `TcpStream`, `UdpSocket`, non-blocking `Poller`, and `SocketAddr`. |
+| **`http`** | [`import http`](file:///mnt/flutter_drive/vira/packages/http) | HTTP/1.1 request parser, response builder, `HeaderMap`, server loops, and Server-Sent Events (`SseStream`). |
+| **`json`** | [`import json`](file:///mnt/flutter_drive/vira/packages/json) | Pure-Vira RFC 8259 JSON parser (`json.get_str`, `json.get_int`), validator (`json.is_valid`), array extractors, and $O(N)$ `JsonBuilder`. |
+| **`viraserve`**| [`import viraserve`](file:///mnt/flutter_drive/vira/packages/viraserve) | Actor-backed asynchronous web microframework and routing engine with zero memory leaks. |
+
+For detailed API documentation, code examples, and best practices, see the comprehensive [**Standard Library Manual**](../STANDARD_LIBRARY.md).
 
 ---
 
@@ -65,14 +95,15 @@ Beginner                           Intermediate                               Ad
 
 To verify that your compiler toolchain is ready:
 
-```powershell
+```bash
 # Run the first tutorial example
-.\vira.exe run docs/examples/01_basics.vir
+vira run docs/examples/01_basics.vir
 
 # Check and inspect autofree escape analysis for an example
-.\vira.exe check docs/examples/02_oop_composition.vir
+vira check docs/examples/02_oop_composition.vir
 
 # Compile an optimized standalone native binary
-.\vira.exe build -prod -o app.exe docs/examples/08_production_pipeline.vir
-.\app.exe
+vira build -prod -o app.exe docs/examples/08_production_pipeline.vir
+./app.exe
 ```
+
