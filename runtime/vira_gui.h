@@ -56,15 +56,360 @@ static int32_t                 _vira_char_queue_count = 0;
 static bool                    _vira_backspace_pressed = false;
 static uint32_t                _vira_cursor_blink_counter = 0;
 
+static bool                    _vira_tab_pressed = false;
+static bool                    _vira_shift_down = false;
+static int32_t                 _vira_total_inputs = 0;
+static bool                    _vira_modal_active = false;
+static bool                    _vira_modal_open_this_frame = false;
+static bool                    _vira_modal_open_prev_frame = false;
+static bool                    _vira_modal_just_opened = false;
+static int32_t                 _vira_modal_first_input = -1;
+static int32_t                 _vira_modal_last_input = -1;
+static int32_t                 _vira_prev_modal_first_input = -1;
+static int32_t                 _vira_prev_modal_last_input = -1;
+
 static int32_t                 _vira_card_heights[16] = {0};
 static int32_t                 _vira_card_counter = 0;
 static int32_t                 _vira_card_end_counter = 0;
 
+static bool                    _vira_click_consumed = false;
+
+// Dropdown State
+typedef struct {
+    bool              active;
+    int32_t           x;
+    int32_t           y;
+    int32_t           w;
+    int32_t           h;
+    vira_slice_string items;
+    int32_t           selected_idx;
+} vira_dropdown_popup_t;
+
+static vira_dropdown_popup_t   _vira_current_dropdown_popup = {0};
+static int32_t                 _vira_active_dropdown_id = -1;
+static int32_t                 _vira_dropdown_counter = 0;
+
+#define VIRA_MAX_TABLES 16
+typedef struct {
+    int32_t sort_col;
+    bool    sort_asc;
+    int32_t page;
+    int32_t selected_row;
+    int32_t last_search_len;
+    bool    initialized;
+} vira_table_state_t;
+
+static vira_table_state_t      _vira_table_states[VIRA_MAX_TABLES] = {0};
+static int32_t                 _vira_table_counter = 0;
+static int32_t                 _vira_last_table_sort_col = 0;
+static bool                    _vira_last_table_sort_asc = true;
+
+// ------------------------------------------------------------------------------
+// Asset & Image Subsystem Definitions
+// ------------------------------------------------------------------------------
+#define VIRA_MAX_GUI_IMAGES 64
+
+typedef struct {
+    int32_t   width;
+    int32_t   height;
+    int32_t   channels;
+    uint32_t* pixels;
+    void*     native_handle;
+    bool      is_valid;
+} vira_gui_image_t;
+
+static vira_gui_image_t _vira_gui_images[VIRA_MAX_GUI_IMAGES] = {0};
+
+static inline bool _vira_load_bmp_file(const char* filepath, int32_t* out_w, int32_t* out_h, uint32_t** out_pixels) {
+    if (!filepath || !out_w || !out_h || !out_pixels) return false;
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return false;
+
+    uint8_t header[54];
+    if (fread(header, 1, 54, f) < 54) { fclose(f); return false; }
+    if (header[0] != 'B' || header[1] != 'M') { fclose(f); return false; }
+
+    uint32_t data_offset = *(uint32_t*)&header[10];
+    int32_t width = *(int32_t*)&header[18];
+    int32_t height = *(int32_t*)&header[22];
+    uint16_t bpp = *(uint16_t*)&header[28];
+    uint32_t compression = *(uint32_t*)&header[30];
+
+    if (width <= 0 || height == 0 || (bpp != 24 && bpp != 32) || (compression != 0 && compression != 3)) {
+        fclose(f);
+        return false;
+    }
+
+    bool flip_y = (height > 0);
+    int32_t abs_h = height < 0 ? -height : height;
+    size_t pixel_count = (size_t)width * (size_t)abs_h;
+    uint32_t* pixels = (uint32_t*)calloc(pixel_count, sizeof(uint32_t));
+    if (!pixels) { fclose(f); return false; }
+
+    fseek(f, (long)data_offset, SEEK_SET);
+    int row_stride = ((width * (bpp / 8) + 3) / 4) * 4;
+    uint8_t* row_buf = (uint8_t*)malloc((size_t)row_stride);
+    if (!row_buf) { free(pixels); fclose(f); return false; }
+
+    for (int32_t row = 0; row < abs_h; row++) {
+        int32_t target_row = flip_y ? (abs_h - 1 - row) : row;
+        if (fread(row_buf, 1, (size_t)row_stride, f) < (size_t)row_stride) break;
+        uint32_t* dst = &pixels[target_row * width];
+        if (bpp == 32) {
+            for (int32_t col = 0; col < width; col++) {
+                uint8_t b = row_buf[col * 4 + 0];
+                uint8_t g = row_buf[col * 4 + 1];
+                uint8_t r = row_buf[col * 4 + 2];
+                uint8_t a = row_buf[col * 4 + 3];
+                dst[col] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
+        } else if (bpp == 24) {
+            for (int32_t col = 0; col < width; col++) {
+                uint8_t b = row_buf[col * 3 + 0];
+                uint8_t g = row_buf[col * 3 + 1];
+                uint8_t r = row_buf[col * 3 + 2];
+                dst[col] = (0xFF << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+            }
+        }
+    }
+
+    free(row_buf);
+    fclose(f);
+    *out_w = width;
+    *out_h = abs_h;
+    *out_pixels = pixels;
+    return true;
+}
+
 // ==============================================================================
-// 2. NATIVE OS BACKEND IMPLEMENTATIONS (NO RAYLIB REQUIRED)
+// 2. NATIVE OS & HARDWARE ACCELERATED BACKENDS
 // ==============================================================================
 
-#if defined(_WIN32)
+#if defined(VIRA_USE_RAYLIB)
+
+// ------------------------------------------------------------------------------
+// 2A. HARDWARE ACCELERATED RAYLIB BACKEND (macOS, Windows & Linux GPU)
+// ------------------------------------------------------------------------------
+#include <raylib.h>
+
+static bool    _vira_rl_should_close = false;
+static int32_t _vira_rl_win_w = 800;
+static int32_t _vira_rl_win_h = 600;
+
+static inline Color _vira_rl_color(int32_t hex) {
+    return (Color){
+        .r = (unsigned char)((hex >> 16) & 0xFF),
+        .g = (unsigned char)((hex >> 8) & 0xFF),
+        .b = (unsigned char)(hex & 0xFF),
+        .a = 255
+    };
+}
+
+static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
+    if (IsWindowReady()) return;
+    _vira_rl_win_w = width;
+    _vira_rl_win_h = height;
+    _vira_rl_should_close = false;
+
+    char stack_title[256];
+    int32_t tlen = title.len < 255 ? title.len : 255;
+    if (tlen > 0 && title.data) memcpy(stack_title, title.data, (size_t)tlen);
+    stack_title[tlen] = '\0';
+
+    SetTraceLogLevel(LOG_WARNING);
+    InitWindow(width, height, stack_title);
+    SetTargetFPS(60);
+}
+
+static inline bool vira_gui_should_close(void) {
+    return _vira_rl_should_close || WindowShouldClose();
+}
+
+static inline void vira_gui_cancel_close(void) {
+    _vira_rl_should_close = false;
+}
+
+static inline void vira_gui_set_target_fps(int32_t fps) {
+    if (fps > 0) SetTargetFPS(fps);
+}
+
+static inline int32_t vira_gui_window_width(void) {
+    return IsWindowReady() ? GetScreenWidth() : _vira_rl_win_w;
+}
+
+static inline int32_t vira_gui_window_height(void) {
+    return IsWindowReady() ? GetScreenHeight() : _vira_rl_win_h;
+}
+
+static inline void _vira_backend_gui_begin(void) {
+    _vira_char_queue_count = 0;
+    _vira_backspace_pressed = false;
+    _vira_cursor_blink_counter++;
+
+    if (IsKeyPressed(KEY_BACKSPACE)) {
+        _vira_backspace_pressed = true;
+    }
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE)) {
+        _vira_active_input_id = -1;
+    }
+    int key = GetCharPressed();
+    while (key > 0) {
+        if (key >= 32 && key <= 126 && _vira_char_queue_count < VIRA_CHAR_QUEUE_SIZE) {
+            _vira_char_queue[_vira_char_queue_count++] = (char)key;
+        }
+        key = GetCharPressed();
+    }
+
+    BeginDrawing();
+}
+
+static inline void _vira_backend_gui_end(void) {
+    EndDrawing();
+}
+
+static inline void vira_gui_close(void) {
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (_vira_gui_images[i].is_valid && _vira_gui_images[i].native_handle) {
+            Texture2D tex = {
+                .id = (unsigned int)(intptr_t)_vira_gui_images[i].native_handle,
+                .width = _vira_gui_images[i].width,
+                .height = _vira_gui_images[i].height,
+                .mipmaps = 1,
+                .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+            };
+            UnloadTexture(tex);
+            _vira_gui_images[i].native_handle = NULL;
+            _vira_gui_images[i].is_valid = false;
+        }
+    }
+    if (IsWindowReady()) {
+        CloseWindow();
+    }
+}
+
+static inline void vira_gui_clear(int32_t hex_color) {
+    ClearBackground(_vira_rl_color(hex_color));
+}
+
+static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
+    if (width <= 0 || height <= 0) return;
+    DrawRectangle(x, y, width, height, _vira_rl_color(hex_color));
+}
+
+static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
+    if (radius <= 0.0f) return;
+    DrawCircle(cx, cy, radius, _vira_rl_color(hex_color));
+}
+
+static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
+    DrawLine(x1, y1, x2, y2, _vira_rl_color(hex_color));
+}
+
+static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
+    if (text.len <= 0 || !text.data) return;
+    char stack_buf[512];
+    char *buf = stack_buf;
+    if (text.len >= 512) {
+        buf = (char *)malloc((size_t)text.len + 1);
+        if (!buf) return;
+    }
+    memcpy(buf, text.data, (size_t)text.len);
+    buf[text.len] = '\0';
+    DrawText(buf, x, y, size > 0 ? size : 16, _vira_rl_color(hex_color));
+    if (buf != stack_buf) free(buf);
+}
+
+static inline int32_t _vira_measure_text_w(vira_string text) {
+    if (text.len <= 0 || !text.data) return 0;
+    char stack_buf[256];
+    char *buf = stack_buf;
+    if (text.len >= 256) {
+        buf = (char *)malloc((size_t)text.len + 1);
+        if (!buf) return text.len * 8;
+    }
+    memcpy(buf, text.data, (size_t)text.len);
+    buf[text.len] = '\0';
+    int32_t w = MeasureText(buf, 16);
+    if (buf != stack_buf) free(buf);
+    return w;
+}
+
+static inline int32_t vira_gui_mouse_x(void) {
+    return GetMouseX();
+}
+
+static inline int32_t vira_gui_mouse_y(void) {
+    return GetMouseY();
+}
+
+static inline bool vira_gui_is_mouse_down(int32_t button) {
+    if (button >= 0 && button < 3) return IsMouseButtonDown(button);
+    return false;
+}
+
+static inline bool _vira_backend_mouse_clicked_left(void) {
+    return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+static inline bool vira_gui_is_key_pressed(int32_t key) {
+    return IsKeyPressed(key);
+}
+
+static inline float vira_gui_frame_time(void) {
+    return GetFrameTime();
+}
+
+static inline int32_t _vira_raylib_load_image(const char* filepath) {
+    if (!filepath || !FileExists(filepath)) return -1;
+    Texture2D tex = LoadTexture(filepath);
+    if (tex.id == 0) return -1;
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (!_vira_gui_images[i].is_valid) {
+            _vira_gui_images[i].width = tex.width;
+            _vira_gui_images[i].height = tex.height;
+            _vira_gui_images[i].channels = 4;
+            _vira_gui_images[i].pixels = NULL;
+            _vira_gui_images[i].native_handle = (void*)(intptr_t)tex.id;
+            _vira_gui_images[i].is_valid = true;
+            return i;
+        }
+    }
+    UnloadTexture(tex);
+    return -1;
+}
+
+static inline void _vira_raylib_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    Texture2D tex = {
+        .id = (unsigned int)(intptr_t)_vira_gui_images[id].native_handle,
+        .width = _vira_gui_images[id].width,
+        .height = _vira_gui_images[id].height,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+    Rectangle src = { 0.0f, 0.0f, (float)tex.width, (float)tex.height };
+    Rectangle dst = { (float)x, (float)y, (float)w, (float)h };
+    Vector2 origin = { 0.0f, 0.0f };
+    DrawTexturePro(tex, src, dst, origin, 0.0f, WHITE);
+}
+
+static inline void _vira_raylib_free_image(int32_t id) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    Texture2D tex = {
+        .id = (unsigned int)(intptr_t)_vira_gui_images[id].native_handle,
+        .width = _vira_gui_images[id].width,
+        .height = _vira_gui_images[id].height,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+    UnloadTexture(tex);
+    _vira_gui_images[id].native_handle = NULL;
+    _vira_gui_images[id].is_valid = false;
+    _vira_gui_images[id].width = 0;
+    _vira_gui_images[id].height = 0;
+}
+
+#elif defined(_WIN32)
 
 // ------------------------------------------------------------------------------
 // 2A. NATIVE WIN32 GDI BACKEND (Zero-Dependency Native Windows)
@@ -121,12 +466,14 @@ static LRESULT CALLBACK _vira_gui_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 0;
         case WM_LBUTTONDOWN:
             _vira_gui.mouse_down[0] = true;
+            _vira_gui.mouse_clicked[0] = true;
             return 0;
         case WM_LBUTTONUP:
             _vira_gui.mouse_down[0] = false;
             return 0;
         case WM_RBUTTONDOWN:
             _vira_gui.mouse_down[1] = true;
+            _vira_gui.mouse_clicked[1] = true;
             return 0;
         case WM_RBUTTONUP:
             _vira_gui.mouse_down[1] = false;
@@ -141,6 +488,11 @@ static LRESULT CALLBACK _vira_gui_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LP
             }
             return 0;
         case WM_KEYDOWN:
+            if (wParam == VK_TAB) {
+                _vira_tab_pressed = true;
+                _vira_shift_down = ((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                return 0;
+            }
             if (wParam == VK_RETURN || wParam == VK_ESCAPE) {
                 _vira_active_input_id = -1;
             }
@@ -212,21 +564,22 @@ static inline void vira_gui_set_target_fps(int32_t fps) { if (fps > 0) _vira_gui
 static inline int32_t vira_gui_window_width(void) { return _vira_gui.width; }
 static inline int32_t vira_gui_window_height(void) { return _vira_gui.height; }
 
-static inline void vira_gui_begin(void) {
-    _vira_layout_depth = 0;
-    _vira_input_counter = 0;
-    _vira_card_counter = 0;
-    _vira_card_end_counter = 0;
+static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
+    for (int i = 0; i < 3; i++) {
+        _vira_gui.mouse_clicked[i] = false;
+    }
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
     for (int i = 0; i < 3; i++) {
-        _vira_gui.mouse_clicked[i] = (!_vira_gui.mouse_prev_down[i] && _vira_gui.mouse_down[i]);
+        if (!_vira_gui.mouse_prev_down[i] && _vira_gui.mouse_down[i]) {
+            _vira_gui.mouse_clicked[i] = true;
+        }
         _vira_gui.mouse_prev_down[i] = _vira_gui.mouse_down[i];
     }
     for (int i = 0; i < 256; i++) {
@@ -235,7 +588,7 @@ static inline void vira_gui_begin(void) {
     }
 }
 
-static inline void vira_gui_end(void) {
+static inline void _vira_backend_gui_end(void) {
     if (!_vira_gui.hdc_screen || !_vira_gui.hdc_mem) return;
     BitBlt(_vira_gui.hdc_screen, 0, 0, _vira_gui.width, _vira_gui.height, _vira_gui.hdc_mem, 0, 0, SRCCOPY);
 
@@ -254,6 +607,17 @@ static inline void vira_gui_end(void) {
 }
 
 static inline void vira_gui_close(void) {
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (_vira_gui_images[i].is_valid) {
+            if (_vira_gui_images[i].pixels) {
+                free(_vira_gui_images[i].pixels);
+                _vira_gui_images[i].pixels = NULL;
+            }
+            _vira_gui_images[i].is_valid = false;
+            _vira_gui_images[i].width = 0;
+            _vira_gui_images[i].height = 0;
+        }
+    }
     if (_vira_gui.hdc_mem) {
         SelectObject(_vira_gui.hdc_mem, _vira_gui.hbm_old);
         DeleteObject(_vira_gui.hbm_mem);
@@ -319,9 +683,57 @@ static inline int32_t _vira_measure_text_w(vira_string text) {
 static inline int32_t vira_gui_mouse_x(void) { return _vira_gui.mouse_x; }
 static inline int32_t vira_gui_mouse_y(void) { return _vira_gui.mouse_y; }
 static inline bool vira_gui_is_mouse_down(int32_t b) { return (b >= 0 && b < 3) ? _vira_gui.mouse_down[b] : false; }
-static inline bool _vira_gui_mouse_clicked_left(void) { return _vira_gui.mouse_clicked[0]; }
+static inline bool _vira_backend_mouse_clicked_left(void) { return _vira_gui.mouse_clicked[0]; }
 static inline bool vira_gui_is_key_pressed(int32_t k) { return (k >= 0 && k < 256) ? _vira_gui.keys_pressed[k] : false; }
 static inline float vira_gui_frame_time(void) { return _vira_gui.delta_time; }
+
+static inline int32_t _vira_win32_load_image(const char* filepath) {
+    int32_t w = 0, h = 0;
+    uint32_t* pixels = NULL;
+    if (!_vira_load_bmp_file(filepath, &w, &h, &pixels)) return -1;
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (!_vira_gui_images[i].is_valid) {
+            _vira_gui_images[i].width = w;
+            _vira_gui_images[i].height = h;
+            _vira_gui_images[i].channels = 4;
+            _vira_gui_images[i].pixels = pixels;
+            _vira_gui_images[i].native_handle = NULL;
+            _vira_gui_images[i].is_valid = true;
+            return i;
+        }
+    }
+    free(pixels);
+    return -1;
+}
+
+static inline void _vira_win32_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    if (!_vira_gui.hdc_mem || !_vira_gui_images[id].pixels) return;
+
+    BITMAPINFO bmi;
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = _vira_gui_images[id].width;
+    bmi.bmiHeader.biHeight = -_vira_gui_images[id].height; // top-down DIB
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    StretchDIBits(_vira_gui.hdc_mem, x, y, w, h,
+                  0, 0, _vira_gui_images[id].width, _vira_gui_images[id].height,
+                  _vira_gui_images[id].pixels, &bmi, DIB_RGB_COLORS, SRCCOPY);
+}
+
+static inline void _vira_win32_free_image(int32_t id) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    if (_vira_gui_images[id].pixels) {
+        free(_vira_gui_images[id].pixels);
+        _vira_gui_images[id].pixels = NULL;
+    }
+    _vira_gui_images[id].is_valid = false;
+    _vira_gui_images[id].width = 0;
+    _vira_gui_images[id].height = 0;
+}
 
 #elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
 
@@ -417,11 +829,7 @@ static inline void vira_gui_set_target_fps(int32_t fps) { if (fps > 0) _vira_x11
 static inline int32_t vira_gui_window_width(void) { return _vira_x11.width; }
 static inline int32_t vira_gui_window_height(void) { return _vira_x11.height; }
 
-static inline void vira_gui_begin(void) {
-    _vira_layout_depth = 0;
-    _vira_input_counter = 0;
-    _vira_card_counter = 0;
-    _vira_card_end_counter = 0;
+static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
@@ -450,7 +858,10 @@ static inline void vira_gui_begin(void) {
             char char_buf[32];
             KeySym sym = 0;
             int count = XLookupString(&ev.xkey, char_buf, sizeof(char_buf), &sym, NULL);
-            if (sym == XK_BackSpace) {
+            if (sym == XK_Tab || sym == XK_ISO_Left_Tab) {
+                _vira_tab_pressed = true;
+                _vira_shift_down = ((ev.xkey.state & ShiftMask) != 0);
+            } else if (sym == XK_BackSpace) {
                 _vira_backspace_pressed = true;
             } else if (sym == XK_Return || sym == XK_Escape) {
                 _vira_active_input_id = -1;
@@ -476,7 +887,7 @@ static inline void vira_gui_begin(void) {
     }
 }
 
-static inline void vira_gui_end(void) {
+static inline void _vira_backend_gui_end(void) {
     if (!_vira_x11.dpy) return;
     XCopyArea(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.win, _vira_x11.gc,
               0, 0, (unsigned int)_vira_x11.width, (unsigned int)_vira_x11.height, 0, 0);
@@ -497,6 +908,17 @@ static inline void vira_gui_end(void) {
 }
 
 static inline void vira_gui_close(void) {
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (_vira_gui_images[i].is_valid) {
+            if (_vira_gui_images[i].pixels) {
+                free(_vira_gui_images[i].pixels);
+                _vira_gui_images[i].pixels = NULL;
+            }
+            _vira_gui_images[i].is_valid = false;
+            _vira_gui_images[i].width = 0;
+            _vira_gui_images[i].height = 0;
+        }
+    }
     if (!_vira_x11.dpy) return;
     if (_vira_x11.backbuf) XFreePixmap(_vira_x11.dpy, _vira_x11.backbuf);
     if (_vira_x11.gc) XFreeGC(_vira_x11.dpy, _vira_x11.gc);
@@ -543,9 +965,517 @@ static inline int32_t _vira_measure_text_w(vira_string text) {
 static inline int32_t vira_gui_mouse_x(void) { return _vira_x11.mouse_x; }
 static inline int32_t vira_gui_mouse_y(void) { return _vira_x11.mouse_y; }
 static inline bool vira_gui_is_mouse_down(int32_t b) { return (b >= 0 && b < 3) ? _vira_x11.mouse_down[b] : false; }
-static inline bool _vira_gui_mouse_clicked_left(void) { return _vira_x11.mouse_clicked[0]; }
+static inline bool _vira_backend_mouse_clicked_left(void) { return _vira_x11.mouse_clicked[0]; }
 static inline bool vira_gui_is_key_pressed(int32_t k) { return (k >= 0 && k < 256) ? _vira_x11.keys_pressed[k] : false; }
 static inline float vira_gui_frame_time(void) { return _vira_x11.delta_time; }
+
+static inline int32_t _vira_x11_load_image(const char* filepath) {
+    int32_t w = 0, h = 0;
+    uint32_t* pixels = NULL;
+    if (!_vira_load_bmp_file(filepath, &w, &h, &pixels)) return -1;
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (!_vira_gui_images[i].is_valid) {
+            _vira_gui_images[i].width = w;
+            _vira_gui_images[i].height = h;
+            _vira_gui_images[i].channels = 4;
+            _vira_gui_images[i].pixels = pixels;
+            _vira_gui_images[i].native_handle = NULL;
+            _vira_gui_images[i].is_valid = true;
+            return i;
+        }
+    }
+    free(pixels);
+    return -1;
+}
+
+static inline void _vira_x11_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    if (!_vira_x11.dpy || !_vira_x11.backbuf || !_vira_gui_images[id].pixels || w <= 0 || h <= 0) return;
+
+    int32_t src_w = _vira_gui_images[id].width;
+    int32_t src_h = _vira_gui_images[id].height;
+    const uint32_t* src_pix = _vira_gui_images[id].pixels;
+
+    XImage* img = XCreateImage(_vira_x11.dpy, DefaultVisual(_vira_x11.dpy, _vira_x11.screen),
+                               24, ZPixmap, 0, NULL, (unsigned int)w, (unsigned int)h, 32, 0);
+    if (!img) return;
+    img->data = (char*)malloc((size_t)img->bytes_per_line * (size_t)h);
+    if (!img->data) {
+        XDestroyImage(img);
+        return;
+    }
+
+    for (int dy = 0; dy < h; dy++) {
+        int sy = (dy * src_h) / h;
+        if (sy >= src_h) sy = src_h - 1;
+        const uint32_t* srow = &src_pix[sy * src_w];
+        for (int dx = 0; dx < w; dx++) {
+            int sx = (dx * src_w) / w;
+            if (sx >= src_w) sx = src_w - 1;
+            uint32_t c = srow[sx];
+            XPutPixel(img, dx, dy, (unsigned long)(c & 0xFFFFFF));
+        }
+    }
+
+    XPutImage(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, img, 0, 0, x, y, (unsigned int)w, (unsigned int)h);
+    XDestroyImage(img);
+}
+
+static inline void _vira_x11_free_image(int32_t id) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    if (_vira_gui_images[id].pixels) {
+        free(_vira_gui_images[id].pixels);
+        _vira_gui_images[id].pixels = NULL;
+    }
+    _vira_gui_images[id].is_valid = false;
+    _vira_gui_images[id].width = 0;
+    _vira_gui_images[id].height = 0;
+}
+
+#elif defined(__APPLE__) && defined(__OBJC__)
+
+// ------------------------------------------------------------------------------
+// 2C. NATIVE MACOS COCOA & COREGRAPHICS BACKEND (Zero-Dependency Native Mac)
+// ------------------------------------------------------------------------------
+#import <Cocoa/Cocoa.h>
+#import <CoreGraphics/CoreGraphics.h>
+#include <time.h>
+#include <unistd.h>
+#include <math.h>
+
+@class ViraCocoaView;
+
+typedef struct {
+    NSWindow*       window;
+    ViraCocoaView*  view;
+    uint32_t*       pixel_buf;
+    CGContextRef    bitmap_ctx;
+    CGColorSpaceRef color_space;
+    int32_t         width;
+    int32_t         height;
+    bool            should_close;
+    int32_t         target_fps;
+    struct timespec frame_start;
+    float           delta_time;
+    int32_t         mouse_x;
+    int32_t         mouse_y;
+    bool            mouse_down[3];
+    bool            mouse_clicked[3];
+    bool            mouse_prev_down[3];
+    bool            keys_down[256];
+    bool            keys_pressed[256];
+    bool            keys_prev[256];
+} vira_cocoa_t;
+
+static vira_cocoa_t _vira_cocoa = {0};
+
+@interface ViraCocoaView : NSView <NSWindowDelegate>
+@end
+
+@implementation ViraCocoaView
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)needsPanelToBecomeKey { return YES; }
+
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    if ([event keyCode] == 48) { // Tab key
+        _vira_tab_pressed = true;
+        NSEventModifierFlags flags = [event modifierFlags];
+        _vira_shift_down = ((flags & NSEventModifierFlagShift) != 0);
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+
+- (void)updateMouse:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:[event locationInWindow] fromView:nil];
+    _vira_cocoa.mouse_x = (int32_t)loc.x;
+    _vira_cocoa.mouse_y = (int32_t)loc.y;
+}
+- (void)mouseMoved:(NSEvent *)event { [self updateMouse:event]; }
+- (void)mouseDragged:(NSEvent *)event { [self updateMouse:event]; }
+- (void)rightMouseDragged:(NSEvent *)event { [self updateMouse:event]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self updateMouse:event]; }
+
+- (void)mouseDown:(NSEvent *)event {
+    _vira_cocoa.mouse_down[0] = true;
+    _vira_cocoa.mouse_clicked[0] = true;
+    [self updateMouse:event];
+}
+- (void)mouseUp:(NSEvent *)event {
+    _vira_cocoa.mouse_down[0] = false;
+    [self updateMouse:event];
+}
+- (void)rightMouseDown:(NSEvent *)event {
+    _vira_cocoa.mouse_down[1] = true;
+    _vira_cocoa.mouse_clicked[1] = true;
+    [self updateMouse:event];
+}
+- (void)rightMouseUp:(NSEvent *)event {
+    _vira_cocoa.mouse_down[1] = false;
+    [self updateMouse:event];
+}
+
+- (void)keyDown:(NSEvent *)event {
+    NSEventModifierFlags flags = [event modifierFlags];
+    _vira_shift_down = ((flags & NSEventModifierFlagShift) != 0);
+
+    NSString *chars = [event characters];
+    for (NSUInteger i = 0; i < [chars length]; i++) {
+        unichar c = [chars characterAtIndex:i];
+        if (c == 0x09 || c == 0x19) {
+            _vira_tab_pressed = true;
+        } else if (c == NSBackspaceCharacter || c == 0x7f) {
+            _vira_backspace_pressed = true;
+        } else if (c == NSEnterCharacter || c == NSCarriageReturnCharacter || c == 0x1b) {
+            _vira_active_input_id = -1;
+        } else if (c >= 32 && c <= 126 && _vira_char_queue_count < VIRA_CHAR_QUEUE_SIZE) {
+            _vira_char_queue[_vira_char_queue_count++] = (char)c;
+        }
+    }
+    unsigned short code = [event keyCode];
+    if (code == 48) {
+        _vira_tab_pressed = true;
+    }
+    if (code < 256) _vira_cocoa.keys_down[code] = true;
+}
+
+- (void)keyUp:(NSEvent *)event {
+    unsigned short code = [event keyCode];
+    if (code < 256) _vira_cocoa.keys_down[code] = false;
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    _vira_cocoa.should_close = true;
+    return NO;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    if (!_vira_cocoa.bitmap_ctx) return;
+    CGImageRef img = CGBitmapContextCreateImage(_vira_cocoa.bitmap_ctx);
+    if (!img) return;
+    CGContextRef screenCtx = [[NSGraphicsContext currentContext] CGContext];
+    CGContextDrawImage(screenCtx, CGRectMake(0, 0, _vira_cocoa.width, _vira_cocoa.height), img);
+    CGImageRelease(img);
+}
+@end
+
+static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
+    if (_vira_cocoa.window) return;
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+        _vira_cocoa.width = width;
+        _vira_cocoa.height = height;
+        _vira_cocoa.target_fps = 60;
+        _vira_cocoa.should_close = false;
+        clock_gettime(CLOCK_MONOTONIC, &_vira_cocoa.frame_start);
+
+        _vira_cocoa.pixel_buf = (uint32_t*)calloc((size_t)width * height, sizeof(uint32_t));
+        _vira_cocoa.color_space = CGColorSpaceCreateDeviceRGB();
+        _vira_cocoa.bitmap_ctx = CGBitmapContextCreate(
+            _vira_cocoa.pixel_buf,
+            width, height, 8, width * 4,
+            _vira_cocoa.color_space,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+        );
+
+        char stack_title[256];
+        int32_t tlen = title.len < 255 ? title.len : 255;
+        if (tlen > 0 && title.data) memcpy(stack_title, title.data, (size_t)tlen);
+        stack_title[tlen] = '\0';
+
+        NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
+        CGFloat x = screenFrame.origin.x + (screenFrame.size.width - width) / 2.0;
+        CGFloat y = screenFrame.origin.y + (screenFrame.size.height - height) / 2.0;
+        NSRect winFrame = NSMakeRect(x, y, width, height);
+
+        NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+        NSWindow *win = [[NSWindow alloc] initWithContentRect:winFrame styleMask:style backing:NSBackingStoreBuffered defer:NO];
+        [win setTitle:[NSString stringWithUTF8String:stack_title]];
+
+        ViraCocoaView *view = [[ViraCocoaView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+        [win setContentView:view];
+        [win setDelegate:view];
+
+        NSTrackingArea *ta = [[NSTrackingArea alloc] initWithRect:NSMakeRect(0, 0, width, height)
+            options:(NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect)
+            owner:view userInfo:nil];
+        [view addTrackingArea:ta];
+        [win setAcceptsMouseMovedEvents:YES];
+        [win makeKeyAndOrderFront:nil];
+        [win makeFirstResponder:view];
+        [NSApp activateIgnoringOtherApps:YES];
+
+        _vira_cocoa.window = win;
+        _vira_cocoa.view = view;
+    }
+}
+
+static inline bool vira_gui_should_close(void) {
+    return _vira_cocoa.should_close;
+}
+
+static inline void vira_gui_cancel_close(void) {
+    _vira_cocoa.should_close = false;
+}
+
+static inline void vira_gui_set_target_fps(int32_t fps) {
+    if (fps > 0) _vira_cocoa.target_fps = fps;
+}
+
+static inline int32_t vira_gui_window_width(void) {
+    return _vira_cocoa.width;
+}
+
+static inline int32_t vira_gui_window_height(void) {
+    return _vira_cocoa.height;
+}
+
+static inline void _vira_backend_gui_begin(void) {
+    if (!_vira_cocoa.window) return;
+    _vira_char_queue_count = 0;
+    _vira_backspace_pressed = false;
+    _vira_cursor_blink_counter++;
+
+    for (int i = 0; i < 3; i++) {
+        _vira_cocoa.mouse_clicked[i] = false;
+    }
+
+    @autoreleasepool {
+        NSEvent *event;
+        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                           untilDate:[NSDate distantPast]
+                                              inMode:NSDefaultRunLoopMode
+                                             dequeue:YES])) {
+            [NSApp sendEvent:event];
+        }
+    }
+
+    for (int i = 0; i < 3; i++) {
+        if (!_vira_cocoa.mouse_prev_down[i] && _vira_cocoa.mouse_down[i]) {
+            _vira_cocoa.mouse_clicked[i] = true;
+        }
+        _vira_cocoa.mouse_prev_down[i] = _vira_cocoa.mouse_down[i];
+    }
+    for (int i = 0; i < 256; i++) {
+        _vira_cocoa.keys_pressed[i] = (!_vira_cocoa.keys_prev[i] && _vira_cocoa.keys_down[i]);
+        _vira_cocoa.keys_prev[i] = _vira_cocoa.keys_down[i];
+    }
+}
+
+static inline void _vira_backend_gui_end(void) {
+    if (!_vira_cocoa.window || !_vira_cocoa.view) return;
+    [_vira_cocoa.view setNeedsDisplay:YES];
+    [_vira_cocoa.view displayIfNeeded];
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - _vira_cocoa.frame_start.tv_sec) +
+                     (now.tv_nsec - _vira_cocoa.frame_start.tv_nsec) * 1e-9;
+    double target = 1.0 / (double)_vira_cocoa.target_fps;
+    if (elapsed < target) {
+        uint32_t us = (uint32_t)((target - elapsed) * 1000000.0);
+        if (us > 0) usleep(us);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed = (now.tv_sec - _vira_cocoa.frame_start.tv_sec) +
+                  (now.tv_nsec - _vira_cocoa.frame_start.tv_nsec) * 1e-9;
+    }
+    _vira_cocoa.delta_time = (float)elapsed;
+    _vira_cocoa.frame_start = now;
+}
+
+static inline void _vira_cocoa_free_image(int32_t slot);
+
+static inline void vira_gui_close(void) {
+    for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+        if (_vira_gui_images[i].is_valid) {
+            _vira_cocoa_free_image(i);
+        }
+    }
+    if (_vira_cocoa.bitmap_ctx) {
+        CGContextRelease(_vira_cocoa.bitmap_ctx);
+        _vira_cocoa.bitmap_ctx = NULL;
+    }
+    if (_vira_cocoa.color_space) {
+        CGColorSpaceRelease(_vira_cocoa.color_space);
+        _vira_cocoa.color_space = NULL;
+    }
+    if (_vira_cocoa.pixel_buf) {
+        free(_vira_cocoa.pixel_buf);
+        _vira_cocoa.pixel_buf = NULL;
+    }
+    if (_vira_cocoa.window) {
+        [_vira_cocoa.window close];
+        _vira_cocoa.window = nil;
+        _vira_cocoa.view = nil;
+    }
+}
+
+static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
+    if (!_vira_cocoa.bitmap_ctx || width <= 0 || height <= 0) return;
+    float r = ((hex_color >> 16) & 0xFF) / 255.0f;
+    float g = ((hex_color >> 8) & 0xFF) / 255.0f;
+    float b = (hex_color & 0xFF) / 255.0f;
+    CGContextSetRGBFillColor(_vira_cocoa.bitmap_ctx, r, g, b, 1.0f);
+    CGContextFillRect(_vira_cocoa.bitmap_ctx, CGRectMake(x, y, width, height));
+}
+
+static inline void vira_gui_clear(int32_t hex_color) {
+    vira_gui_draw_rect(0, 0, _vira_cocoa.width, _vira_cocoa.height, hex_color);
+}
+
+static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
+    if (!_vira_cocoa.bitmap_ctx || radius <= 0.0f) return;
+    float r = ((hex_color >> 16) & 0xFF) / 255.0f;
+    float g = ((hex_color >> 8) & 0xFF) / 255.0f;
+    float b = (hex_color & 0xFF) / 255.0f;
+    CGContextSetRGBFillColor(_vira_cocoa.bitmap_ctx, r, g, b, 1.0f);
+    CGContextFillEllipseInRect(_vira_cocoa.bitmap_ctx, CGRectMake(cx - radius, cy - radius, radius * 2, radius * 2));
+}
+
+static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
+    if (!_vira_cocoa.bitmap_ctx) return;
+    float r = ((hex_color >> 16) & 0xFF) / 255.0f;
+    float g = ((hex_color >> 8) & 0xFF) / 255.0f;
+    float b = (hex_color & 0xFF) / 255.0f;
+    CGContextSetRGBStrokeColor(_vira_cocoa.bitmap_ctx, r, g, b, 1.0f);
+    CGContextSetLineWidth(_vira_cocoa.bitmap_ctx, 1.0f);
+    CGContextBeginPath(_vira_cocoa.bitmap_ctx);
+    CGContextMoveToPoint(_vira_cocoa.bitmap_ctx, x1, y1);
+    CGContextAddLineToPoint(_vira_cocoa.bitmap_ctx, x2, y2);
+    CGContextStrokePath(_vira_cocoa.bitmap_ctx);
+}
+
+static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
+    if (!_vira_cocoa.bitmap_ctx || text.len <= 0 || !text.data) return;
+    @autoreleasepool {
+        NSString *str = [[NSString alloc] initWithBytes:text.data length:text.len encoding:NSUTF8StringEncoding];
+        if (!str) return;
+        float r = ((hex_color >> 16) & 0xFF) / 255.0f;
+        float g = ((hex_color >> 8) & 0xFF) / 255.0f;
+        float b = (hex_color & 0xFF) / 255.0f;
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:(size > 0 ? size : 14)],
+            NSForegroundColorAttributeName: [NSColor colorWithRed:r green:g blue:b alpha:1.0f]
+        };
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext *nsCtx = [NSGraphicsContext graphicsContextWithCGContext:_vira_cocoa.bitmap_ctx flipped:YES];
+        [NSGraphicsContext setCurrentContext:nsCtx];
+        [str drawAtPoint:NSMakePoint(x, y) withAttributes:attrs];
+        [NSGraphicsContext restoreGraphicsState];
+    }
+}
+
+static inline int32_t _vira_measure_text_w(vira_string text) {
+    if (text.len <= 0 || !text.data) return 0;
+    @autoreleasepool {
+        NSString *str = [[NSString alloc] initWithBytes:text.data length:text.len encoding:NSUTF8StringEncoding];
+        if (!str) return text.len * 8;
+        NSDictionary *attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:14] };
+        NSSize sz = [str sizeWithAttributes:attrs];
+        return (int32_t)ceil(sz.width);
+    }
+}
+
+static inline int32_t vira_gui_mouse_x(void) { return _vira_cocoa.mouse_x; }
+static inline int32_t vira_gui_mouse_y(void) { return _vira_cocoa.mouse_y; }
+static inline bool vira_gui_is_mouse_down(int32_t button) {
+    if (button >= 0 && button < 3) return _vira_cocoa.mouse_down[button];
+    return false;
+}
+static inline bool _vira_backend_mouse_clicked_left(void) {
+    return _vira_cocoa.mouse_clicked[0];
+}
+static inline bool vira_gui_is_key_pressed(int32_t key) {
+    if (key >= 0 && key < 256) return _vira_cocoa.keys_pressed[key];
+    return false;
+}
+static inline float vira_gui_frame_time(void) {
+    return _vira_cocoa.delta_time;
+}
+
+static inline int32_t _vira_cocoa_load_image(const char* cpath) {
+    if (!cpath || cpath[0] == '\0') return -1;
+    @autoreleasepool {
+        NSString *nsPath = [NSString stringWithUTF8String:cpath];
+        if (!nsPath) return -1;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:nsPath]) {
+            NSString *appDir = [[NSBundle mainBundle] bundlePath];
+            NSString *altPath = [appDir stringByAppendingPathComponent:nsPath];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:altPath]) {
+                nsPath = altPath;
+            } else {
+                return -1;
+            }
+        }
+        NSImage *img = [[NSImage alloc] initWithContentsOfFile:nsPath];
+        if (!img) return -1;
+
+        NSSize sz = [img size];
+        int32_t w = (int32_t)ceil(sz.width);
+        int32_t h = (int32_t)ceil(sz.height);
+        if (w <= 0 || h <= 0) return -1;
+
+        int32_t slot = -1;
+        for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
+            if (!_vira_gui_images[i].is_valid) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) return -1;
+
+        _vira_gui_images[slot].width = w;
+        _vira_gui_images[slot].height = h;
+        _vira_gui_images[slot].channels = 4;
+        _vira_gui_images[slot].pixels = NULL;
+        _vira_gui_images[slot].native_handle = (void*)img;
+        _vira_gui_images[slot].is_valid = true;
+        return slot;
+    }
+}
+
+static inline void _vira_cocoa_draw_image(int32_t slot, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (slot < 0 || slot >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[slot].is_valid) return;
+    if (!_vira_cocoa.bitmap_ctx) return;
+
+    @autoreleasepool {
+        NSImage *img = (NSImage*)_vira_gui_images[slot].native_handle;
+        if (!img) return;
+
+        int32_t target_w = (w > 0) ? w : _vira_gui_images[slot].width;
+        int32_t target_h = (h > 0) ? h : _vira_gui_images[slot].height;
+
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext *nsCtx = [NSGraphicsContext graphicsContextWithCGContext:_vira_cocoa.bitmap_ctx flipped:YES];
+        [NSGraphicsContext setCurrentContext:nsCtx];
+        [img drawInRect:NSMakeRect(x, y, target_w, target_h)
+               fromRect:NSZeroRect
+              operation:NSCompositingOperationSourceOver
+               fraction:1.0f
+         respectFlipped:YES
+                  hints:nil];
+        [NSGraphicsContext restoreGraphicsState];
+    }
+}
+
+static inline void _vira_cocoa_free_image(int32_t slot) {
+    if (slot < 0 || slot >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[slot].is_valid) return;
+    if (_vira_gui_images[slot].native_handle) {
+        [(NSImage*)_vira_gui_images[slot].native_handle release];
+        _vira_gui_images[slot].native_handle = NULL;
+    }
+    if (_vira_gui_images[slot].pixels) {
+        free(_vira_gui_images[slot].pixels);
+        _vira_gui_images[slot].pixels = NULL;
+    }
+    _vira_gui_images[slot].is_valid = false;
+    _vira_gui_images[slot].width = 0;
+    _vira_gui_images[slot].height = 0;
+}
 
 #else
 
@@ -556,8 +1486,8 @@ static inline void vira_gui_cancel_close(void) {}
 static inline void vira_gui_set_target_fps(int32_t fps) { (void)fps; }
 static inline int32_t vira_gui_window_width(void) { return 800; }
 static inline int32_t vira_gui_window_height(void) { return 600; }
-static inline void vira_gui_begin(void) {}
-static inline void vira_gui_end(void) {}
+static inline void _vira_backend_gui_begin(void) {}
+static inline void _vira_backend_gui_end(void) {}
 static inline void vira_gui_close(void) {}
 static inline void vira_gui_clear(int32_t c) { (void)c; }
 static inline void vira_gui_draw_text(vira_string t, int32_t x, int32_t y, int32_t s, int32_t c) { (void)t; (void)x; (void)y; (void)s; (void)c; }
@@ -568,34 +1498,146 @@ static inline int32_t _vira_measure_text_w(vira_string t) { return t.len * 8; }
 static inline int32_t vira_gui_mouse_x(void) { return 0; }
 static inline int32_t vira_gui_mouse_y(void) { return 0; }
 static inline bool vira_gui_is_mouse_down(int32_t b) { (void)b; return false; }
-static inline bool _vira_gui_mouse_clicked_left(void) { return false; }
+static inline bool _vira_backend_mouse_clicked_left(void) { return false; }
 static inline bool vira_gui_is_key_pressed(int32_t k) { (void)k; return false; }
 static inline float vira_gui_frame_time(void) { return 0.016f; }
-static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t w, int32_t h, vira_string p, vira_string t) { (void)x; (void)y; (void)w; (void)h; (void)p; return t; }
-static inline void vira_gui_progress_bar(int32_t x, int32_t y, int32_t w, int32_t h, float pct) { (void)x; (void)y; (void)w; (void)h; (void)pct; }
-static inline bool vira_gui_radio_button(int32_t x, int32_t y, vira_string l, bool s) { (void)x; (void)y; (void)l; return s; }
-static inline void vira_gui_draw_badge(int32_t x, int32_t y, vira_string t, int32_t bg, int32_t fg) { (void)x; (void)y; (void)t; (void)bg; (void)fg; }
-static inline vira_string vira_gui_input(vira_string p, vira_string t) { (void)p; return t; }
-static inline void vira_gui_progress(float pct) { (void)pct; }
-static inline bool vira_gui_radio(vira_string l, bool s) { (void)l; return s; }
-static inline void vira_gui_separator(void) {}
-static inline void vira_gui_badge(vira_string t, int32_t bg, int32_t fg) { (void)t; (void)bg; (void)fg; }
-static inline bool vira_gui_tab_item(vira_string l, bool a) { (void)l; return a; }
-static inline void vira_gui_modal_begin(vira_string t, int32_t w, int32_t h) { (void)t; (void)w; (void)h; }
-static inline void vira_gui_modal_end(void) {}
-static inline void vira_gui_lbl_temp(vira_string t) { vira_str_free(&t); }
-static inline void vira_gui_draw_text_temp(vira_string t, int32_t x, int32_t y, int32_t s, int32_t c) { (void)x; (void)y; (void)s; (void)c; vira_str_free(&t); }
-static inline void vira_gui_card_begin_temp(vira_string t, int32_t w) { (void)w; vira_str_free(&t); }
-static inline void vira_gui_badge_temp(vira_string t, int32_t bg, int32_t fg) { (void)bg; (void)fg; vira_str_free(&t); }
-static inline bool vira_gui_btn_temp(vira_string l) { vira_str_free(&l); return false; }
-static inline bool vira_gui_tab_item_temp(vira_string l, bool a) { vira_str_free(&l); return a; }
-static inline void vira_gui_modal_begin_temp(vira_string t, int32_t w, int32_t h) { (void)w; (void)h; vira_str_free(&t); }
+static inline int32_t _vira_headless_load_image(const char* filepath) { (void)filepath; return -1; }
+static inline void _vira_headless_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) { (void)id; (void)x; (void)y; (void)w; (void)h; }
+static inline void _vira_headless_free_image(int32_t id) { (void)id; }
 
 #endif
+
+// ------------------------------------------------------------------------------
+// Unified Cross-Platform Image Dispatch
+// ------------------------------------------------------------------------------
+static inline int32_t vira_gui_load_image(vira_string path) {
+    if (path.len <= 0 || !path.data) return -1;
+    char stack_path[512];
+    int32_t plen = path.len < 511 ? path.len : 511;
+    memcpy(stack_path, path.data, (size_t)plen);
+    stack_path[plen] = '\0';
+
+#if defined(VIRA_USE_RAYLIB)
+    return _vira_raylib_load_image(stack_path);
+#elif defined(_WIN32)
+    return _vira_win32_load_image(stack_path);
+#elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
+    return _vira_x11_load_image(stack_path);
+#elif defined(__APPLE__) && defined(__OBJC__)
+    return _vira_cocoa_load_image(stack_path);
+#else
+    return _vira_headless_load_image(stack_path);
+#endif
+}
+
+static inline int32_t vira_gui_image_width(int32_t id) {
+    if (id >= 0 && id < VIRA_MAX_GUI_IMAGES && _vira_gui_images[id].is_valid) {
+        return _vira_gui_images[id].width;
+    }
+    return 0;
+}
+
+static inline int32_t vira_gui_image_height(int32_t id) {
+    if (id >= 0 && id < VIRA_MAX_GUI_IMAGES && _vira_gui_images[id].is_valid) {
+        return _vira_gui_images[id].height;
+    }
+    return 0;
+}
+
+static inline void vira_gui_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    int32_t draw_w = (w > 0) ? w : _vira_gui_images[id].width;
+    int32_t draw_h = (h > 0) ? h : _vira_gui_images[id].height;
+
+#if defined(VIRA_USE_RAYLIB)
+    _vira_raylib_draw_image(id, x, y, draw_w, draw_h);
+#elif defined(_WIN32)
+    _vira_win32_draw_image(id, x, y, draw_w, draw_h);
+#elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
+    _vira_x11_draw_image(id, x, y, draw_w, draw_h);
+#elif defined(__APPLE__) && defined(__OBJC__)
+    _vira_cocoa_draw_image(id, x, y, draw_w, draw_h);
+#else
+    _vira_headless_draw_image(id, x, y, draw_w, draw_h);
+#endif
+}
+
+static inline void vira_gui_free_image(int32_t id) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+#if defined(VIRA_USE_RAYLIB)
+    _vira_raylib_free_image(id);
+#elif defined(_WIN32)
+    _vira_win32_free_image(id);
+#elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
+    _vira_x11_free_image(id);
+#elif defined(__APPLE__) && defined(__OBJC__)
+    _vira_cocoa_free_image(id);
+#else
+    _vira_headless_free_image(id);
+#endif
+}
 
 // ==============================================================================
 // 3. SHARED WIDGETS & DECLARATIVE AUTO-LAYOUT ENGINE
 // ==============================================================================
+
+static inline bool _vira_gui_mouse_clicked_left(void) {
+    if (_vira_click_consumed) return false;
+    if (_vira_modal_active) return false;
+    return _vira_backend_mouse_clicked_left();
+}
+
+static inline void _vira_gui_draw_deferred_popups(void);
+
+static inline void vira_gui_begin(void) {
+    _vira_layout_depth = 0;
+    _vira_input_counter = 0;
+    _vira_card_counter = 0;
+    _vira_card_end_counter = 0;
+    _vira_dropdown_counter = 0;
+    _vira_table_counter = 0;
+    _vira_click_consumed = false;
+    _vira_modal_active = _vira_modal_open_prev_frame;
+    _vira_modal_first_input = -1;
+    _vira_modal_last_input = -1;
+
+    _vira_backend_gui_begin();
+
+    // Keyboard Tab Focus Navigation
+    if (_vira_tab_pressed && _vira_total_inputs > 0) {
+        int32_t min_id = 0;
+        int32_t max_id = _vira_total_inputs - 1;
+        if (_vira_modal_open_prev_frame && _vira_prev_modal_first_input >= 0 && _vira_prev_modal_last_input >= _vira_prev_modal_first_input) {
+            min_id = _vira_prev_modal_first_input;
+            max_id = _vira_prev_modal_last_input;
+        }
+        int32_t span = max_id - min_id + 1;
+        if (span > 0) {
+            if (_vira_active_input_id < min_id || _vira_active_input_id > max_id) {
+                _vira_active_input_id = _vira_shift_down ? max_id : min_id;
+            } else {
+                int32_t cur_offset = _vira_active_input_id - min_id;
+                if (_vira_shift_down) {
+                    cur_offset = (cur_offset - 1 + span) % span;
+                } else {
+                    cur_offset = (cur_offset + 1) % span;
+                }
+                _vira_active_input_id = min_id + cur_offset;
+            }
+        }
+        _vira_tab_pressed = false;
+    }
+}
+
+static inline void vira_gui_end(void) {
+    _vira_gui_draw_deferred_popups();
+    _vira_total_inputs = _vira_input_counter;
+    _vira_prev_modal_first_input = _vira_modal_first_input;
+    _vira_prev_modal_last_input = _vira_modal_last_input;
+    _vira_modal_open_prev_frame = _vira_modal_open_this_frame;
+    _vira_modal_open_this_frame = false;
+    _vira_backend_gui_end();
+}
 
 static inline bool vira_gui_button(int32_t x, int32_t y, int32_t width, int32_t height, vira_string label) {
     int mx = vira_gui_mouse_x();
@@ -618,6 +1660,49 @@ static inline bool vira_gui_button(int32_t x, int32_t y, int32_t width, int32_t 
     if (label.len > 0) {
         int32_t tw = _vira_measure_text_w(label);
         vira_gui_draw_text(label, x + (width - tw) / 2, y + (height - 16) / 2, 16, text_color);
+    }
+    return is_clicked;
+}
+
+static inline void _vira_gui_draw_trash_icon(int32_t x, int32_t y, int32_t color) {
+    // Lid handle
+    vira_gui_draw_line(x + 4, y + 1, x + 8, y + 1, color);
+    // Lid
+    vira_gui_draw_line(x + 1, y + 3, x + 11, y + 3, color);
+    // Can body
+    vira_gui_draw_line(x + 2, y + 4, x + 3, y + 13, color);
+    vira_gui_draw_line(x + 10, y + 4, x + 9, y + 13, color);
+    vira_gui_draw_line(x + 3, y + 13, x + 9, y + 13, color);
+    // Vertical ribs
+    vira_gui_draw_line(x + 5, y + 5, x + 5, y + 11, color);
+    vira_gui_draw_line(x + 7, y + 5, x + 7, y + 11, color);
+}
+
+static inline bool vira_gui_button_danger(int32_t x, int32_t y, int32_t width, int32_t height, vira_string label) {
+    int mx = vira_gui_mouse_x();
+    int my = vira_gui_mouse_y();
+    bool is_hovered = (mx >= x && mx <= x + width && my >= y && my <= y + height);
+    bool is_down    = is_hovered && vira_gui_is_mouse_down(0);
+    bool is_clicked = is_hovered && _vira_gui_mouse_clicked_left();
+
+    int32_t bg_color     = is_down ? 0x4A1E29 : (is_hovered ? 0x3D202A : 0x24171E);
+    int32_t border_color = is_hovered ? 0xF38BA8 : 0xA63A50;
+    int32_t text_color   = is_hovered ? 0xFFFFFF : 0xF38BA8;
+
+    vira_gui_draw_rect(x, y, width, height, bg_color);
+    vira_gui_draw_line(x, y, x + width, y, border_color);
+    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
+    vira_gui_draw_line(x, y, x, y + height, border_color);
+    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+
+    int32_t tw = _vira_measure_text_w(label);
+    int32_t total_w = 14 + 6 + tw;
+    int32_t start_x = x + (width - total_w) / 2;
+    int32_t mid_y = y + (height - 16) / 2;
+
+    _vira_gui_draw_trash_icon(start_x, mid_y, text_color);
+    if (label.len > 0) {
+        vira_gui_draw_text(label, start_x + 18, mid_y, 16, text_color);
     }
     return is_clicked;
 }
@@ -700,6 +1785,15 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
     int32_t id = _vira_input_counter++;
     vira_text_input_state_t* state = &_vira_text_inputs[id];
 
+    if (_vira_modal_open_this_frame) {
+        if (_vira_modal_first_input < 0) _vira_modal_first_input = id;
+        _vira_modal_last_input = id;
+        if (_vira_modal_just_opened && _vira_active_input_id < 0) {
+            _vira_active_input_id = id;
+            _vira_modal_just_opened = false;
+        }
+    }
+
     int mx = vira_gui_mouse_x();
     int my = vira_gui_mouse_y();
     bool is_hovered = (mx >= x && mx <= x + width && my >= y && my <= y + height);
@@ -707,6 +1801,7 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
     if (_vira_gui_mouse_clicked_left()) {
         if (is_hovered) {
             _vira_active_input_id = id;
+            _vira_click_consumed = true;
         } else if (_vira_active_input_id == id) {
             _vira_active_input_id = -1;
         }
@@ -759,6 +1854,13 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
     vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
     vira_gui_draw_line(x, y, x, y + height, border_color);
     vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+
+    if (is_focused) {
+        vira_gui_draw_line(x - 1, y - 1, x + width + 1, y - 1, 0x89B4FA);
+        vira_gui_draw_line(x - 1, y + height + 1, x + width + 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_line(x - 1, y - 1, x - 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_line(x + width + 1, y - 1, x + width + 1, y + height + 1, 0x89B4FA);
+    }
 
     int text_y = y + (height - 16) / 2;
     int pad_x = 10;
@@ -970,7 +2072,8 @@ static inline bool vira_gui_btn(vira_string label) {
     int32_t x = node->cur_x;
     int32_t y = node->cur_y;
     if (node->type == VIRA_LAYOUT_HORIZONTAL) {
-        int32_t w = 140;
+        int32_t w = _vira_measure_text_w(label) + 28;
+        if (w < 120) w = 120;
         int32_t h = node->height;
         bool clicked = vira_gui_button(x, y, w, h, label);
         node->cur_x += w + node->spacing;
@@ -979,6 +2082,27 @@ static inline bool vira_gui_btn(vira_string label) {
         int32_t w = node->width;
         int32_t h = 36;
         bool clicked = vira_gui_button(x, y, w, h, label);
+        node->cur_y += h + node->spacing;
+        return clicked;
+    }
+}
+
+static inline bool vira_gui_btn_danger(vira_string label) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return false;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        int32_t w = _vira_measure_text_w(label) + 40;
+        if (w < 130) w = 130;
+        int32_t h = node->height;
+        bool clicked = vira_gui_button_danger(x, y, w, h, label);
+        node->cur_x += w + node->spacing;
+        return clicked;
+    } else {
+        int32_t w = node->width;
+        int32_t h = 36;
+        bool clicked = vira_gui_button_danger(x, y, w, h, label);
         node->cur_y += h + node->spacing;
         return clicked;
     }
@@ -1028,6 +2152,26 @@ static inline void vira_gui_lbl(vira_string text) {
         node->cur_x += _vira_measure_text_w(text) + node->spacing;
     } else {
         node->cur_y += h + node->spacing;
+    }
+}
+
+static inline void vira_gui_image(int32_t id, int32_t w, int32_t h) {
+    if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
+    int32_t draw_w = (w > 0) ? w : _vira_gui_images[id].width;
+    int32_t draw_h = (h > 0) ? h : _vira_gui_images[id].height;
+
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (node) {
+        int32_t x = node->cur_x;
+        int32_t y = node->cur_y;
+        vira_gui_draw_image(id, x, y, draw_w, draw_h);
+        if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+            node->cur_x += draw_w + node->spacing;
+        } else {
+            node->cur_y += draw_h + node->spacing;
+        }
+    } else {
+        vira_gui_draw_image(id, 0, 0, draw_w, draw_h);
     }
 }
 
@@ -1147,6 +2291,13 @@ static inline bool vira_gui_tab_item(vira_string label, bool is_active) {
 }
 
 static inline void vira_gui_modal_begin(vira_string title, int32_t width, int32_t height) {
+    if (!_vira_modal_open_prev_frame) {
+        _vira_modal_just_opened = true;
+        _vira_active_input_id = -1;
+    }
+    _vira_modal_open_this_frame = true;
+    _vira_modal_active = false; // Enable clicks inside modal dialog
+
     int32_t win_w = vira_gui_window_width();
     int32_t win_h = vira_gui_window_height();
 
@@ -1176,6 +2327,500 @@ static inline void vira_gui_modal_begin(vira_string title, int32_t width, int32_
 
 static inline void vira_gui_modal_end(void) {
     vira_gui_stack_end();
+    _vira_click_consumed = true;
+}
+
+// ------------------------------------------------------------------------------
+// 3B. DROPDOWN SELECT & INTERACTIVE DATA TABLE COMPONENTS
+// ------------------------------------------------------------------------------
+
+static inline void _vira_gui_draw_deferred_popups(void) {
+    if (!_vira_current_dropdown_popup.active) return;
+
+    int32_t px = _vira_current_dropdown_popup.x;
+    int32_t py = _vira_current_dropdown_popup.y;
+    int32_t pw = _vira_current_dropdown_popup.w;
+    int32_t ph = _vira_current_dropdown_popup.h;
+    vira_slice_string items = _vira_current_dropdown_popup.items;
+    int32_t sel = _vira_current_dropdown_popup.selected_idx;
+    int32_t item_h = 28;
+
+    int mx = vira_gui_mouse_x();
+    int my = vira_gui_mouse_y();
+
+    // Solid dark background for popup list
+    vira_gui_draw_rect(px, py, pw, ph, 0x181825);
+    vira_gui_draw_line(px, py, px + pw, py, 0x89B4FA);
+    vira_gui_draw_line(px, py + ph, px + pw, py + ph, 0x585B70);
+    vira_gui_draw_line(px, py, px, py + ph, 0x89B4FA);
+    vira_gui_draw_line(px + pw, py, px + pw, py + ph, 0x585B70);
+
+    for (int i = 0; i < items.len; i++) {
+        int iy = py + i * item_h;
+        if (iy + item_h > py + ph) break;
+        bool is_hover = (mx >= px && mx <= px + pw && my >= iy && my < iy + item_h);
+        bool is_sel = (i == sel);
+
+        int32_t bg = is_sel ? 0x313244 : (is_hover ? 0x45475A : 0x181825);
+        int32_t fg = is_sel ? 0x89B4FA : (is_hover ? 0xFFFFFF : 0xCDD6F4);
+
+        vira_gui_draw_rect(px + 1, iy, pw - 2, item_h, bg);
+        if (is_sel) {
+            vira_gui_draw_rect(px + 1, iy, 3, item_h, 0x89B4FA);
+        }
+        vira_gui_draw_text(items.data[i], px + 12, iy + (item_h - 15) / 2, 14, fg);
+    }
+
+    _vira_current_dropdown_popup.active = false;
+}
+
+static inline int32_t vira_gui_dropdown(int32_t x, int32_t y, int32_t width, int32_t height,
+                                       vira_slice_string items, int32_t selected_idx) {
+    int32_t id = _vira_dropdown_counter++;
+    int mx = vira_gui_mouse_x();
+    int my = vira_gui_mouse_y();
+
+    bool is_hovered = (mx >= x && mx <= x + width && my >= y && my <= y + height);
+    bool is_open = (_vira_active_dropdown_id == id);
+
+    int item_h = 28;
+    int popup_h = items.len * item_h;
+    if (popup_h > 240) popup_h = 240;
+
+    int popup_x = x;
+    int popup_y = y + height;
+    int win_h = vira_gui_window_height();
+    if (win_h > 0 && popup_y + popup_h > win_h - 10 && y - popup_h > 10) {
+        popup_y = y - popup_h;
+    }
+
+    if (_vira_gui_mouse_clicked_left()) {
+        if (is_open) {
+            if (mx >= popup_x && mx <= popup_x + width && my >= popup_y && my <= popup_y + popup_h) {
+                int clicked_item = (my - popup_y) / item_h;
+                if (clicked_item >= 0 && clicked_item < items.len) {
+                    selected_idx = clicked_item;
+                }
+            }
+            _vira_active_dropdown_id = -1;
+            _vira_click_consumed = true;
+            is_open = false;
+        } else if (is_hovered) {
+            _vira_active_dropdown_id = id;
+            _vira_click_consumed = true;
+            is_open = true;
+        }
+    }
+
+    int32_t bg_color     = is_open ? 0x181825 : (is_hovered ? 0x242537 : 0x1E1E2E);
+    int32_t border_color = is_open ? 0x89B4FA : (is_hovered ? 0x585B70 : 0x313244);
+
+    vira_gui_draw_rect(x, y, width, height, bg_color);
+    vira_gui_draw_line(x, y, x + width, y, border_color);
+    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
+    vira_gui_draw_line(x, y, x, y + height, border_color);
+    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+
+    if (is_open) {
+        vira_gui_draw_line(x - 1, y - 1, x + width + 1, y - 1, 0x89B4FA);
+        vira_gui_draw_line(x - 1, y + height + 1, x + width + 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_line(x - 1, y - 1, x - 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_line(x + width + 1, y - 1, x + width + 1, y + height + 1, 0x89B4FA);
+    }
+
+    int text_y = y + (height - 16) / 2;
+    if (selected_idx >= 0 && selected_idx < items.len) {
+        vira_gui_draw_text(items.data[selected_idx], x + 10, text_y, 15, 0xCDD6F4);
+    } else {
+        vira_string ph = (vira_string){ .data = (const uint8_t*)"Select...", .len = 9, .is_lit = true };
+        vira_gui_draw_text(ph, x + 10, text_y, 15, 0x6C7086);
+    }
+
+    vira_string arrow = is_open
+        ? (vira_string){ .data = (const uint8_t*)"^", .len = 1, .is_lit = true }
+        : (vira_string){ .data = (const uint8_t*)"v", .len = 1, .is_lit = true };
+    vira_gui_draw_text(arrow, x + width - 20, text_y, 13, border_color);
+
+    if (is_open) {
+        _vira_current_dropdown_popup.active = true;
+        _vira_current_dropdown_popup.x = popup_x;
+        _vira_current_dropdown_popup.y = popup_y;
+        _vira_current_dropdown_popup.w = width;
+        _vira_current_dropdown_popup.h = popup_h;
+        _vira_current_dropdown_popup.items = items;
+        _vira_current_dropdown_popup.selected_idx = selected_idx;
+    }
+
+    return selected_idx;
+}
+
+static inline int32_t vira_gui_select(vira_slice_string items, int32_t selected_idx) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return selected_idx;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t h = (node->type == VIRA_LAYOUT_HORIZONTAL) ? node->height : 34;
+    int32_t w = (node->type == VIRA_LAYOUT_HORIZONTAL) ? 180 : node->width;
+
+    int32_t res = vira_gui_dropdown(x, y, w, h, items, selected_idx);
+
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += w + node->spacing;
+    } else {
+        node->cur_y += h + node->spacing;
+    }
+    return res;
+}
+
+static inline bool _vira_table_str_contains_ci(vira_string haystack, vira_string needle) {
+    if (needle.len == 0 || !needle.data) return true;
+    if (haystack.len < needle.len || !haystack.data) return false;
+    int max_i = haystack.len - needle.len;
+    for (int i = 0; i <= max_i; i++) {
+        bool match = true;
+        for (int j = 0; j < needle.len; j++) {
+            if (tolower((unsigned char)haystack.data[i + j]) != tolower((unsigned char)needle.data[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static inline bool _vira_is_numeric_str(vira_string s, double* out_val) {
+    if (s.len <= 0 || !s.data) return false;
+    int i = 0;
+    while (i < s.len && (s.data[i] == ' ' || s.data[i] == '$' || s.data[i] == '\t')) i++;
+    if (i >= s.len) return false;
+    char buf[64];
+    int len = s.len - i;
+    if (len >= (int)sizeof(buf)) return false;
+    memcpy(buf, s.data + i, (size_t)len);
+    buf[len] = '\0';
+    char* endptr = NULL;
+    double v = strtod(buf, &endptr);
+    if (endptr != buf && (*endptr == '\0' || *endptr == ' ' || *endptr == '%')) {
+        *out_val = v;
+        return true;
+    }
+    return false;
+}
+
+static inline int _vira_table_compare_cells(vira_string a, vira_string b) {
+    double na = 0.0, nb = 0.0;
+    if (_vira_is_numeric_str(a, &na) && _vira_is_numeric_str(b, &nb)) {
+        if (na < nb) return -1;
+        if (na > nb) return 1;
+        return 0;
+    }
+    int min_len = a.len < b.len ? a.len : b.len;
+    for (int i = 0; i < min_len; i++) {
+        int ca = tolower((unsigned char)a.data[i]);
+        int cb = tolower((unsigned char)b.data[i]);
+        if (ca != cb) return ca - cb;
+    }
+    return a.len - b.len;
+}
+
+static inline void _vira_gui_draw_clipped_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t color, int32_t max_w) {
+    if (text.len <= 0 || !text.data || max_w <= 10) return;
+    int tw = _vira_measure_text_w(text);
+    if (tw <= max_w) {
+        vira_gui_draw_text(text, x, y, size, color);
+        return;
+    }
+    char buf[128];
+    int copy_len = text.len < 120 ? text.len : 120;
+    while (copy_len > 0) {
+        memcpy(buf, text.data, (size_t)copy_len);
+        buf[copy_len] = '.';
+        buf[copy_len + 1] = '.';
+        buf[copy_len + 2] = '\0';
+        vira_string s = (vira_string){ .data = (const uint8_t*)buf, .len = copy_len + 2, .is_lit = true };
+        if (_vira_measure_text_w(s) <= max_w) {
+            vira_gui_draw_text(s, x, y, size, color);
+            return;
+        }
+        copy_len--;
+    }
+}
+
+static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_t height,
+                                    vira_slice_string headers, vira_slice_vira_slice_string rows,
+                                    vira_string search_query, int32_t selected_row) {
+    if (headers.len <= 0) return selected_row;
+
+    int32_t id = _vira_table_counter++;
+    if (id >= VIRA_MAX_TABLES) id = VIRA_MAX_TABLES - 1;
+    vira_table_state_t* state = &_vira_table_states[id];
+
+    if (!state->initialized) {
+        state->sort_col = 0;
+        state->sort_asc = true;
+        state->page = 0;
+        state->selected_row = selected_row;
+        state->last_search_len = search_query.len;
+        state->initialized = true;
+    }
+
+    if (selected_row >= 0 && selected_row != state->selected_row) {
+        state->selected_row = selected_row;
+    }
+
+    if (search_query.len != state->last_search_len) {
+        state->page = 0;
+        state->last_search_len = search_query.len;
+    }
+
+    // Filter matching rows
+    int32_t filtered[2048];
+    int32_t filtered_count = 0;
+    for (int r = 0; r < rows.len && filtered_count < 2048; r++) {
+        if (search_query.len == 0) {
+            filtered[filtered_count++] = r;
+        } else {
+            bool matched = false;
+            for (int c = 0; c < rows.data[r].len; c++) {
+                if (_vira_table_str_contains_ci(rows.data[r].data[c], search_query)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) {
+                filtered[filtered_count++] = r;
+            }
+        }
+    }
+
+    // Sort matching rows
+    if (state->sort_col >= 0 && state->sort_col < headers.len && filtered_count > 1) {
+        for (int i = 0; i < filtered_count - 1; i++) {
+            int best = i;
+            for (int j = i + 1; j < filtered_count; j++) {
+                int r_a = filtered[j];
+                int r_b = filtered[best];
+                vira_string str_a = (state->sort_col < rows.data[r_a].len) ? rows.data[r_a].data[state->sort_col] : (vira_string){0};
+                vira_string str_b = (state->sort_col < rows.data[r_b].len) ? rows.data[r_b].data[state->sort_col] : (vira_string){0};
+                int cmp = _vira_table_compare_cells(str_a, str_b);
+                if (!state->sort_asc) cmp = -cmp;
+                if (cmp < 0) {
+                    best = j;
+                }
+            }
+            if (best != i) {
+                int tmp = filtered[i];
+                filtered[i] = filtered[best];
+                filtered[best] = tmp;
+            }
+        }
+    }
+
+    int header_h = 32;
+    int footer_h = 28;
+    int row_h = 28;
+    int avail_h = height - header_h - footer_h;
+    int visible_rows = avail_h / row_h;
+    if (visible_rows < 1) visible_rows = 1;
+
+    int total_pages = (filtered_count + visible_rows - 1) / visible_rows;
+    if (total_pages < 1) total_pages = 1;
+    if (state->page >= total_pages) state->page = total_pages - 1;
+    if (state->page < 0) state->page = 0;
+
+    int start_row = state->page * visible_rows;
+    int end_row = start_row + visible_rows;
+    if (end_row > filtered_count) end_row = filtered_count;
+
+    int mx = vira_gui_mouse_x();
+    int my = vira_gui_mouse_y();
+    int col_w = (width - 2) / headers.len;
+    if (col_w < 50) col_w = 50;
+
+    // Table Container Background
+    vira_gui_draw_rect(x, y, width, height, 0x181825);
+
+    // Header Row
+    for (int c = 0; c < headers.len; c++) {
+        int cx = x + 1 + c * col_w;
+        int cw = (c == headers.len - 1) ? (width - 2 - c * col_w) : col_w;
+        bool is_col_hover = (mx >= cx && mx < cx + cw && my >= y && my < y + header_h);
+
+        if (is_col_hover && _vira_gui_mouse_clicked_left()) {
+            if (state->sort_col == c) {
+                state->sort_asc = !state->sort_asc;
+            } else {
+                state->sort_col = c;
+                state->sort_asc = true;
+            }
+            _vira_click_consumed = true;
+        }
+
+        int32_t header_bg = is_col_hover ? 0x313244 : 0x181825;
+        vira_gui_draw_rect(cx, y + 1, cw, header_h - 1, header_bg);
+
+        // Header text + sort indicator
+        char hbuf[128];
+        if (state->sort_col == c) {
+            snprintf(hbuf, sizeof(hbuf), "%.*s %s", headers.data[c].len, (const char*)headers.data[c].data,
+                     state->sort_asc ? "^" : "v");
+        } else {
+            snprintf(hbuf, sizeof(hbuf), "%.*s", headers.data[c].len, (const char*)headers.data[c].data);
+        }
+        vira_string hs = (vira_string){ .data = (const uint8_t*)hbuf, .len = (int32_t)strlen(hbuf), .is_lit = true };
+        int32_t hcolor = (state->sort_col == c) ? 0x89B4FA : (is_col_hover ? 0xFFFFFF : 0xCDD6F4);
+        _vira_gui_draw_clipped_text(hs, cx + 10, y + (header_h - 16) / 2, 14, hcolor, cw - 14);
+
+        if (c > 0) {
+            vira_gui_draw_line(cx, y, cx, y + header_h, 0x313244);
+        }
+    }
+    vira_gui_draw_line(x, y + header_h, x + width, y + header_h, 0x313244);
+
+    // Data Rows
+    for (int vi = start_row; vi < end_row; vi++) {
+        int orig_r = filtered[vi];
+        int ry = y + header_h + (vi - start_row) * row_h;
+        bool is_hover = (mx >= x && mx < x + width && my >= ry && my < ry + row_h);
+        bool is_sel = (state->selected_row == orig_r);
+
+        if (is_hover && _vira_gui_mouse_clicked_left()) {
+            state->selected_row = orig_r;
+            selected_row = orig_r;
+            is_sel = true;
+            _vira_click_consumed = true;
+        }
+
+        int32_t row_bg = is_sel ? 0x313244 : (is_hover ? 0x242537 : ((vi % 2 == 1) ? 0x181825 : 0x1E1E2E));
+        vira_gui_draw_rect(x + 1, ry, width - 2, row_h, row_bg);
+
+        if (is_sel) {
+            vira_gui_draw_rect(x + 1, ry, 3, row_h, 0x89B4FA);
+        }
+
+        for (int c = 0; c < headers.len; c++) {
+            int cx = x + 1 + c * col_w;
+            int cw = (c == headers.len - 1) ? (width - 2 - c * col_w) : col_w;
+            if (c < rows.data[orig_r].len) {
+                vira_string val = rows.data[orig_r].data[c];
+                int32_t tcolor = is_sel ? 0xFFFFFF : (is_hover ? 0xCDD6F4 : 0xBAC2DE);
+                _vira_gui_draw_clipped_text(val, cx + 10, ry + (row_h - 15) / 2, 14, tcolor, cw - 14);
+            }
+            if (c > 0) {
+                vira_gui_draw_line(cx, ry, cx, ry + row_h, 0x222436);
+            }
+        }
+    }
+
+    // Status Bar & Pagination Footer
+    int fy = y + height - footer_h;
+    vira_gui_draw_line(x, fy, x + width, fy, 0x313244);
+    vira_gui_draw_rect(x + 1, fy + 1, width - 2, footer_h - 2, 0x181825);
+
+    char sbuf[128];
+    if (filtered_count == 0) {
+        snprintf(sbuf, sizeof(sbuf), "No records found");
+    } else {
+        snprintf(sbuf, sizeof(sbuf), "Showing %d-%d of %d%s", start_row + 1, end_row, filtered_count,
+                 (filtered_count != rows.len) ? " (filtered)" : "");
+    }
+    vira_string ss = (vira_string){ .data = (const uint8_t*)sbuf, .len = (int32_t)strlen(sbuf), .is_lit = true };
+    vira_gui_draw_text(ss, x + 12, fy + 6, 13, 0x6C7086);
+
+    // Pagination controls: [ < ] [Page X / Y] [ > ]
+    int btn_w = 24;
+    int btn_h = 20;
+    int by = fy + (footer_h - btn_h) / 2;
+    int next_x = x + width - 34;
+    int page_x = next_x - 64;
+    int prev_x = page_x - btn_w - 4;
+
+    bool prev_avail = (state->page > 0);
+    bool prev_hover = (mx >= prev_x && mx <= prev_x + btn_w && my >= by && my <= by + btn_h);
+    if (prev_avail && prev_hover && _vira_gui_mouse_clicked_left()) {
+        state->page--;
+        _vira_click_consumed = true;
+    }
+    int32_t prev_bg = !prev_avail ? 0x181825 : (prev_hover ? 0x45475A : 0x1E1E2E);
+    int32_t prev_fg = !prev_avail ? 0x45475A : (prev_hover ? 0xFFFFFF : 0xCDD6F4);
+    vira_gui_draw_rect(prev_x, by, btn_w, btn_h, prev_bg);
+    vira_gui_draw_line(prev_x, by, prev_x + btn_w, by, 0x313244);
+    vira_gui_draw_line(prev_x, by + btn_h, prev_x + btn_w, by + btn_h, 0x313244);
+    vira_gui_draw_line(prev_x, by, prev_x, by + btn_h, 0x313244);
+    vira_gui_draw_line(prev_x + btn_w, by, prev_x + btn_w, by + btn_h, 0x313244);
+    vira_string prev_str = (vira_string){ .data = (const uint8_t*)"<", .len = 1, .is_lit = true };
+    vira_gui_draw_text(prev_str, prev_x + 8, by + 2, 13, prev_fg);
+
+    char pbuf[32];
+    snprintf(pbuf, sizeof(pbuf), "%d / %d", state->page + 1, total_pages);
+    vira_string ps = (vira_string){ .data = (const uint8_t*)pbuf, .len = (int32_t)strlen(pbuf), .is_lit = true };
+    int pw = _vira_measure_text_w(ps);
+    vira_gui_draw_text(ps, page_x + (60 - pw) / 2, fy + 6, 13, 0xA6ADC8);
+
+    bool next_avail = (state->page < total_pages - 1);
+    bool next_hover = (mx >= next_x && mx <= next_x + btn_w && my >= by && my <= by + btn_h);
+    if (next_avail && next_hover && _vira_gui_mouse_clicked_left()) {
+        state->page++;
+        _vira_click_consumed = true;
+    }
+    int32_t next_bg = !next_avail ? 0x181825 : (next_hover ? 0x45475A : 0x1E1E2E);
+    int32_t next_fg = !next_avail ? 0x45475A : (next_hover ? 0xFFFFFF : 0xCDD6F4);
+    vira_gui_draw_rect(next_x, by, btn_w, btn_h, next_bg);
+    vira_gui_draw_line(next_x, by, next_x + btn_w, by, 0x313244);
+    vira_gui_draw_line(next_x, by + btn_h, next_x + btn_w, by + btn_h, 0x313244);
+    vira_gui_draw_line(next_x, by, next_x, by + btn_h, 0x313244);
+    vira_gui_draw_line(next_x + btn_w, by, next_x + btn_w, by + btn_h, 0x313244);
+    vira_string next_str = (vira_string){ .data = (const uint8_t*)">", .len = 1, .is_lit = true };
+    vira_gui_draw_text(next_str, next_x + 8, by + 2, 13, next_fg);
+
+    // Outer Table Border
+    vira_gui_draw_line(x, y, x + width, y, 0x313244);
+    vira_gui_draw_line(x, y + height, x + width, y + height, 0x313244);
+    vira_gui_draw_line(x, y, x, y + height, 0x313244);
+    vira_gui_draw_line(x + width, y, x + width, y + height, 0x313244);
+
+    _vira_last_table_sort_col = state->sort_col;
+    _vira_last_table_sort_asc = state->sort_asc;
+
+    return state->selected_row;
+}
+
+static inline int32_t vira_gui_tbl(vira_slice_string headers, vira_slice_vira_slice_string rows,
+                                   vira_string search_query, int32_t selected_row) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) return selected_row;
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t w = node->width;
+    int32_t h = (node->type == VIRA_LAYOUT_HORIZONTAL) ? node->height : 260;
+    if (h < 120) h = 120;
+
+    int32_t res = vira_gui_table(x, y, w, h, headers, rows, search_query, selected_row);
+
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += w + node->spacing;
+    } else {
+        node->cur_y += h + node->spacing;
+    }
+    return res;
+}
+
+static inline int32_t vira_gui_table_sort_col(void) {
+    return _vira_last_table_sort_col;
+}
+
+static inline bool vira_gui_table_sort_asc(void) {
+    return _vira_last_table_sort_asc;
+}
+
+static inline void vira_gui_table_set_sort(int32_t col, bool asc) {
+    _vira_last_table_sort_col = col;
+    _vira_last_table_sort_asc = asc;
+    for (int i = 0; i < VIRA_MAX_TABLES; i++) {
+        _vira_table_states[i].sort_col = col;
+        _vira_table_states[i].sort_asc = asc;
+    }
 }
 
 // ==============================================================================
@@ -1208,6 +2853,12 @@ static inline bool vira_gui_btn_temp(vira_string label) {
     return res;
 }
 
+static inline bool vira_gui_btn_danger_temp(vira_string label) {
+    bool res = vira_gui_btn_danger(label);
+    vira_str_free(&label);
+    return res;
+}
+
 static inline bool vira_gui_tab_item_temp(vira_string label, bool is_active) {
     bool res = vira_gui_tab_item(label, is_active);
     vira_str_free(&label);
@@ -1217,6 +2868,27 @@ static inline bool vira_gui_tab_item_temp(vira_string label, bool is_active) {
 static inline void vira_gui_modal_begin_temp(vira_string title, int32_t width, int32_t height) {
     vira_gui_modal_begin(title, width, height);
     vira_str_free(&title);
+}
+
+static inline int32_t vira_gui_table_temp(int32_t x, int32_t y, int32_t width, int32_t height,
+                                         vira_slice_string headers, vira_slice_vira_slice_string rows,
+                                         vira_string search_query, int32_t selected_row) {
+    int32_t res = vira_gui_table(x, y, width, height, headers, rows, search_query, selected_row);
+    vira_str_free(&search_query);
+    return res;
+}
+
+static inline int32_t vira_gui_tbl_temp(vira_slice_string headers, vira_slice_vira_slice_string rows,
+                                       vira_string search_query, int32_t selected_row) {
+    int32_t res = vira_gui_tbl(headers, rows, search_query, selected_row);
+    vira_str_free(&search_query);
+    return res;
+}
+
+static inline int32_t vira_gui_load_image_temp(vira_string path) {
+    int32_t res = vira_gui_load_image(path);
+    vira_str_free(&path);
+    return res;
 }
 
 #endif // VIRA_GUI_H

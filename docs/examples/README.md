@@ -55,6 +55,7 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`34_basic_cli_app.vir`](./34_basic_cli_app.vir)** | Basic CLI Application Development | Command-line argument inspection via `os.args()`, environment variables (`os.getenv`/`os.setenv`), path helpers, file I/O with deterministic cleanup via `defer`, and 0 memory leaks. |
 | **[`35_advanced_cli_flags_syscall_exec.vir`](./35_advanced_cli_flags_syscall_exec.vir)** | Advanced CLI Flags, Logging, Syscall & Exec | Production flag parsing with `flag.FlagSet`, leveled logging with `log.Logger`, child process execution via `exec.Command`, raw UNIX pipe IPC via `syscall.pipe`, and 0 memory leaks. |
 | **[`36_linux_container_runtime_reference.vir`](./36_linux_container_runtime_reference.vir)** | Linux Container Runtime Reference Implementation | Full Linux container engine: private namespaces (`CLONE_NEWPID/NEWUTS/NEWNS/NEWNET/NEWIPC`), cgroups v2 resource capping, virtual ethernet plumbing, `/dev` character devices via `syscall.mknod`, and 0 memory leaks. |
+| **[`37_gui_image_and_asset_loading.vir`](./37_gui_image_and_asset_loading.vir)** | Native GUI Asset & Image Subsystem | Loading PNG/JPEG/BMP assets (`gui_load_image`), intrinsic resolution queries (`gui_image_width`/`height`), auto-layout flow (`gui_image`), absolute canvas drawing (`gui_draw_image`), alpha transparency blending, interactive zoom slider, preset scaling, and zero memory leaks. |
 
 ---
 
@@ -99,4 +100,5 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/34_basic_cli_app.vir
 .\vira.exe run docs/examples/35_advanced_cli_flags_syscall_exec.vir
 .\vira.exe run docs/examples/36_linux_container_runtime_reference.vir
+.\vira.exe run docs/examples/37_gui_image_and_asset_loading.vir
 ```

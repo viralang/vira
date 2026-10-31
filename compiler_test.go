@@ -1528,7 +1528,11 @@ int main(void) {
 	}
 
 	runCmd := exec.Command(binFile)
-	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	if runtime.GOOS == "darwin" {
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+	} else {
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	}
 	rawOut, err := runCmd.CombinedOutput()
 	outStr := string(rawOut)
 	if err != nil {
@@ -1608,7 +1612,11 @@ fn main() {
 
 	runCmd := exec.Command(viraBin, "run", srcFile)
 	runCmd.Dir = "."
-	runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	if runtime.GOOS == "darwin" {
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+	} else {
+		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+	}
 	out, err := runCmd.CombinedOutput()
 	outStr := string(out)
 	if err != nil {
@@ -1718,7 +1726,11 @@ fn main() {
 
 		runCmd := exec.Command(viraBin, "run", srcFile)
 		runCmd.Dir = "."
-		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		if runtime.GOOS == "darwin" {
+			runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+		} else {
+			runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		}
 		out, err := runCmd.CombinedOutput()
 		outStr := string(out)
 		if err != nil {
@@ -1793,7 +1805,11 @@ fn main() {
 
 		runCmd := exec.Command(viraBin, "run", srcFile)
 		runCmd.Dir = "."
-		runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		if runtime.GOOS == "darwin" {
+			runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+		} else {
+			runCmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=1")
+		}
 		out, err := runCmd.CombinedOutput()
 		outStr := string(out)
 		if err != nil {

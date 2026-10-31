@@ -1038,7 +1038,7 @@ func (p *Parser) parsePrefix() ast.Expr {
 		lb := p.advance()
 		if p.cur.Kind == token.TokRBracket {
 			rb := p.advance()
-			if p.isTypeStart(p.cur.Kind) {
+			if !p.hasNewlineBetween(rb.Span, p.cur.Span) && p.isTypeStart(p.cur.Kind) {
 				elemType := p.parseTypeExpr()
 				p.expect(token.TokLBrace)
 				var elems []ast.Expr
@@ -1066,7 +1066,7 @@ func (p *Parser) parsePrefix() ast.Expr {
 		}
 
 		firstExpr := p.parseExpr(0)
-		if p.cur.Kind == token.TokRBracket && p.isTypeStart(p.peek.Kind) {
+		if p.cur.Kind == token.TokRBracket && !p.hasNewlineBetween(p.cur.Span, p.peek.Span) && p.isTypeStart(p.peek.Kind) {
 			p.advance()
 			elemType := p.parseTypeExpr()
 			p.expect(token.TokLBrace)

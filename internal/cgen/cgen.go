@@ -291,6 +291,10 @@ func (g *Generator) discoverCodegenRequirements(file *ast.File) {
 		}
 		g.scanBlockRequirements(fn.Body)
 	}
+	if g.usesGUI {
+		g.registerSliceType(&checker.SliceType{Elem: checker.TypeString})
+		g.registerSliceType(&checker.SliceType{Elem: &checker.SliceType{Elem: checker.TypeString}})
+	}
 }
 
 func (g *Generator) scanBlockRequirements(b *ast.BlockStmt) {
@@ -536,7 +540,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 		cStructName = g.cStructName(st.Name)
 	}
 
-	out.WriteString(fmt.Sprintf("typedef struct %s {\n", cStructName))
+	out.WriteString(fmt.Sprintf("struct %s {\n", cStructName))
 	if st.IsActor {
 		out.WriteString("    vira_actor_ctx _ctx;\n")
 	}
@@ -551,7 +555,7 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 		finfo := st.Fields[fname]
 		out.WriteString(fmt.Sprintf("    %s %s;\n", g.cType(finfo.Type), fname))
 	}
-	out.WriteString(fmt.Sprintf("} %s;\n\n", cStructName))
+	out.WriteString("};\n\n")
 
 	// If this is an Actor, emit a default state reset function for Supervisor OneForOne restarts
 	if st.IsActor {
@@ -902,7 +906,7 @@ func sliceNestingDepth(t checker.Type) int {
 
 func isPredefinedSliceName(name string) bool {
 	switch name {
-	case "vira_slice_u8", "vira_slice_int", "vira_slice_i64", "vira_slice_f32", "vira_slice_f64", "vira_slice_bool", "vira_slice_string":
+	case "vira_slice_u8", "vira_slice_int", "vira_slice_i64", "vira_slice_f32", "vira_slice_f64", "vira_slice_bool", "vira_slice_string", "vira_slice_vira_slice_string":
 		return true
 	}
 	return false
@@ -1631,6 +1635,14 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 				out.WriteString(fmt.Sprintf("%svira_string %s = %s;\n", indent, tmpOld, targetLValue))
 				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsExpr))
 				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, tmpOld))
+				return
+			}
+			if sl, isSlice := targetType.(*checker.SliceType); isSlice && s.Op == token.TokAssign {
+				tmpOld := g.nextTmp("old_slice")
+				sliceName := g.cSliceName(sl.Elem)
+				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, sliceName, tmpOld, targetLValue))
+				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsExpr))
+				out.WriteString(fmt.Sprintf("%s%s_free(&%s);\n", indent, sliceName, tmpOld))
 				return
 			}
 		}
@@ -2724,6 +2736,14 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				}
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_btn_danger":
+			fnName := "vira_gui_btn_danger"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_btn_danger_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_check":
 			return fmt.Sprintf("vira_gui_check(%s)", strings.Join(argStrs, ", "))
 		case "gui_slide":
@@ -2776,6 +2796,50 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_modal_end":
 			return "vira_gui_modal_end()"
+		case "gui_dropdown":
+			return fmt.Sprintf("vira_gui_dropdown(%s)", strings.Join(argStrs, ", "))
+		case "gui_select":
+			return fmt.Sprintf("vira_gui_select(%s)", strings.Join(argStrs, ", "))
+		case "gui_table":
+			fnName := "vira_gui_table"
+			if len(call.Args) > 6 {
+				if _, ok := call.Args[6].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_table_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_tbl":
+			fnName := "vira_gui_tbl"
+			if len(call.Args) > 2 {
+				if _, ok := call.Args[2].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_tbl_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_table_sort_col":
+			return "vira_gui_table_sort_col()"
+		case "gui_table_sort_asc":
+			return "vira_gui_table_sort_asc()"
+		case "gui_table_set_sort":
+			return fmt.Sprintf("vira_gui_table_set_sort(%s)", strings.Join(argStrs, ", "))
+		case "gui_load_image":
+			fnName := "vira_gui_load_image"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_load_image_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_image_width":
+			return fmt.Sprintf("vira_gui_image_width(%s)", strings.Join(argStrs, ", "))
+		case "gui_image_height":
+			return fmt.Sprintf("vira_gui_image_height(%s)", strings.Join(argStrs, ", "))
+		case "gui_draw_image":
+			return fmt.Sprintf("vira_gui_draw_image(%s)", strings.Join(argStrs, ", "))
+		case "gui_image":
+			return fmt.Sprintf("vira_gui_image(%s)", strings.Join(argStrs, ", "))
+		case "gui_free_image":
+			return fmt.Sprintf("vira_gui_free_image(%s)", strings.Join(argStrs, ", "))
 		}
 		// Interface boxing cast: Payable(inv)
 		if iface, isIface := g.chk.Interfaces()[name]; isIface && len(call.Args) == 1 {

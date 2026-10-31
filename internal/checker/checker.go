@@ -844,6 +844,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "label", Type: TypeString}},
 		ReturnType: TypeBool,
 	}
+	c.functions["gui_btn_danger"] = &FnSig{
+		Name:       "gui_btn_danger",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}},
+		ReturnType: TypeBool,
+	}
 	c.functions["gui_check"] = &FnSig{
 		Name:       "gui_check",
 		IsPub:      true,
@@ -926,6 +932,121 @@ func (c *Checker) registerBuiltins() {
 		Name:       "gui_modal_end",
 		IsPub:      true,
 		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_dropdown"] = &FnSig{
+		Name:  "gui_dropdown",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "items", Type: &SliceType{Elem: TypeString}},
+			{Name: "selected_idx", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_select"] = &FnSig{
+		Name:  "gui_select",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "items", Type: &SliceType{Elem: TypeString}},
+			{Name: "selected_idx", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table"] = &FnSig{
+		Name:  "gui_table",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "headers", Type: &SliceType{Elem: TypeString}},
+			{Name: "rows", Type: &SliceType{Elem: &SliceType{Elem: TypeString}}},
+			{Name: "search_query", Type: TypeString},
+			{Name: "selected_row", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_tbl"] = &FnSig{
+		Name:  "gui_tbl",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "headers", Type: &SliceType{Elem: TypeString}},
+			{Name: "rows", Type: &SliceType{Elem: &SliceType{Elem: TypeString}}},
+			{Name: "search_query", Type: TypeString},
+			{Name: "selected_row", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table_sort_col"] = &FnSig{
+		Name:       "gui_table_sort_col",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table_sort_asc"] = &FnSig{
+		Name:       "gui_table_sort_asc",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_table_set_sort"] = &FnSig{
+		Name:  "gui_table_set_sort",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "col", Type: TypeInt},
+			{Name: "asc", Type: TypeBool},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_load_image"] = &FnSig{
+		Name:       "gui_load_image",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_image_width"] = &FnSig{
+		Name:       "gui_image_width",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_image_height"] = &FnSig{
+		Name:       "gui_image_height",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_draw_image"] = &FnSig{
+		Name:  "gui_draw_image",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "id", Type: TypeInt},
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "w", Type: TypeInt},
+			{Name: "h", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_image"] = &FnSig{
+		Name:  "gui_image",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "id", Type: TypeInt},
+			{Name: "w", Type: TypeInt},
+			{Name: "h", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_free_image"] = &FnSig{
+		Name:       "gui_free_image",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
 		ReturnType: TypeVoid,
 	}
 }

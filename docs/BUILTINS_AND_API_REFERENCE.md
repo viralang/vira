@@ -489,15 +489,34 @@ Vira includes a double-buffered 60 FPS Immediate-Mode GUI (IMGUI) engine and an 
 
 ### Auto-Layout Zero-Math Widgets
 - `gui_btn(label string) bool`
+- `gui_btn_danger(label string) bool`
 - `gui_check(label string, checked bool) bool`
 - `gui_slide(left string, right string, val f32, min f32, max f32) f32`
 - `gui_lbl(text string) void`
+- `gui_image(img_id int, width int, height int) void`
 - `gui_input(placeholder string, text string) string`
+- `gui_select(items []string, selected_idx int) int`
+- `gui_dropdown(x int, y int, width int, height int, items []string, selected_idx int) int`
+- `gui_tbl(headers []string, rows [][]string, search_query string, selected_row int) int`
+- `gui_table(x int, y int, width int, height int, headers []string, rows [][]string, search_query string, selected_row int) int`
+- `gui_table_sort_col() int`
+- `gui_table_sort_asc() bool`
+- `gui_table_set_sort(col int, asc bool) void`
 - `gui_progress(percent f32) void`
 - `gui_radio(label string, is_selected bool) bool`
 - `gui_badge(text string, hex_bg int, hex_fg int) void`
 - `gui_tab_item(label string, is_active bool) bool`
 - `gui_modal_begin(title string, width int, height int) void` / `gui_modal_end() void`
+
+### Assets & Image Management
+- `gui_load_image(path string) int`: Loads image asset from filesystem (`.png`, `.jpg`, `.bmp`, `.webp`, `.gif`). Returns handle `id >= 0` or `-1` on error.
+- `gui_image_width(img_id int) int`: Queries intrinsic pixel width.
+- `gui_image_height(img_id int) int`: Queries intrinsic pixel height.
+- `gui_draw_image(img_id int, x int, y int, width int, height int) void`: Draws scaled image at absolute canvas coordinates with alpha blending.
+- `gui_image(img_id int, width int, height int) void`: Draws scaled image positioned inside active auto-layout cursor stack.
+- `gui_free_image(img_id int) void`: Explicitly releases native image texture/buffer. All active images are also automatically freed at `gui_close()`.
+
+*Complete Runnable Example:* See [`docs/examples/37_gui_image_and_asset_loading.vir`](examples/37_gui_image_and_asset_loading.vir) and [`examples/gui_table_dropdown_demo.vir`](../examples/gui_table_dropdown_demo.vir).
 
 ```v
 gui_init(800, 600, 'Vira Dashboard')

@@ -592,6 +592,95 @@ static inline void vira_slice_string_free(vira_slice_string *s) {
   s->cap = 0;
 }
 
+#ifndef _vira_slice_vira_slice_string_DEFINED
+#define _vira_slice_vira_slice_string_DEFINED
+typedef struct {
+  vira_slice_string *data;
+  int32_t len;
+  int32_t cap;
+  bool is_arena;
+} vira_slice_vira_slice_string;
+#endif
+
+static inline vira_slice_vira_slice_string vira_slice_vira_slice_string_new(int32_t initial_cap) {
+  vira_slice_vira_slice_string s = {.data = NULL, .len = 0, .cap = 0, .is_arena = false};
+  if (initial_cap > 0) {
+    s.data = (vira_slice_string *)malloc((size_t)initial_cap * sizeof(vira_slice_string));
+    if (s.data) {
+      s.cap = initial_cap;
+      _vira_record_alloc();
+    }
+  }
+  return s;
+}
+
+static inline void vira_slice_vira_slice_string_push(vira_slice_vira_slice_string *s, vira_slice_string val) {
+  if (s->len >= s->cap) {
+    _vira_slice_grow((void **)&s->data, &s->cap, sizeof(vira_slice_string), s->is_arena);
+  }
+  s->data[s->len++] = val;
+}
+
+static inline vira_slice_string vira_slice_vira_slice_string_pop(vira_slice_vira_slice_string *s) {
+  if (s->len <= 0) {
+    fprintf(stderr, "vira panic: pop from empty slice\n");
+    exit(1);
+  }
+  return s->data[--s->len];
+}
+
+static inline void vira_slice_vira_slice_string_set(vira_slice_vira_slice_string *s, int32_t idx, vira_slice_string val) {
+  vira_bounds_check(idx, s->len, __FILE__, __LINE__);
+  vira_slice_string_free(&s->data[idx]);
+  s->data[idx] = val;
+}
+
+static inline void vira_slice_vira_slice_string_clear(vira_slice_vira_slice_string *s) {
+  for (int32_t i = 0; i < s->len; i++) {
+    vira_slice_string_free(&s->data[i]);
+  }
+  s->len = 0;
+}
+
+static inline bool vira_slice_vira_slice_string_is_empty(const vira_slice_vira_slice_string *s) {
+  return s->len == 0;
+}
+
+static inline vira_slice_vira_slice_string vira_slice_vira_slice_string_clone(const vira_slice_vira_slice_string *s) {
+  vira_slice_vira_slice_string res = vira_slice_vira_slice_string_new(s->len);
+  for (int32_t i = 0; i < s->len; i++) {
+    vira_slice_string clone_item = vira_slice_string_clone(&s->data[i]);
+    vira_slice_vira_slice_string_push(&res, clone_item);
+  }
+  return res;
+}
+
+static inline vira_slice_vira_slice_string vira_slice_vira_slice_string_subslice(const vira_slice_vira_slice_string *s, int32_t start, int32_t end) {
+  if (start < 0) start = 0;
+  if (end > s->len) end = s->len;
+  if (start > end) start = end;
+  int32_t count = end - start;
+  vira_slice_vira_slice_string res = vira_slice_vira_slice_string_new(count);
+  for (int32_t i = 0; i < count; i++) {
+    vira_slice_string clone_item = vira_slice_string_clone(&s->data[start + i]);
+    vira_slice_vira_slice_string_push(&res, clone_item);
+  }
+  return res;
+}
+
+static inline void vira_slice_vira_slice_string_free(vira_slice_vira_slice_string *s) {
+  if (s->data != NULL && !s->is_arena) {
+    for (int32_t i = 0; i < s->len; i++) {
+      vira_slice_string_free(&s->data[i]);
+    }
+    free(s->data);
+    s->data = NULL;
+    _vira_record_free();
+  }
+  s->len = 0;
+  s->cap = 0;
+}
+
 static inline vira_slice_string vira_os_args(void) {
   vira_slice_string s = vira_slice_string_new(_vira_argc);
   for (int i = 0; i < _vira_argc; i++) {

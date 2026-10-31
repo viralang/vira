@@ -995,7 +995,11 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	var modeDesc string
 
 	if compiler == "" {
-		for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
+		candidates := []string{"gcc", "clang", "cc", "tcc"}
+		if goRuntime.GOOS == "darwin" {
+			candidates = []string{"clang", "gcc", "cc", "tcc"}
+		}
+		for _, cand := range candidates {
 			if _, err := exec.LookPath(cand); err == nil {
 				compiler = cand
 				break
@@ -1052,17 +1056,13 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 			}
 		}
 		extraLibs = append(extraLibs, "-lm")
-	} else if goRuntime.GOOS == "darwin" && hasRaylib {
-		if staticRaylibPath != "" {
-			extraLibs = append(extraLibs, staticRaylibPath, "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
-		} else {
-			extraLibs = append(extraLibs, "-lraylib", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
-		}
+	} else if goRuntime.GOOS == "darwin" {
+		extraLibs = append(extraLibs, "-framework", "Cocoa", "-framework", "CoreGraphics")
 	}
 
 	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
 	baseIncludes = append(baseIncludes, libFlags...)
-	if hasRaylib {
+	if hasRaylib && goRuntime.GOOS != "darwin" {
 		baseIncludes = append(baseIncludes, "-DVIRA_USE_RAYLIB")
 	}
 	if opts.quietRT {
@@ -1070,8 +1070,17 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	}
 
 	waFlags := []string{}
-	if strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
+	if goRuntime.GOOS != "darwin" && strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
 		waFlags = append(waFlags, "-Wa,-muse-unaligned-vector-move")
+	}
+
+	appendCFile := func(targetFlags *[]string) {
+		if goRuntime.GOOS == "darwin" {
+			*targetFlags = append(*targetFlags, "-x", "objective-c", cFile, "-o", binFile)
+		} else {
+			*targetFlags = append(*targetFlags, cFile, "-o", binFile)
+		}
+		*targetFlags = append(*targetFlags, extraLibs...)
 	}
 
 	if opts.prod {
@@ -1079,15 +1088,13 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
 		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	} else if compiler == "tcc" {
 		modeDesc = "dev (TinyCC instant build)"
 		cFlags = append([]string{"-pthread"}, baseIncludes...)
@@ -1098,8 +1105,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	}
 
 	cmd := exec.Command(compiler, cFlags...)
