@@ -76,11 +76,15 @@ vira <command> [flags] <file.vir>
 | Command | Purpose | Example |
 | :--- | :--- | :--- |
 | `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
-| `build` | Compile into a native standalone executable (`.exe` / ELF) | `vira build -prod -o app main.vir` |
+| `build` | Compile into a native standalone executable (`.exe` / ELF / Mach-O) | `vira build -prod -o app main.vir` |
+| `init` | Scaffold a standard multi-package enterprise project | `vira init my_service` |
+| `init-gui` | Scaffold a dedicated native desktop GUI application with theme tokens and icons | `vira init-gui my_app` |
+| `bundle` | Package a GUI app into native production bundles for macOS (`.app`), Linux, and Windows | `vira bundle --target darwin -release` |
 | `test` | Discover and execute `*_test.vir` test suites | `vira test ./...` |
 | `fmt` | Format `.vir` source files to canonical style | `vira fmt main.vir` |
-| `doc` | Generate documentation from `.vir` module declarations | `vira doc packages/http` |
-| `pkg` | Manage `vira.mod` dependencies and cryptographic `vira.lock` files | `vira pkg lock` |
+| `add` | Add and download a package dependency | `vira add github.com/user/pkg@v1.0.0` |
+| `install` | Install all dependencies declared in `vira.mod` / `vira.lock` | `vira install` |
+| `vendor` | Vendor all dependencies into `./vendor` for air-gapped builds | `vira vendor` |
 | `lsp` | Start the JSON-RPC 2.0 Language Server (`virals`) over stdio | `vira lsp` |
 | `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
 | `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vira check main.vir` |
@@ -93,6 +97,22 @@ vira <command> [flags] <file.vir>
 - `-o <path>`: Specifies output binary filename.
 - `-cc <bin>`: Overrides backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
 - `-keep-c`: Preserves intermediate generated `.c` files in `build/`.
+
+### Desktop GUI App Scaffolding & Packaging
+
+Vira provides built-in, zero-dependency tools for building and shipping commercial desktop software:
+- **`vira init-gui <name>`**: Scaffolds a complete desktop GUI project with `vira.mod`, high-resolution vector icon, theme tokens (`src/config/theme.vir`), and immediate-mode 60 FPS lifecycle loop (`src/main.vir`).
+- **`vira.mod` Manifest Extensions**:
+  - `app_name = "My App"`: Human-readable window and dock title.
+  - `app_id = "com.company.myapp"`: Reverse-DNS identifier for macOS and XDG desktop systems.
+  - `icon = "assets/icon.png"`: Relative path to primary application icon.
+  - `assets = ["assets"]`: Directories automatically copied into distribution bundles.
+- **`vira bundle`**: Packages the app into platform-specific native formats:
+  - **macOS (`--target darwin`)**: Builds a `.app` bundle with `Contents/Info.plist`, High-DPI Retina support (`NSHighResolutionCapable`), native icons, and `.zip` distribution archive.
+  - **Linux (`--target linux`)**: Builds a portable directory with FreeDesktop `.desktop` entry, `icon.png`, environment `run.sh` launcher, and `.tar.gz` distribution archive.
+  - **Windows (`--target windows`)**: Compiles with Win32 GUI subsystem (`-mwindows` linker flag to eliminate the black CMD console window), multi-resolution `.ico`, and `.zip` distribution archive.
+
+> For the comprehensive guide, see [**Tutorial 35: Native GUI App Scaffolding & Cross-Platform Bundling**](tutorials/35_gui_app_scaffolding_and_cross_platform_bundling.md).
 
 ---
 

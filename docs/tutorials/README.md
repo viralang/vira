@@ -21,7 +21,9 @@ Beginner                           Intermediate                               Ad
    │                                     │                                        │
    └── [31. Basic CLI Applications]      ├── [30. Package Namespacing]            ├── [32. Advanced CLI, Flags & Containers]
                                          │                                        │
-                                         └── [33. ND Tensors & JSON]              └── [Standard Library Guide]
+                                         ├── [33. ND Tensors & JSON]              ├── [21-23. Native Desktop GUI]
+                                         │                                        │
+                                         └── [34. Advanced GUI Controls]          └── [35. GUI Scaffolding & Bundling]
 ```
 
 ---
@@ -64,6 +66,8 @@ Beginner                           Intermediate                               Ad
 | **32** | [**Advanced CLI Flags, Subprocess Execution & Linux Containers**](./32_advanced_cli_flags_syscall_and_exec.md) | Advanced / Systems | [`35_advanced_cli_flags_syscall_exec.vir`](../examples/35_advanced_cli_flags_syscall_exec.vir)<br>[`36_linux_container_runtime_reference.vir`](../examples/36_linux_container_runtime_reference.vir) | Production flag parsing with `flag.FlagSet`, leveled logging with `log.Logger`, child process orchestration with `exec.Command`, raw UNIX pipe IPC, Linux namespaces (`CLONE_NEWPID/NEWUTS/NEWNS/NEWNET/NEWIPC`), cgroups v2 resource capping, and pure-Vira container runtime. |
 | **33** | [**1D-4D Strided Tensors, Batched Attention & Pure-Vira JSON**](./33_nd_tensors_and_stdlib_json.md) | Advanced / AI | [`33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir) | 4D batched multi-head attention matrix multiplication (`@`), zero-copy bump arena reshaping (`seq.reshape_2d`), trailing-dimension bias broadcasting, pure-Vira RFC 8259 JSON parsing (`json.get_str`, `json.get_int`), and concurrent actor `json.JsonBuilder`. |
 | **34** | [**Advanced GUI Components: Dropdown Select & Searchable, Sortable Data Tables**](./34_advanced_gui_tables_and_dropdowns.md) | Intermediate to Adv | [`gui_table_dropdown_demo.vir`](../../examples/gui_table_dropdown_demo.vir)<br>[`37_gui_image_and_asset_loading.vir`](../examples/37_gui_image_and_asset_loading.vir)<br>[`38_gui_remote_url_image_loading.vir`](../examples/38_gui_remote_url_image_loading.vir) | Dropdown select (`gui_select`/`gui_dropdown`) with deferred top-layer popup rendering, interactive data tables (`gui_tbl`/`gui_table`) with natural sorting, real-time search filtering, row selection, automated pagination, vector icons (`gui_btn_danger`), local image loading, and non-blocking remote URL asset fetching with custom HTTP headers on macOS, Linux, and Windows. |
+| **35** | [**Native GUI App Scaffolding & Cross-Platform Bundling**](./35_gui_app_scaffolding_and_cross_platform_bundling.md) | Intermediate to Adv | `vira init-gui my_app`<br>`vira bundle -release` | Dedicated GUI app scaffolding (`vira init-gui`), desktop manifest metadata (`app_name`, `app_id`, `icon`, `assets`), macOS `.app` bundle with `Contents/Info.plist` and High-DPI Retina support, Linux portable directory with FreeDesktop `.desktop` entry and `run.sh`, Windows Win32 GUI subsystem (`-mwindows` without console window) and `.ico` icons, and automated CI/CD release archiving. |
+
 
 ---
 

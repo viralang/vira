@@ -39,16 +39,19 @@ Commands:
   test    Discover and run test functions/files with leak checks
   fmt     Format .vir source files according to official style rules
   lsp     Start the Vira Language Server (LSP) over stdin/stdout
-  init    Initialize a new Vira project scaffold with vira.mod and src/
-  add     Add and download a package dependency (local or git)
-  install Install dependencies declared in vira.mod and vira.lock
-  remove  Remove a package dependency
-  vendor  Vendor all dependencies into ./vendor for offline/air-gapped builds
-  demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
-  version Display compiler version and target platform
+  init     Initialize a new Vira project scaffold with vira.mod and src/
+  init-gui Initialize a dedicated native GUI project with assets and theme
+  bundle   Package native application bundle (.app, .desktop, .exe)
+  add      Add and download a package dependency (local or git)
+  install  Install dependencies declared in vira.mod and vira.lock
+  remove   Remove a package dependency
+  vendor   Vendor all dependencies into ./vendor for offline/air-gapped builds
+  demo     Generate and run the built-in OOP + SIMD Tensor + Actor demo
+  version  Display compiler version and target platform
 
 Flags for 'vira build':
   -prod       Enable production optimizations (-O3 -march=native -flto)
+  -gui        Build as GUI application (suppresses Windows console window)
   -sanitize   Enable AddressSanitizer & UndefinedBehaviorSanitizer
   -o <path>   Output binary path (default: <filename>)
   -cc <bin>   Specify C compiler backend (cc, clang, gcc, tcc)
@@ -63,6 +66,7 @@ type compileOptions struct {
 	keepC        bool
 	showAutofree bool
 	quietRT      bool
+	guiApp       bool
 }
 
 func main() {
@@ -89,6 +93,10 @@ func main() {
 		lspCmd()
 	case "init":
 		initCmd(os.Args[2:])
+	case "init-gui":
+		initGuiCmd(os.Args[2:])
+	case "bundle", "pack", "dist":
+		bundleCmd(os.Args[2:])
 	case "add":
 		addCmd(os.Args[2:])
 	case "install", "get":
@@ -172,6 +180,7 @@ func runCmd(args []string) {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	prod := fs.Bool("prod", false, "Compile with -O3 -march=native -flto")
+	guiFlag := fs.Bool("gui", false, "Compile as native GUI application (no Windows console)")
 	sanitize := fs.Bool("sanitize", false, "Enable ASan and UBSan")
 	outPath := fs.String("o", "", "Output binary path")
 	ccFlag := fs.String("cc", "", "C compiler (cc, clang, gcc, tcc)")
@@ -210,6 +219,7 @@ func buildCmd(args []string) {
 		outPath:  targetBin,
 		keepC:    *keepC,
 		quietRT:  *quietRTFlag,
+		guiApp:   *guiFlag,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, targetBin, opts)
@@ -419,6 +429,13 @@ func lspCmd() {
 // --- SUBCOMMAND 8: `vira init` ---
 
 func initCmd(args []string) {
+	for _, a := range args {
+		if a == "--gui" || a == "-gui" {
+			initGuiCmd(args)
+			return
+		}
+	}
+
 	name := "my_vira_app"
 	if len(args) > 0 {
 		name = args[0]
@@ -1042,6 +1059,9 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 
 	if goRuntime.GOOS == "windows" {
 		staticFlags = append(staticFlags, "-static")
+		if opts.guiApp {
+			staticFlags = append(staticFlags, "-mwindows")
+		}
 		if hasRaylib {
 			if staticRaylibPath != "" {
 				extraLibs = append(extraLibs, staticRaylibPath)

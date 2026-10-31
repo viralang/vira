@@ -131,6 +131,8 @@ vira <command> [flags] [arguments]
 | `test` | Run all unit tests (`*_test.vir`) in a directory or project | `vira test ./tests` |
 | `fmt` | Format Vira source files in-place to canonical style | `vira fmt ./src` |
 | `init` | Scaffold a modern enterprise multi-package Vira project with `vira.mod`, `src/`, `tests/` | `vira init my_app` |
+| `init-gui` | Scaffold a dedicated native desktop GUI project with theme tokens, vector icon, and GUI manifest | `vira init-gui my_app` |
+| `bundle` | Package a GUI desktop app into native production bundles for macOS (`.app`), Linux, and Windows | `vira bundle --target darwin -release` |
 | `add` | Add and download a package dependency (local or Git repository) | `vira add github.com/user/pkg@v1.0.0` |
 | `install` | Install and verify all dependencies declared in `vira.mod` and `vira.lock` | `vira install` |
 | `remove` | Remove a package dependency from manifest, lockfile, and cache | `vira remove github.com/user/pkg` |
@@ -150,7 +152,7 @@ vira <command> [flags] [arguments]
 ---
 
 ## 4. Master Catalog: Tutorials & Runnable Examples Table
-The repository includes 30 comprehensive step-by-step tutorials paired directly with 31 standalone, self-contained runnable `.vir` example programs and benchmark suites.
+The repository includes 35 comprehensive step-by-step tutorials paired directly with standalone, self-contained runnable `.vir` example programs and benchmark suites.
 
 | # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
 | :-: | :--- | :--- | :--- | :--- | :--- |
@@ -186,6 +188,9 @@ The repository includes 30 comprehensive step-by-step tutorials paired directly 
 | **30** | **Package Namespacing, Modules & Dependency Management** | Intermediate/Adv | [`31_package_namespacing_and_modules.vir`](docs/examples/31_package_namespacing_and_modules.vir) | [`30_package_namespacing_and_dependency_management.md`](docs/tutorials/30_package_namespacing_and_dependency_management.md) | First-class module isolation (`module http`), qualified type signatures (`net.TcpStream`), qualified static factory calls, package aliasing (`import as`), and cryptographic `vira.lock` locking. |
 | **31** | **Basic CLI Application Development** | Beginner/Inter | [`34_basic_cli_app.vir`](docs/examples/34_basic_cli_app.vir) | [`31_basic_cli_application_development.md`](docs/tutorials/31_basic_cli_application_development.md) | Native `int main(argc, argv)` entrypoint, command-line arguments via `os.args()`, environment variables (`os.getenv`/`os.setenv`), path helpers, file I/O with deterministic cleanup via `defer`, and 0 memory leaks. |
 | **32** | **Advanced CLI Flags, Subprocess Execution & Linux Containers** | Advanced/Systems | [`35_advanced_cli_flags_syscall_exec.vir`](docs/examples/35_advanced_cli_flags_syscall_exec.vir)<br>[`36_linux_container_runtime_reference.vir`](docs/examples/36_linux_container_runtime_reference.vir) | [`32_advanced_cli_flags_syscall_and_exec.md`](docs/tutorials/32_advanced_cli_flags_syscall_and_exec.md) | Production flag parsing with `flag.FlagSet`, leveled logging with `log.Logger`, child process orchestration with `exec.Command`, raw UNIX pipe IPC, Linux namespaces (`CLONE_NEWPID/NEWUTS/NEWNS/NEWNET/NEWIPC`), cgroups v2 resource capping, and pure-Vira container runtime. |
+| **33** | **1D-4D Strided Tensors, Attention & JSON** | Advanced/AI | [`33_nd_tensors_and_stdlib_json.vir`](docs/examples/33_nd_tensors_and_stdlib_json.vir) | [`33_nd_tensors_and_stdlib_json.md`](docs/tutorials/33_nd_tensors_and_stdlib_json.md) | 4D batched multi-head attention matrix multiplication (`@`), zero-copy bump arena reshaping (`seq.reshape_2d`), trailing-dimension bias broadcasting, pure-Vira RFC 8259 JSON parsing (`json.get_str`, `json.get_int`), and concurrent actor `json.JsonBuilder`. |
+| **34** | **Advanced GUI: Dropdowns & Data Tables** | Intermediate/Adv | [`gui_table_dropdown_demo.vir`](examples/gui_table_dropdown_demo.vir) | [`34_advanced_gui_tables_and_dropdowns.md`](docs/tutorials/34_advanced_gui_tables_and_dropdowns.md) | Dropdown select (`gui_select`/`gui_dropdown`) with deferred top-layer popup rendering, interactive data tables (`gui_tbl`/`gui_table`) with natural sorting, real-time search filtering, row selection, automated pagination, vector icons (`gui_btn_danger`), local image loading, and non-blocking remote URL asset fetching with custom HTTP headers on macOS, Linux, and Windows. |
+| **35** | **Native GUI App Scaffolding & Bundling** | Intermediate/Adv | `vira init-gui my_app`<br>`vira bundle -release` | [`35_gui_app_scaffolding_and_cross_platform_bundling.md`](docs/tutorials/35_gui_app_scaffolding_and_cross_platform_bundling.md) | Dedicated GUI scaffolding (`vira init-gui`), desktop manifest metadata (`app_name`, `app_id`, `icon`, `assets`), macOS `.app` bundle with `Contents/Info.plist` and High-DPI Retina support, Linux portable directory with FreeDesktop `.desktop` entry and `run.sh`, Windows Win32 GUI subsystem (`-mwindows` without console window) and `.ico` icons, and automated CI/CD release archiving. |
 
 ---
 
