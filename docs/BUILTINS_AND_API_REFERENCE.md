@@ -516,7 +516,9 @@ Vira includes a double-buffered 60 FPS Immediate-Mode GUI (IMGUI) engine and an 
 - `gui_image(img_id int, width int, height int) void`: Draws scaled image positioned inside active auto-layout cursor stack.
 - `gui_free_image(img_id int) void`: Explicitly releases native image texture/buffer. All active images are also automatically freed at `gui_close()`.
 
-*Complete Runnable Example:* See [`docs/examples/37_gui_image_and_asset_loading.vir`](examples/37_gui_image_and_asset_loading.vir) and [`examples/gui_table_dropdown_demo.vir`](../examples/gui_table_dropdown_demo.vir).
+*Complete Runnable Examples:*
+- Local Assets: [`docs/examples/37_gui_image_and_asset_loading.vir`](examples/37_gui_image_and_asset_loading.vir) & [`examples/gui_table_dropdown_demo.vir`](../examples/gui_table_dropdown_demo.vir).
+- Remote URL & Headers: [`docs/examples/38_gui_remote_url_image_loading.vir`](examples/38_gui_remote_url_image_loading.vir).
 
 ```v
 gui_init(800, 600, 'Vira Dashboard')

@@ -705,4 +705,5 @@ To produce a stripped, native executable with `-O3` and vector optimizations:
 | **`gui_free_image`** | `(img_id int) void` | Explicitly frees image memory and native texture handle. |
 
 For a dedicated standalone showcase of image loading, interactive zoom scaling, and surface alpha blending, see [`docs/examples/37_gui_image_and_asset_loading.vir`](../examples/37_gui_image_and_asset_loading.vir).
+For non-blocking remote asset downloading with custom HTTP headers (`Authorization: Bearer`, `User-Agent`, `Accept`), see [`docs/examples/38_gui_remote_url_image_loading.vir`](../examples/38_gui_remote_url_image_loading.vir).
 
