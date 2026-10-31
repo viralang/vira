@@ -191,10 +191,13 @@ static inline bool _vira_load_bmp_file(const char* filepath, int32_t* out_w, int
 // 2A. HARDWARE ACCELERATED RAYLIB BACKEND (macOS, Windows & Linux GPU)
 // ------------------------------------------------------------------------------
 #include <raylib.h>
+#include <math.h>
 
 static bool    _vira_rl_should_close = false;
 static int32_t _vira_rl_win_w = 800;
 static int32_t _vira_rl_win_h = 600;
+static Font    _vira_rl_font = {0};
+static bool    _vira_rl_font_loaded = false;
 
 static inline Color _vira_rl_color(int32_t hex) {
     return (Color){
@@ -203,6 +206,45 @@ static inline Color _vira_rl_color(int32_t hex) {
         .b = (unsigned char)(hex & 0xFF),
         .a = 255
     };
+}
+
+static inline void _vira_rl_load_system_font(void) {
+    if (_vira_rl_font_loaded) return;
+    const char* cand_paths[] = {
+        // Linux desktop system fonts
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/ubuntu-font-family/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        // Project local fallback fonts
+        "assets/font.ttf",
+        "fonts/font.ttf",
+        // Windows fonts
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf",
+        // macOS fonts
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        NULL
+    };
+    for (int i = 0; cand_paths[i]; i++) {
+        if (FileExists(cand_paths[i])) {
+            // High-resolution 36px font atlas for razor-sharp rendering at all UI sizes
+            _vira_rl_font = LoadFontEx(cand_paths[i], 36, NULL, 0);
+            if (_vira_rl_font.texture.id > 0) {
+                SetTextureFilter(_vira_rl_font.texture, TEXTURE_FILTER_BILINEAR);
+                _vira_rl_font_loaded = true;
+                return;
+            }
+        }
+    }
 }
 
 static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
@@ -217,8 +259,10 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
     stack_title[tlen] = '\0';
 
     SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI | FLAG_VSYNC_HINT);
     InitWindow(width, height, stack_title);
     SetTargetFPS(60);
+    _vira_rl_load_system_font();
 }
 
 static inline bool vira_gui_should_close(void) {
@@ -268,6 +312,11 @@ static inline void _vira_backend_gui_end(void) {
 }
 
 static inline void vira_gui_close(void) {
+    if (_vira_rl_font_loaded && _vira_rl_font.texture.id > 0) {
+        UnloadFont(_vira_rl_font);
+        _vira_rl_font_loaded = false;
+        _vira_rl_font = (Font){0};
+    }
     for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
         if (_vira_gui_images[i].is_valid && _vira_gui_images[i].native_handle) {
             Texture2D tex = {
@@ -296,6 +345,21 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
     DrawRectangle(x, y, width, height, _vira_rl_color(hex_color));
 }
 
+static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
+    if (width <= 0 || height <= 0) return;
+    int32_t min_dim = width < height ? width : height;
+    float roundness = (float)radius / ((float)min_dim * 0.5f);
+    if (roundness > 1.0f) roundness = 1.0f;
+    if (roundness < 0.0f) roundness = 0.0f;
+    Rectangle rect = { (float)x, (float)y, (float)width, (float)height };
+    if (bg_hex >= 0) {
+        DrawRectangleRounded(rect, roundness, 8, _vira_rl_color(bg_hex));
+    }
+    if (border_hex >= 0) {
+        DrawRectangleRoundedLines(rect, roundness, 8, 1.0f, _vira_rl_color(border_hex));
+    }
+}
+
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
     if (radius <= 0.0f) return;
     DrawCircle(cx, cy, radius, _vira_rl_color(hex_color));
@@ -315,7 +379,12 @@ static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, in
     }
     memcpy(buf, text.data, (size_t)text.len);
     buf[text.len] = '\0';
-    DrawText(buf, x, y, size > 0 ? size : 16, _vira_rl_color(hex_color));
+    float fsize = (float)(size > 0 ? size : 15);
+    if (_vira_rl_font_loaded && _vira_rl_font.texture.id > 0) {
+        DrawTextEx(_vira_rl_font, buf, (Vector2){ (float)x, (float)y }, fsize, 1.0f, _vira_rl_color(hex_color));
+    } else {
+        DrawText(buf, x, y, (int)fsize, _vira_rl_color(hex_color));
+    }
     if (buf != stack_buf) free(buf);
 }
 
@@ -329,7 +398,13 @@ static inline int32_t _vira_measure_text_w(vira_string text) {
     }
     memcpy(buf, text.data, (size_t)text.len);
     buf[text.len] = '\0';
-    int32_t w = MeasureText(buf, 16);
+    int32_t w = 0;
+    if (_vira_rl_font_loaded && _vira_rl_font.texture.id > 0) {
+        Vector2 sz = MeasureTextEx(_vira_rl_font, buf, 15.0f, 1.0f);
+        w = (int32_t)ceilf(sz.x);
+    } else {
+        w = MeasureText(buf, 15);
+    }
     if (buf != stack_buf) free(buf);
     return w;
 }
@@ -630,11 +705,27 @@ static inline void vira_gui_close(void) {
 }
 
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
-    if (!_vira_gui.hdc_mem) return;
+    if (!_vira_gui.hdc_mem || width <= 0 || height <= 0) return;
     HBRUSH br = CreateSolidBrush(_vira_color_to_colorref(hex_color));
     RECT rc = {x, y, x + width, y + height};
     FillRect(_vira_gui.hdc_mem, &rc, br);
     DeleteObject(br);
+}
+
+static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
+    if (!_vira_gui.hdc_mem || width <= 0 || height <= 0) return;
+    HBRUSH br = (bg_hex >= 0) ? CreateSolidBrush(_vira_color_to_colorref(bg_hex)) : (HBRUSH)GetStockObject(NULL_BRUSH);
+    HPEN pen = (border_hex >= 0) ? CreatePen(PS_SOLID, 1, _vira_color_to_colorref(border_hex)) : (HPEN)GetStockObject(NULL_PEN);
+    HGDIOBJ oldBr = SelectObject(_vira_gui.hdc_mem, br);
+    HGDIOBJ oldPen = SelectObject(_vira_gui.hdc_mem, pen);
+    int d = (int)(radius * 2);
+    if (d > width) d = width;
+    if (d > height) d = height;
+    RoundRect(_vira_gui.hdc_mem, x, y, x + width, y + height, d, d);
+    SelectObject(_vira_gui.hdc_mem, oldBr);
+    SelectObject(_vira_gui.hdc_mem, oldPen);
+    if (bg_hex >= 0) DeleteObject(br);
+    if (border_hex >= 0) DeleteObject(pen);
 }
 
 static inline void vira_gui_clear(int32_t hex_color) {
@@ -813,8 +904,20 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
 
     _vira_x11.backbuf = XCreatePixmap(_vira_x11.dpy, _vira_x11.win, (unsigned int)width, (unsigned int)height, (unsigned int)_vira_x11.depth);
     _vira_x11.gc      = XCreateGC(_vira_x11.dpy, _vira_x11.backbuf, 0, NULL);
-    _vira_x11.font    = XLoadQueryFont(_vira_x11.dpy, "9x15");
-    if (!_vira_x11.font) _vira_x11.font = XLoadQueryFont(_vira_x11.dpy, "fixed");
+    const char* x11_font_names[] = {
+        "-*-ubuntu-medium-r-*-*-14-*-*-*-*-*-iso10646-1",
+        "-*-dejavu sans-medium-r-*-*-14-*-*-*-*-*-iso10646-1",
+        "-*-liberation sans-medium-r-*-*-14-*-*-*-*-*-iso10646-1",
+        "-*-helvetica-medium-r-*-*-14-*-*-*-*-*-iso8859-1",
+        "-*-arial-medium-r-*-*-14-*-*-*-*-*-iso8859-1",
+        "9x15",
+        "fixed",
+        NULL
+    };
+    for (int i = 0; x11_font_names[i]; i++) {
+        _vira_x11.font = XLoadQueryFont(_vira_x11.dpy, x11_font_names[i]);
+        if (_vira_x11.font) break;
+    }
     if (_vira_x11.font) XSetFont(_vira_x11.dpy, _vira_x11.gc, _vira_x11.font->fid);
 
     XMapWindow(_vira_x11.dpy, _vira_x11.win);
@@ -931,6 +1034,19 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
     if (!_vira_x11.dpy || width <= 0 || height <= 0) return;
     XSetForeground(_vira_x11.dpy, _vira_x11.gc, (unsigned long)(hex_color & 0xFFFFFF));
     XFillRectangle(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x, y, (unsigned int)width, (unsigned int)height);
+}
+
+static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
+    (void)radius;
+    if (!_vira_x11.dpy || width <= 0 || height <= 0) return;
+    if (bg_hex >= 0) {
+        XSetForeground(_vira_x11.dpy, _vira_x11.gc, (unsigned long)(bg_hex & 0xFFFFFF));
+        XFillRectangle(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x, y, (unsigned int)width, (unsigned int)height);
+    }
+    if (border_hex >= 0) {
+        XSetForeground(_vira_x11.dpy, _vira_x11.gc, (unsigned long)(border_hex & 0xFFFFFF));
+        XDrawRectangle(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x, y, (unsigned int)(width > 1 ? width - 1 : 1), (unsigned int)(height > 1 ? height - 1 : 1));
+    }
 }
 
 static inline void vira_gui_clear(int32_t hex_color) {
@@ -1323,6 +1439,30 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
     CGContextFillRect(_vira_cocoa.bitmap_ctx, CGRectMake(x, y, width, height));
 }
 
+static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
+    if (!_vira_cocoa.bitmap_ctx || width <= 0 || height <= 0) return;
+    CGRect rect = CGRectMake((CGFloat)x, (CGFloat)y, (CGFloat)width, (CGFloat)height);
+    CGPathRef path = CGPathCreateWithRoundedRect(rect, (CGFloat)radius, (CGFloat)radius, NULL);
+    if (bg_hex >= 0) {
+        float r = ((bg_hex >> 16) & 0xFF) / 255.0f;
+        float g = ((bg_hex >> 8) & 0xFF) / 255.0f;
+        float b = (bg_hex & 0xFF) / 255.0f;
+        CGContextSetRGBFillColor(_vira_cocoa.bitmap_ctx, r, g, b, 1.0f);
+        CGContextAddPath(_vira_cocoa.bitmap_ctx, path);
+        CGContextFillPath(_vira_cocoa.bitmap_ctx);
+    }
+    if (border_hex >= 0) {
+        float r = ((border_hex >> 16) & 0xFF) / 255.0f;
+        float g = ((border_hex >> 8) & 0xFF) / 255.0f;
+        float b = (border_hex & 0xFF) / 255.0f;
+        CGContextSetRGBStrokeColor(_vira_cocoa.bitmap_ctx, r, g, b, 1.0f);
+        CGContextSetLineWidth(_vira_cocoa.bitmap_ctx, 1.0f);
+        CGContextAddPath(_vira_cocoa.bitmap_ctx, path);
+        CGContextStrokePath(_vira_cocoa.bitmap_ctx);
+    }
+    CGPathRelease(path);
+}
+
 static inline void vira_gui_clear(int32_t hex_color) {
     vira_gui_draw_rect(0, 0, _vira_cocoa.width, _vira_cocoa.height, hex_color);
 }
@@ -1492,6 +1632,7 @@ static inline void vira_gui_close(void) {}
 static inline void vira_gui_clear(int32_t c) { (void)c; }
 static inline void vira_gui_draw_text(vira_string t, int32_t x, int32_t y, int32_t s, int32_t c) { (void)t; (void)x; (void)y; (void)s; (void)c; }
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
+static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t w, int32_t h, float r, int32_t bg, int32_t border) { (void)x; (void)y; (void)w; (void)h; (void)r; (void)bg; (void)border; }
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float r, int32_t c) { (void)cx; (void)cy; (void)r; (void)c; }
 static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t c) { (void)x1; (void)y1; (void)x2; (void)y2; (void)c; }
 static inline int32_t _vira_measure_text_w(vira_string t) { return t.len * 8; }
@@ -1650,16 +1791,11 @@ static inline bool vira_gui_button(int32_t x, int32_t y, int32_t width, int32_t 
     int32_t border_color = is_hovered ? 0x89B4FA : 0x585B70;
     int32_t text_color   = is_hovered ? 0xFFFFFF : 0xCDD6F4;
 
-    vira_gui_draw_rect(x, y, width, height, bg_color);
-    // 1px border outline using lines (works identically on Win32 & X11)
-    vira_gui_draw_line(x, y, x + width, y, border_color);
-    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
-    vira_gui_draw_line(x, y, x, y + height, border_color);
-    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, bg_color, border_color);
 
     if (label.len > 0) {
         int32_t tw = _vira_measure_text_w(label);
-        vira_gui_draw_text(label, x + (width - tw) / 2, y + (height - 16) / 2, 16, text_color);
+        vira_gui_draw_text(label, x + (width - tw) / 2, y + (height - 16) / 2, 15, text_color);
     }
     return is_clicked;
 }
@@ -1689,11 +1825,7 @@ static inline bool vira_gui_button_danger(int32_t x, int32_t y, int32_t width, i
     int32_t border_color = is_hovered ? 0xF38BA8 : 0xA63A50;
     int32_t text_color   = is_hovered ? 0xFFFFFF : 0xF38BA8;
 
-    vira_gui_draw_rect(x, y, width, height, bg_color);
-    vira_gui_draw_line(x, y, x + width, y, border_color);
-    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
-    vira_gui_draw_line(x, y, x, y + height, border_color);
-    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, bg_color, border_color);
 
     int32_t tw = _vira_measure_text_w(label);
     int32_t total_w = 14 + 6 + tw;
@@ -1702,7 +1834,7 @@ static inline bool vira_gui_button_danger(int32_t x, int32_t y, int32_t width, i
 
     _vira_gui_draw_trash_icon(start_x, mid_y, text_color);
     if (label.len > 0) {
-        vira_gui_draw_text(label, start_x + 18, mid_y, 16, text_color);
+        vira_gui_draw_text(label, start_x + 18, mid_y, 15, text_color);
     }
     return is_clicked;
 }
@@ -1761,9 +1893,9 @@ static inline bool vira_gui_checkbox(int32_t x, int32_t y, int32_t width, int32_
     }
 
     int box_y = y + (height - box_size) / 2;
-    vira_gui_draw_rect(x, box_y, box_size, box_size, 0x313244);
+    vira_gui_draw_rounded_rect(x, box_y, box_size, box_size, 4.0f, 0x313244, is_hovered ? 0x89B4FA : 0x585B70);
     if (checked) {
-        vira_gui_draw_rect(x + 3, box_y + 3, box_size - 6, box_size - 6, 0xA6E3A1);
+        vira_gui_draw_rounded_rect(x + 3, box_y + 3, box_size - 6, box_size - 6, 2.0f, 0xA6E3A1, -1);
     }
     if (label.len > 0) {
         vira_gui_draw_text(label, x + box_size + 8, y + (height - 16) / 2, 15, is_hovered ? 0xFFFFFF : 0xCDD6F4);
@@ -1849,17 +1981,10 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
     int32_t bg_color     = is_focused ? 0x181825 : (is_hovered ? 0x1E1E2E : 0x11111B);
     int32_t border_color = is_focused ? 0x89B4FA : (is_hovered ? 0x585B70 : 0x313244);
 
-    vira_gui_draw_rect(x, y, width, height, bg_color);
-    vira_gui_draw_line(x, y, x + width, y, border_color);
-    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
-    vira_gui_draw_line(x, y, x, y + height, border_color);
-    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, bg_color, border_color);
 
     if (is_focused) {
-        vira_gui_draw_line(x - 1, y - 1, x + width + 1, y - 1, 0x89B4FA);
-        vira_gui_draw_line(x - 1, y + height + 1, x + width + 1, y + height + 1, 0x89B4FA);
-        vira_gui_draw_line(x - 1, y - 1, x - 1, y + height + 1, 0x89B4FA);
-        vira_gui_draw_line(x + width + 1, y - 1, x + width + 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_rounded_rect(x - 1, y - 1, width + 2, height + 2, 7.0f, -1, 0x89B4FA);
     }
 
     int text_y = y + (height - 16) / 2;
@@ -1891,15 +2016,11 @@ static inline void vira_gui_progress_bar(int32_t x, int32_t y, int32_t width, in
     if (percent < 0.0f) percent = 0.0f;
     if (percent > 1.0f) percent = 1.0f;
 
-    vira_gui_draw_rect(x, y, width, height, 0x11111B);
-    vira_gui_draw_line(x, y, x + width, y, 0x313244);
-    vira_gui_draw_line(x, y + height, x + width, y + height, 0x313244);
-    vira_gui_draw_line(x, y, x, y + height, 0x313244);
-    vira_gui_draw_line(x + width, y, x + width, y + height, 0x313244);
+    vira_gui_draw_rounded_rect(x, y, width, height, 4.0f, 0x11111B, 0x313244);
 
     int fill_w = (int)(percent * (float)(width - 4));
     if (fill_w > 0) {
-        vira_gui_draw_rect(x + 2, y + 2, fill_w, height - 4, 0xA6E3A1);
+        vira_gui_draw_rounded_rect(x + 2, y + 2, fill_w, height - 4, 3.0f, 0xA6E3A1, -1);
     }
 
     if (height >= 18) {
@@ -1947,15 +2068,10 @@ static inline void vira_gui_draw_badge(int32_t x, int32_t y, vira_string text, i
     int32_t tw = _vira_measure_text_w(text);
     int32_t bw = tw + 16;
     int32_t bh = 22;
-
-    vira_gui_draw_rect(x, y, bw, bh, hex_bg);
     int32_t border = ((hex_bg >> 1) & 0x7F7F7F);
-    vira_gui_draw_line(x, y, x + bw, y, border);
-    vira_gui_draw_line(x, y + bh, x + bw, y + bh, border);
-    vira_gui_draw_line(x, y, x, y + bh, border);
-    vira_gui_draw_line(x + bw, y, x + bw, y + bh, border);
 
-    vira_gui_draw_text(text, x + 8, y + 3, 14, hex_fg);
+    vira_gui_draw_rounded_rect(x, y, bw, bh, 6.0f, hex_bg, border);
+    vira_gui_draw_text(text, x + 8, y + 3, 13, hex_fg);
 }
 
 static inline void vira_gui_vstack_begin(int32_t x, int32_t y, int32_t width, int32_t spacing) {
@@ -2041,11 +2157,7 @@ static inline void vira_gui_card_begin(vira_string title, int32_t width) {
     int32_t c_idx = _vira_card_counter++;
     int32_t card_h = (c_idx < 16 && _vira_card_heights[c_idx] > 0) ? _vira_card_heights[c_idx] : 220;
 
-    vira_gui_draw_rect(x, y, w, card_h, 0x1E1E2E);
-    vira_gui_draw_line(x, y, x + w, y, 0x313244);
-    vira_gui_draw_line(x, y + card_h, x + w, y + card_h, 0x313244);
-    vira_gui_draw_line(x, y, x, y + card_h, 0x313244);
-    vira_gui_draw_line(x + w, y, x + w, y + card_h, 0x313244);
+    vira_gui_draw_rounded_rect(x, y, w, card_h, 8.0f, 0x1E1E2E, 0x313244);
 
     if (title.len > 0) {
         vira_gui_draw_text(title, x + 15, y + 12, 16, 0x89B4FA);
@@ -2276,9 +2388,9 @@ static inline bool vira_gui_tab_item(vira_string label, bool is_active) {
     int32_t bg_color   = is_active ? 0x313244 : (is_hovered ? 0x242537 : 0x181825);
     int32_t text_color = is_active ? 0xFFFFFF : (is_hovered ? 0xCDD6F4 : 0x6C7086);
 
-    vira_gui_draw_rect(x, y, w, h, bg_color);
+    vira_gui_draw_rounded_rect(x, y, w, h, 6.0f, bg_color, -1);
     if (is_active) {
-        vira_gui_draw_rect(x, y + h - 3, w, 3, 0x89B4FA);
+        vira_gui_draw_rounded_rect(x + 2, y + h - 3, w - 4, 3, 1.5f, 0x89B4FA, -1);
     }
     vira_gui_draw_text(label, x + 14, y + (h - 16) / 2, 15, text_color);
 
@@ -2309,13 +2421,8 @@ static inline void vira_gui_modal_begin(vira_string title, int32_t width, int32_
     if (mx < 20) mx = 20;
     if (my < 20) my = 20;
 
-    vira_gui_draw_rect(mx, my, width, height, 0x1E1E2E);
-    vira_gui_draw_line(mx, my, mx + width, my, 0x89B4FA);
-    vira_gui_draw_line(mx, my + height, mx + width, my + height, 0x585B70);
-    vira_gui_draw_line(mx, my, mx, my + height, 0x89B4FA);
-    vira_gui_draw_line(mx + width, my, mx + width, my + height, 0x585B70);
-
-    vira_gui_draw_rect(mx, my, width, 38, 0x181825);
+    vira_gui_draw_rounded_rect(mx, my, width, height, 10.0f, 0x1E1E2E, 0x585B70);
+    vira_gui_draw_rounded_rect(mx, my, width, 38, 10.0f, 0x181825, -1);
     vira_gui_draw_line(mx, my + 38, mx + width, my + 38, 0x313244);
     if (title.len > 0) {
         vira_gui_draw_text(title, mx + 16, my + 10, 16, 0xCDD6F4);
@@ -2349,11 +2456,7 @@ static inline void _vira_gui_draw_deferred_popups(void) {
     int my = vira_gui_mouse_y();
 
     // Solid dark background for popup list
-    vira_gui_draw_rect(px, py, pw, ph, 0x181825);
-    vira_gui_draw_line(px, py, px + pw, py, 0x89B4FA);
-    vira_gui_draw_line(px, py + ph, px + pw, py + ph, 0x585B70);
-    vira_gui_draw_line(px, py, px, py + ph, 0x89B4FA);
-    vira_gui_draw_line(px + pw, py, px + pw, py + ph, 0x585B70);
+    vira_gui_draw_rounded_rect(px, py, pw, ph, 6.0f, 0x181825, 0x585B70);
 
     for (int i = 0; i < items.len; i++) {
         int iy = py + i * item_h;
@@ -2364,9 +2467,11 @@ static inline void _vira_gui_draw_deferred_popups(void) {
         int32_t bg = is_sel ? 0x313244 : (is_hover ? 0x45475A : 0x181825);
         int32_t fg = is_sel ? 0x89B4FA : (is_hover ? 0xFFFFFF : 0xCDD6F4);
 
-        vira_gui_draw_rect(px + 1, iy, pw - 2, item_h, bg);
+        if (is_sel || is_hover) {
+            vira_gui_draw_rounded_rect(px + 4, iy + 2, pw - 8, item_h - 4, 4.0f, bg, -1);
+        }
         if (is_sel) {
-            vira_gui_draw_rect(px + 1, iy, 3, item_h, 0x89B4FA);
+            vira_gui_draw_rounded_rect(px + 2, iy + 4, 3, item_h - 8, 1.5f, 0x89B4FA, -1);
         }
         vira_gui_draw_text(items.data[i], px + 12, iy + (item_h - 15) / 2, 14, fg);
     }
@@ -2415,17 +2520,10 @@ static inline int32_t vira_gui_dropdown(int32_t x, int32_t y, int32_t width, int
     int32_t bg_color     = is_open ? 0x181825 : (is_hovered ? 0x242537 : 0x1E1E2E);
     int32_t border_color = is_open ? 0x89B4FA : (is_hovered ? 0x585B70 : 0x313244);
 
-    vira_gui_draw_rect(x, y, width, height, bg_color);
-    vira_gui_draw_line(x, y, x + width, y, border_color);
-    vira_gui_draw_line(x, y + height, x + width, y + height, border_color);
-    vira_gui_draw_line(x, y, x, y + height, border_color);
-    vira_gui_draw_line(x + width, y, x + width, y + height, border_color);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, bg_color, border_color);
 
     if (is_open) {
-        vira_gui_draw_line(x - 1, y - 1, x + width + 1, y - 1, 0x89B4FA);
-        vira_gui_draw_line(x - 1, y + height + 1, x + width + 1, y + height + 1, 0x89B4FA);
-        vira_gui_draw_line(x - 1, y - 1, x - 1, y + height + 1, 0x89B4FA);
-        vira_gui_draw_line(x + width + 1, y - 1, x + width + 1, y + height + 1, 0x89B4FA);
+        vira_gui_draw_rounded_rect(x - 1, y - 1, width + 2, height + 2, 7.0f, -1, 0x89B4FA);
     }
 
     int text_y = y + (height - 16) / 2;
@@ -2639,7 +2737,7 @@ static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_
     if (col_w < 50) col_w = 50;
 
     // Table Container Background
-    vira_gui_draw_rect(x, y, width, height, 0x181825);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, 0x181825, 0x313244);
 
     // Header Row
     for (int c = 0; c < headers.len; c++) {
@@ -2744,11 +2842,7 @@ static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_
     }
     int32_t prev_bg = !prev_avail ? 0x181825 : (prev_hover ? 0x45475A : 0x1E1E2E);
     int32_t prev_fg = !prev_avail ? 0x45475A : (prev_hover ? 0xFFFFFF : 0xCDD6F4);
-    vira_gui_draw_rect(prev_x, by, btn_w, btn_h, prev_bg);
-    vira_gui_draw_line(prev_x, by, prev_x + btn_w, by, 0x313244);
-    vira_gui_draw_line(prev_x, by + btn_h, prev_x + btn_w, by + btn_h, 0x313244);
-    vira_gui_draw_line(prev_x, by, prev_x, by + btn_h, 0x313244);
-    vira_gui_draw_line(prev_x + btn_w, by, prev_x + btn_w, by + btn_h, 0x313244);
+    vira_gui_draw_rounded_rect(prev_x, by, btn_w, btn_h, 4.0f, prev_bg, 0x313244);
     vira_string prev_str = (vira_string){ .data = (const uint8_t*)"<", .len = 1, .is_lit = true };
     vira_gui_draw_text(prev_str, prev_x + 8, by + 2, 13, prev_fg);
 
@@ -2766,19 +2860,12 @@ static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_
     }
     int32_t next_bg = !next_avail ? 0x181825 : (next_hover ? 0x45475A : 0x1E1E2E);
     int32_t next_fg = !next_avail ? 0x45475A : (next_hover ? 0xFFFFFF : 0xCDD6F4);
-    vira_gui_draw_rect(next_x, by, btn_w, btn_h, next_bg);
-    vira_gui_draw_line(next_x, by, next_x + btn_w, by, 0x313244);
-    vira_gui_draw_line(next_x, by + btn_h, next_x + btn_w, by + btn_h, 0x313244);
-    vira_gui_draw_line(next_x, by, next_x, by + btn_h, 0x313244);
-    vira_gui_draw_line(next_x + btn_w, by, next_x + btn_w, by + btn_h, 0x313244);
+    vira_gui_draw_rounded_rect(next_x, by, btn_w, btn_h, 4.0f, next_bg, 0x313244);
     vira_string next_str = (vira_string){ .data = (const uint8_t*)">", .len = 1, .is_lit = true };
     vira_gui_draw_text(next_str, next_x + 8, by + 2, 13, next_fg);
 
     // Outer Table Border
-    vira_gui_draw_line(x, y, x + width, y, 0x313244);
-    vira_gui_draw_line(x, y + height, x + width, y + height, 0x313244);
-    vira_gui_draw_line(x, y, x, y + height, 0x313244);
-    vira_gui_draw_line(x + width, y, x + width, y + height, 0x313244);
+    vira_gui_draw_rounded_rect(x, y, width, height, 6.0f, -1, 0x313244);
 
     _vira_last_table_sort_col = state->sort_col;
     _vira_last_table_sort_asc = state->sort_asc;

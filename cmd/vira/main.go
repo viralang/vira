@@ -1032,6 +1032,10 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	archFlag := "-march=native"
 
 	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths()
+	if os.Getenv("VIRA_NO_RAYLIB") == "1" || os.Getenv("VIRA_GUI") == "native" || os.Getenv("VIRA_GUI") == "x11" {
+		hasRaylib = false
+		staticRaylibPath = ""
+	}
 
 	extraLibs := []string{}
 	staticFlags := []string{}
