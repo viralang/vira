@@ -1,0 +1,81 @@
+module main
+
+import widget as w
+
+fn main() {
+	mut app := w.App.new("Flutter-Style Responsive Dashboard", 900, 650)
+	app.init()
+	defer app.cleanup()
+
+	theme := w.Theme.latte()
+	mut counter := 0
+	mut progress := 40
+	mut volume := 65.0f32
+	mut is_syncing := false
+	mut selected_status := 0
+	status_options := ["Production", "Staging", "Testing", "Disaster Recovery"]
+
+	for !app.should_close() {
+		app.begin_frame(theme.bg_color)
+		w.Scaffold.begin(theme)
+
+		// 1. Responsive Margin Container (24px all sides)
+		w.Padding.begin(w.EdgeInsets.all(24), w.window_width(), 14)
+
+		// 2. Responsive Card Panel
+		w.Card.begin("Vira Widget Toolkit (Flutter-Inspired IMGUI)", w.content_width(24))
+
+		w.Heading("Enterprise System Telemetry")
+		w.Text("Hardware-accelerated reactive desktop interface with 0 memory leaks.")
+		w.Spacer(6)
+
+		// Badges row
+		w.Row.begin(28, 10)
+		w.StatusBadge("Cluster: Online", true)
+		w.Badge("Latency: 0.4ms", w.COLOR_SURFACE1, w.COLOR_TEXT)
+		w.Badge("Autofree: 0 Leaks", w.COLOR_BLUE, w.COLOR_BASE)
+		w.Row.end()
+
+		w.Spacer(6)
+		w.Divider()
+		w.Spacer(6)
+
+		// 3. Horizontal Action Buttons
+		w.Subheading("Interactive Controls")
+		w.Row.begin(38, 12)
+		if w.ElevatedButton("Run Inference") {
+			counter += 1
+			if progress < 100 {
+				progress += 10
+			}
+			is_syncing = true
+		}
+		if w.SecondaryButton("Toggle State") {
+			is_syncing = !is_syncing
+		}
+		if w.DangerButton("Reset Metrics") {
+			counter = 0
+			progress = 0
+			is_syncing = false
+		}
+		w.Row.end()
+
+		w.Spacer(8)
+		w.Text('Operations Completed: ${counter}')
+		w.ProgressBar(progress, 100)
+
+		w.Spacer(12)
+		w.Subheading("Audio / Telemetry Volume")
+		volume = w.Slider("Gain", volume, 0.0f32, 100.0f32)
+
+		w.Spacer(12)
+		w.Subheading("Environment Deployment Target")
+		selected_status = w.Dropdown(status_options, selected_status)
+
+		w.Card.end()
+		w.Padding.end()
+
+		w.Scaffold.end()
+		app.end_frame()
+	}
+}

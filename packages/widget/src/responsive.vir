@@ -1,0 +1,131 @@
+module widget
+
+// Screen dimensions, breakpoint classification, and orientation
+pub struct Screen {
+pub:
+	width        int
+	height       int
+	is_mobile    bool
+	is_tablet    bool
+	is_desktop   bool
+	is_landscape bool
+}
+
+// Queries current window viewport metrics and calculates responsive breakpoints
+pub fn screen() Screen {
+	w := gui_window_width()
+	h := gui_window_height()
+	mut mobile := false
+	mut tablet := false
+	mut desktop := false
+
+	if w < 640 {
+		mobile = true
+	} else if w <= 1024 {
+		tablet = true
+	} else {
+		desktop = true
+	}
+
+	mut landscape := true
+	if h > w {
+		landscape = false
+	}
+
+	return Screen{
+		width:        w,
+		height:       h,
+		is_mobile:    mobile,
+		is_tablet:    tablet,
+		is_desktop:   desktop,
+		is_landscape: landscape,
+	}
+}
+
+// Returns current viewport width in pixels
+pub fn window_width() int {
+	return gui_window_width()
+}
+
+// Returns current viewport height in pixels
+pub fn window_height() int {
+	return gui_window_height()
+}
+
+// Calculates dynamic pixel width based on percentage of viewport (e.g. 50.0 = 50%)
+pub fn pct_w(percent f32) int {
+	w := gui_window_width()
+	ratio := percent / 100.0
+	return int(f32(w) * ratio)
+}
+
+// Calculates dynamic pixel height based on percentage of viewport (e.g. 25.0 = 25%)
+pub fn pct_h(percent f32) int {
+	h := gui_window_height()
+	ratio := percent / 100.0
+	return int(f32(h) * ratio)
+}
+
+// Calculates usable content width subtracting symmetric horizontal padding
+pub fn content_width(horizontal_padding int) int {
+	mut w := gui_window_width() - (horizontal_padding * 2)
+	if w < 100 {
+		return 100
+	}
+	return w
+}
+
+// Returns true if viewport is mobile (< 640px)
+pub fn is_mobile() bool {
+	return gui_window_width() < 640
+}
+
+// Returns true if viewport is tablet (640px to 1024px)
+pub fn is_tablet() bool {
+	w := gui_window_width()
+	return w >= 640 && w <= 1024
+}
+
+// Returns true if viewport is desktop (> 1024px)
+pub fn is_desktop() bool {
+	return gui_window_width() > 1024
+}
+
+// Static MediaQuery query namespace (Flutter-style)
+pub struct MediaQuery {}
+
+pub fn MediaQuery.of() Screen {
+	return screen()
+}
+
+pub fn MediaQuery.width() int {
+	return window_width()
+}
+
+pub fn MediaQuery.height() int {
+	return window_height()
+}
+
+pub fn MediaQuery.pct_w(percent f32) int {
+	return pct_w(percent)
+}
+
+pub fn MediaQuery.pct_h(percent f32) int {
+	return pct_h(percent)
+}
+
+pub fn MediaQuery.content_width(horizontal_padding int) int {
+	return content_width(horizontal_padding)
+}
+
+pub fn MediaQuery.is_mobile() bool {
+	return is_mobile()
+}
+
+pub fn MediaQuery.is_tablet() bool {
+	return is_tablet()
+}
+
+pub fn MediaQuery.is_desktop() bool {
+	return is_desktop()
+}

@@ -113,6 +113,9 @@ func (g *Generator) nextTmp(prefix string) string {
 
 // EmitFile generates a complete, self-contained C99 translation unit for file.
 func (g *Generator) EmitFile(file *ast.File) string {
+	// Set active file imports in checker for correct cross-module alias and symbol resolution
+	g.chk.SetFileImports(file.Imports)
+
 	// Pre-scan AST to discover Result[T] wrappers, (Struct, Interface) vtable pairs, GUI usage, and Actor <- sends
 	g.discoverCodegenRequirements(file)
 

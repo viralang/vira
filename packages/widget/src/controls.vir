@@ -1,0 +1,85 @@
+module widget
+
+// Standard interactive action button (Flutter ElevatedButton)
+pub fn Button(label string) bool {
+	return gui_btn(label)
+}
+
+pub fn ElevatedButton(label string) bool {
+	return gui_btn(label)
+}
+
+pub fn button(label string) bool {
+	return gui_btn(label)
+}
+
+// Destructive action button with red warning styling (Flutter FilledButton.tonal red)
+pub fn DangerButton(label string) bool {
+	return gui_btn_danger(label)
+}
+
+pub fn danger_button(label string) bool {
+	return gui_btn_danger(label)
+}
+
+// Secondary action button (Flutter OutlinedButton)
+pub fn SecondaryButton(label string) bool {
+	return gui_btn(label)
+}
+
+pub fn secondary_button(label string) bool {
+	return gui_btn(label)
+}
+
+// Interactive text field input with placeholder (Flutter TextField)
+pub fn TextField(placeholder string, text string) string {
+	return gui_input(placeholder, text)
+}
+
+pub fn text_field(placeholder string, text string) string {
+	return gui_input(placeholder, text)
+}
+
+// Labeled toggle checkbox (Flutter CheckboxListTile)
+pub fn Checkbox(label string, checked bool) bool {
+	return gui_check(label, checked)
+}
+
+pub fn checkbox(label string, checked bool) bool {
+	return gui_check(label, checked)
+}
+
+// Labeled single-choice radio button (Flutter RadioListTile)
+pub fn Radio(label string, is_selected bool) bool {
+	return gui_radio(label, is_selected)
+}
+
+pub fn radio(label string, is_selected bool) bool {
+	return gui_radio(label, is_selected)
+}
+
+// Continuous horizontal value range slider (Flutter Slider)
+pub fn Slider(label string, val f32, min_val f32, max_val f32) f32 {
+	return gui_slide(label, '', val, min_val, max_val)
+}
+
+pub fn slider(label string, val f32, min_val f32, max_val f32) f32 {
+	return gui_slide(label, '', val, min_val, max_val)
+}
+
+// Expandable dropdown popup selector (Flutter DropdownButton)
+pub fn Dropdown(items []string, selected_idx int) int {
+	return gui_select(items, selected_idx)
+}
+
+pub fn dropdown(items []string, selected_idx int) int {
+	return gui_select(items, selected_idx)
+}
+
+pub fn Select(items []string, selected_idx int) int {
+	return gui_select(items, selected_idx)
+}
+
+pub fn select(items []string, selected_idx int) int {
+	return gui_select(items, selected_idx)
+}

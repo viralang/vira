@@ -1,0 +1,143 @@
+module widget
+
+// Vertical layout column (Flutter Column)
+pub struct Column {}
+
+// Begins an auto-layout vertical column starting at the current stack cursor
+pub fn Column.begin(width int, spacing int) {
+	gui_vstack_begin(0, 0, width, spacing)
+}
+
+// Begins an auto-layout vertical column at explicit (x, y) coordinates
+pub fn Column.begin_at(x int, y int, width int, spacing int) {
+	gui_vstack_begin(x, y, width, spacing)
+}
+
+// Closes the vertical column
+pub fn Column.end() {
+	gui_stack_end()
+}
+
+// Functional shortcuts for Column
+pub fn column_begin(width int, spacing int) {
+	gui_vstack_begin(0, 0, width, spacing)
+}
+
+pub fn column_begin_at(x int, y int, width int, spacing int) {
+	gui_vstack_begin(x, y, width, spacing)
+}
+
+pub fn column_end() {
+	gui_stack_end()
+}
+
+// Horizontal layout row (Flutter Row)
+pub struct Row {}
+
+// Begins an auto-layout horizontal row of given height and item spacing
+pub fn Row.begin(height int, spacing int) {
+	gui_hstack_begin(height, spacing)
+}
+
+// Closes the horizontal row
+pub fn Row.end() {
+	gui_stack_end()
+}
+
+// Functional shortcuts for Row
+pub fn row_begin(height int, spacing int) {
+	gui_hstack_begin(height, spacing)
+}
+
+pub fn row_end() {
+	gui_stack_end()
+}
+
+// Framed elevation card with title header (Flutter Card)
+pub struct Card {}
+
+// Begins a themed elevation card
+pub fn Card.begin(title string, width int) {
+	gui_card_begin(title, width)
+}
+
+// Closes the elevation card
+pub fn Card.end() {
+	gui_card_end()
+}
+
+// Functional shortcuts for Card
+pub fn card_begin(title string, width int) {
+	gui_card_begin(title, width)
+}
+
+pub fn card_end() {
+	gui_card_end()
+}
+
+// Margin and padding wrapper container (Flutter Padding)
+pub struct Padding {}
+
+// Begins an auto-layout container inset by EdgeInsets
+pub fn Padding.begin(insets EdgeInsets, width int, spacing int) {
+	mut inner_w := width - insets.left - insets.right
+	if inner_w < 50 {
+		inner_w = 50
+	}
+	gui_vstack_begin(insets.left, insets.top, inner_w, spacing)
+}
+
+// Closes the padding container
+pub fn Padding.end() {
+	gui_stack_end()
+}
+
+// Functional shortcuts for Padding
+pub fn padding_begin(insets EdgeInsets, width int, spacing int) {
+	Padding.begin(insets, width, spacing)
+}
+
+pub fn padding_end() {
+	gui_stack_end()
+}
+
+// Horizontally centered column layout (Flutter Center)
+pub struct Center {}
+
+// Calculates the horizontal X offset required to center content of given width
+pub fn center_offset(content_width int) int {
+	mut off := (gui_window_width() - content_width) / 2
+	if off < 0 {
+		return 0
+	}
+	return off
+}
+
+// Begins a horizontally centered vertical column
+pub fn Center.begin(content_width int, spacing int) {
+	x := center_offset(content_width)
+	gui_vstack_begin(x, 0, content_width, spacing)
+}
+
+// Closes the centered column
+pub fn Center.end() {
+	gui_stack_end()
+}
+
+// Explicit pixel spacing gap (Flutter SizedBox)
+pub fn Spacer(pixels int) {
+	gui_spacing(pixels)
+}
+
+pub fn spacer(pixels int) {
+	gui_spacing(pixels)
+}
+
+// Horizontal divider line (Flutter Divider)
+pub fn Divider() {
+	gui_separator()
+}
+
+pub fn divider() {
+	gui_separator()
+}

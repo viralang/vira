@@ -71,85 +71,100 @@ func initGuiCmd(args []string) {
 	// 4. Generate src/config/theme.vir
 	themeVir := fmt.Sprintf(`module %s
 
+import widget as w
+
 pub struct AppTheme {
 pub:
 	app_title string
-	win_width int
-	win_height int
-	bg_color int
-	accent_color int
+	theme w.Theme
 }
 
 pub fn AppTheme.new() AppTheme {
 	return AppTheme{
 		app_title: '%s',
-		win_width: 860,
-		win_height: 620,
-		bg_color: 0x181825,
-		accent_color: 0x89B4FA
+		theme: w.Theme.mocha(),
 	}
 }
 `, modName, appTitle)
 	_ = os.WriteFile(filepath.Join(targetDir, "src", "config", "theme.vir"), []byte(themeVir), 0644)
 
-	// 5. Generate src/main.vir (Rich, interactive native GUI dashboard)
+	// 5. Generate src/main.vir (Rich, interactive native GUI dashboard using Flutter-style widget package)
 	mainVir := fmt.Sprintf(`module %s
 
+import widget as w
+
 fn main() {
-	cfg := AppTheme.new()
-	gui_init(cfg.win_width, cfg.win_height, cfg.app_title)
-	gui_set_target_fps(60)
+	mut app := w.App.new('%s', 860, 620)
+	app.init()
+	defer app.cleanup()
 
+	theme := w.Theme.mocha()
 	mut counter := 0
-	mut status_msg := 'System Ready'
+	mut progress := 35
+	mut status_msg := 'System Online'
 
-	for !gui_should_close() {
-		gui_begin()
-		gui_clear(cfg.bg_color)
+	for !app.should_close() {
+		app.begin_frame(theme.bg_color)
+		w.Scaffold.begin(theme)
 
-		gui_vstack_begin(24, 20, cfg.win_width - 48, 16)
-			gui_card_begin('Application Studio', cfg.win_width - 48)
+		w.Padding.begin(w.EdgeInsets.all(24), w.window_width(), 16)
+		w.Card.begin('%s', w.content_width(24))
 
-				gui_badge('ARCHITECTURE: NATIVE GUI & GPU ACCELERATED', 0x181825, cfg.accent_color)
-				gui_spacing(6)
-				gui_lbl('Welcome to ${cfg.app_title}')
-				gui_lbl('Status: ${status_msg}')
-				gui_lbl('Metric Clicks: ${counter}')
-				gui_separator()
+		w.StatusBadge('ARCHITECTURE: FLUTTER-STYLE NATIVE IMGUI', true)
+		w.Spacer(6)
+		w.Heading('Welcome to %s')
+		w.Text('Status: ${status_msg}')
+		w.Text('Metric Clicks: ${counter}')
+		w.Divider()
 
-				gui_hstack_begin(36, 12)
-					if gui_btn('Increment Counter (+1)') {
-						counter = counter + 1
-						status_msg = 'Counter incremented'
-					}
-					if gui_btn('Quick Action (+5)') {
-						counter = counter + 5
-						status_msg = 'Added +5 to counter'
-					}
-					if gui_btn_danger('Reset') {
-						counter = 0
-						status_msg = 'Counter reset to zero'
-					}
-				gui_stack_end()
+		w.Row.begin(38, 12)
+		if w.ElevatedButton('Increment (+1)') {
+			counter = counter + 1
+			if progress < 100 {
+				progress = progress + 5
+			}
+			status_msg = 'Counter incremented'
+		}
+		if w.SecondaryButton('Quick Action (+5)') {
+			counter = counter + 5
+			if progress < 100 {
+				progress = progress + 15
+			}
+			status_msg = 'Added +5 to counter'
+		}
+		if w.DangerButton('Reset') {
+			counter = 0
+			progress = 0
+			status_msg = 'Counter reset to zero'
+		}
+		w.Row.end()
 
-			gui_card_end()
-		gui_stack_end()
+		w.Spacer(10)
+		w.ProgressBar(progress, 100)
 
-		gui_end()
+		w.Card.end()
+		w.Padding.end()
+
+		w.Scaffold.end()
+		app.end_frame()
 	}
-
-	gui_close()
 }
-`, modName)
+`, modName, appTitle, appTitle, appTitle)
 	_ = os.WriteFile(filepath.Join(targetDir, "src", "main.vir"), []byte(mainVir), 0644)
 
 	// 6. Generate tests/app_test.vir
 	testVir := fmt.Sprintf(`module %s_test
 
+import widget as w
+
 fn test_theme_defaults() {
-	cfg := AppTheme.new()
-	assert(cfg.win_width == 860)
-	assert(cfg.win_height == 620)
+	theme := w.Theme.mocha()
+	if theme.bg_color != 0x1E1E2E {
+		panic("expected mocha bg_color == 0x1E1E2E")
+	}
+	if theme.accent_color != 0x89B4FA {
+		panic("expected mocha accent_color == 0x89B4FA")
+	}
 }
 `, modName)
 	_ = os.WriteFile(filepath.Join(targetDir, "tests", "app_test.vir"), []byte(testVir), 0644)

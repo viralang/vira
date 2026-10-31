@@ -67,13 +67,14 @@ Beginner                           Intermediate                               Ad
 | **33** | [**1D-4D Strided Tensors, Batched Attention & Pure-Vira JSON**](./33_nd_tensors_and_stdlib_json.md) | Advanced / AI | [`33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir) | 4D batched multi-head attention matrix multiplication (`@`), zero-copy bump arena reshaping (`seq.reshape_2d`), trailing-dimension bias broadcasting, pure-Vira RFC 8259 JSON parsing (`json.get_str`, `json.get_int`), and concurrent actor `json.JsonBuilder`. |
 | **34** | [**Advanced GUI Components: Dropdown Select & Searchable, Sortable Data Tables**](./34_advanced_gui_tables_and_dropdowns.md) | Intermediate to Adv | [`gui_table_dropdown_demo.vir`](../../examples/gui_table_dropdown_demo.vir)<br>[`37_gui_image_and_asset_loading.vir`](../examples/37_gui_image_and_asset_loading.vir)<br>[`38_gui_remote_url_image_loading.vir`](../examples/38_gui_remote_url_image_loading.vir) | Dropdown select (`gui_select`/`gui_dropdown`) with deferred top-layer popup rendering, interactive data tables (`gui_tbl`/`gui_table`) with natural sorting, real-time search filtering, row selection, automated pagination, vector icons (`gui_btn_danger`), local image loading, and non-blocking remote URL asset fetching with custom HTTP headers on macOS, Linux, and Windows. |
 | **35** | [**Native GUI App Scaffolding & Cross-Platform Bundling**](./35_gui_app_scaffolding_and_cross_platform_bundling.md) | Intermediate to Adv | `vira init-gui my_app`<br>`vira bundle -release` | Dedicated GUI app scaffolding (`vira init-gui`), desktop manifest metadata (`app_name`, `app_id`, `icon`, `assets`), macOS `.app` bundle with `Contents/Info.plist` and High-DPI Retina support, Linux portable directory with FreeDesktop `.desktop` entry and `run.sh`, Windows Win32 GUI subsystem (`-mwindows` without console window) and `.ico` icons, and automated CI/CD release archiving. |
+| **36** | [**Flutter-Style Declarative Widgets & Responsive Desktop UI**](./36_flutter_style_widgets_and_responsive_ui.md) | Intermediate to Adv | [`flutter_style_dashboard.vir`](../../examples/flutter_style_dashboard.vir) | Flutter-inspired declarative UI kit (`package widget`), `w.App` lifecycle runner, `w.Scaffold`, auto-layout stacks (`w.Column`, `w.Row`, `w.Card`), `w.Padding` with `w.EdgeInsets`, responsive `w.MediaQuery` and breakpoints, interactive inputs (`w.ElevatedButton`, `w.TextField`, `w.Slider`, `w.Dropdown`), data tables, progress bars, and Catppuccin theme tokens with 0 memory leaks. |
 
 
 ---
 
 ## 🏛️ Standard Library Packages Guide
 
-Vira ships with 14 first-party standard library packages located under [`packages/`](file:///mnt/flutter_drive/vira/packages), resolved automatically by the compiler at compile-time:
+Vira ships with 15 first-party standard library packages located under [`packages/`](file:///mnt/flutter_drive/vira/packages), resolved automatically by the compiler at compile-time:
 
 | Package | Import Path | Primary Responsibilities |
 | :--- | :--- | :--- |
@@ -91,6 +92,7 @@ Vira ships with 14 first-party standard library packages located under [`package
 | **`http`** | [`import http`](file:///mnt/flutter_drive/vira/packages/http) | HTTP/1.1 request parser, response builder, `HeaderMap`, server loops, and Server-Sent Events (`SseStream`). |
 | **`json`** | [`import json`](file:///mnt/flutter_drive/vira/packages/json) | Pure-Vira RFC 8259 JSON parser (`json.get_str`, `json.get_int`), validator (`json.is_valid`), array extractors, and $O(N)$ `JsonBuilder`. |
 | **`viraserve`**| [`import viraserve`](file:///mnt/flutter_drive/vira/packages/viraserve) | Actor-backed asynchronous web microframework and routing engine with zero memory leaks. |
+| **`widget`** | [`import widget as w`](file:///mnt/flutter_drive/vira/packages/widget) | Flutter-inspired declarative UI kit, responsive layouts (`Column`, `Row`, `Card`, `Padding`), `MediaQuery`, buttons, inputs, data tables, and Catppuccin theme tokens. |
 
 For detailed API documentation, code examples, and best practices, see the comprehensive [**Standard Library Manual**](../STANDARD_LIBRARY.md).
 

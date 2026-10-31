@@ -1,0 +1,112 @@
+module widget
+
+// Standard text label (Flutter Text)
+pub fn Text(content string) {
+	gui_lbl(content)
+}
+
+pub fn text(content string) {
+	gui_lbl(content)
+}
+
+// Emphasized heading label
+pub fn Heading(content string) {
+	gui_lbl(content)
+}
+
+pub fn heading(content string) {
+	gui_lbl(content)
+}
+
+// Subheading label with secondary emphasis
+pub fn Subheading(content string) {
+	gui_lbl(content)
+}
+
+pub fn subheading(content string) {
+	gui_lbl(content)
+}
+
+// Small caption text label
+pub fn Caption(content string) {
+	gui_lbl(content)
+}
+
+pub fn caption(content string) {
+	gui_lbl(content)
+}
+
+// Pill-shaped status badge with custom background and text color (Flutter Chip / Badge)
+pub fn Badge(label string, bg_hex int, fg_hex int) {
+	gui_badge(label, bg_hex, fg_hex)
+}
+
+pub fn badge(label string, bg_hex int, fg_hex int) {
+	gui_badge(label, bg_hex, fg_hex)
+}
+
+// Semantic status badge (Green for active/success, Red for error/offline)
+pub fn StatusBadge(label string, is_ok bool) {
+	if is_ok {
+		gui_badge(label, COLOR_GREEN, COLOR_BASE)
+	} else {
+		gui_badge(label, COLOR_RED, COLOR_BASE)
+	}
+}
+
+pub fn status_badge(label string, is_ok bool) {
+	StatusBadge(label, is_ok)
+}
+
+// Interactive sortable and searchable data table (Flutter PaginatedDataTable)
+pub fn DataTable(headers []string, rows [][]string, search string, selected_row int) int {
+	return gui_tbl(headers, rows, search, selected_row)
+}
+
+pub fn data_table(headers []string, rows [][]string, search string, selected_row int) int {
+	return gui_tbl(headers, rows, search, selected_row)
+}
+
+// Fluid horizontal progress indicator (Flutter LinearProgressIndicator)
+pub fn ProgressBar(current int, max_val int) {
+	mut pct := 0.0
+	if max_val > 0 {
+		pct = (f32(current) / f32(max_val)) * 100.0
+		if pct > 100.0 {
+			pct = 100.0
+		}
+	}
+	gui_progress(pct)
+}
+
+pub fn progress_bar(current int, max_val int) {
+	ProgressBar(current, max_val)
+}
+
+// Direct percentage progress indicator (0.0 to 100.0)
+pub fn ProgressPercent(percent f32) {
+	gui_progress(percent)
+}
+
+pub fn progress_percent(percent f32) {
+	gui_progress(percent)
+}
+
+// Displays a loaded hardware-accelerated image
+pub fn Image(image_id int, width int, height int) {
+	gui_image(image_id, width, height)
+}
+
+pub fn image(image_id int, width int, height int) {
+	gui_image(image_id, width, height)
+}
+
+// Loads an image from the local filesystem and returns a texture handle
+pub fn LoadImage(path string) int {
+	return gui_load_image(path)
+}
+
+// Releases a loaded texture handle from GPU memory
+pub fn FreeImage(image_id int) {
+	gui_free_image(image_id)
+}

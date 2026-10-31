@@ -672,7 +672,10 @@ func (s *Server) validateDocument(uri string, text string) {
 		docFileDir := filepath.Dir(uriToPath(uri))
 		docPRoot, _, _ := mod.FindProjectRoot(docFileDir)
 		for _, imp := range astFile.Imports {
-			impTarget := imp.Name
+			impTarget := imp.Path
+			if impTarget == "" {
+				impTarget = imp.Name
+			}
 			candList := pkg.ResolveImportCandidates(docFileDir, docPRoot, impTarget)
 			foundImp := false
 			for _, c := range candList {
@@ -1469,7 +1472,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		}
 	}
 
-	for _, kw := range []string{"module", "import", "pub", "mut", "const", "defer", "fn", "struct", "actor", "interface", "return", "if", "else", "switch", "case", "default", "for", "break", "continue", "arena", "true", "false"} {
+	for _, kw := range []string{"module", "import", "pub", "mut", "const", "defer", "fn", "struct", "actor", "interface", "enum", "type", "return", "if", "else", "switch", "case", "default", "match", "for", "in", "or", "is", "as", "break", "continue", "spawn", "supervise", "arena", "true", "false"} {
 		items = append(items, CompletionItem{
 			Label:  kw,
 			Kind:   14, // Keyword
@@ -1477,7 +1480,24 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		})
 	}
 
-	for _, bi := range []string{"println", "print", "eprintln", "eprint", "time_sleep_ms", "panic", "time_now_us", "time_now_ms", "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_transpose", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
+	for _, bi := range []string{
+		"println", "print", "eprintln", "eprint", "panic", "time_sleep_ms", "time_now_us", "time_now_ms",
+		"file_exists", "read_file", "write_file", "append_file", "remove_file",
+		"net_listen", "net_accept", "net_read", "net_write", "net_close", "http_response",
+		"json_get_str", "json_get_int", "json_get_f32", "json_is_valid",
+		"tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_silu", "tensor_softmax", "tensor_embedding", "tensor_transpose",
+		"tensor_load_bin", "tensor_save_bin", "safetensors_load", "gguf_load", "gguf_load_tensor", "gguf_tensor_dequant",
+		"tensor_rmsnorm", "tensor_rope", "rmsnorm", "rope", "swiglu", "causal_self_attention", "sample_token", "sample_argmax", "sample_top_p",
+		"gui_init", "gui_should_close", "gui_cancel_close", "gui_set_target_fps", "gui_window_width", "gui_window_height", "gui_begin", "gui_end", "gui_close", "gui_clear", "gui_frame_time", "gui_poll",
+		"gui_vstack_begin", "gui_hstack_begin", "gui_stack_end", "gui_spacing", "gui_card_begin", "gui_card_end", "gui_separator", "gui_badge",
+		"gui_btn", "gui_btn_danger", "gui_check", "gui_slide", "gui_lbl", "gui_input", "gui_progress", "gui_radio",
+		"gui_button", "gui_slider", "gui_checkbox", "gui_label", "gui_text_input", "gui_progress_bar", "gui_radio_button",
+		"gui_table", "gui_tbl", "gui_dropdown", "gui_select", "gui_table_sort_col", "gui_table_sort_asc", "gui_table_set_sort",
+		"gui_load_image", "gui_free_image", "gui_image", "gui_image_width", "gui_image_height", "gui_draw_image",
+		"gui_tab_item", "gui_modal_begin", "gui_modal_end",
+		"gui_draw_text", "gui_draw_rect", "gui_draw_circle", "gui_draw_line", "gui_draw_badge",
+		"gui_mouse_x", "gui_mouse_y", "gui_is_mouse_down", "gui_is_key_pressed", "gui_get_mouse_x", "gui_get_mouse_y", "gui_get_mouse_down", "gui_get_char_pressed", "gui_is_key_down",
+	} {
 		items = append(items, CompletionItem{
 			Label:  bi,
 			Kind:   3, // Function

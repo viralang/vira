@@ -887,7 +887,10 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		// Resolve explicit import declarations dynamically
 		vDir := filepath.Dir(vFile)
 		for _, imp := range astFile.Imports {
-			impTarget := imp.Name
+			impTarget := imp.Path
+			if impTarget == "" {
+				impTarget = imp.Name
+			}
 			candidates := pkg.ResolveImportCandidates(vDir, pRoot, impTarget)
 
 			found := false

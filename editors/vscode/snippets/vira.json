@@ -137,5 +137,143 @@
       "}"
     ],
     "description": "Spawn child process using stdlib exec.Command"
+  },
+  "Widget App Boilerplate": {
+    "prefix": "wapp",
+    "body": [
+      "module main",
+      "",
+      "import widget as w",
+      "",
+      "fn main() {",
+      "\tmut app := w.App.new('${1:Vira App}', ${2:800}, ${3:600})",
+      "\tapp.init()",
+      "\tdefer app.cleanup()",
+      "",
+      "\ttheme := w.Theme.mocha()",
+      "",
+      "\tfor !app.should_close() {",
+      "\t\tapp.begin_frame(theme.bg_color)",
+      "\t\tw.Scaffold.begin(theme)",
+      "",
+      "\t\tw.Padding.begin(w.EdgeInsets.all(${4:24}), w.window_width(), ${5:12})",
+      "\t\tw.Card.begin('${6:Dashboard}', w.content_width(${4:24}))",
+      "",
+      "\t\tw.Heading('${7:Welcome to Vira}')",
+      "\t\tw.Text('${8:Hardware-accelerated native GUI with zero garbage collection.}')",
+      "\t\tw.Spacer(6)",
+      "",
+      "\t\t$0",
+      "",
+      "\t\tw.Card.end()",
+      "\t\tw.Padding.end()",
+      "",
+      "\t\tw.Scaffold.end()",
+      "\t\tapp.end_frame()",
+      "\t}",
+      "}"
+    ],
+    "description": "Scaffold a complete Flutter-style responsive GUI application"
+  },
+  "Widget Card": {
+    "prefix": "wcard",
+    "body": [
+      "w.Card.begin('${1:Title}', w.content_width(${2:24}))",
+      "$0",
+      "w.Card.end()"
+    ],
+    "description": "Framed elevation Card with header and borders"
+  },
+  "Widget Row": {
+    "prefix": "wrow",
+    "body": [
+      "w.Row.begin(${1:36}, ${2:12})",
+      "$0",
+      "w.Row.end()"
+    ],
+    "description": "Horizontal auto-stack row container"
+  },
+  "Widget Column": {
+    "prefix": "wcol",
+    "body": [
+      "w.Column.begin(${1:10})",
+      "$0",
+      "w.Column.end()"
+    ],
+    "description": "Vertical auto-stack column container"
+  },
+  "Widget Elevated Button": {
+    "prefix": "wbtn",
+    "body": [
+      "if w.ElevatedButton('${1:Click Me}') {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Primary theme action button with click event handler"
+  },
+  "Widget Danger Button": {
+    "prefix": "wbtndanger",
+    "body": [
+      "if w.DangerButton('${1:Delete}') {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Destructive red action button"
+  },
+  "Widget Secondary Button": {
+    "prefix": "wbtnsec",
+    "body": [
+      "if w.SecondaryButton('${1:Cancel}') {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Secondary outline action button"
+  },
+  "Widget Slider": {
+    "prefix": "wslider",
+    "body": [
+      "${1:val} = w.Slider('${2:Gain}', ${1:val}, ${3:0.0f32}, ${4:100.0f32})"
+    ],
+    "description": "Interactive draggable slider control"
+  },
+  "Widget Text Field": {
+    "prefix": "winput",
+    "body": [
+      "${1:text} = w.TextField('${2:Placeholder}', ${1:text})"
+    ],
+    "description": "Interactive text input field"
+  },
+  "Widget Dropdown": {
+    "prefix": "wdrop",
+    "body": [
+      "${1:selected} = w.Dropdown(${2:options}, ${1:selected})"
+    ],
+    "description": "Deferred top-layer overlay dropdown select"
+  },
+  "Widget Progress Bar": {
+    "prefix": "wprogress",
+    "body": [
+      "w.ProgressBar(${1:progress}, ${2:100})"
+    ],
+    "description": "Horizontal percentage progress bar"
+  },
+  "Widget Status Badge": {
+    "prefix": "wstatus",
+    "body": [
+      "w.StatusBadge('${1:System: Healthy}', ${2:true})"
+    ],
+    "description": "System health status pill badge"
+  },
+  "Widget Media Query": {
+    "prefix": "wmedia",
+    "body": [
+      "mq := w.MediaQuery.of()",
+      "if mq.is_mobile {",
+      "\t${1:// compact mobile layout}",
+      "} else {",
+      "\t${2:// full desktop layout}",
+      "}"
+    ],
+    "description": "Responsive screen breakpoint inspection via MediaQuery"
   }
 }

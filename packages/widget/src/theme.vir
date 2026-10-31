@@ -1,0 +1,160 @@
+module widget
+
+// Standard Design System Color Palette (Catppuccin Mocha)
+pub const COLOR_BASE: int = 0x1E1E2E
+pub const COLOR_MANTLE: int = 0x181825
+pub const COLOR_CRUST: int = 0x11111B
+pub const COLOR_SURFACE0: int = 0x313244
+pub const COLOR_SURFACE1: int = 0x45475A
+pub const COLOR_SURFACE2: int = 0x585B70
+pub const COLOR_OVERLAY0: int = 0x6C7086
+pub const COLOR_TEXT: int = 0xCDD6F4
+pub const COLOR_SUBTEXT: int = 0xA6ADC8
+pub const COLOR_BLUE: int = 0x89B4FA
+pub const COLOR_GREEN: int = 0xA6E3A1
+pub const COLOR_RED: int = 0xF38BA8
+pub const COLOR_PEACH: int = 0xFAB387
+pub const COLOR_YELLOW: int = 0xF9E2AF
+pub const COLOR_MAUVE: int = 0xCBA6F7
+pub const COLOR_LAVENDER: int = 0xB4BEFE
+pub const COLOR_WHITE: int = 0xFFFFFF
+pub const COLOR_BLACK: int = 0x000000
+
+// Theme configuration encapsulating colors and visual styling
+pub struct Theme {
+pub:
+	bg_color      int
+	surface_color int
+	accent_color  int
+	text_color    int
+	subtext_color int
+	border_color  int
+	danger_color  int
+	success_color int
+}
+
+// Catppuccin Mocha Dark Theme (Standard)
+pub fn Theme.mocha() Theme {
+	return Theme{
+		bg_color:      0x1E1E2E,
+		surface_color: 0x313244,
+		accent_color:  0x89B4FA,
+		text_color:    0xCDD6F4,
+		subtext_color: 0xA6ADC8,
+		border_color:  0x45475A,
+		danger_color:  0xF38BA8,
+		success_color: 0xA6E3A1,
+	}
+}
+
+// Catppuccin Latte Light Theme
+pub fn Theme.latte() Theme {
+	return Theme{
+		bg_color:      0xEFF1F5,
+		surface_color: 0xE6E9EF,
+		accent_color:  0x1E66F5,
+		text_color:    0x4C4F69,
+		subtext_color: 0x6C6F85,
+		border_color:  0xCCD0DA,
+		danger_color:  0xD20F39,
+		success_color: 0x40A02B,
+	}
+}
+
+// High-contrast Midnight Theme
+pub fn Theme.midnight() Theme {
+	return Theme{
+		bg_color:      0x0F0F14,
+		surface_color: 0x1A1A24,
+		accent_color:  0x3B82F6,
+		text_color:    0xF8FAFC,
+		subtext_color: 0x94A3B8,
+		border_color:  0x334155,
+		danger_color:  0xEF4444,
+		success_color: 0x22C55E,
+	}
+}
+
+// EdgeInsets model for margin and padding calculations (Flutter-like)
+pub struct EdgeInsets {
+pub:
+	top    int
+	right  int
+	bottom int
+	left   int
+}
+
+// Construct uniform EdgeInsets on all 4 sides
+pub fn EdgeInsets.all(val int) EdgeInsets {
+	return EdgeInsets{
+		top:    val,
+		right:  val,
+		bottom: val,
+		left:   val,
+	}
+}
+
+// Construct symmetric EdgeInsets with horizontal and vertical padding
+pub fn EdgeInsets.symmetric(horizontal int, vertical int) EdgeInsets {
+	return EdgeInsets{
+		top:    vertical,
+		right:  horizontal,
+		bottom: vertical,
+		left:   horizontal,
+	}
+}
+
+// Construct EdgeInsets with granular side controls
+pub fn EdgeInsets.only(top int, right int, bottom int, left int) EdgeInsets {
+	return EdgeInsets{
+		top:    top,
+		right:  right,
+		bottom: bottom,
+		left:   left,
+	}
+}
+
+// Zero margin/padding
+pub fn EdgeInsets.zero() EdgeInsets {
+	return EdgeInsets{
+		top:    0,
+		right:  0,
+		bottom: 0,
+		left:   0,
+	}
+}
+
+// Typography styling descriptor
+pub struct TextStyle {
+pub:
+	size  int
+	color int
+}
+
+pub fn TextStyle.heading() TextStyle {
+	return TextStyle{
+		size:  22,
+		color: COLOR_TEXT,
+	}
+}
+
+pub fn TextStyle.subheading() TextStyle {
+	return TextStyle{
+		size:  17,
+		color: COLOR_SUBTEXT,
+	}
+}
+
+pub fn TextStyle.body() TextStyle {
+	return TextStyle{
+		size:  14,
+		color: COLOR_TEXT,
+	}
+}
+
+pub fn TextStyle.caption() TextStyle {
+	return TextStyle{
+		size:  12,
+		color: COLOR_SUBTEXT,
+	}
+}

@@ -1,0 +1,112 @@
+module widget
+
+// Master application shell managing window initialization, FPS, and event lifecycle
+pub struct App {
+pub mut:
+	title          string
+	width          int
+	height         int
+	target_fps     int
+	is_initialized bool
+}
+
+// Creates a new App descriptor
+pub fn App.new(title string, width int, height int) App {
+	return App{
+		title:          title,
+		width:          width,
+		height:         height,
+		target_fps:     60,
+		is_initialized: false,
+	}
+}
+
+// Initializes the underlying native window (Cocoa, X11, Win32)
+pub fn (mut a App) init() {
+	gui_init(a.width, a.height, a.title)
+	gui_set_target_fps(a.target_fps)
+	a.is_initialized = true
+}
+
+// Returns true if the user has requested to close the window
+pub fn (a App) should_close() bool {
+	return gui_should_close()
+}
+
+// Begins a new 60 FPS rendering frame with specified background color
+pub fn (a App) begin_frame(bg_color int) {
+	gui_begin()
+	gui_clear(bg_color)
+}
+
+// Ends the current frame and presents the double-buffered native framebuffer
+pub fn (a App) end_frame() {
+	gui_end()
+}
+
+// Programmatically closes the application window
+pub fn (a App) close() {
+	gui_close()
+}
+
+// Cancels an in-flight window close request (e.g. to prompt for unsaved changes)
+pub fn (a App) cancel_close() {
+	gui_cancel_close()
+}
+
+// Releases all OS window and graphics resources
+pub fn (a App) cleanup() {
+	gui_close()
+}
+
+// Window scaffold establishing page background and baseline margins (Flutter Scaffold)
+pub struct Scaffold {}
+
+// Begins a themed window scaffold
+pub fn Scaffold.begin(theme Theme) {
+	gui_clear(theme.bg_color)
+}
+
+// Closes the window scaffold
+pub fn Scaffold.end() {
+	// Marker for scaffold scope termination
+}
+
+// Interactive horizontal tab strip item (Flutter Tab)
+pub fn Tab(label string, is_active bool) bool {
+	return gui_tab_item(label, is_active)
+}
+
+pub fn tab(label string, is_active bool) bool {
+	return gui_tab_item(label, is_active)
+}
+
+// Centered modal dialog with backdrop occlusion (Flutter showDialog / AlertDialog)
+pub struct Modal {}
+
+// Begins a centered modal overlay window
+pub fn Modal.begin(title string, width int, height int) {
+	gui_modal_begin(title, width, height)
+}
+
+// Closes the modal overlay window
+pub fn Modal.end() {
+	gui_modal_end()
+}
+
+// Functional shortcuts for Modal / Dialog
+pub fn modal_begin(title string, width int, height int) {
+	gui_modal_begin(title, width, height)
+}
+
+pub fn modal_end() {
+	gui_modal_end()
+}
+
+pub fn dialog_begin(title string, width int, height int) {
+	gui_modal_begin(title, width, height)
+}
+
+pub fn dialog_end() {
+	gui_modal_end()
+}

@@ -241,7 +241,7 @@ func (c *Checker) LookupInterface(name string) *InterfaceType {
 	return c.interfaces[name]
 }
 
-func (c *Checker) setFileImports(imports []ast.ImportSpec) {
+func (c *Checker) SetFileImports(imports []ast.ImportSpec) {
 	c.currentImports = make(map[string]string)
 	for _, imp := range imports {
 		targetMod := imp.Path
@@ -1119,7 +1119,7 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 			fileMod = "main"
 		}
 		c.currentMod = fileMod
-		c.setFileImports(file.Imports)
+		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
 			savedMod := c.currentMod
@@ -1171,7 +1171,7 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 			fileMod = "main"
 		}
 		c.currentMod = fileMod
-		c.setFileImports(file.Imports)
+		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FnDecl); ok {

@@ -8,7 +8,7 @@
 
 ## 1. Overview & Automatic Package Resolution
 
-Vira provides 14 first-party standard library packages implemented in pure Vira code backed by lean C99 intrinsics ([runtime/vira_rt.h](file:///mnt/flutter_drive/vira/runtime/vira_rt.h)).
+Vira provides 15 first-party standard library packages implemented in pure Vira code backed by lean C99 intrinsics ([runtime/vira_rt.h](file:///mnt/flutter_drive/vira/runtime/vira_rt.h)).
 
 Standard packages are stored directly in the `packages/` directory of the Vira distribution:
 ```
@@ -26,7 +26,8 @@ packages/
 ├── net/         # Cross-platform TCP listeners/streams, UDP sockets, non-blocking Poller
 ├── http/        # HTTP/1.1 request/response parser, HeaderMap, SSE writer, server loop
 ├── json/        # Pure-Vira RFC 8259 parser, validator, and O(N) JsonBuilder
-└── viraserve/   # Actor-driven asynchronous HTTP microframework and router
+├── viraserve/   # Actor-driven asynchronous HTTP microframework and router
+└── widget/      # Flutter-inspired declarative UI kit, responsive layouts & components
 ```
 
 ### Zero-Configuration Imports
@@ -334,6 +335,59 @@ fn main() {
 - **`http`**: HTTP/1.1 request/response parser, `HeaderMap`, server loops, and Server-Sent Events (`SseStream`).
 - **`json`**: Pure-Vira RFC 8259 parser, validator (`json.is_valid`), depth-aware field extractors (`json.get_str`, `json.get_int`, `json.get_bool`), and $O(N)$ `json.JsonBuilder`.
 - **`viraserve`**: Actor-driven HTTP microframework for serving high-throughput REST APIs and AI inference pipelines with zero memory leaks.
+
+---
+
+### 2.12 `packages/widget` — Flutter-Inspired Declarative UI Kit
+The [`widget`](file:///mnt/flutter_drive/vira/packages/widget) package provides high-level Flutter-like ergonomics, responsive layout engine, Catppuccin design tokens, and a full component library on top of Vira's hardware-accelerated Immediate-Mode GUI:
+
+- **Layout**: `w.Column.begin(width, spacing)`, `w.Row.begin(height, spacing)`, `w.Card.begin(title, width)`, `w.Padding.begin(insets, width, spacing)`, `w.Center.begin(width, spacing)`, `w.Spacer(px)`, `w.Divider()`.
+- **Responsive**: `w.window_width()`, `w.window_height()`, `w.pct_w(50.0)`, `w.pct_h(25.0)`, `w.content_width(padding)`, `w.is_mobile()`, `w.is_tablet()`, `w.is_desktop()`, `w.screen()`.
+- **Controls**: `w.Button(label)`, `w.ElevatedButton(label)`, `w.DangerButton(label)`, `w.SecondaryButton(label)`, `w.TextField(placeholder, text)`, `w.Checkbox(label, checked)`, `w.Radio(label, selected)`, `w.Slider(label, val, min, max)`, `w.Dropdown(items, selected_idx)`.
+- **Data & Display**: `w.Text(content)`, `w.Heading(content)`, `w.Subheading(content)`, `w.Badge(label, bg, fg)`, `w.StatusBadge(label, is_ok)`, `w.DataTable(headers, rows, search, selected_row)`, `w.ProgressBar(current, max)`, `w.Image(id, w, h)`.
+- **Lifecycle & Shell**: `w.App.new(title, width, height)`, `w.Scaffold.begin(theme)`, `w.Tab(label, active)`, `w.Modal.begin(title, w, h)`.
+- **Theme & Insets**: `w.Theme.mocha()`, `w.Theme.latte()`, `w.Theme.midnight()`, `w.EdgeInsets.all(px)`, `w.EdgeInsets.symmetric(h, v)`.
+
+```v
+import widget as w
+
+fn main() {
+    mut app := w.App.new('Dashboard', 800, 600)
+    app.init()
+    defer app.cleanup()
+
+    theme := w.Theme.mocha()
+    mut clicks := 0
+
+    for !app.should_close() {
+        app.begin_frame(theme.bg_color)
+        w.Scaffold.begin(theme)
+
+        w.Padding.begin(w.EdgeInsets.all(20), w.window_width(), 12)
+        w.Card.begin('Studio Metrics', w.content_width(20))
+
+        w.Heading('System Telemetry')
+        w.StatusBadge('Active Cluster', true)
+        w.Spacer(8)
+
+        w.Row.begin(36, 12)
+        if w.ElevatedButton('Increment (+1)') {
+            clicks += 1
+        }
+        if w.DangerButton('Reset') {
+            clicks = 0
+        }
+        w.Row.end()
+
+        w.Text('Total clicks: ${clicks}')
+        w.Card.end()
+        w.Padding.end()
+
+        w.Scaffold.end()
+        app.end_frame()
+    }
+}
+```
 
 ---
 

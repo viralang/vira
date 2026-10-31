@@ -1,0 +1,96 @@
+module main
+
+import widget as w
+
+fn test_theme_and_colors() {
+	mocha := w.Theme.mocha()
+	if mocha.bg_color != 0x1E1E2E {
+		panic("expected mocha bg_color == 0x1E1E2E")
+	}
+	if mocha.accent_color != 0x89B4FA {
+		panic("expected mocha accent_color == 0x89B4FA")
+	}
+
+	latte := w.Theme.latte()
+	if latte.bg_color != 0xEFF1F5 {
+		panic("expected latte bg_color == 0xEFF1F5")
+	}
+
+	midnight := w.Theme.midnight()
+	if midnight.bg_color != 0x0F0F14 {
+		panic("expected midnight bg_color == 0x0F0F14")
+	}
+
+	println("✓ test_theme_and_colors passed")
+}
+
+fn test_edge_insets() {
+	all16 := w.EdgeInsets.all(16)
+	if all16.top != 16 || all16.right != 16 || all16.bottom != 16 || all16.left != 16 {
+		panic("expected EdgeInsets.all(16) to set all sides to 16")
+	}
+
+	sym := w.EdgeInsets.symmetric(24, 12)
+	if sym.left != 24 || sym.right != 24 || sym.top != 12 || sym.bottom != 12 {
+		panic("expected EdgeInsets.symmetric(24, 12) horizontal=24, vertical=12")
+	}
+
+	only := w.EdgeInsets.only(1, 2, 3, 4)
+	if only.top != 1 || only.right != 2 || only.bottom != 3 || only.left != 4 {
+		panic("expected EdgeInsets.only(1, 2, 3, 4)")
+	}
+
+	zero := w.EdgeInsets.zero()
+	if zero.top != 0 || zero.right != 0 || zero.bottom != 0 || zero.left != 0 {
+		panic("expected EdgeInsets.zero()")
+	}
+
+	println("✓ test_edge_insets passed")
+}
+
+fn test_text_styles() {
+	h := w.TextStyle.heading()
+	if h.size != 22 {
+		panic("expected heading size 22")
+	}
+
+	sub := w.TextStyle.subheading()
+	if sub.size != 17 {
+		panic("expected subheading size 17")
+	}
+
+	body := w.TextStyle.body()
+	if body.size != 14 {
+		panic("expected body size 14")
+	}
+
+	cap := w.TextStyle.caption()
+	if cap.size != 12 {
+		panic("expected caption size 12")
+	}
+
+	println("✓ test_text_styles passed")
+}
+
+fn test_app_and_responsive() {
+	app := w.App.new("Test Studio", 1024, 768)
+	if app.title != "Test Studio" {
+		panic("expected title 'Test Studio'")
+	}
+	if app.width != 1024 || app.height != 768 {
+		panic("expected dimensions 1024x768")
+	}
+	if app.target_fps != 60 {
+		panic("expected target_fps 60")
+	}
+
+	println("✓ test_app_and_responsive passed")
+}
+
+fn main() {
+	test_theme_and_colors()
+	test_edge_insets()
+	test_text_styles()
+	test_app_and_responsive()
+	println("All widget unit tests passed successfully!")
+}
