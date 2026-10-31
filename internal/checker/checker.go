@@ -838,6 +838,24 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeVoid,
 	}
+	c.functions["gui_scroll_begin"] = &FnSig{
+		Name:       "gui_scroll_begin",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "width", Type: TypeInt}, {Name: "height", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_scroll_end"] = &FnSig{
+		Name:       "gui_scroll_end",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_mouse_wheel"] = &FnSig{
+		Name:       "gui_mouse_wheel",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeF32,
+	}
 	c.functions["gui_btn"] = &FnSig{
 		Name:       "gui_btn",
 		IsPub:      true,

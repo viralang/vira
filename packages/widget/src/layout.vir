@@ -141,3 +141,55 @@ pub fn Divider() {
 pub fn divider() {
 	gui_separator()
 }
+
+// Scrollable container with mouse wheel support and interactive scrollbar (Flutter SingleChildScrollView / ListView)
+pub struct ScrollView {}
+
+// Begins a scrollable vertical viewport with specified height
+pub fn ScrollView.begin(height int) {
+	gui_scroll_begin(0, height)
+}
+
+// Begins a scrollable vertical viewport with explicit width and height
+pub fn ScrollView.begin_sized(width int, height int) {
+	gui_scroll_begin(width, height)
+}
+
+// Closes the scrollable container and draws the interactive scrollbar
+pub fn ScrollView.end() {
+	gui_scroll_end()
+}
+
+// Flutter-named alias: SingleChildScrollView
+pub struct SingleChildScrollView {}
+
+pub fn SingleChildScrollView.begin(height int) {
+	gui_scroll_begin(0, height)
+}
+
+pub fn SingleChildScrollView.begin_sized(width int, height int) {
+	gui_scroll_begin(width, height)
+}
+
+pub fn SingleChildScrollView.end() {
+	gui_scroll_end()
+}
+
+// Functional shortcuts for ScrollView
+pub fn scroll_begin(height int) {
+	gui_scroll_begin(0, height)
+}
+
+pub fn scroll_begin_sized(width int, height int) {
+	gui_scroll_begin(width, height)
+}
+
+pub fn scroll_end() {
+	gui_scroll_end()
+}
+
+// Mouse wheel scroll delta query
+pub fn mouse_wheel_delta() f32 {
+	return gui_mouse_wheel()
+}
+

@@ -103,6 +103,7 @@ static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
+    _vira_mouse_wheel_delta = GetMouseWheelMove();
 
     if (IsKeyPressed(KEY_BACKSPACE)) {
         _vira_backspace_pressed = true;
@@ -296,6 +297,14 @@ static inline void _vira_raylib_free_image(int32_t id) {
     _vira_gui_images[id].is_valid = false;
     _vira_gui_images[id].width = 0;
     _vira_gui_images[id].height = 0;
+}
+
+static inline void _vira_raylib_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (w > 0 && h > 0) BeginScissorMode(x, y, w, h);
+}
+
+static inline void _vira_raylib_reset_clip(void) {
+    EndScissorMode();
 }
 
 #endif // VIRA_GUI_RAYLIB_H

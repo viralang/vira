@@ -71,6 +71,41 @@ static inline void vira_gui_free_image(int32_t id) {
 #endif
 }
 
+// ------------------------------------------------------------------------------
+// Unified Cross-Platform Scissor / Clipping Dispatch
+// ------------------------------------------------------------------------------
+static inline void vira_gui_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
+#if defined(VIRA_USE_RAYLIB)
+    _vira_raylib_set_clip(x, y, w, h);
+#elif defined(_WIN32)
+    _vira_win32_set_clip(x, y, w, h);
+#elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
+    _vira_x11_set_clip(x, y, w, h);
+#elif defined(__APPLE__) && defined(__OBJC__)
+    _vira_cocoa_set_clip(x, y, w, h);
+#else
+    _vira_headless_set_clip(x, y, w, h);
+#endif
+}
+
+static inline void vira_gui_reset_clip(void) {
+#if defined(VIRA_USE_RAYLIB)
+    _vira_raylib_reset_clip();
+#elif defined(_WIN32)
+    _vira_win32_reset_clip();
+#elif (defined(__linux__) || defined(__unix__)) && !defined(VIRA_NO_X11)
+    _vira_x11_reset_clip();
+#elif defined(__APPLE__) && defined(__OBJC__)
+    _vira_cocoa_reset_clip();
+#else
+    _vira_headless_reset_clip();
+#endif
+}
+
+static inline float vira_gui_mouse_wheel(void) {
+    return _vira_mouse_wheel_delta;
+}
+
 // ==============================================================================
 // 3. SHARED WIDGETS & DECLARATIVE AUTO-LAYOUT ENGINE
 // ==============================================================================
@@ -90,6 +125,7 @@ static inline void vira_gui_begin(void) {
     _vira_card_end_counter = 0;
     _vira_dropdown_counter = 0;
     _vira_table_counter = 0;
+    _vira_scroll_counter = 0;
     _vira_click_consumed = false;
     _vira_modal_active = _vira_modal_open_prev_frame;
     _vira_modal_first_input = -1;
@@ -98,9 +134,10 @@ static inline void vira_gui_begin(void) {
     _vira_backend_gui_begin();
 
     // Keyboard Tab Focus Navigation
-    if (_vira_tab_pressed && _vira_total_inputs > 0) {
+    int32_t total = _vira_total_inputs > 0 ? _vira_total_inputs : _vira_input_counter;
+    if (_vira_tab_pressed && total > 0) {
         int32_t min_id = 0;
-        int32_t max_id = _vira_total_inputs - 1;
+        int32_t max_id = total - 1;
         if (_vira_modal_open_prev_frame && _vira_prev_modal_first_input >= 0 && _vira_prev_modal_last_input >= _vira_prev_modal_first_input) {
             min_id = _vira_prev_modal_first_input;
             max_id = _vira_prev_modal_last_input;
@@ -487,6 +524,139 @@ static inline void vira_gui_stack_end(void) {
         } else if (parent->type == VIRA_LAYOUT_HORIZONTAL) {
             int32_t consumed_w = closed.is_card ? (closed.width + 30) : (closed.cur_x - closed.x);
             parent->cur_x += consumed_w + parent->spacing;
+        }
+    }
+}
+
+static inline void vira_gui_scroll_begin(int32_t width, int32_t height) {
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    int32_t x = parent ? parent->cur_x : 0;
+    int32_t y = parent ? parent->cur_y : 0;
+    int32_t w = width > 0 ? width : (parent ? parent->width : (vira_gui_window_width() - x));
+    int32_t h = height > 0 ? height : (parent ? (vira_gui_window_height() - y) : vira_gui_window_height());
+    if (h < 40) h = 40;
+
+    int32_t sid = _vira_scroll_counter++;
+    if (sid >= VIRA_MAX_SCROLL_VIEWS) sid = VIRA_MAX_SCROLL_VIEWS - 1;
+    vira_scroll_view_state_t* sv = &_vira_scroll_views[sid];
+
+    int mx = vira_gui_mouse_x();
+    int my = vira_gui_mouse_y();
+
+    // Mouse wheel scrolling
+    if (mx >= x && mx <= x + w && my >= y && my <= y + h) {
+        if (_vira_mouse_wheel_delta != 0.0f) {
+            sv->scroll_y -= (int32_t)(_vira_mouse_wheel_delta * 45.0f);
+        }
+    }
+
+    int32_t max_scroll = sv->content_h > h ? (sv->content_h - h) : 0;
+    int32_t track_x = x + w - 8;
+    int32_t track_w = 6;
+    int32_t track_h = h;
+
+    if (max_scroll > 0) {
+        int32_t thumb_h = (track_h * track_h) / sv->content_h;
+        if (thumb_h < 24) thumb_h = 24;
+        if (thumb_h > track_h) thumb_h = track_h;
+        int32_t thumb_y = y + (sv->scroll_y * (track_h - thumb_h)) / max_scroll;
+
+        if (sv->is_dragging) {
+            if (vira_gui_is_mouse_down(0)) {
+                int32_t dy = my - sv->drag_start_y;
+                int32_t scrollable_track = track_h - thumb_h;
+                if (scrollable_track > 0) {
+                    sv->scroll_y = sv->drag_start_scroll + (dy * max_scroll) / scrollable_track;
+                }
+            } else {
+                sv->is_dragging = false;
+            }
+        } else if (_vira_gui_mouse_clicked_left()) {
+            if (mx >= track_x - 6 && mx <= track_x + track_w + 6 && my >= y && my <= y + h) {
+                if (my >= thumb_y && my <= thumb_y + thumb_h) {
+                    sv->is_dragging = true;
+                    sv->drag_start_y = my;
+                    sv->drag_start_scroll = sv->scroll_y;
+                    _vira_click_consumed = true;
+                } else {
+                    if (my < thumb_y) {
+                        sv->scroll_y -= h / 2;
+                    } else {
+                        sv->scroll_y += h / 2;
+                    }
+                    _vira_click_consumed = true;
+                }
+            }
+        }
+    } else {
+        sv->is_dragging = false;
+        sv->scroll_y = 0;
+    }
+
+    if (sv->scroll_y > max_scroll) sv->scroll_y = max_scroll;
+    if (sv->scroll_y < 0) sv->scroll_y = 0;
+
+    // Apply hardware scissor / clip
+    vira_gui_set_clip(x, y, w, h);
+
+    if (_vira_layout_depth < VIRA_MAX_LAYOUT_DEPTH) {
+        vira_layout_node_t* node = &_vira_layout_stack[_vira_layout_depth++];
+        node->type = VIRA_LAYOUT_VERTICAL;
+        node->x = x;
+        node->y = y;
+        node->cur_x = x;
+        node->cur_y = y - sv->scroll_y;
+        node->width = (max_scroll > 0) ? (w - 12) : w;
+        node->height = h;
+        node->spacing = 10;
+        node->start_y = y - sv->scroll_y;
+        node->is_card = 0;
+        node->is_scroll = 1;
+        node->scroll_id = sid;
+        node->scroll_offset_y = sv->scroll_y;
+    }
+}
+
+static inline void vira_gui_scroll_end(void) {
+    if (_vira_layout_depth <= 0) return;
+    vira_layout_node_t closed = _vira_layout_stack[--_vira_layout_depth];
+    int32_t sid = closed.scroll_id;
+    if (sid < 0 || sid >= VIRA_MAX_SCROLL_VIEWS) return;
+    vira_scroll_view_state_t* sv = &_vira_scroll_views[sid];
+
+    int32_t content_h = closed.cur_y - closed.start_y;
+    sv->content_h = content_h;
+
+    // Release hardware scissor / clip
+    vira_gui_reset_clip();
+
+    int32_t max_scroll = sv->content_h > closed.height ? (sv->content_h - closed.height) : 0;
+    if (max_scroll > 0) {
+        int32_t track_x = closed.x + closed.width + 4;
+        int32_t track_y = closed.y;
+        int32_t track_w = 6;
+        int32_t track_h = closed.height;
+
+        vira_gui_draw_rounded_rect(track_x, track_y, track_w, track_h, 3.0f, 0x181825, 0x313244);
+
+        int32_t thumb_h = (track_h * track_h) / sv->content_h;
+        if (thumb_h < 24) thumb_h = 24;
+        if (thumb_h > track_h) thumb_h = track_h;
+        int32_t thumb_y = track_y + (sv->scroll_y * (track_h - thumb_h)) / max_scroll;
+
+        int mx = vira_gui_mouse_x();
+        int my = vira_gui_mouse_y();
+        bool is_hovered = (mx >= track_x - 6 && mx <= track_x + track_w + 6 && my >= thumb_y && my <= thumb_y + thumb_h);
+        int32_t thumb_color = (sv->is_dragging || is_hovered) ? 0x89B4FA : 0x585B70;
+        vira_gui_draw_rounded_rect(track_x, thumb_y, track_w, thumb_h, 3.0f, thumb_color, -1);
+    }
+
+    vira_layout_node_t* parent = _vira_gui_cur_layout();
+    if (parent != NULL) {
+        if (parent->type == VIRA_LAYOUT_VERTICAL) {
+            parent->cur_y += closed.height + parent->spacing;
+        } else if (parent->type == VIRA_LAYOUT_HORIZONTAL) {
+            parent->cur_x += closed.width + parent->spacing;
         }
     }
 }

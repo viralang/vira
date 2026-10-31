@@ -2731,6 +2731,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "gui_card_end":
 			return "vira_gui_card_end()"
+		case "gui_scroll_begin":
+			return fmt.Sprintf("vira_gui_scroll_begin(%s)", strings.Join(argStrs, ", "))
+		case "gui_scroll_end":
+			return "vira_gui_scroll_end()"
+		case "gui_mouse_wheel":
+			return "vira_gui_mouse_wheel()"
 		case "gui_btn":
 			fnName := "vira_gui_btn"
 			if len(call.Args) > 0 {

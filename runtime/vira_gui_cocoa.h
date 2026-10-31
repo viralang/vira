@@ -83,6 +83,9 @@ static vira_cocoa_t _vira_cocoa = {0};
     _vira_cocoa.mouse_down[1] = false;
     [self updateMouse:event];
 }
+- (void)scrollWheel:(NSEvent *)event {
+    _vira_mouse_wheel_delta += (float)[event scrollingDeltaY];
+}
 
 - (void)keyDown:(NSEvent *)event {
     NSEventModifierFlags flags = [event modifierFlags];
@@ -206,6 +209,7 @@ static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
+    _vira_mouse_wheel_delta = 0.0f;
 
     for (int i = 0; i < 3; i++) {
         _vira_cocoa.mouse_clicked[i] = false;
@@ -467,5 +471,11 @@ static inline void _vira_cocoa_free_image(int32_t slot) {
     _vira_gui_images[slot].width = 0;
     _vira_gui_images[slot].height = 0;
 }
+
+static inline void _vira_cocoa_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
+    (void)x; (void)y; (void)w; (void)h;
+}
+
+static inline void _vira_cocoa_reset_clip(void) {}
 
 #endif // VIRA_GUI_COCOA_H

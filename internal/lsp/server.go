@@ -1017,6 +1017,12 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`gui_card_begin(title: string, width: int)`**\n\nBegins an elevated auto-sized card panel with header styling."
 	case "gui_card_end":
 		return "**`gui_card_end()`**\n\nCloses the active card layout container and auto-calculates total card height."
+	case "gui_scroll_begin":
+		return "**`gui_scroll_begin(width: int, height: int)`**\n\nBegins a hardware-clipped scrollable container with mouse wheel scrolling and interactive scrollbar."
+	case "gui_scroll_end":
+		return "**`gui_scroll_end()`**\n\nCloses the scrollable container, releases the hardware scissor clipping, and renders the scrollbar."
+	case "gui_mouse_wheel":
+		return "**`gui_mouse_wheel() -> f32`**\n\nReturns the vertical mouse wheel scroll delta accumulated in the current frame."
 	case "gui_separator":
 		return "**`gui_separator()`**\n\nRenders a 1px divider line across the current layout container."
 	case "gui_badge":
@@ -1495,7 +1501,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		"tensor_load_bin", "tensor_save_bin", "safetensors_load", "gguf_load", "gguf_load_tensor", "gguf_tensor_dequant",
 		"tensor_rmsnorm", "tensor_rope", "rmsnorm", "rope", "swiglu", "causal_self_attention", "sample_token", "sample_argmax", "sample_top_p",
 		"gui_init", "gui_should_close", "gui_cancel_close", "gui_set_target_fps", "gui_window_width", "gui_window_height", "gui_begin", "gui_end", "gui_close", "gui_clear", "gui_frame_time", "gui_poll",
-		"gui_vstack_begin", "gui_hstack_begin", "gui_stack_end", "gui_spacing", "gui_card_begin", "gui_card_end", "gui_separator", "gui_badge",
+		"gui_vstack_begin", "gui_hstack_begin", "gui_stack_end", "gui_spacing", "gui_card_begin", "gui_card_end", "gui_scroll_begin", "gui_scroll_end", "gui_mouse_wheel", "gui_separator", "gui_badge",
 		"gui_btn", "gui_btn_danger", "gui_check", "gui_slide", "gui_lbl", "gui_input", "gui_progress", "gui_radio",
 		"gui_button", "gui_slider", "gui_checkbox", "gui_label", "gui_text_input", "gui_progress_bar", "gui_radio_button",
 		"gui_table", "gui_tbl", "gui_dropdown", "gui_select", "gui_table_sort_col", "gui_table_sort_asc", "gui_table_set_sort",

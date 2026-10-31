@@ -24,6 +24,9 @@ typedef struct {
     int32_t spacing;
     int32_t start_y;
     int32_t is_card;
+    int32_t is_scroll;
+    int32_t scroll_id;
+    int32_t scroll_offset_y;
 } vira_layout_node_t;
 
 #define VIRA_MAX_LAYOUT_DEPTH 16
@@ -73,6 +76,19 @@ static int32_t                 _vira_card_counter = 0;
 static int32_t                 _vira_card_end_counter = 0;
 
 static bool                    _vira_click_consumed = false;
+static float                   _vira_mouse_wheel_delta = 0.0f;
+
+#define VIRA_MAX_SCROLL_VIEWS 32
+typedef struct {
+    int32_t scroll_y;
+    int32_t content_h;
+    bool    is_dragging;
+    int32_t drag_start_y;
+    int32_t drag_start_scroll;
+} vira_scroll_view_state_t;
+
+static vira_scroll_view_state_t _vira_scroll_views[VIRA_MAX_SCROLL_VIEWS] = {0};
+static int32_t                 _vira_scroll_counter = 0;
 
 // Dropdown State
 typedef struct {

@@ -54,18 +54,29 @@ static LRESULT CALLBACK _vira_gui_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LP
             _vira_gui.mouse_x = GET_X_LPARAM(lParam);
             _vira_gui.mouse_y = GET_Y_LPARAM(lParam);
             return 0;
+        case WM_MOUSEWHEEL:
+            _vira_mouse_wheel_delta += (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
+            return 0;
         case WM_LBUTTONDOWN:
+            _vira_gui.mouse_x = GET_X_LPARAM(lParam);
+            _vira_gui.mouse_y = GET_Y_LPARAM(lParam);
             _vira_gui.mouse_down[0] = true;
             _vira_gui.mouse_clicked[0] = true;
             return 0;
         case WM_LBUTTONUP:
+            _vira_gui.mouse_x = GET_X_LPARAM(lParam);
+            _vira_gui.mouse_y = GET_Y_LPARAM(lParam);
             _vira_gui.mouse_down[0] = false;
             return 0;
         case WM_RBUTTONDOWN:
+            _vira_gui.mouse_x = GET_X_LPARAM(lParam);
+            _vira_gui.mouse_y = GET_Y_LPARAM(lParam);
             _vira_gui.mouse_down[1] = true;
             _vira_gui.mouse_clicked[1] = true;
             return 0;
         case WM_RBUTTONUP:
+            _vira_gui.mouse_x = GET_X_LPARAM(lParam);
+            _vira_gui.mouse_y = GET_Y_LPARAM(lParam);
             _vira_gui.mouse_down[1] = false;
             return 0;
         case WM_CHAR:
@@ -158,6 +169,7 @@ static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
+    _vira_mouse_wheel_delta = 0.0f;
     for (int i = 0; i < 3; i++) {
         _vira_gui.mouse_clicked[i] = false;
     }
@@ -339,6 +351,17 @@ static inline void _vira_win32_free_image(int32_t id) {
     _vira_gui_images[id].is_valid = false;
     _vira_gui_images[id].width = 0;
     _vira_gui_images[id].height = 0;
+}
+
+static inline void _vira_win32_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (!_vira_gui.hdc_mem) return;
+    HRGN rgn = CreateRectRgn(x, y, x + (w > 0 ? w : 0), y + (h > 0 ? h : 0));
+    SelectClipRgn(_vira_gui.hdc_mem, rgn);
+    DeleteObject(rgn);
+}
+
+static inline void _vira_win32_reset_clip(void) {
+    if (_vira_gui.hdc_mem) SelectClipRgn(_vira_gui.hdc_mem, NULL);
 }
 
 #endif // VIRA_GUI_WIN32_H

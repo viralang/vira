@@ -87,10 +87,20 @@ fn test_app_and_responsive() {
 	println("✓ test_app_and_responsive passed")
 }
 
+fn test_scroll_view_widgets() {
+	delta := w.mouse_wheel_delta()
+	if delta < -100.0 || delta > 100.0 {
+		panic("expected reasonable mouse wheel delta range")
+	}
+	println("✓ test_scroll_view_widgets passed")
+}
+
 fn main() {
 	test_theme_and_colors()
 	test_edge_insets()
 	test_text_styles()
 	test_app_and_responsive()
+	test_scroll_view_widgets()
 	println("All widget unit tests passed successfully!")
 }
+

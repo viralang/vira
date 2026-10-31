@@ -12,4 +12,5 @@ include/
 lib/
 /vira
 scratch/
+assets/cache/
 .DS_Store

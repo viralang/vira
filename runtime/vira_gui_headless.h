@@ -30,5 +30,7 @@ static inline float vira_gui_frame_time(void) { return 0.016f; }
 static inline int32_t _vira_headless_load_image(const char* filepath) { (void)filepath; return -1; }
 static inline void _vira_headless_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) { (void)id; (void)x; (void)y; (void)w; (void)h; }
 static inline void _vira_headless_free_image(int32_t id) { (void)id; }
+static inline void _vira_headless_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) { (void)x; (void)y; (void)w; (void)h; }
+static inline void _vira_headless_reset_clip(void) {}
 
 #endif // VIRA_GUI_HEADLESS_H

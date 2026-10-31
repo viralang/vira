@@ -264,6 +264,8 @@ fn main() {
 		w.Divider()
 		w.Spacer(6)
 
+		scroll_h := mq.height - 145
+
 		// Responsive layout: 2-column on desktop (>1024px), stacked on tablet/mobile
 		if mq.is_desktop {
 			left_w := 370
@@ -272,178 +274,184 @@ fn main() {
 				right_w = 400
 			}
 
-			// Left Column: Query form, Image Inspector, Controls
+			// Left Column: Query form, Image Inspector, Controls (Scrollable)
 			w.Column.begin_at(20, 130, left_w, 10)
-				w.Card.begin("Remote API Query & Asset Inspector", left_w)
-					w.Subheading("Target Repository / Model")
-					target_repo = w.TextField("Repository Slug (e.g. viralang/vira)", target_repo)
-					w.Spacer(4)
+				w.SingleChildScrollView.begin(scroll_h)
+					w.Card.begin("Remote API Query & Asset Inspector", left_w - 12)
+						w.Subheading("Target Repository / Model")
+						target_repo = w.TextField("Repository Slug (e.g. viralang/vira)", target_repo)
+						w.Spacer(4)
 
-					w.Subheading("Authorization Token (Optional)")
-					auth_token = w.TextField("Bearer Token", auth_token)
-					w.Spacer(4)
+						w.Subheading("Authorization Token (Optional)")
+						auth_token = w.TextField("Bearer Token", auth_token)
+						w.Spacer(4)
 
-					w.Subheading("Target Architecture")
-					selected_arch = w.Dropdown(arch_options, selected_arch)
-					w.Spacer(6)
-
-					// Protocol radio buttons
-					w.Subheading("Network Protocol")
-					w.Row.begin(26, 8)
-					if w.Radio("HTTP/2 TLS", selected_protocol == 0) {
-						selected_protocol = 0
-					}
-					if w.Radio("HTTP/1.1 REST", selected_protocol == 1) {
-						selected_protocol = 1
-					}
-					w.Row.end()
-					w.Spacer(4)
-
-					// Checkboxes
-					enable_autosync = w.Checkbox("Enable Background Polling (15s)", enable_autosync)
-					hardware_accel = w.Checkbox("Hardware Decoupled Blitting", hardware_accel)
-					w.Spacer(6)
-
-					// Sliders
-					timeout_sec = w.Slider("HTTP Timeout (sec)", timeout_sec, 5.0f32, 60.0f32)
-					img_scale = w.Slider("Image Zoom Scale", img_scale, 0.5f32, 2.0f32)
-					w.Spacer(6)
-
-					// Hardware-Accelerated Image Display
-					w.Subheading("Remote Asset / Avatar Texture")
-					if current_image >= 0 {
-						img_w := int(72.0f32 * img_scale)
-						img_h := int(72.0f32 * img_scale)
-						w.Row.begin(img_h + 8, 12)
-						w.Image(current_image, img_w, img_h)
-						w.Column.begin(left_w - img_w - 30, 4)
-							w.Caption("Texture: GPU RGBA8888")
-							w.Caption("Cached: ${cache_file}")
-							w.Badge("Hardware Blit: OK", w.COLOR_MAUVE, w.COLOR_BASE)
-						w.Column.end()
-						w.Row.end()
-					} else {
-						w.Caption("No texture currently loaded in GPU memory.")
-					}
-					w.Spacer(8)
-
-					// Primary Action Buttons
-					w.Subheading("Registry Actions")
-					w.Row.begin(36, 8)
-					if fetch_state != 1 && fetch_state != 2 {
-						if w.ElevatedButton("Fetch Live Data (HTTP)") {
-							total_requests = total_requests + 1
-							progress_pct = 0.0f32
-							fetch_state = 1
-						}
-					} else {
-						w.Badge("Transfer Active...", w.COLOR_SURFACE1, w.COLOR_YELLOW)
-					}
-
-					if w.SecondaryButton("Switch Theme") {
-						current_theme_idx = (current_theme_idx + 1) % 3
-					}
-					w.Row.end()
-
-					w.Spacer(4)
-					if w.DangerButton("Purge GPU Cache & Free Texture") {
-						show_purge_dialog = true
-					}
-				w.Card.end()
-			w.Column.end()
-
-			// Right Column: Tab View, Data Table, Live Telemetry
-			w.Column.begin_at(left_w + 40, 130, right_w, 10)
-				if active_tab == 0 {
-					w.Card.begin("Cloud AI Model & Package Registry (Live)", right_w)
-						w.Row.begin(32, 10)
-						w.Subheading("Registry Explorer")
-						w.Spacer(10)
-						search_filter = w.TextField("Search packages or models...", search_filter)
-						w.Row.end()
-
+						w.Subheading("Target Architecture")
+						selected_arch = w.Dropdown(arch_options, selected_arch)
 						w.Spacer(6)
-						// Interactive sortable data table
-						selected_row = w.DataTable(headers, rows, search_filter, selected_row)
 
+						// Protocol radio buttons
+						w.Subheading("Network Protocol")
+						w.Row.begin(26, 8)
+						if w.Radio("HTTP/2 TLS", selected_protocol == 0) {
+							selected_protocol = 0
+						}
+						if w.Radio("HTTP/1.1 REST", selected_protocol == 1) {
+							selected_protocol = 1
+						}
+						w.Row.end()
+						w.Spacer(4)
+
+						// Checkboxes
+						enable_autosync = w.Checkbox("Enable Background Polling (15s)", enable_autosync)
+						hardware_accel = w.Checkbox("Hardware Decoupled Blitting", hardware_accel)
+						w.Spacer(6)
+
+						// Sliders
+						timeout_sec = w.Slider("HTTP Timeout (sec)", timeout_sec, 5.0f32, 60.0f32)
+						img_scale = w.Slider("Image Zoom Scale", img_scale, 0.5f32, 2.0f32)
+						w.Spacer(6)
+
+						// Hardware-Accelerated Image Display
+						w.Subheading("Remote Asset / Avatar Texture")
+						if current_image >= 0 {
+							img_w := int(72.0f32 * img_scale)
+							img_h := int(72.0f32 * img_scale)
+							w.Row.begin(img_h + 8, 12)
+							w.Image(current_image, img_w, img_h)
+							w.Column.begin(left_w - img_w - 42, 4)
+								w.Caption("Texture: GPU RGBA8888")
+								w.Caption("Cached: ${cache_file}")
+								w.Badge("Hardware Blit: OK", w.COLOR_MAUVE, w.COLOR_BASE)
+							w.Column.end()
+							w.Row.end()
+						} else {
+							w.Caption("No texture currently loaded in GPU memory.")
+						}
 						w.Spacer(8)
-						w.Text("Selected Item Details: ${rows[selected_row][0]} • ${rows[selected_row][2]}")
-						w.Caption(latest_tele.desc)
-					w.Card.end()
 
-					w.Spacer(6)
-					w.Card.begin("Network Sync Status & Cache Utilization", right_w)
-						w.Row.begin(28, 10)
-						w.Text("Transfer Status: ${status_msg}")
-						w.Badge("Requests: ${total_requests}", w.COLOR_SURFACE1, w.COLOR_TEXT)
+						// Primary Action Buttons
+						w.Subheading("Registry Actions")
+						w.Row.begin(36, 8)
+						if fetch_state != 1 && fetch_state != 2 {
+							if w.ElevatedButton("Fetch Live Data (HTTP)") {
+								total_requests = total_requests + 1
+								progress_pct = 0.0f32
+								fetch_state = 1
+							}
+						} else {
+							w.Badge("Transfer Active...", w.COLOR_SURFACE1, w.COLOR_YELLOW)
+						}
+
+						if w.SecondaryButton("Switch Theme") {
+							current_theme_idx = (current_theme_idx + 1) % 3
+						}
 						w.Row.end()
 
 						w.Spacer(4)
-						w.ProgressBar(int(progress_pct * 100.0f32), 100)
+						if w.DangerButton("Purge GPU Cache & Free Texture") {
+							show_purge_dialog = true
+						}
+					w.Card.end()
+				w.SingleChildScrollView.end()
+			w.Column.end()
+
+			// Right Column: Tab View, Data Table, Live Telemetry (Scrollable)
+			w.Column.begin_at(left_w + 40, 130, right_w, 10)
+				w.SingleChildScrollView.begin(scroll_h)
+					if active_tab == 0 {
+						w.Card.begin("Cloud AI Model & Package Registry (Live)", right_w - 12)
+							w.Row.begin(32, 10)
+							w.Subheading("Registry Explorer")
+							w.Spacer(10)
+							search_filter = w.TextField("Search packages or models...", search_filter)
+							w.Row.end()
+
+							w.Spacer(6)
+							// Interactive sortable data table
+							selected_row = w.DataTable(headers, rows, search_filter, selected_row)
+
+							w.Spacer(8)
+							w.Text("Selected Item Details: ${rows[selected_row][0]} • ${rows[selected_row][2]}")
+							w.Caption(latest_tele.desc)
+						w.Card.end()
 
 						w.Spacer(6)
-						w.Row.begin(24, 10)
-						w.Text("Disk & GPU Memory Cache Quota: ${int(cache_quota)}%")
-						w.Row.end()
-						w.ProgressPercent(cache_quota)
-					w.Card.end()
+						w.Card.begin("Network Sync Status & Cache Utilization", right_w - 12)
+							w.Row.begin(28, 10)
+							w.Text("Transfer Status: ${status_msg}")
+							w.Badge("Requests: ${total_requests}", w.COLOR_SURFACE1, w.COLOR_TEXT)
+							w.Row.end()
 
-				} else if active_tab == 1 {
-					w.Card.begin("Live HTTP Response & Payload Inspector", right_w)
-						w.Subheading("Decoded Response for ${latest_tele.name}")
-						w.Spacer(6)
-						w.Text("Repository: ${latest_tele.name}")
-						w.Text("Description: ${latest_tele.desc}")
-						w.Text("GitHub Stars: ${latest_tele.stars} ⭐ | Forks: ${latest_tele.forks} 🍴 | Open Issues: ${latest_tele.issues} 🐞")
-						w.Text("License: ${latest_tele.license}")
-						w.Text("Remote Avatar URL: ${latest_tele.avatar_url}")
-						w.Spacer(8)
-						w.Divider()
-						w.Spacer(8)
+							w.Spacer(4)
+							w.ProgressBar(int(progress_pct * 100.0f32), 100)
 
-						w.Subheading("Simulated HTTP Response Headers")
-						w.Caption("HTTP/2 200 OK")
-						w.Caption("server: GitHub.com")
-						w.Caption("content-type: application/json; charset=utf-8")
-						w.Caption("x-ratelimit-limit: 60")
-						w.Caption("x-ratelimit-remaining: 59")
-						w.Caption("access-control-allow-origin: *")
-						w.Caption("strict-transport-security: max-age=31536000")
-					w.Card.end()
+							w.Spacer(6)
+							w.Row.begin(24, 10)
+							w.Text("Disk & GPU Memory Cache Quota: ${int(cache_quota)}%")
+							w.Row.end()
+							w.ProgressPercent(cache_quota)
+						w.Card.end()
 
-				} else {
-					w.Card.begin("GPU Subsystem & Runtime Diagnostics", right_w)
-						w.Subheading("Vira High-Performance Graphics Diagnostics")
-						w.Spacer(6)
-						w.Text("Graphics Subsystem: Native Double-Buffered Framebuffer")
-						w.Text("Target FPS: 60 FPS (Hardware V-Sync Enabled)")
-						w.Text("Current GPU Texture Handle: ${current_image}")
-						w.Text("SIMD Architecture: x86_64 SSE2 / AVX2 (Zero GC Pause)")
-						w.Text("Memory Management: Vira Deterministic Autofree (0 Leaks)")
-						w.Spacer(8)
-						w.Divider()
-						w.Spacer(8)
+					} else if active_tab == 1 {
+						w.Card.begin("Live HTTP Response & Payload Inspector", right_w - 12)
+							w.Subheading("Decoded Response for ${latest_tele.name}")
+							w.Spacer(6)
+							w.Text("Repository: ${latest_tele.name}")
+							w.Text("Description: ${latest_tele.desc}")
+							w.Text("GitHub Stars: ${latest_tele.stars} ⭐ | Forks: ${latest_tele.forks} 🍴 | Open Issues: ${latest_tele.issues} 🐞")
+							w.Text("License: ${latest_tele.license}")
+							w.Text("Remote Avatar URL: ${latest_tele.avatar_url}")
+							w.Spacer(8)
+							w.Divider()
+							w.Spacer(8)
 
-						w.Center.begin(320, 6)
-						w.Badge("ALL SYSTEMS OPTIMAL - ZERO MEMORY LEAKS", w.COLOR_GREEN, w.COLOR_BASE)
-						w.Center.end()
-					w.Card.end()
-				}
+							w.Subheading("Simulated HTTP Response Headers")
+							w.Caption("HTTP/2 200 OK")
+							w.Caption("server: GitHub.com")
+							w.Caption("content-type: application/json; charset=utf-8")
+							w.Caption("x-ratelimit-limit: 60")
+							w.Caption("x-ratelimit-remaining: 59")
+							w.Caption("access-control-allow-origin: *")
+							w.Caption("strict-transport-security: max-age=31536000")
+						w.Card.end()
+
+					} else {
+						w.Card.begin("GPU Subsystem & Runtime Diagnostics", right_w - 12)
+							w.Subheading("Vira High-Performance Graphics Diagnostics")
+							w.Spacer(6)
+							w.Text("Graphics Subsystem: Native Double-Buffered Framebuffer")
+							w.Text("Target FPS: 60 FPS (Hardware V-Sync Enabled)")
+							w.Text("Current GPU Texture Handle: ${current_image}")
+							w.Text("SIMD Architecture: x86_64 SSE2 / AVX2 (Zero GC Pause)")
+							w.Text("Memory Management: Vira Deterministic Autofree (0 Leaks)")
+							w.Spacer(8)
+							w.Divider()
+							w.Spacer(8)
+
+							w.Center.begin(320, 6)
+							w.Badge("ALL SYSTEMS OPTIMAL - ZERO MEMORY LEAKS", w.COLOR_GREEN, w.COLOR_BASE)
+							w.Center.end()
+						w.Card.end()
+					}
+				w.SingleChildScrollView.end()
 			w.Column.end()
 
 		} else {
 			// Mobile & Tablet Responsive Stack (Single Column adapting to viewport)
 			full_w := w.content_width(20)
 			w.Column.begin(full_w, 10)
-				w.Card.begin("Registry Explorer (Compact)", full_w)
-					target_repo = w.TextField("Repository Slug", target_repo)
-					if w.ElevatedButton("Fetch Live Data (HTTP)") {
-						total_requests = total_requests + 1
-						progress_pct = 0.0f32
-						fetch_state = 1
-					}
-					selected_row = w.DataTable(headers, rows, search_filter, selected_row)
-				w.Card.end()
+				w.SingleChildScrollView.begin(scroll_h)
+					w.Card.begin("Registry Explorer (Compact)", full_w - 12)
+						target_repo = w.TextField("Repository Slug", target_repo)
+						if w.ElevatedButton("Fetch Live Data (HTTP)") {
+							total_requests = total_requests + 1
+							progress_pct = 0.0f32
+							fetch_state = 1
+						}
+						selected_row = w.DataTable(headers, rows, search_filter, selected_row)
+					w.Card.end()
+				w.SingleChildScrollView.end()
 			w.Column.end()
 		}
 

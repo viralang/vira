@@ -64,9 +64,19 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
 
     XSelectInput(_vira_x11.dpy, _vira_x11.win,
                  ExposureMask | KeyPressMask | KeyReleaseMask |
-                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask);
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask | FocusChangeMask);
     _vira_x11.wm_delete = XInternAtom(_vira_x11.dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(_vira_x11.dpy, _vira_x11.win, &_vira_x11.wm_delete, 1);
+
+    // Provide window manager input hints so Wayland / Mutter / KWin route keyboard focus
+    XWMHints* wm_hints = XAllocWMHints();
+    if (wm_hints) {
+        wm_hints->flags = InputHint | StateHint;
+        wm_hints->input = True;
+        wm_hints->initial_state = NormalState;
+        XSetWMHints(_vira_x11.dpy, _vira_x11.win, wm_hints);
+        XFree(wm_hints);
+    }
 
     // Lock fixed window size hints for tiling window managers
     XSizeHints hints = {0};
@@ -94,6 +104,7 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
     if (_vira_x11.font) XSetFont(_vira_x11.dpy, _vira_x11.gc, _vira_x11.font->fid);
 
     XMapWindow(_vira_x11.dpy, _vira_x11.win);
+    XSetInputFocus(_vira_x11.dpy, _vira_x11.win, RevertToParent, CurrentTime);
     XFlush(_vira_x11.dpy);
     clock_gettime(CLOCK_MONOTONIC, &_vira_x11.frame_start);
     _vira_layout_depth = 0;
@@ -109,6 +120,7 @@ static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
+    _vira_mouse_wheel_delta = 0.0f;
     for (int i = 0; i < 3; i++) {
         _vira_x11.mouse_clicked[i] = false;
     }
@@ -120,16 +132,31 @@ static inline void _vira_backend_gui_begin(void) {
         XNextEvent(_vira_x11.dpy, &ev);
         if (ev.type == ClientMessage && (Atom)ev.xclient.data.l[0] == _vira_x11.wm_delete) {
             _vira_x11.should_close = true;
+        } else if (ev.type == FocusIn) {
+            // Window gained keyboard focus
         } else if (ev.type == MotionNotify) {
             _vira_x11.mouse_x = ev.xmotion.x;
             _vira_x11.mouse_y = ev.xmotion.y;
         } else if (ev.type == ButtonPress) {
-            int b = (ev.xbutton.button == Button1) ? 0 : ((ev.xbutton.button == Button3) ? 1 : 2);
-            _vira_x11.mouse_down[b] = true;
-            _vira_x11.mouse_clicked[b] = true;
+            _vira_x11.mouse_x = ev.xbutton.x;
+            _vira_x11.mouse_y = ev.xbutton.y;
+            XSetInputFocus(_vira_x11.dpy, _vira_x11.win, RevertToParent, CurrentTime);
+            if (ev.xbutton.button == 4) {
+                _vira_mouse_wheel_delta += 1.0f;
+            } else if (ev.xbutton.button == 5) {
+                _vira_mouse_wheel_delta -= 1.0f;
+            } else {
+                int b = (ev.xbutton.button == Button1) ? 0 : ((ev.xbutton.button == Button3) ? 1 : 2);
+                _vira_x11.mouse_down[b] = true;
+                _vira_x11.mouse_clicked[b] = true;
+            }
         } else if (ev.type == ButtonRelease) {
-            int b = (ev.xbutton.button == Button1) ? 0 : ((ev.xbutton.button == Button3) ? 1 : 2);
-            _vira_x11.mouse_down[b] = false;
+            _vira_x11.mouse_x = ev.xbutton.x;
+            _vira_x11.mouse_y = ev.xbutton.y;
+            if (ev.xbutton.button != 4 && ev.xbutton.button != 5) {
+                int b = (ev.xbutton.button == Button1) ? 0 : ((ev.xbutton.button == Button3) ? 1 : 2);
+                _vira_x11.mouse_down[b] = false;
+            }
         } else if (ev.type == KeyPress) {
             char char_buf[32];
             KeySym sym = 0;
@@ -319,6 +346,23 @@ static inline void _vira_x11_free_image(int32_t id) {
     _vira_gui_images[id].is_valid = false;
     _vira_gui_images[id].width = 0;
     _vira_gui_images[id].height = 0;
+}
+
+static inline void _vira_x11_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (!_vira_x11.dpy || !_vira_x11.gc) return;
+    if (w <= 0 || h <= 0) {
+        XRectangle r = { 0, 0, 0, 0 };
+        XSetClipRectangles(_vira_x11.dpy, _vira_x11.gc, 0, 0, &r, 1, Unsorted);
+    } else {
+        XRectangle r = { (short)x, (short)y, (unsigned short)w, (unsigned short)h };
+        XSetClipRectangles(_vira_x11.dpy, _vira_x11.gc, 0, 0, &r, 1, Unsorted);
+    }
+}
+
+static inline void _vira_x11_reset_clip(void) {
+    if (_vira_x11.dpy && _vira_x11.gc) {
+        XSetClipMask(_vira_x11.dpy, _vira_x11.gc, None);
+    }
 }
 
 #endif // VIRA_GUI_X11_H
