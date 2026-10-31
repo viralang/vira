@@ -1,0 +1,316 @@
+module math
+
+pub const PI: f64 = 3.141592653589793
+pub const TAU: f64 = 6.283185307179586
+pub const E: f64 = 2.718281828459045
+pub const SQRT2: f64 = 1.414213562373095
+
+@[intrinsic: 'vira_math_sin']
+fn c_sin(x f64) f64
+
+@[intrinsic: 'vira_math_cos']
+fn c_cos(x f64) f64
+
+@[intrinsic: 'vira_math_tan']
+fn c_tan(x f64) f64
+
+@[intrinsic: 'vira_math_asin']
+fn c_asin(x f64) f64
+
+@[intrinsic: 'vira_math_acos']
+fn c_acos(x f64) f64
+
+@[intrinsic: 'vira_math_atan']
+fn c_atan(x f64) f64
+
+@[intrinsic: 'vira_math_atan2']
+fn c_atan2(y f64, x f64) f64
+
+@[intrinsic: 'vira_math_sinh']
+fn c_sinh(x f64) f64
+
+@[intrinsic: 'vira_math_cosh']
+fn c_cosh(x f64) f64
+
+@[intrinsic: 'vira_math_tanh']
+fn c_tanh(x f64) f64
+
+@[intrinsic: 'vira_math_exp']
+fn c_exp(x f64) f64
+
+@[intrinsic: 'vira_math_exp2']
+fn c_exp2(x f64) f64
+
+@[intrinsic: 'vira_math_log']
+fn c_log(x f64) f64
+
+@[intrinsic: 'vira_math_log2']
+fn c_log2(x f64) f64
+
+@[intrinsic: 'vira_math_log10']
+fn c_log10(x f64) f64
+
+@[intrinsic: 'vira_math_pow']
+fn c_pow(x f64, y f64) f64
+
+@[intrinsic: 'vira_math_sqrt']
+fn c_sqrt(x f64) f64
+
+@[intrinsic: 'vira_math_cbrt']
+fn c_cbrt(x f64) f64
+
+@[intrinsic: 'vira_math_hypot']
+fn c_hypot(x f64, y f64) f64
+
+@[intrinsic: 'vira_math_abs']
+fn c_abs(x f64) f64
+
+@[intrinsic: 'vira_math_abs_int']
+fn c_abs_int(x int) int
+
+@[intrinsic: 'vira_math_abs_i64']
+fn c_abs_i64(x i64) i64
+
+@[intrinsic: 'vira_math_floor']
+fn c_floor(x f64) f64
+
+@[intrinsic: 'vira_math_ceil']
+fn c_ceil(x f64) f64
+
+@[intrinsic: 'vira_math_round']
+fn c_round(x f64) f64
+
+@[intrinsic: 'vira_math_trunc']
+fn c_trunc(x f64) f64
+
+@[intrinsic: 'vira_math_fmod']
+fn c_fmod(x f64, y f64) f64
+
+@[intrinsic: 'vira_math_is_nan']
+fn c_isnan(x f64) bool
+
+@[intrinsic: 'vira_math_is_inf']
+fn c_isinf(x f64) bool
+
+@[intrinsic: 'vira_math_srand']
+fn c_srand(seed int) void
+
+@[intrinsic: 'vira_math_rand_int']
+fn c_rand_int(min_v int, max_v int) int
+
+@[intrinsic: 'vira_math_rand_f64']
+fn c_rand_f64() f64
+
+@[intrinsic: 'vira_math_sort_ints']
+fn c_sort_ints(mut s []int) void
+
+@[intrinsic: 'vira_math_sort_f64s']
+fn c_sort_f64s(mut s []f64) void
+
+pub fn sin(x f64) f64 {
+	return c_sin(x)
+}
+
+pub fn cos(x f64) f64 {
+	return c_cos(x)
+}
+
+pub fn tan(x f64) f64 {
+	return c_tan(x)
+}
+
+pub fn asin(x f64) f64 {
+	return c_asin(x)
+}
+
+pub fn acos(x f64) f64 {
+	return c_acos(x)
+}
+
+pub fn atan(x f64) f64 {
+	return c_atan(x)
+}
+
+pub fn atan2(y f64, x f64) f64 {
+	return c_atan2(y, x)
+}
+
+pub fn sinh(x f64) f64 {
+	return c_sinh(x)
+}
+
+pub fn cosh(x f64) f64 {
+	return c_cosh(x)
+}
+
+pub fn tanh(x f64) f64 {
+	return c_tanh(x)
+}
+
+pub fn exp(x f64) f64 {
+	return c_exp(x)
+}
+
+pub fn exp2(x f64) f64 {
+	return c_exp2(x)
+}
+
+pub fn log(x f64) f64 {
+	return c_log(x)
+}
+
+pub fn log2(x f64) f64 {
+	return c_log2(x)
+}
+
+pub fn log10(x f64) f64 {
+	return c_log10(x)
+}
+
+pub fn pow(x f64, y f64) f64 {
+	return c_pow(x, y)
+}
+
+pub fn sqrt(x f64) f64 {
+	return c_sqrt(x)
+}
+
+pub fn cbrt(x f64) f64 {
+	return c_cbrt(x)
+}
+
+pub fn hypot(x f64, y f64) f64 {
+	return c_hypot(x, y)
+}
+
+pub fn abs(x f64) f64 {
+	return c_abs(x)
+}
+
+pub fn abs_int(x int) int {
+	return c_abs_int(x)
+}
+
+pub fn abs_i64(x i64) i64 {
+	return c_abs_i64(x)
+}
+
+pub fn floor(x f64) f64 {
+	return c_floor(x)
+}
+
+pub fn ceil(x f64) f64 {
+	return c_ceil(x)
+}
+
+pub fn round(x f64) f64 {
+	return c_round(x)
+}
+
+pub fn trunc(x f64) f64 {
+	return c_trunc(x)
+}
+
+pub fn fmod(x f64, y f64) f64 {
+	return c_fmod(x, y)
+}
+
+pub fn is_nan(x f64) bool {
+	return c_isnan(x)
+}
+
+pub fn is_inf(x f64) bool {
+	return c_isinf(x)
+}
+
+pub fn srand(seed int) void {
+	c_srand(seed)
+}
+
+pub fn rand_int(min_v int, max_v int) int {
+	return c_rand_int(min_v, max_v)
+}
+
+pub fn rand_f64() f64 {
+	return c_rand_f64()
+}
+
+pub fn sort_ints(mut s []int) void {
+	c_sort_ints(mut s)
+}
+
+pub fn sort_f64s(mut s []f64) void {
+	c_sort_f64s(mut s)
+}
+
+pub fn min(a f64, b f64) f64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+pub fn max(a f64, b f64) f64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+pub fn clamp(val f64, min_val f64, max_val f64) f64 {
+	if val < min_val {
+		return min_val
+	}
+	if val > max_val {
+		return max_val
+	}
+	return val
+}
+
+pub fn min_int(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+pub fn max_int(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+pub fn clamp_int(val int, min_val int, max_val int) int {
+	if val < min_val {
+		return min_val
+	}
+	if val > max_val {
+		return max_val
+	}
+	return val
+}
+
+pub fn min_i64(a i64, b i64) i64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+pub fn max_i64(a i64, b i64) i64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+pub fn clamp_i64(val i64, min_val i64, max_val i64) i64 {
+	if val < min_val {
+		return min_val
+	}
+	if val > max_val {
+		return max_val
+	}
+	return val
+}

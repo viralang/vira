@@ -1,0 +1,117 @@
+// ============================================================================
+// VIRA TUTORIAL 31: BASIC CLI APPLICATION DEVELOPMENT
+// ============================================================================
+// Demonstrates:
+// 1. Command-line argument inspection via `os.args()`
+// 2. Environment variables (`os.getenv`, `os.setenv`)
+// 3. Platform metadata & path helpers (`os.platform`, `os.join_path`, etc.)
+// 4. File I/O with deterministic cleanup via `defer`
+// 5. Standard I/O output streams (`print`, `println`, `eprintln`)
+// 6. Graceful process termination with `os.exit`
+//
+// Run via:
+//   vira run docs/examples/34_basic_cli_app.vir --demo=cli --mode=fast input.txt
+// ============================================================================
+module main
+
+import os
+import io
+import strings
+
+const APP_NAME = 'ViraCLI'
+const APP_VERSION = '1.0.0'
+
+fn print_banner() {
+	println('===========================================================')
+	println('  ${APP_NAME} v${APP_VERSION} - Native Systems CLI Demo')
+	println('===========================================================')
+}
+
+fn demonstrate_args() {
+	println('[1] Command-Line Arguments (os.args):')
+	args := os.args()
+	println('  Total arguments received: ${args.len}')
+	for mut i := 0; i < args.len; i += 1 {
+		println('    argv[${i}] = \'${args[i]}\'')
+	}
+	println('')
+}
+
+fn demonstrate_environment() {
+	println('[2] Environment Variables (os.getenv & os.setenv):')
+	test_key := 'VIRA_DEMO_ENV'
+	test_val := 'production_ready'
+
+	os.setenv(test_key, test_val) or {
+		eprintln('Failed to set environment variable')
+		return
+	}
+	retrieved := os.getenv(test_key)
+	println('  Set and retrieved ${test_key} = "${retrieved}"')
+
+	pid := os.getpid()
+	println('  Current process PID: ${pid}')
+	println('  Host platform: ${os.platform()} (is_windows: ${os.is_windows()})')
+	p1 := 'build'
+	p2 := 'output.log'
+	joined := os.join_path(p1, p2)
+	println('  Joined path helper: "${joined}"')
+	println('')
+}
+
+fn demonstrate_file_ops_with_defer() {
+	println('[3] File Operations & Cleanup with `defer`:')
+	tmp_dir := 'scratch_cli_demo'
+	if !os.is_dir(tmp_dir) {
+		os.mkdir_all(tmp_dir, 0o755) or {
+			eprintln('Failed to create directory: ${tmp_dir}')
+			return
+		}
+	}
+	// Defer directory removal at scope exit
+	defer os.remove(tmp_dir)
+
+	file_path := os.join_path(tmp_dir, 'manifest.txt')
+	// Defer file cleanup before directory removal
+	defer os.remove(file_path)
+
+	println('  Created temporary test directory: ${tmp_dir}')
+	println('  Target file path: ${file_path}')
+
+	mut out_f := io.File.open(file_path, 'wb') or {
+		eprintln('Error opening output file')
+		return
+	}
+	payload := 'app_name=${APP_NAME}\nversion=${APP_VERSION}\nstatus=verified\n'
+	_ := out_f.write_string(payload) or { 0 }
+	out_f.close() or { false }
+
+	exists := os.exists(file_path)
+	println('  File written successfully. Exists on disk: ${exists}')
+
+	mut in_f := io.File.open(file_path, 'rb') or {
+		eprintln('Error opening input file for reading')
+		return
+	}
+	mut reader := io.BufReader.new(in_f)
+	println('  Reading lines via io.BufReader:')
+	for {
+		line := reader.read_line() or { break }
+		if line.len == 0 {
+			break
+		}
+		println('    > ${line}')
+	}
+	reader.close() or { false }
+	println('  Deterministic `defer` handlers registered for cleanup.')
+	println('')
+}
+
+fn main() {
+	print_banner()
+	demonstrate_args()
+	demonstrate_environment()
+	demonstrate_file_ops_with_defer()
+
+	println('✓ All basic CLI operations completed successfully.')
+}

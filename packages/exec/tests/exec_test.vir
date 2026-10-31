@@ -1,0 +1,62 @@
+module main
+
+import os
+import exec
+
+fn test_command_output() {
+	mut cmd := exec.command("echo", ["Vira Exec Engine"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "echo", "Vira Exec Engine"])
+	}
+	out := cmd.output() or {
+		panic("cmd.output failed: ${err}")
+	}
+	if !out.contains("Vira Exec Engine") {
+		panic("expected output to contain 'Vira Exec Engine', got: ${out}")
+	}
+	println("✓ test_command_output passed")
+}
+
+fn test_combined_output() {
+	mut cmd := exec.command("echo", ["Combined Stream"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "echo", "Combined Stream"])
+	}
+	out := cmd.combined_output() or {
+		println("COMBINED ERROR: ${err}")
+		panic("cmd.combined_output failed: ${err}")
+	}
+	println("COMBINED OUT: '${out}'")
+	if !out.contains("Combined Stream") {
+		panic("combined output mismatch: ${out}")
+	}
+	println("✓ test_combined_output passed")
+}
+
+fn test_async_start_wait() {
+	mut cmd := exec.command("sh", ["-c", "exit 0"])
+	if os.is_windows() {
+		cmd = exec.command("cmd", ["/c", "exit 0"])
+	}
+	pid := cmd.start() or {
+		panic("start failed: ${err}")
+	}
+	if pid <= 0 {
+		panic("invalid pid from start")
+	}
+
+	exit_code := cmd.wait() or {
+		panic("wait failed: ${err}")
+	}
+	if exit_code != 0 {
+		panic("expected exit code 0, got ${exit_code}")
+	}
+	println("✓ test_async_start_wait passed")
+}
+
+fn main() {
+	test_command_output()
+	test_combined_output()
+	test_async_start_wait()
+	println("All exec tests passed successfully!")
+}

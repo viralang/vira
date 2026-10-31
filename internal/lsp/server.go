@@ -1469,7 +1469,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		}
 	}
 
-	for _, kw := range []string{"module", "import", "pub", "mut", "fn", "struct", "actor", "interface", "return", "if", "else", "switch", "case", "default", "for", "arena", "true", "false"} {
+	for _, kw := range []string{"module", "import", "pub", "mut", "const", "defer", "fn", "struct", "actor", "interface", "return", "if", "else", "switch", "case", "default", "for", "break", "continue", "arena", "true", "false"} {
 		items = append(items, CompletionItem{
 			Label:  kw,
 			Kind:   14, // Keyword
@@ -1477,7 +1477,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		})
 	}
 
-	for _, bi := range []string{"println", "print", "eprintln", "panic", "time_now_us", "time_now_ms", "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_transpose", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
+	for _, bi := range []string{"println", "print", "eprintln", "eprint", "time_sleep_ms", "panic", "time_now_us", "time_now_ms", "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_transpose", "gui_init", "gui_begin", "gui_end", "gui_button", "gui_clear", "file_exists", "read_file", "write_file"} {
 		items = append(items, CompletionItem{
 			Label:  bi,
 			Kind:   3, // Function

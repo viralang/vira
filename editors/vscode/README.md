@@ -25,7 +25,7 @@ Official Visual Studio Code and Cursor extension for the **Vira Programming Lang
   - **Smart Autocomplete & Dot Completion:** Trigger completion after `.` (e.g., `user.`, `slice.`, `tensor.`, `json.`, `net.`) to see fields, methods, module exports, and promoted members from embedded structs across imported modules
   - **Document Symbols & Outline:** Full breadcrumbs and symbol outline for modules, imports, structs, interfaces, methods, and embeds
 - **Language Configuration:** Automatic bracket matching, smart case/default decrease indentation, surrounding pairs, and comment toggling (`//`, `/* */`).
-- **Snippets:** Built-in productivity snippets for loops (`forin`), collections (`arr`, `slice`, `push`, `getor`), control flow (`switch`), modules (`mod`, `impas`), 3D/4D tensors (`tensor3d`, `tensor4d`), and RFC 8259 JSON building (`jsonb`).
+- **Snippets:** Built-in productivity snippets for loops (`forin`), constants (`const`), cleanup (`defer`), collections (`arr`, `slice`, `push`, `getor`), control flow (`switch`), modules (`mod`, `impas`), CLI flags (`flagset`), structured logging (`logger`), process execution (`exec`), 3D/4D tensors (`tensor3d`, `tensor4d`), and RFC 8259 JSON building (`jsonb`).
 - **Language Server (LSP) Integration:** Real-time semantic diagnostics, error highlighting, and code formatting via `vira lsp` and `vira fmt`.
 - **GitHub Linguist Grammar:** Serves as the upstream grammar for GitHub syntax highlighting (see [LINGUIST.md](LINGUIST.md)).
 
@@ -38,13 +38,13 @@ Official Visual Studio Code and Cursor extension for the **Vira Programming Lang
 Run in your terminal:
 
 ```bash
-code --install-extension editors/vscode/vira-language-0.1.8.vsix
+code --install-extension editors/vscode/vira-language-0.2.0.vsix
 ```
 
 Or in Cursor:
 
 ```bash
-cursor --install-extension editors/vscode/vira-language-0.1.8.vsix
+cursor --install-extension editors/vscode/vira-language-0.2.0.vsix
 ```
 
 ### Option 2: Install from Source

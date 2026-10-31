@@ -63,6 +63,8 @@ const (
 	TokTrue
 	TokFalse
 	TokArena
+	TokConst
+	TokDefer
 
 	TokBreak
 	TokContinue
@@ -148,6 +150,8 @@ var keywords = map[string]Kind{
 	"true":      TokTrue,
 	"false":     TokFalse,
 	"arena":     TokArena,
+	"const":     TokConst,
+	"defer":     TokDefer,
 	"f32":       TokF32,
 	"f16":       TokF16,
 	"bf16":      TokBF16,
@@ -229,6 +233,8 @@ func (k Kind) String() string {
 		TokTrue:       "true",
 		TokFalse:      "false",
 		TokArena:      "arena",
+		TokConst:      "const",
+		TokDefer:      "defer",
 		TokF32:        "f32",
 		TokF16:        "f16",
 		TokBF16:       "bf16",

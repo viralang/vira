@@ -33,6 +33,43 @@ description High-performance tensor graph
 	}
 }
 
+func TestParseManifestBundlingFields(t *testing.T) {
+	content := `
+module my_gui_app
+version 2.0.1
+app_name "My Studio App"
+app_id com.mycorp.studio
+icon assets/studio.png
+assets assets/
+`
+	m, err := mod.ParseManifest(content)
+	if err != nil {
+		t.Fatalf("ParseManifest failed: %v", err)
+	}
+
+	if m.AppName != "My Studio App" {
+		t.Errorf("expected app_name 'My Studio App', got %s", m.AppName)
+	}
+	if m.AppID != "com.mycorp.studio" {
+		t.Errorf("expected app_id 'com.mycorp.studio', got %s", m.AppID)
+	}
+	if m.Icon != "assets/studio.png" {
+		t.Errorf("expected icon 'assets/studio.png', got %s", m.Icon)
+	}
+	if m.Assets != "assets/" {
+		t.Errorf("expected assets 'assets/', got %s", m.Assets)
+	}
+
+	formatted := m.Format()
+	m2, err := mod.ParseManifest(formatted)
+	if err != nil {
+		t.Fatalf("ParseManifest on formatted output failed: %v", err)
+	}
+	if m2.AppName != m.AppName || m2.AppID != m.AppID || m2.Icon != m.Icon {
+		t.Errorf("roundtrip mismatch: got %+v, expected %+v", m2, m)
+	}
+}
+
 func TestFindProjectRoot(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vira_mod_test_*")
 	if err != nil {

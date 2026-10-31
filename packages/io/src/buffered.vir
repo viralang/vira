@@ -25,7 +25,7 @@ pub fn BufReader.new(f File) BufReader {
 pub fn BufReader.from_string(s string) BufReader {
 	b := s.bytes()
 	return BufReader{
-		file: File{ handle: 0, path: '', is_open: false },
+		file: File{ handle: 0, is_open: false },
 		buf: b,
 		pos: 0,
 		len: s.len,
@@ -35,7 +35,7 @@ pub fn BufReader.from_string(s string) BufReader {
 
 pub fn BufReader.from_bytes(b []u8) BufReader {
 	return BufReader{
-		file: File{ handle: 0, path: '', is_open: false },
+		file: File{ handle: 0, is_open: false },
 		buf: b,
 		pos: 0,
 		len: b.len,

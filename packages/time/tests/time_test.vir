@@ -1,0 +1,41 @@
+module main
+
+import time
+
+fn test_timestamps_and_monotonic() {
+	u := time.now_unix()
+	if u < 1700000000 {
+		panic("invalid unix timestamp")
+	}
+
+	m1 := time.monotonic_ns()
+	time.sleep_ms(10)
+	m2 := time.monotonic_ns()
+
+	if m2 <= m1 {
+		panic("monotonic time must increase")
+	}
+	println("✓ test_timestamps_and_monotonic passed")
+}
+
+fn test_formatting_and_duration() {
+	// Epoch 1700000000 in UTC is 2023-11-14 22:13:20
+	formatted := time.format("%Y-%m-%d", 1700000000, true) or {
+		panic("format failed: ${err}")
+	}
+	if formatted != "2023-11-14" {
+		panic("format mismatch: ${formatted}")
+	}
+
+	d := time.Duration.from_secs(5)
+	if d.secs() != 5 || d.millis() != 5000 {
+		panic("duration conversion failed")
+	}
+	println("✓ test_formatting_and_duration passed")
+}
+
+fn main() {
+	test_timestamps_and_monotonic()
+	test_formatting_and_duration()
+	println("All time tests passed successfully!")
+}

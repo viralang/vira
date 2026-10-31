@@ -21,6 +21,10 @@ type Manifest struct {
 	License      string       `json:"license"`
 	Author       string       `json:"author"`
 	Description  string       `json:"description"`
+	AppName      string       `json:"app_name,omitempty"`
+	AppID        string       `json:"app_id,omitempty"`
+	Icon         string       `json:"icon,omitempty"`
+	Assets       string       `json:"assets,omitempty"`
 	Dependencies []Dependency `json:"dependencies"`
 	Deps         []string     `json:"-"` // legacy compatibility
 }
@@ -81,6 +85,14 @@ func ParseManifest(content string) (*Manifest, error) {
 			m.Author = val
 		case "description":
 			m.Description = val
+		case "app_name", "appname":
+			m.AppName = val
+		case "app_id", "appid":
+			m.AppID = val
+		case "icon":
+			m.Icon = val
+		case "assets":
+			m.Assets = val
 		case "dep":
 			fields := strings.Fields(val)
 			if len(fields) >= 1 {
@@ -116,6 +128,18 @@ func (m *Manifest) Format() string {
 	}
 	if m.Description != "" {
 		sb.WriteString(fmt.Sprintf("description %s\n", m.Description))
+	}
+	if m.AppName != "" {
+		sb.WriteString(fmt.Sprintf("app_name %s\n", m.AppName))
+	}
+	if m.AppID != "" {
+		sb.WriteString(fmt.Sprintf("app_id %s\n", m.AppID))
+	}
+	if m.Icon != "" {
+		sb.WriteString(fmt.Sprintf("icon %s\n", m.Icon))
+	}
+	if m.Assets != "" {
+		sb.WriteString(fmt.Sprintf("assets %s\n", m.Assets))
 	}
 	if len(m.Dependencies) > 0 {
 		sb.WriteString("\ndeps\n")

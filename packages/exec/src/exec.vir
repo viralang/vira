@@ -1,0 +1,151 @@
+module exec
+
+@[intrinsic: 'vira_sys_exec_run']
+fn c_exec_run(args []string, dir string, inherit_stdio bool) !int
+
+@[intrinsic: 'vira_sys_exec_output']
+fn c_exec_output(args []string, dir string, stdin_text string, combine_err bool) !string
+
+@[intrinsic: 'vira_sys_proc_start']
+fn c_proc_start(args []string, dir string, clone_flags int, inherit_stdio bool) !int
+
+@[intrinsic: 'vira_sys_proc_wait']
+fn c_proc_wait(pid int) !int
+
+pub struct Command {
+pub mut:
+	name string
+	args []string
+	dir string
+	clone_flags int
+	stdin_text string
+	inherit_stdio bool
+	pid int
+}
+
+pub fn Command.new(name string, extra []string) Command {
+	return Command{
+		name: name,
+		args: extra,
+		dir: "",
+		clone_flags: 0,
+		stdin_text: "",
+		inherit_stdio: false,
+		pid: 0,
+	}
+}
+
+pub fn command(name string, extra []string) Command {
+	return Command.new(name, extra)
+}
+
+pub fn (mut c Command) set_dir(dir string) {
+	c.dir = dir
+}
+
+pub fn (mut c Command) set_clone_flags(flags int) {
+	c.clone_flags = flags
+}
+
+pub fn (mut c Command) set_stdin(text string) {
+	c.stdin_text = text
+}
+
+pub fn (mut c Command) set_inherit_stdio(inherit bool) {
+	c.inherit_stdio = inherit
+}
+
+pub fn (c Command) all_args() []string {
+	mut full := []string{}
+	full.push(c.name)
+	for a in c.args {
+		full.push(a)
+	}
+	return full
+}
+
+pub fn (c Command) run() !int {
+	full := c.all_args()
+	res := c_exec_run(full, c.dir, c.inherit_stdio) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) Run() !int {
+	res := c.run() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) output() !string {
+	full := c.all_args()
+	res := c_exec_output(full, c.dir, c.stdin_text, false) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) Output() !string {
+	res := c.output() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) combined_output() !string {
+	full := c.all_args()
+	res := c_exec_output(full, c.dir, c.stdin_text, true) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) CombinedOutput() !string {
+	res := c.combined_output() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (mut c Command) start() !int {
+	full := c.all_args()
+	pid := c_proc_start(full, c.dir, c.clone_flags, c.inherit_stdio) or {
+		return error(err)
+	}
+	c.pid = pid
+	return pid
+}
+
+pub fn (mut c Command) Start() !int {
+	res := c.start() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) wait() !int {
+	if c.pid <= 0 {
+		return error("process not started")
+	}
+	res := c_proc_wait(c.pid) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn (c Command) Wait() !int {
+	res := c.wait() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn combined_output(name string, extra []string) !string {
+	c := Command.new(name, extra)
+	res := c.combined_output() or {
+		return error(err)
+	}
+	return res
+}

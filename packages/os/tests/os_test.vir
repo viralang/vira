@@ -1,0 +1,103 @@
+module main
+
+import os
+
+fn test_env_and_args() {
+	args := os.args()
+	if args.len < 1 {
+		panic("expected at least 1 arg (exe path)")
+	}
+
+	os.setenv("VIRA_TEST_VAR", "active_2026") or {
+		panic("setenv failed: ${err}")
+	}
+	val := os.getenv("VIRA_TEST_VAR")
+	if val != "active_2026" {
+		panic("getenv mismatch: ${val}")
+	}
+
+	os.unsetenv("VIRA_TEST_VAR") or {
+		panic("unsetenv failed: ${err}")
+	}
+	cleared := os.getenv("VIRA_TEST_VAR")
+	if cleared != "" {
+		panic("expected cleared env var")
+	}
+	println("✓ test_env_and_args passed")
+}
+
+fn test_path_helpers() {
+	joined := os.join_path("home/user", "data.json")
+	if joined != "home/user/data.json" {
+		panic("join_path mismatch: ${joined}")
+	}
+
+	base := os.base_name("var/log/system.log")
+	if base != "system.log" {
+		panic("base_name mismatch: ${base}")
+	}
+
+	dir := os.dir_name("var/log/system.log")
+	if dir != "var/log" {
+		panic("dir_name mismatch: ${dir}")
+	}
+
+	extension := os.ext("archive.tar.gz")
+	if extension != ".gz" {
+		panic("ext mismatch: ${extension}")
+	}
+
+	cleaned := os.clean_path("C:\\windows\\system32")
+	if cleaned != "C:/windows/system32" {
+		panic("clean_path mismatch: ${cleaned}")
+	}
+	println("✓ test_path_helpers passed")
+}
+
+fn test_file_and_dir_ops() {
+	dir_test := "scratch/os_test_dir"
+	file_test := "scratch/os_test_dir/file.txt"
+
+	os.mkdir_all(dir_test, 0o755) or {
+		panic("mkdir_all failed: ${err}")
+	}
+	if !os.is_dir(dir_test) {
+		panic("is_dir failed")
+	}
+
+	os.write_file(file_test, "vira systems programming") or {
+		panic("write_file failed: ${err}")
+	}
+	if !os.is_file(file_test) {
+		panic("is_file failed")
+	}
+
+	read_back := os.read_file(file_test) or {
+		panic("read_file failed: ${err}")
+	}
+	if read_back != "vira systems programming" {
+		panic("read_back mismatch: ${read_back}")
+	}
+
+	entries := os.read_dir(dir_test) or {
+		panic("read_dir failed: ${err}")
+	}
+	if entries.len < 1 {
+		panic("expected at least 1 entry in dir")
+	}
+
+	os.remove_all(dir_test) or {
+		panic("remove_all failed: ${err}")
+	}
+	if os.exists(dir_test) {
+		panic("expected dir_test to be removed")
+	}
+	println("✓ test_file_and_dir_ops passed")
+}
+
+fn main() {
+	test_env_and_args()
+	test_path_helpers()
+	test_file_and_dir_ops()
+	println("All os tests passed successfully!")
+}

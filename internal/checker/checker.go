@@ -56,11 +56,21 @@ func (s *Scope) Lookup(name string) (*VarSymbol, bool) {
 	return nil, false
 }
 
+type ConstSymbol struct {
+	Module string
+	Name   string
+	IsPub  bool
+	Type   Type
+	Value  ast.Expr
+	Span   token.Span
+}
+
 type ModuleScope struct {
 	Name       string
 	Structs    map[string]*StructType
 	Interfaces map[string]*InterfaceType
 	Functions  map[string]*FnSig
+	Consts     map[string]*ConstSymbol
 }
 
 func NewModuleScope(name string) *ModuleScope {
@@ -69,6 +79,7 @@ func NewModuleScope(name string) *ModuleScope {
 		Structs:    make(map[string]*StructType),
 		Interfaces: make(map[string]*InterfaceType),
 		Functions:  make(map[string]*FnSig),
+		Consts:     make(map[string]*ConstSymbol),
 	}
 }
 
@@ -79,14 +90,17 @@ type Checker struct {
 	structs        map[string]*StructType
 	interfaces     map[string]*InterfaceType
 	functions      map[string]*FnSig
+	consts         map[string]*ConstSymbol
 	errors         []SemanticError
 
 	// Semantic side-tables consumed by Phase 3 (autofree) and Phase 4 (cgen)
-	ExprTypes     map[ast.Expr]Type
-	SelectorPaths map[*ast.SelectorExpr][]string // records embedded hop path (e.g. ["AuditMeta"])
+	ExprTypes      map[ast.Expr]Type
+	SelectorPaths  map[*ast.SelectorExpr][]string // records embedded hop path (e.g. ["AuditMeta"])
+	ResolvedConsts map[ast.Expr]*ConstSymbol      // records resolved top-level constant references
 
 	// Function context during Pass 3
-	curFnReturn Type
+	curFnReturn    Type
+	inDeferDiscard bool
 }
 
 func New() *Checker {
@@ -96,8 +110,10 @@ func New() *Checker {
 		structs:        make(map[string]*StructType),
 		interfaces:     make(map[string]*InterfaceType),
 		functions:      make(map[string]*FnSig),
+		consts:         make(map[string]*ConstSymbol),
 		ExprTypes:      make(map[ast.Expr]Type),
 		SelectorPaths:  make(map[*ast.SelectorExpr][]string),
+		ResolvedConsts: make(map[ast.Expr]*ConstSymbol),
 	}
 	c.registerBuiltins()
 	return c
@@ -117,6 +133,21 @@ func (c *Checker) Interfaces() map[string]*InterfaceType {
 
 func (c *Checker) Functions() map[string]*FnSig {
 	return c.functions
+}
+
+func (c *Checker) Consts() map[string]*ConstSymbol {
+	return c.consts
+}
+
+func (c *Checker) LookupConstInModule(modName, constName string) *ConstSymbol {
+	targetMod := modName
+	if resolved, ok := c.currentImports[modName]; ok {
+		targetMod = resolved
+	}
+	if m, ok := c.modules[targetMod]; ok {
+		return m.Consts[constName]
+	}
+	return nil
 }
 
 func (c *Checker) ModuleName() string {
@@ -235,8 +266,20 @@ func (c *Checker) errorf(span token.Span, format string, args ...any) {
 }
 
 func (c *Checker) registerBuiltins() {
+	c.functions["print"] = &FnSig{
+		Name:       "print",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "msg", Type: TypeString, IsMut: false}},
+		ReturnType: TypeVoid,
+	}
 	c.functions["println"] = &FnSig{
 		Name:       "println",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "msg", Type: TypeString, IsMut: false}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["eprint"] = &FnSig{
+		Name:       "eprint",
 		IsPub:      true,
 		Params:     []ParamInfo{{Name: "msg", Type: TypeString, IsMut: false}},
 		ReturnType: TypeVoid,
@@ -264,6 +307,12 @@ func (c *Checker) registerBuiltins() {
 		IsPub:      true,
 		Params:     []ParamInfo{},
 		ReturnType: TypeI64,
+	}
+	c.functions["time_sleep_ms"] = &FnSig{
+		Name:       "time_sleep_ms",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "ms", Type: TypeInt}},
+		ReturnType: TypeVoid,
 	}
 	c.functions["tensor_fill"] = &FnSig{
 		Name:  "tensor_fill",
@@ -795,6 +844,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "label", Type: TypeString}},
 		ReturnType: TypeBool,
 	}
+	c.functions["gui_btn_danger"] = &FnSig{
+		Name:       "gui_btn_danger",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}},
+		ReturnType: TypeBool,
+	}
 	c.functions["gui_check"] = &FnSig{
 		Name:       "gui_check",
 		IsPub:      true,
@@ -879,6 +934,121 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeVoid,
 	}
+	c.functions["gui_dropdown"] = &FnSig{
+		Name:  "gui_dropdown",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "items", Type: &SliceType{Elem: TypeString}},
+			{Name: "selected_idx", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_select"] = &FnSig{
+		Name:  "gui_select",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "items", Type: &SliceType{Elem: TypeString}},
+			{Name: "selected_idx", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table"] = &FnSig{
+		Name:  "gui_table",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "width", Type: TypeInt},
+			{Name: "height", Type: TypeInt},
+			{Name: "headers", Type: &SliceType{Elem: TypeString}},
+			{Name: "rows", Type: &SliceType{Elem: &SliceType{Elem: TypeString}}},
+			{Name: "search_query", Type: TypeString},
+			{Name: "selected_row", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_tbl"] = &FnSig{
+		Name:  "gui_tbl",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "headers", Type: &SliceType{Elem: TypeString}},
+			{Name: "rows", Type: &SliceType{Elem: &SliceType{Elem: TypeString}}},
+			{Name: "search_query", Type: TypeString},
+			{Name: "selected_row", Type: TypeInt},
+		},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table_sort_col"] = &FnSig{
+		Name:       "gui_table_sort_col",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_table_sort_asc"] = &FnSig{
+		Name:       "gui_table_sort_asc",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
+	c.functions["gui_table_set_sort"] = &FnSig{
+		Name:  "gui_table_set_sort",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "col", Type: TypeInt},
+			{Name: "asc", Type: TypeBool},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_load_image"] = &FnSig{
+		Name:       "gui_load_image",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_image_width"] = &FnSig{
+		Name:       "gui_image_width",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_image_height"] = &FnSig{
+		Name:       "gui_image_height",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
+		ReturnType: TypeInt,
+	}
+	c.functions["gui_draw_image"] = &FnSig{
+		Name:  "gui_draw_image",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "id", Type: TypeInt},
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "w", Type: TypeInt},
+			{Name: "h", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_image"] = &FnSig{
+		Name:  "gui_image",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "id", Type: TypeInt},
+			{Name: "w", Type: TypeInt},
+			{Name: "h", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_free_image"] = &FnSig{
+		Name:       "gui_free_image",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "id", Type: TypeInt}},
+		ReturnType: TypeVoid,
+	}
 }
 
 // CheckFile executes all 3 semantic passes on a parsed AST File.
@@ -959,6 +1129,8 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				c.currentMod = d.Module
 			} else if d, ok := decl.(*ast.FnDecl); ok && d.Module != "" {
 				c.currentMod = d.Module
+			} else if d, ok := decl.(*ast.ConstDecl); ok && d.Module != "" {
+				c.currentMod = d.Module
 			}
 
 			switch d := decl.(type) {
@@ -968,6 +1140,8 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				c.registerInterfaceMembers(d)
 			case *ast.FnDecl:
 				c.registerFnHeader(d)
+			case *ast.ConstDecl:
+				c.registerConstDecl(d)
 			}
 			c.currentMod = savedMod
 		}
@@ -1159,6 +1333,38 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 	c.functions[dMod+"."+d.Name.Name] = sig
 	if _, exists := c.functions[d.Name.Name]; !exists || dMod == "main" {
 		c.functions[d.Name.Name] = sig
+	}
+}
+
+func (c *Checker) registerConstDecl(d *ast.ConstDecl) {
+	dMod := d.Module
+	if dMod == "" {
+		dMod = c.currentMod
+	}
+	constScope := NewScope(nil)
+	valType := c.checkExpr(d.Value, constScope)
+	finalType := valType
+	if d.Type != nil {
+		declType := c.resolveTypeExpr(d.Type)
+		if !declType.Equals(valType) {
+			c.errorf(d.DeclSpan, "constant '%s' declared as '%s', got '%s'", d.Name.Name, declType, valType)
+		}
+		finalType = declType
+		c.ExprTypes[d.Value] = finalType
+	}
+	sym := &ConstSymbol{
+		Module: dMod,
+		Name:   d.Name.Name,
+		IsPub:  d.IsPub,
+		Type:   finalType,
+		Value:  d.Value,
+		Span:   d.DeclSpan,
+	}
+	modScope := c.getOrCreateModule(dMod)
+	modScope.Consts[d.Name.Name] = sym
+	c.consts[dMod+"."+d.Name.Name] = sym
+	if _, exists := c.consts[d.Name.Name]; !exists || dMod == "main" {
+		c.consts[d.Name.Name] = sym
 	}
 }
 
@@ -1385,6 +1591,23 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 		arenaScope := NewScope(scope)
 		c.checkBlock(s.Body, arenaScope)
 
+	case *ast.DeferStmt:
+		deferScope := NewScope(scope)
+		if s.Body != nil {
+			for _, st := range s.Body.Stmts {
+				if es, ok := st.(*ast.ExprStmt); ok {
+					if call, isCall := es.Expr.(*ast.CallExpr); isCall && call.OrBlock == nil && !call.Propagate {
+						prev := c.inDeferDiscard
+						c.inDeferDiscard = true
+						c.checkExpr(es.Expr, deferScope)
+						c.inDeferDiscard = prev
+						continue
+					}
+				}
+				c.checkStmt(st, deferScope)
+			}
+		}
+
 	case *ast.ReturnStmt:
 		if s.Value == nil {
 			if !c.curFnReturn.Equals(TypeVoid) {
@@ -1417,6 +1640,10 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span token.Span) {
 	switch t := target.(type) {
 	case *ast.IdentExpr:
+		if cSym, isConst := c.ResolvedConsts[t]; isConst {
+			c.errorf(span, "cannot reassign constant '%s'", cSym.Name)
+			return
+		}
 		sym, ok := scope.Lookup(t.Ident.Name)
 		if !ok {
 			return
@@ -1427,6 +1654,10 @@ func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span
 		}
 
 	case *ast.SelectorExpr:
+		if cSym, isConst := c.ResolvedConsts[t]; isConst {
+			c.errorf(span, "cannot reassign constant '%s.%s'", cSym.Module, cSym.Name)
+			return
+		}
 		// 1. Root binding must be declared `mut`
 		rootSym := c.findRootSymbol(t.Left, scope)
 		if rootSym != nil && !rootSym.IsMut {
@@ -1496,8 +1727,17 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 	case *ast.LiteralExpr:
 		switch e.Kind {
 		case token.TokInt:
+			if strings.HasSuffix(e.Value, "i64") {
+				return TypeI64
+			}
 			return TypeInt
 		case token.TokFloat:
+			if strings.HasSuffix(e.Value, "f32") {
+				return TypeF32
+			}
+			if strings.HasSuffix(e.Value, "bf16") {
+				return TypeBF16
+			}
 			return TypeF64
 		case token.TokString:
 			return TypeString
@@ -1519,11 +1759,19 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			return TypeVoid
 		}
 		sym, ok := scope.Lookup(e.Ident.Name)
-		if !ok {
-			c.errorf(e.Ident.NamePos, "undefined variable '%s'", e.Ident.Name)
-			return TypeVoid
+		if ok {
+			return sym.Type
 		}
-		return sym.Type
+		if cSym := c.LookupConstInModule(c.currentMod, e.Ident.Name); cSym != nil {
+			c.ResolvedConsts[e] = cSym
+			return cSym.Type
+		}
+		if cSym, hasGlobal := c.consts[e.Ident.Name]; hasGlobal && (cSym.Module == c.currentMod || cSym.IsPub) {
+			c.ResolvedConsts[e] = cSym
+			return cSym.Type
+		}
+		c.errorf(e.Ident.NamePos, "undefined variable '%s'", e.Ident.Name)
+		return TypeVoid
 
 	case *ast.StructInitExpr:
 		typ := c.resolveTypeExpr(e.Type)
@@ -1564,6 +1812,22 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		return st
 
 	case *ast.SelectorExpr:
+		if identLeft, ok := e.Left.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
+				if cSym := c.LookupConstInModule(identLeft.Ident.Name, e.Field.Name); cSym != nil {
+					targetMod := identLeft.Ident.Name
+					if resolved, ok := c.currentImports[targetMod]; ok {
+						targetMod = resolved
+					}
+					if targetMod != c.currentMod && !cSym.IsPub {
+						c.errorf(e.SelSpan, "constant '%s.%s' is private to module '%s'", identLeft.Ident.Name, e.Field.Name, targetMod)
+						return TypeVoid
+					}
+					c.ResolvedConsts[e] = cSym
+					return cSym.Type
+				}
+			}
+		}
 		leftType := c.checkExpr(e.Left, scope)
 		if sl, ok := leftType.(*SliceType); ok {
 			if e.Field.Name == "len" || e.Field.Name == "cap" {
@@ -1694,6 +1958,9 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		case token.TokEq, token.TokNeq, token.TokLt, token.TokLte, token.TokGt, token.TokGte, token.TokAnd, token.TokOrLogical:
 			return TypeBool
 		default:
+			if ExactEquals(l, TypeI64) || ExactEquals(r, TypeI64) {
+				return TypeI64
+			}
 			return l
 		}
 
@@ -1706,7 +1973,7 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			}
 			return TypeBool
 		case token.TokMinus:
-			if !t.Equals(TypeInt) && !t.Equals(TypeF32) && !t.Equals(TypeF64) {
+			if !t.Equals(TypeInt) && !t.Equals(TypeI64) && !t.Equals(TypeF32) && !t.Equals(TypeF64) {
 				c.errorf(e.UnarySpan, "operator '-' expects numeric type, got '%s'", t)
 			}
 			return t
@@ -1735,6 +2002,39 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				return resRet
 			}
 			return &ResultType{Inner: TypeVoid}
+		}
+
+		// Built-in primitive numeric/boolean casts: `u8(x)`, `int(x)`, `i64(x)`, `f32(x)`, `f64(x)`
+		switch callName {
+		case "u8", "byte", "int", "i64", "f32", "f64", "bool":
+			var targetType Type
+			switch callName {
+			case "u8", "byte":
+				targetType = TypeU8
+			case "int":
+				targetType = TypeInt
+			case "i64":
+				targetType = TypeI64
+			case "f32":
+				targetType = TypeF32
+			case "f64":
+				targetType = TypeF64
+			case "bool":
+				targetType = TypeBool
+			}
+			if len(call.Args) != 1 {
+				c.errorf(call.CallSpan, "type cast '%s(...)' expects 1 argument, got %d", callName, len(call.Args))
+				return targetType
+			}
+			argType := c.checkExpr(call.Args[0].Expr, scope)
+			if argType.Equals(TypeString) {
+				c.errorf(call.CallSpan, "cannot cast 'string' directly to '%s' (use .to_int(), .to_i64(), .to_f64(), or .to_f32())", callName)
+				return targetType
+			}
+			if _, isPrim := argType.(*PrimitiveType); !isPrim || argType.Equals(TypeVoid) {
+				c.errorf(call.CallSpan, "cannot cast '%s' to '%s'", argType, callName)
+			}
+			return targetType
 		}
 
 		// Built-in structural interface cast: `Payable(inv)`
@@ -1939,6 +2239,14 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "slice.clone"
+				case "slice":
+					sig = &FnSig{
+						Name:       "slice",
+						Params:     []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}},
+						ReturnType: sl,
+						Span:       callee.SelSpan,
+					}
+					callName = "slice.slice"
 				case "contains":
 					sig = &FnSig{
 						Name:       "contains",
@@ -2028,9 +2336,9 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				case "index_of":
 					sig = &FnSig{Name: "index_of", Params: []ParamInfo{{Name: "substr", Type: TypeString}}, ReturnType: TypeInt, Span: callee.SelSpan}
 					callName = "string.index_of"
-				case "substr":
-					sig = &FnSig{Name: "substr", Params: []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}}, ReturnType: TypeString, Span: callee.SelSpan}
-					callName = "string.substr"
+				case "substr", "slice":
+					sig = &FnSig{Name: callee.Field.Name, Params: []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}}, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string." + callee.Field.Name
 				case "starts_with":
 					sig = &FnSig{Name: "starts_with", Params: []ParamInfo{{Name: "prefix", Type: TypeString}}, ReturnType: TypeBool, Span: callee.SelSpan}
 					callName = "string.starts_with"
@@ -2055,6 +2363,33 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				case "to_i64":
 					sig = &FnSig{Name: "to_i64", Params: nil, ReturnType: &ResultType{Inner: TypeI64}, Span: callee.SelSpan}
 					callName = "string.to_i64"
+				case "to_f64":
+					sig = &FnSig{Name: "to_f64", Params: nil, ReturnType: &ResultType{Inner: TypeF64}, Span: callee.SelSpan}
+					callName = "string.to_f64"
+				case "to_f32":
+					sig = &FnSig{Name: "to_f32", Params: nil, ReturnType: &ResultType{Inner: TypeF32}, Span: callee.SelSpan}
+					callName = "string.to_f32"
+				case "replace":
+					sig = &FnSig{Name: "replace", Params: []ParamInfo{{Name: "old", Type: TypeString}, {Name: "new_str", Type: TypeString}}, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.replace"
+				case "last_index_of":
+					sig = &FnSig{Name: "last_index_of", Params: []ParamInfo{{Name: "substr", Type: TypeString}}, ReturnType: TypeInt, Span: callee.SelSpan}
+					callName = "string.last_index_of"
+				case "trim_left":
+					sig = &FnSig{Name: "trim_left", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.trim_left"
+				case "trim_right":
+					sig = &FnSig{Name: "trim_right", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.trim_right"
+				case "repeat":
+					sig = &FnSig{Name: "repeat", Params: []ParamInfo{{Name: "count", Type: TypeInt}}, ReturnType: TypeString, Span: callee.SelSpan}
+					callName = "string.repeat"
+				case "lines":
+					sig = &FnSig{Name: "lines", Params: nil, ReturnType: &SliceType{Elem: TypeString}, Span: callee.SelSpan}
+					callName = "string.lines"
+				case "byte_at":
+					sig = &FnSig{Name: "byte_at", Params: []ParamInfo{{Name: "index", Type: TypeInt}}, ReturnType: &ResultType{Inner: TypeU8}, Span: callee.SelSpan}
+					callName = "string.byte_at"
 				case "clone":
 					sig = &FnSig{Name: "clone", Params: nil, ReturnType: TypeString, Span: callee.SelSpan}
 					callName = "string.clone"
@@ -2230,6 +2565,19 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				c.errorf(call.CallSpan,
 					"cannot propagate '!' on '%s()': enclosing function returns '%s', not a Result '!T'",
 					callName, c.curFnReturn)
+			} else {
+				errIdent := &ast.IdentExpr{Ident: ast.Ident{Name: "err", NamePos: call.CallSpan}}
+				c.ExprTypes[errIdent] = TypeString
+				errCallee := &ast.IdentExpr{Ident: ast.Ident{Name: "error", NamePos: call.CallSpan}}
+				errCall := &ast.CallExpr{
+					Callee:   errCallee,
+					Args:     []ast.CallArg{{Expr: errIdent, ArgSpan: call.CallSpan}},
+					CallSpan: call.CallSpan,
+				}
+				c.ExprTypes[errCall] = c.curFnReturn
+				retStmt := &ast.ReturnStmt{Value: errCall, StmtSpan: call.CallSpan}
+				call.OrBlock = &ast.BlockStmt{Stmts: []ast.Stmt{retStmt}, BlockSpan: call.CallSpan}
+				call.Propagate = false
 			}
 			return ret.Inner
 		}
@@ -2238,6 +2586,10 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			// Inject implicit `err` string into `or { ... }` block scope
 			orScope.Define(&VarSymbol{Name: "err", Type: TypeString, IsMut: false, Span: call.OrBlock.BlockSpan})
 			c.checkOrBlock(call.OrBlock, orScope, ret.Inner)
+			return ret.Inner
+		}
+		if c.inDeferDiscard {
+			call.OrBlock = &ast.BlockStmt{BlockSpan: call.CallSpan}
 			return ret.Inner
 		}
 		c.errorf(call.CallSpan,
@@ -2257,6 +2609,10 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 		if call.OrBlock != nil {
 			orScope := NewScope(scope)
 			c.checkOrBlock(call.OrBlock, orScope, ret.Inner)
+			return ret.Inner
+		}
+		if c.inDeferDiscard {
+			call.OrBlock = &ast.BlockStmt{BlockSpan: call.CallSpan}
 			return ret.Inner
 		}
 		c.errorf(call.CallSpan,
@@ -2294,11 +2650,9 @@ func (c *Checker) checkOrBlock(block *ast.BlockStmt, scope *Scope, expectedType 
 				c.checkStmt(last, scope)
 				return
 			case *ast.ExprStmt:
-				if call, ok := last.Expr.(*ast.CallExpr); ok {
-					if id, isId := call.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
-						c.checkExpr(last.Expr, scope)
-						return
-					}
+				if IsDivergentExpr(last.Expr) {
+					c.checkExpr(last.Expr, scope)
+					return
 				}
 				valType := c.checkExpr(last.Expr, scope)
 				if !expectedType.Equals(TypeVoid) && !valType.Equals(expectedType) {
@@ -2358,6 +2712,26 @@ func (c *Checker) CheckInterfaceSatisfaction(st *StructType, iface *InterfaceTyp
 	}
 
 	return ok
+}
+
+// IsDivergentExpr reports whether expr terminates process/actor execution without returning (panic, exit, os.exit, log.fatal).
+func IsDivergentExpr(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if id, isId := call.Callee.(*ast.IdentExpr); isId && (id.Ident.Name == "panic" || id.Ident.Name == "exit") {
+		return true
+	}
+	if sel, isSel := call.Callee.(*ast.SelectorExpr); isSel {
+		if pkgId, isId := sel.Left.(*ast.IdentExpr); isId {
+			if (pkgId.Ident.Name == "os" && sel.Field.Name == "exit") ||
+				(pkgId.Ident.Name == "log" && sel.Field.Name == "fatal") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {

@@ -1,0 +1,34 @@
+module main
+
+import log
+
+fn test_logger_instance() {
+	mut l := log.Logger.new(log.LEVEL_INFO)
+	l.set_prefix("app")
+	l.set_timestamp(false)
+
+	l.debug("this should be ignored")
+	l.info("service initialized")
+	l.warn("high memory usage")
+	l.error("connection dropped")
+
+	l.set_level(log.LEVEL_DEBUG)
+	l.set_timestamp(true)
+	l.debug("verbose tracing enabled")
+
+	println("✓ test_logger_instance passed")
+}
+
+fn test_package_level_functions() {
+	log.debug("test package debug")
+	log.info("test package info")
+	log.warn("test package warn")
+	log.error("test package error")
+	println("✓ test_package_level_functions passed")
+}
+
+fn main() {
+	test_logger_instance()
+	test_package_level_functions()
+	println("All log tests passed successfully!")
+}

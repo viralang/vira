@@ -1,0 +1,110 @@
+module log
+
+import time
+import os
+
+pub const LEVEL_DEBUG: int = 0
+pub const LEVEL_INFO: int  = 1
+pub const LEVEL_WARN: int  = 2
+pub const LEVEL_ERROR: int = 3
+pub const LEVEL_FATAL: int = 4
+
+pub struct Logger {
+pub mut:
+	level int
+	prefix string
+	show_timestamp bool
+}
+
+pub fn Logger.new(level int) Logger {
+	return Logger{
+		level: level,
+		prefix: "",
+		show_timestamp: true,
+	}
+}
+
+pub fn (mut l Logger) set_level(level int) {
+	l.level = level
+}
+
+pub fn (mut l Logger) set_prefix(prefix string) {
+	l.prefix = prefix
+}
+
+pub fn (mut l Logger) set_timestamp(enabled bool) {
+	l.show_timestamp = enabled
+}
+
+fn format_prefix(tag string, custom_prefix string, show_ts bool) string {
+	mut ts := ""
+	if show_ts {
+		t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+		ts = "${t} "
+	}
+	mut p := ""
+	if custom_prefix.len > 0 {
+		p = "[${custom_prefix}] "
+	}
+	return "${ts}${p}[${tag}] "
+}
+
+pub fn (l Logger) debug(msg string) {
+	if l.level <= LEVEL_DEBUG {
+		hdr := format_prefix("DEBUG", l.prefix, l.show_timestamp)
+		eprintln("${hdr}${msg}")
+	}
+}
+
+pub fn (l Logger) info(msg string) {
+	if l.level <= LEVEL_INFO {
+		hdr := format_prefix("INFO", l.prefix, l.show_timestamp)
+		eprintln("${hdr}${msg}")
+	}
+}
+
+pub fn (l Logger) warn(msg string) {
+	if l.level <= LEVEL_WARN {
+		hdr := format_prefix("WARN", l.prefix, l.show_timestamp)
+		eprintln("${hdr}${msg}")
+	}
+}
+
+pub fn (l Logger) error(msg string) {
+	if l.level <= LEVEL_ERROR {
+		hdr := format_prefix("ERROR", l.prefix, l.show_timestamp)
+		eprintln("${hdr}${msg}")
+	}
+}
+
+pub fn (l Logger) fatal(msg string) {
+	hdr := format_prefix("FATAL", l.prefix, l.show_timestamp)
+	eprintln("${hdr}${msg}")
+	os.exit(1)
+}
+
+pub fn debug(msg string) {
+	t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+	eprintln("${t} [DEBUG] ${msg}")
+}
+
+pub fn info(msg string) {
+	t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+	eprintln("${t} [INFO] ${msg}")
+}
+
+pub fn warn(msg string) {
+	t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+	eprintln("${t} [WARN] ${msg}")
+}
+
+pub fn error(msg string) {
+	t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+	eprintln("${t} [ERROR] ${msg}")
+}
+
+pub fn fatal(msg string) {
+	t := time.format("%Y-%m-%d %H:%M:%S", time.now_unix(), false) or { "" }
+	eprintln("${t} [FATAL] ${msg}")
+	os.exit(1)
+}

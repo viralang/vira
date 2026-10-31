@@ -1,0 +1,106 @@
+module main
+
+import strings
+
+fn test_split_and_join() {
+	raw := "apple,banana,orange,grape"
+	parts := strings.split(raw, ",")
+	if parts.len != 4 {
+		panic("expected 4 parts")
+	}
+	if parts[0] != "apple" || parts[1] != "banana" || parts[2] != "orange" || parts[3] != "grape" {
+		panic("split parts mismatch")
+	}
+
+	joined := strings.join(parts, " - ")
+	if joined != "apple - banana - orange - grape" {
+		panic("join mismatch: ${joined}")
+	}
+	println("✓ test_split_and_join passed")
+}
+
+fn test_fields_and_trim() {
+	cmd_line := "  run    --port 8080   --debug  "
+	f := strings.fields(cmd_line)
+	println("f.len is: ${f.len}")
+	mut idx := 0
+	for idx < f.len {
+		println("f[${idx}] = '${f[idx]}'")
+		idx = idx + 1
+	}
+	if f.len != 4 {
+		panic("expected 4 fields")
+	}
+	if f[0] != "run" || f[1] != "--port" || f[2] != "8080" || f[3] != "--debug" {
+		panic("fields mismatch")
+	}
+
+	trimmed_p := strings.trim_prefix("--port", "--")
+	if trimmed_p != "port" {
+		panic("trim_prefix mismatch")
+	}
+
+	trimmed_s := strings.trim_suffix("archive.tar.gz", ".gz")
+	if trimmed_s != "archive.tar" {
+		panic("trim_suffix mismatch")
+	}
+	println("✓ test_fields_and_trim passed")
+}
+
+fn test_padding_and_count() {
+	padded_l := strings.pad_left("42", 5, "0")
+	if padded_l != "00042" {
+		panic("pad_left mismatch: ${padded_l}")
+	}
+
+	padded_r := strings.pad_right("go", 5, ".")
+	if padded_r != "go..." {
+		panic("pad_right mismatch: ${padded_r}")
+	}
+
+	c := strings.count("banana", "an")
+	if c != 2 {
+		panic("count mismatch")
+	}
+	println("✓ test_padding_and_count passed")
+}
+
+fn test_builder_and_base() {
+	mut sb := strings.StringBuilder.new()
+	sb.write("Hello, ")
+	sb.write("World!")
+	sb.write_line("")
+	sb.write("Vira 2026")
+
+	s := sb.to_string()
+	if !strings.has_prefix(s, "Hello, World!\n") {
+		panic("builder to_string prefix mismatch")
+	}
+
+	hex_str := strings.format_i64_base(255, 16)
+	if hex_str != "ff" {
+		panic("format_i64_base hex mismatch: ${hex_str}")
+	}
+
+	parsed := strings.parse_i64_base("ff", 16) or {
+		panic("failed to parse hex ff: ${err}")
+	}
+	if parsed != 255 {
+		panic("parse_i64_base mismatch")
+	}
+
+	mut words := ["banana", "apple", "cherry"]
+	strings.sort(mut words)
+	if words[0] != "apple" || words[1] != "banana" || words[2] != "cherry" {
+		panic("sort mismatch")
+	}
+	println("✓ test_builder_and_base passed")
+}
+
+fn main() {
+	test_split_and_join()
+	test_fields_and_trim()
+	test_padding_and_count()
+	test_builder_and_base()
+	println("All strings tests passed successfully!")
+}

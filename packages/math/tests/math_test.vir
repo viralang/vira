@@ -1,0 +1,93 @@
+module main
+
+import math
+
+fn test_constants_and_trig() {
+	if math.PI < 3.14 || math.PI > 3.15 {
+		panic("invalid PI value")
+	}
+	if math.E < 2.71 || math.E > 2.72 {
+		panic("invalid E value")
+	}
+
+	s := math.sin(0.0)
+	if s < -0.0001 || s > 0.0001 {
+		panic("sin(0) must be 0")
+	}
+
+	c := math.cos(0.0)
+	if c < 0.9999 || c > 1.0001 {
+		panic("cos(0) must be 1")
+	}
+
+	hyp := math.hypot(3.0, 4.0)
+	if hyp < 4.9999 || hyp > 5.0001 {
+		panic("hypot(3, 4) must be 5")
+	}
+	println("✓ test_constants_and_trig passed")
+}
+
+fn test_powers_and_rounding() {
+	p := math.pow(2.0, 3.0)
+	if p < 7.9999 || p > 8.0001 {
+		panic("pow(2, 3) must be 8")
+	}
+
+	sq := math.sqrt(16.0)
+	if sq < 3.9999 || sq > 4.0001 {
+		panic("sqrt(16) must be 4")
+	}
+
+	f := math.floor(3.7)
+	if f != 3.0 {
+		panic("floor(3.7) must be 3.0")
+	}
+
+	ce := math.ceil(3.2)
+	if ce != 4.0 {
+		panic("ceil(3.2) must be 4.0")
+	}
+
+	ro := math.round(3.6)
+	if ro != 4.0 {
+		panic("round(3.6) must be 4.0")
+	}
+
+	abs_v := math.abs(-42.5)
+	if abs_v != 42.5 {
+		panic("abs(-42.5) must be 42.5")
+	}
+	println("✓ test_powers_and_rounding passed")
+}
+
+fn test_clamp_and_sorting() {
+	cl := math.clamp(15.0, 0.0, 10.0)
+	if cl != 10.0 {
+		panic("clamp failed")
+	}
+
+	cl_int := math.clamp_int(-5, 0, 100)
+	if cl_int != 0 {
+		panic("clamp_int failed")
+	}
+
+	mut nums := [5, 2, 9, 1, 7]
+	math.sort_ints(mut nums)
+	if nums[0] != 1 || nums[1] != 2 || nums[2] != 5 || nums[3] != 7 || nums[4] != 9 {
+		panic("sort_ints failed")
+	}
+
+	mut fnums := [3.3, 1.1, 5.5, 2.2]
+	math.sort_f64s(mut fnums)
+	if fnums[0] != 1.1 || fnums[1] != 2.2 || fnums[2] != 3.3 || fnums[3] != 5.5 {
+		panic("sort_f64s failed")
+	}
+	println("✓ test_clamp_and_sorting passed")
+}
+
+fn main() {
+	test_constants_and_trig()
+	test_powers_and_rounding()
+	test_clamp_and_sorting()
+	println("All math tests passed successfully!")
+}

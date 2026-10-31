@@ -39,16 +39,19 @@ Commands:
   test    Discover and run test functions/files with leak checks
   fmt     Format .vir source files according to official style rules
   lsp     Start the Vira Language Server (LSP) over stdin/stdout
-  init    Initialize a new Vira project scaffold with vira.mod and src/
-  add     Add and download a package dependency (local or git)
-  install Install dependencies declared in vira.mod and vira.lock
-  remove  Remove a package dependency
-  vendor  Vendor all dependencies into ./vendor for offline/air-gapped builds
-  demo    Generate and run the built-in OOP + SIMD Tensor + Actor demo
-  version Display compiler version and target platform
+  init     Initialize a new Vira project scaffold with vira.mod and src/
+  init-gui Initialize a dedicated native GUI project with assets and theme
+  bundle   Package native application bundle (.app, .desktop, .exe)
+  add      Add and download a package dependency (local or git)
+  install  Install dependencies declared in vira.mod and vira.lock
+  remove   Remove a package dependency
+  vendor   Vendor all dependencies into ./vendor for offline/air-gapped builds
+  demo     Generate and run the built-in OOP + SIMD Tensor + Actor demo
+  version  Display compiler version and target platform
 
 Flags for 'vira build':
   -prod       Enable production optimizations (-O3 -march=native -flto)
+  -gui        Build as GUI application (suppresses Windows console window)
   -sanitize   Enable AddressSanitizer & UndefinedBehaviorSanitizer
   -o <path>   Output binary path (default: <filename>)
   -cc <bin>   Specify C compiler backend (cc, clang, gcc, tcc)
@@ -62,6 +65,8 @@ type compileOptions struct {
 	outPath      string
 	keepC        bool
 	showAutofree bool
+	quietRT      bool
+	guiApp       bool
 }
 
 func main() {
@@ -88,6 +93,10 @@ func main() {
 		lspCmd()
 	case "init":
 		initCmd(os.Args[2:])
+	case "init-gui":
+		initGuiCmd(os.Args[2:])
+	case "bundle", "pack", "dist":
+		bundleCmd(os.Args[2:])
 	case "add":
 		addCmd(os.Args[2:])
 	case "install", "get":
@@ -118,10 +127,11 @@ func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	ccFlag := fs.String("cc", "", "C compiler to use (auto-detects tcc, cc, gcc, or clang)")
 	prodFlag := fs.Bool("prod", false, "Run with -O3 -march=native optimizations")
+	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-cc compiler] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-quiet-rt] [-cc compiler] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -145,8 +155,9 @@ func runCmd(args []string) {
 	}
 
 	opts := compileOptions{
-		prod: *prodFlag,
-		cc:   *ccFlag,
+		prod:    *prodFlag,
+		cc:      *ccFlag,
+		quietRT: *quietRTFlag,
 	}
 	compiler, _ := invokeCBackend(cFile, binFile, opts)
 
@@ -169,14 +180,16 @@ func runCmd(args []string) {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	prod := fs.Bool("prod", false, "Compile with -O3 -march=native -flto")
+	guiFlag := fs.Bool("gui", false, "Compile as native GUI application (no Windows console)")
 	sanitize := fs.Bool("sanitize", false, "Enable ASan and UBSan")
 	outPath := fs.String("o", "", "Output binary path")
 	ccFlag := fs.String("cc", "", "C compiler (cc, clang, gcc, tcc)")
 	keepC := fs.Bool("keep-c", false, "Keep generated C99 file in build/")
+	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-o out] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
@@ -205,6 +218,8 @@ func buildCmd(args []string) {
 		cc:       *ccFlag,
 		outPath:  targetBin,
 		keepC:    *keepC,
+		quietRT:  *quietRTFlag,
+		guiApp:   *guiFlag,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, targetBin, opts)
@@ -414,6 +429,13 @@ func lspCmd() {
 // --- SUBCOMMAND 8: `vira init` ---
 
 func initCmd(args []string) {
+	for _, a := range args {
+		if a == "--gui" || a == "-gui" {
+			initGuiCmd(args)
+			return
+		}
+	}
+
 	name := "my_vira_app"
 	if len(args) > 0 {
 		name = args[0]
@@ -990,7 +1012,11 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	var modeDesc string
 
 	if compiler == "" {
-		for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
+		candidates := []string{"gcc", "clang", "cc", "tcc"}
+		if goRuntime.GOOS == "darwin" {
+			candidates = []string{"clang", "gcc", "cc", "tcc"}
+		}
+		for _, cand := range candidates {
 			if _, err := exec.LookPath(cand); err == nil {
 				compiler = cand
 				break
@@ -1023,12 +1049,19 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	archFlag := "-march=native"
 
 	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths()
+	if os.Getenv("VIRA_NO_RAYLIB") == "1" || os.Getenv("VIRA_GUI") == "native" || os.Getenv("VIRA_GUI") == "x11" {
+		hasRaylib = false
+		staticRaylibPath = ""
+	}
 
 	extraLibs := []string{}
 	staticFlags := []string{}
 
 	if goRuntime.GOOS == "windows" {
 		staticFlags = append(staticFlags, "-static")
+		if opts.guiApp {
+			staticFlags = append(staticFlags, "-mwindows")
+		}
 		if hasRaylib {
 			if staticRaylibPath != "" {
 				extraLibs = append(extraLibs, staticRaylibPath)
@@ -1047,23 +1080,31 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 			}
 		}
 		extraLibs = append(extraLibs, "-lm")
-	} else if goRuntime.GOOS == "darwin" && hasRaylib {
-		if staticRaylibPath != "" {
-			extraLibs = append(extraLibs, staticRaylibPath, "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
-		} else {
-			extraLibs = append(extraLibs, "-lraylib", "-framework", "OpenGL", "-framework", "Cocoa", "-framework", "IOKit", "-framework", "CoreVideo")
-		}
+	} else if goRuntime.GOOS == "darwin" {
+		extraLibs = append(extraLibs, "-framework", "Cocoa", "-framework", "CoreGraphics")
 	}
 
 	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
 	baseIncludes = append(baseIncludes, libFlags...)
-	if hasRaylib {
+	if hasRaylib && goRuntime.GOOS != "darwin" {
 		baseIncludes = append(baseIncludes, "-DVIRA_USE_RAYLIB")
+	}
+	if opts.quietRT {
+		baseIncludes = append(baseIncludes, "-DVIRA_QUIET_RT=1")
 	}
 
 	waFlags := []string{}
-	if strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
+	if goRuntime.GOOS != "darwin" && strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
 		waFlags = append(waFlags, "-Wa,-muse-unaligned-vector-move")
+	}
+
+	appendCFile := func(targetFlags *[]string) {
+		if goRuntime.GOOS == "darwin" {
+			*targetFlags = append(*targetFlags, "-x", "objective-c", cFile, "-o", binFile)
+		} else {
+			*targetFlags = append(*targetFlags, cFile, "-o", binFile)
+		}
+		*targetFlags = append(*targetFlags, extraLibs...)
 	}
 
 	if opts.prod {
@@ -1071,15 +1112,13 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
 		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	} else if compiler == "tcc" {
 		modeDesc = "dev (TinyCC instant build)"
 		cFlags = append([]string{"-pthread"}, baseIncludes...)
@@ -1090,8 +1129,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
-		cFlags = append(cFlags, cFile, "-o", binFile)
-		cFlags = append(cFlags, extraLibs...)
+		appendCFile(&cFlags)
 	}
 
 	cmd := exec.Command(compiler, cFlags...)

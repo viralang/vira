@@ -17,7 +17,7 @@ Welcome to the definitive API reference for the **Vira Programming Language**. T
 9. [Native GUI & Declarative Layout Engine](#9-native-gui--declarative-layout-engine)
 10. [Memory, Bump Arenas, Autofree & C FFI Helpers](#10-memory-bump-arenas-autofree--c-ffi-helpers)
 11. [Native Collections (`[]T` & `[N]T`) & String Methods](#11-native-collections-t--nt--string-methods)
-12. [Standard Library Packages (`io`, `net`, `http`, `json`, `viraserve`)](#12-standard-library-packages-io-net-http-json-viraserve)
+12. [Standard Library Packages (`os`, `exec`, `syscall`, `flag`, `log`, `strings`, `math`, `time`, `ctype`, `io`, `net`, `http`, `json`, `viraserve`)](#12-standard-library-packages)
 
 ---
 
@@ -32,10 +32,42 @@ Prints a UTF-8 string followed by a newline character to standard output (`stdou
 println('Server started on port ${port}')
 ```
 
+### `print(msg string) void`
+Prints a UTF-8 string without a trailing newline to standard output (`stdout`).
+```v
+print('Loading assets... ')
+```
+
 ### `eprintln(msg string) void`
 Prints a UTF-8 string followed by a newline to standard error (`stderr`).
 ```v
 eprintln('ERROR: Connection reset by peer')
+```
+
+### `eprint(msg string) void`
+Prints a UTF-8 string without a trailing newline to standard error (`stderr`).
+```v
+eprint('Warning: ')
+```
+
+### `time_sleep_ms(ms int) void`
+Suspends execution of the calling thread for `ms` milliseconds.
+```v
+time_sleep_ms(100)
+```
+
+### `const` / `pub const` Declaration
+Defines compile-time immutable typed constants. Available at module and local scope.
+```v
+pub const BUFFER_SIZE = 4096
+const DEFAULT_HOST = '127.0.0.1'
+```
+
+### `defer` Statement
+Defines a cleanup expression or statement that executes unconditionally when the enclosing function or block scope exits, evaluated in strict **LIFO** (Last-In, First-Out) order.
+```v
+mut f := io.File.open('data.bin', 'rb') or { return }
+defer f.close()
 ```
 
 ### `panic(msg string) void`
@@ -457,15 +489,36 @@ Vira includes a double-buffered 60 FPS Immediate-Mode GUI (IMGUI) engine and an 
 
 ### Auto-Layout Zero-Math Widgets
 - `gui_btn(label string) bool`
+- `gui_btn_danger(label string) bool`
 - `gui_check(label string, checked bool) bool`
 - `gui_slide(left string, right string, val f32, min f32, max f32) f32`
 - `gui_lbl(text string) void`
+- `gui_image(img_id int, width int, height int) void`
 - `gui_input(placeholder string, text string) string`
+- `gui_select(items []string, selected_idx int) int`
+- `gui_dropdown(x int, y int, width int, height int, items []string, selected_idx int) int`
+- `gui_tbl(headers []string, rows [][]string, search_query string, selected_row int) int`
+- `gui_table(x int, y int, width int, height int, headers []string, rows [][]string, search_query string, selected_row int) int`
+- `gui_table_sort_col() int`
+- `gui_table_sort_asc() bool`
+- `gui_table_set_sort(col int, asc bool) void`
 - `gui_progress(percent f32) void`
 - `gui_radio(label string, is_selected bool) bool`
 - `gui_badge(text string, hex_bg int, hex_fg int) void`
 - `gui_tab_item(label string, is_active bool) bool`
 - `gui_modal_begin(title string, width int, height int) void` / `gui_modal_end() void`
+
+### Assets & Image Management
+- `gui_load_image(path string) int`: Loads image asset from filesystem (`.png`, `.jpg`, `.bmp`, `.webp`, `.gif`). Returns handle `id >= 0` or `-1` on error.
+- `gui_image_width(img_id int) int`: Queries intrinsic pixel width.
+- `gui_image_height(img_id int) int`: Queries intrinsic pixel height.
+- `gui_draw_image(img_id int, x int, y int, width int, height int) void`: Draws scaled image at absolute canvas coordinates with alpha blending.
+- `gui_image(img_id int, width int, height int) void`: Draws scaled image positioned inside active auto-layout cursor stack.
+- `gui_free_image(img_id int) void`: Explicitly releases native image texture/buffer. All active images are also automatically freed at `gui_close()`.
+
+*Complete Runnable Examples:*
+- Local Assets: [`docs/examples/37_gui_image_and_asset_loading.vir`](examples/37_gui_image_and_asset_loading.vir) & [`examples/gui_table_dropdown_demo.vir`](../examples/gui_table_dropdown_demo.vir).
+- Remote URL & Headers: [`docs/examples/38_gui_remote_url_image_loading.vir`](examples/38_gui_remote_url_image_loading.vir).
 
 ```v
 gui_init(800, 600, 'Vira Dashboard')
@@ -557,23 +610,107 @@ Vira `string` values are immutable UTF-8 views (`data`, `len`, `is_lit`) with bu
 | `.starts_with(prefix string)` | `fn (prefix string) bool` | Returns `true` if the string starts with `prefix` |
 | `.ends_with(suffix string)` | `fn (suffix string) bool` | Returns `true` if the string ends with `suffix` |
 | `.index_of(needle string)` | `fn (needle string) int` | Byte index of first occurrence of `needle`, or `-1` |
+| `.last_index_of(needle string)` | `fn (needle string) int` | Byte index of last occurrence of `needle`, or `-1` |
 | `.substr(start int, end int)` | `fn (start int, end int) string` | Newly allocated substring covering half-open byte range `[start, end)` |
 | `.trim()` | `fn () string` | Newly allocated string with leading and trailing whitespace removed |
+| `.trim_left()` | `fn () string` | Strips leading whitespace |
+| `.trim_right()` | `fn () string` | Strips trailing whitespace |
+| `.repeat(count int)` | `fn (count int) string` | Replicates the string `count` times |
+| `.lines()` | `fn () []string` | Splits string into lines by `\n` or `\r\n` |
+| `.byte_at(idx int)` | `fn (idx int) !u8` | Returns byte at `idx` or error if out of bounds |
 | `.split(delim string)` | `fn (delim string) []string` | Splits the string by `delim` into a slice of strings (`[]string`) |
 | `.replace(old string, new string)` | `fn (old string, new string) string` | Replaces all occurrences of `old` with `new` |
 | `.to_upper()` / `.to_lower()` | `fn () string` | Returns an ASCII uppercase or lowercase copy |
 | `.to_int()` / `.to_i64()` | `fn () !int` / `fn () !i64` | Parses a base-10 integer, returning a Result |
+| `.to_f64()` / `.to_f32()` | `fn () !f64` / `fn () !f32` | Parses a floating-point number, returning a Result |
 | `.bytes()` | `fn () []u8` | Copies the string bytes into a mutable `[]u8` slice |
 
 ---
 
-## 12. Standard Library Packages (`io`, `net`, `http`, `json`, `viraserve`)
+## 12. Standard Library Packages
 
 Import first-party standard library modules using `import <pkg>`:
 
-- **`import io`**: `io.BufReader` buffered reader (`read_byte`, `read_line`, `read_exact`, `read_all`), `io.File` handles, and streaming traits.
-- **`import net`**: Cross-platform TCP (`net.TcpListener`, `net.TcpStream`), UDP (`net.UdpSocket`), socket addresses (`net.SocketAddr`), and non-blocking event readiness (`net.Poller` over `epoll` / `kqueue` / `WSAPoll`).
-- **`import http`**: Structured HTTP/1.1 request/response types (`http.Request`, `http.Response`, `http.HeaderMap`, `http.HttpServer`, and `http.SseStream`).
-- **`import json`**: Pure-`.vir` RFC 8259 JSON validator, `{}`/`[]` depth-aware field & array extractor, string escaper/unescaper, and $O(N)$ `json.JsonBuilder`.
-- **`import viraserve`**: High-concurrency actor-backed web & AI inference server framework built on `net` and `http`, supporting route registration, JSON APIs, and Server-Sent Events (SSE) token streaming.
+### `import math`
+High-performance C99 math intrinsics:
+- **Trigonometry**: `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)`
+- **Hyperbolics**: `sinh(x)`, `cosh(x)`, `tanh(x)`
+- **Exponential & Logarithmic**: `exp(x)`, `exp2(x)`, `log(x)`, `log2(x)`, `log10(x)`
+- **Power & Roots**: `pow(x, y)`, `sqrt(x)`, `cbrt(x)`, `hypot(x, y)`
+- **Rounding & Modulo**: `ceil(x)`, `floor(x)`, `trunc(x)`, `round(x)`, `abs(x)`
+- **Constants**: `math.PI`, `math.E`, `math.LN2`, `math.LN10`
+
+### `import ctype`
+Fast ASCII character classification and conversion:
+- **Classifiers**: `is_alpha(c)`, `is_digit(c)`, `is_alnum(c)`, `is_space(c)`, `is_upper(c)`, `is_lower(c)`, `is_xdigit(c)`, `is_print(c)`, `is_punct(c)`, `is_cntrl(c)`
+- **Converters**: `to_lower(c)`, `to_upper(c)`
+
+### `import strings`
+Pure-Vira string processing utilities:
+- `contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)`, `has_prefix(s, p)`, `has_suffix(s, p)`
+- `index_of(s, needle)`, `last_index_of(s, needle)`, `split(s, delim)`, `join(parts, sep)`, `replace(s, old, new)`
+- `trim(s)`, `trim_left(s)`, `trim_right(s)`, `repeat(s, count)`, `lines(s)`, `fields(s)`
+
+### `import time`
+Wall-clock timestamps, formatting and sleeping:
+- `time.now() i64`: Current Unix timestamp in seconds.
+- `time.sleep_ms(ms int) void`: Sleep current thread for `ms` milliseconds.
+- `time.format(epoch i64, fmt string) string`: Format epoch via `strftime` in local time.
+- `time.utc_format(epoch i64, fmt string) string`: Format epoch via `strftime` in UTC.
+- `time.parse(str string, fmt string) !i64`: Parse formatted string into Unix epoch.
+
+### `import io`
+File streaming, buffered reader, and standard I/O:
+- `io.File.open(path, mode) !File`, `f.read(mut buf)`, `f.write(buf)`, `f.write_string(s)`, `f.close()`
+- `io.BufReader.new(file)`, `r.read_line()`, `r.read_byte()`, `r.read_exact(n)`, `r.read_all()`, `r.close()`
+- `io.read_line() !string`, `io.read_all_stdin() !string`, `io.prompt(msg) !string`
+- `io.rename(old, new) !bool`, `io.remove(path) !bool`, `io.temp_file() !string`
+
+### `import os`
+Process environment, filesystem manipulation, and platform queries:
+- `os.args() []string`, `os.exit(code int)`, `os.set_quiet_rt(quiet bool)`
+- `os.getenv(k)`, `os.setenv(k, v)!`, `os.unsetenv(k)!`, `os.environ() []string`
+- `os.platform() string`, `os.is_windows() bool`, `os.path_separator() string`
+- `os.getpid()`, `os.getppid()`, `os.getuid()`, `os.getgid()`, `os.hostname()!`
+- `os.exists(path)`, `os.is_file(path)`, `os.is_dir(path)`, `os.stat(path)!`
+- `os.read_file(path)!`, `os.write_file(path, content)!`, `os.read_bytes(path)!`, `os.write_bytes(path, b)!`
+- `os.mkdir(path, perm)!`, `os.mkdir_all(path, perm)!`, `os.remove(path)!`, `os.remove_all(path)!`, `os.read_dir(path)!`
+- `os.join_path(p1, p2)`, `os.base_name(path)`, `os.dir_name(path)`, `os.ext(path)`, `os.clean_path(path)`
+
+### `import syscall`
+Raw OS system calls, file descriptors, and Linux container primitives:
+- `syscall.open(path, flags, mode)!`, `syscall.read(fd, mut buf, n)!`, `syscall.write(fd, buf, n)!`, `syscall.close(fd)!`
+- `syscall.pipe(mut fds)!`, `syscall.dup(fd)!`, `syscall.dup2(old_fd, new_fd)!`, `syscall.isatty(fd)`
+- `syscall.stat(path)!`, `syscall.mkdir(path, perm)!`, `syscall.readdir(path)`, `syscall.getuid()`, `syscall.getgid()`
+- Linux container support: `syscall.mount(src, target, fs, flags, data)!`, `syscall.umount2(target, flags)!`, `syscall.chroot(path)!`, `syscall.mknod(path, mode, dev)!`, `syscall.makedev(major, minor)`, `syscall.unshare(flags)!`, `syscall.sethostname(name)!`
+- Namespace flags: `CLONE_NEWPID`, `CLONE_NEWUTS`, `CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWIPC`
+
+### `import exec`
+Process execution and supervision:
+- `exec.Command.new(prog string, args []string) Command`
+- `cmd.set_dir(path)`, `cmd.set_clone_flags(flags)`, `cmd.set_stdin(text)`, `cmd.set_inherit_stdio(inherit)`
+- `cmd.start() !int`, `cmd.wait() !int`, `cmd.run() !int`, `cmd.output() !string`, `cmd.combined_output() !string`
+- `exec.combined_output(prog string, args []string) !string`
+
+### `import flag`
+POSIX/GNU command-line argument parser:
+- `flag.FlagSet.new(name string)`
+- `fs.bool_flag(name, short, def, desc)`, `fs.string_flag(name, short, def, desc)`, `fs.int_flag(name, short, def, desc)`, `fs.i64_flag(name, short, def, desc)`, `fs.f64_flag(name, short, def, desc)`
+- `fs.parse(args []string) !bool`, `fs.get_bool(name)`, `fs.get_string(name)`, `fs.get_int(name)`, `fs.get_i64(name)`, `fs.get_f64(name)`
+- `fs.args []string` (remaining positional arguments after `--` or flags)
+- `fs.help_string() string` (auto-formatted options table)
+
+### `import log`
+Leveled stderr logger:
+- `log.Logger.new(level int)`
+- `l.set_level(level)`, `l.set_prefix(prefix)`, `l.set_timestamp(enabled)`
+- `l.debug(msg)`, `l.info(msg)`, `l.warn(msg)`, `l.error(msg)`, `l.fatal(msg)`
+- Package-level: `log.debug(msg)`, `log.info(msg)`, `log.warn(msg)`, `log.error(msg)`, `log.fatal(msg)`
+- Levels: `log.LEVEL_DEBUG`, `log.LEVEL_INFO`, `log.LEVEL_WARN`, `log.LEVEL_ERROR`, `log.LEVEL_FATAL`
+
+### `import net`, `import http`, `import json`, `import viraserve`
+- **`net`**: `TcpListener`, `TcpStream`, `UdpSocket`, `SocketAddr`, `Poller`
+- **`http`**: `Request`, `Response`, `HeaderMap`, `HttpServer`, `SseStream`
+- **`json`**: Pure-`.vir` RFC 8259 parser, validator, extractor, and `JsonBuilder`
+- **`viraserve`**: Actor-backed microservice and SSE streaming framework
 

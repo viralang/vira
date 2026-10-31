@@ -1,0 +1,306 @@
+module syscall
+
+pub const O_RDONLY: int = 0
+pub const O_WRONLY: int = 1
+pub const O_RDWR: int = 2
+pub const O_CREAT: int = 64
+pub const O_EXCL: int = 128
+pub const O_TRUNC: int = 512
+pub const O_APPEND: int = 1024
+pub const O_NONBLOCK: int = 2048
+pub const O_CLOEXEC: int = 524288
+
+pub const CLONE_NEWNS: int = 0x00020000
+pub const CLONE_NEWCGROUP: int = 0x02000000
+pub const CLONE_NEWUTS: int = 0x04000000
+pub const CLONE_NEWIPC: int = 0x08000000
+pub const CLONE_NEWUSER: int = 0x10000000
+pub const CLONE_NEWPID: int = 0x20000000
+pub const CLONE_NEWNET: int = 0x40000000
+
+pub const MS_RDONLY: int = 1
+pub const MS_NOSUID: int = 2
+pub const MS_NODEV: int = 4
+pub const MS_NOEXEC: int = 8
+pub const MS_SYNCHRONOUS: int = 16
+pub const MS_REMOUNT: int = 32
+pub const MS_MANDLOCK: int = 64
+pub const MS_DIRSYNC: int = 128
+pub const MS_BIND: int = 4096
+pub const MS_MOVE: int = 8192
+pub const MS_REC: int = 16384
+pub const MS_PRIVATE: int = 262144
+
+pub const MNT_FORCE: int = 1
+pub const MNT_DETACH: int = 2
+pub const MNT_EXPIRE: int = 4
+
+pub const S_IFIFO: int = 0o010000
+pub const S_IFCHR: int = 0o020000
+pub const S_IFDIR: int = 0o040000
+pub const S_IFBLK: int = 0o060000
+pub const S_IFREG: int = 0o100000
+
+pub const SIGHUP: int = 1
+pub const SIGINT: int = 2
+pub const SIGQUIT: int = 3
+pub const SIGKILL: int = 9
+pub const SIGTERM: int = 15
+
+@[intrinsic: 'vira_sys_errno']
+fn c_errno() int
+
+@[intrinsic: 'vira_sys_strerror']
+fn c_strerror(err int) string
+
+@[intrinsic: 'vira_sys_open']
+fn c_open(path string, flags int, mode int) !int
+
+@[intrinsic: 'vira_sys_read']
+fn c_read(fd int, mut buf []u8, max_bytes int) !int
+
+@[intrinsic: 'vira_sys_write']
+fn c_write(fd int, buf []u8, count int) !int
+
+@[intrinsic: 'vira_sys_close']
+fn c_close(fd int) !bool
+
+@[intrinsic: 'vira_sys_lseek']
+fn c_lseek(fd int, offset i64, whence int) !i64
+
+@[intrinsic: 'vira_sys_pipe']
+fn c_pipe(mut fds []int) !bool
+
+@[intrinsic: 'vira_sys_dup']
+fn c_dup(oldfd int) !int
+
+@[intrinsic: 'vira_sys_dup2']
+fn c_dup2(oldfd int, newfd int) !int
+
+@[intrinsic: 'vira_sys_isatty']
+fn c_isatty(fd int) bool
+
+@[intrinsic: 'vira_sys_getpid']
+fn c_getpid() int
+
+@[intrinsic: 'vira_sys_getppid']
+fn c_getppid() int
+
+@[intrinsic: 'vira_sys_getuid']
+fn c_getuid() int
+
+@[intrinsic: 'vira_sys_getgid']
+fn c_getgid() int
+
+@[intrinsic: 'vira_sys_kill']
+fn c_kill(pid int, sig int) !bool
+
+@[intrinsic: 'vira_sys_mount']
+fn c_mount(source string, target string, fstype string, flags i64, data string) !bool
+
+@[intrinsic: 'vira_sys_unmount']
+fn c_unmount(target string, flags int) !bool
+
+@[intrinsic: 'vira_sys_chroot']
+fn c_chroot(path string) !bool
+
+@[intrinsic: 'vira_sys_mknod']
+fn c_mknod(path string, mode int, dev i64) !bool
+
+@[intrinsic: 'vira_sys_makedev']
+fn c_makedev(major int, minor int) i64
+
+@[intrinsic: 'vira_sys_unshare']
+fn c_unshare(flags int) !bool
+
+@[intrinsic: 'vira_sys_sethostname']
+fn c_sethostname(name string) !bool
+
+@[intrinsic: 'vira_sys_signal_notify']
+fn c_signal_notify(sigs []int) !bool
+
+@[intrinsic: 'vira_sys_signal_poll']
+fn c_signal_poll() int
+
+@[intrinsic: 'vira_sys_signal_wait']
+fn c_signal_wait() int
+
+pub fn get_errno() int {
+	return c_errno()
+}
+
+pub fn strerror(err int) string {
+	return c_strerror(err)
+}
+
+pub fn open(path string, flags int, mode int) !int {
+	fd := c_open(path, flags, mode) or {
+		return error(err)
+	}
+	return fd
+}
+
+pub fn read(fd int, mut buf []u8, max_bytes int) !int {
+	n := c_read(fd, mut buf, max_bytes) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn write(fd int, buf []u8, count int) !int {
+	n := c_write(fd, buf, count) or {
+		return error(err)
+	}
+	return n
+}
+
+pub fn close(fd int) !bool {
+	res := c_close(fd) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn lseek(fd int, offset i64, whence int) !i64 {
+	res := c_lseek(fd, offset, whence) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn pipe(mut fds []int) !bool {
+	res := c_pipe(mut fds) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn dup(oldfd int) !int {
+	res := c_dup(oldfd) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn dup2(oldfd int, newfd int) !int {
+	res := c_dup2(oldfd, newfd) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn isatty(fd int) bool {
+	return c_isatty(fd)
+}
+
+pub fn getpid() int {
+	return c_getpid()
+}
+
+pub fn getppid() int {
+	return c_getppid()
+}
+
+pub fn getuid() int {
+	return c_getuid()
+}
+
+pub fn getgid() int {
+	return c_getgid()
+}
+
+pub fn kill(pid int, sig int) !bool {
+	res := c_kill(pid, sig) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn mount(source string, target string, fstype string, flags i64, data string) !bool {
+	res := c_mount(source, target, fstype, flags, data) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn unmount(target string, flags int) !bool {
+	res := c_unmount(target, flags) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn Unmount(target string, flags int) !bool {
+	res := unmount(target, flags) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn chroot(path string) !bool {
+	res := c_chroot(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn Chroot(path string) !bool {
+	res := chroot(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn mknod(path string, mode int, dev i64) !bool {
+	res := c_mknod(path, mode, dev) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn Mknod(path string, mode int, dev i64) !bool {
+	res := mknod(path, mode, dev) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn makedev(major int, minor int) i64 {
+	return c_makedev(major, minor)
+}
+
+pub fn unshare(flags int) !bool {
+	res := c_unshare(flags) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn sethostname(name string) !bool {
+	res := c_sethostname(name) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn Sethostname(name string) !bool {
+	res := sethostname(name) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn signal_notify(sigs []int) !bool {
+	res := c_signal_notify(sigs) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn signal_poll() int {
+	return c_signal_poll()
+}
+
+pub fn signal_wait() int {
+	return c_signal_wait()
+}

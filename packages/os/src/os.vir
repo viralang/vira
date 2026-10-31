@@ -1,0 +1,340 @@
+module os
+
+@[intrinsic: 'vira_os_args']
+fn c_args() []string
+
+@[intrinsic: 'vira_os_exit']
+fn c_exit(code int) void
+
+@[intrinsic: 'vira_os_set_quiet_rt']
+fn c_set_quiet_rt(quiet bool) void
+
+@[intrinsic: 'vira_sys_getenv']
+fn c_getenv(name string) !string
+
+@[intrinsic: 'vira_sys_setenv']
+fn c_setenv(name string, val string) !bool
+
+@[intrinsic: 'vira_sys_unsetenv']
+fn c_unsetenv(name string) !bool
+
+@[intrinsic: 'vira_sys_environ']
+fn c_environ() []string
+
+@[intrinsic: 'vira_sys_hostname']
+fn c_hostname() !string
+
+@[intrinsic: 'vira_sys_executable_path']
+fn c_executable() !string
+
+@[intrinsic: 'vira_sys_getpid']
+fn c_getpid() int
+
+@[intrinsic: 'vira_sys_getppid']
+fn c_getppid() int
+
+@[intrinsic: 'vira_sys_getuid']
+fn c_getuid() int
+
+@[intrinsic: 'vira_sys_getgid']
+fn c_getgid() int
+
+@[intrinsic: 'vira_sys_mkdir']
+fn c_mkdir(path string, perm int) !bool
+
+@[intrinsic: 'vira_sys_rmdir']
+fn c_rmdir(path string) !bool
+
+@[intrinsic: 'vira_sys_unlink']
+fn c_unlink(path string) !bool
+
+@[intrinsic: 'vira_sys_readdir']
+fn c_readdir(path string) []string
+
+@[intrinsic: 'vira_file_exists']
+fn c_file_exists(path string) bool
+
+@[intrinsic: 'vira_dir_exists']
+fn c_dir_exists(path string) bool
+
+@[intrinsic: 'vira_read_file']
+fn c_read_file(path string) !string
+
+@[intrinsic: 'vira_write_file']
+fn c_write_file(path string, content string) !bool
+
+@[intrinsic: 'vira_os_platform']
+fn c_platform() string
+
+pub fn platform() string {
+	return c_platform()
+}
+
+pub fn is_windows() bool {
+	return platform() == "windows"
+}
+
+pub fn args() []string {
+	return c_args()
+}
+
+pub fn exit(code int) void {
+	c_exit(code)
+}
+
+pub fn Exit(code int) void {
+	c_exit(code)
+}
+
+pub fn set_quiet_rt(quiet bool) void {
+	c_set_quiet_rt(quiet)
+}
+
+pub fn getenv(name string) string {
+	res := c_getenv(name) or {
+		return ""
+	}
+	return res
+}
+
+pub fn setenv(name string, val string) !bool {
+	res := c_setenv(name, val) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn unsetenv(name string) !bool {
+	res := c_unsetenv(name) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn environ() []string {
+	return c_environ()
+}
+
+pub fn hostname() !string {
+	res := c_hostname() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn executable() !string {
+	res := c_executable() or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn getpid() int {
+	return c_getpid()
+}
+
+pub fn getppid() int {
+	return c_getppid()
+}
+
+pub fn getuid() int {
+	return c_getuid()
+}
+
+pub fn getgid() int {
+	return c_getgid()
+}
+
+pub fn is_file(path string) bool {
+	return c_file_exists(path)
+}
+
+pub fn is_dir(path string) bool {
+	return c_dir_exists(path)
+}
+
+pub fn exists(path string) bool {
+	return c_file_exists(path) || c_dir_exists(path)
+}
+
+pub fn stat(path string) !bool {
+	if exists(path) {
+		return true
+	}
+	return error("path does not exist")
+}
+
+pub fn Stat(path string) !bool {
+	res := stat(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn read_file(path string) !string {
+	res := c_read_file(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn write_file(path string, content string) !bool {
+	res := c_write_file(path, content) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn read_bytes(path string) ![]u8 {
+	s := read_file(path) or {
+		return error(err)
+	}
+	return s.bytes()
+}
+
+pub fn write_bytes(path string, data []u8) !bool {
+	s := data.to_string()
+	res := write_file(path, s) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn mkdir(path string, perm int) !bool {
+	res := c_mkdir(path, perm) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn mkdir_all(path string, perm int) !bool {
+	if is_dir(path) {
+		return true
+	}
+	clean := clean_path(path)
+	mut i := 0
+	for i < clean.len {
+		b := clean.byte_at(i) or { 0 }
+		if (b == 47 || b == 92) && i > 0 {
+			sub := clean.slice(0, i)
+			if !is_dir(sub) {
+				c_mkdir(sub, perm) or { false }
+			}
+		}
+		i = i + 1
+	}
+	res := c_mkdir(clean, perm) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn remove(path string) !bool {
+	if is_dir(path) {
+		res := c_rmdir(path) or {
+			return error(err)
+		}
+		return res
+	}
+	res := c_unlink(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn Remove(path string) !bool {
+	res := remove(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn remove_all(path string) !bool {
+	if !exists(path) {
+		return true
+	}
+	if !is_dir(path) {
+		res := remove(path) or {
+			return error(err)
+		}
+		return res
+	}
+	entries := read_dir(path) or {
+		return error(err)
+	}
+	for entry in entries {
+		sub := join_path(path, entry)
+		remove_all(sub) or { false }
+	}
+	res := remove(path) or {
+		return error(err)
+	}
+	return res
+}
+
+pub fn read_dir(path string) ![]string {
+	if !is_dir(path) {
+		return error("not a directory")
+	}
+	return c_readdir(path)
+}
+
+pub fn join_path(p1 string, p2 string) string {
+	if p1.len == 0 {
+		return p2
+	}
+	if p2.len == 0 {
+		return p1
+	}
+	last_b := p1.byte_at(p1.len - 1) or { 0 }
+	if last_b == 47 || last_b == 92 {
+		return "${p1}${p2}"
+	}
+	return "${p1}/${p2}"
+}
+
+pub fn base_name(path string) string {
+	if path.len == 0 {
+		return ""
+	}
+	mut i := path.len - 1
+	for i >= 0 {
+		b := path.byte_at(i) or { 0 }
+		if b == 47 || b == 92 {
+			return path.slice(i + 1, path.len)
+		}
+		i = i - 1
+	}
+	return path
+}
+
+pub fn dir_name(path string) string {
+	if path.len == 0 {
+		return "."
+	}
+	mut i := path.len - 1
+	for i >= 0 {
+		b := path.byte_at(i) or { 0 }
+		if b == 47 || b == 92 {
+			if i == 0 {
+				return "/"
+			}
+			return path.slice(0, i)
+		}
+		i = i - 1
+	}
+	return "."
+}
+
+pub fn ext(path string) string {
+	base := base_name(path)
+	idx := base.last_index_of(".")
+	if idx < 0 {
+		return ""
+	}
+	return base.slice(idx, base.len)
+}
+
+pub fn clean_path(path string) string {
+	return path.replace("\\", "/")
+}

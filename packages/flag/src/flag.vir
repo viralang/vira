@@ -1,0 +1,306 @@
+module flag
+
+import os
+
+pub struct Flag {
+pub mut:
+	name string
+	short_name string
+	usage string
+	def_val string
+	val string
+	is_bool bool
+}
+
+pub struct FlagSet {
+pub mut:
+	name string
+	flags []Flag
+	args []string
+	parsed bool
+}
+
+pub fn FlagSet.new(name string) FlagSet {
+	return FlagSet{
+		name: name,
+		flags: []Flag{},
+		args: []string{},
+		parsed: false,
+	}
+}
+
+pub fn (mut fs FlagSet) bool_flag(name string, short_name string, def bool, usage string) {
+	mut def_str := "false"
+	if def {
+		def_str = "true"
+	}
+	f := Flag{
+		name: name,
+		short_name: short_name,
+		usage: usage,
+		def_val: def_str,
+		val: def_str,
+		is_bool: true,
+	}
+	fs.flags.push(f)
+}
+
+pub fn (mut fs FlagSet) string_flag(name string, short_name string, def string, usage string) {
+	f := Flag{
+		name: name,
+		short_name: short_name,
+		usage: usage,
+		def_val: def,
+		val: def,
+		is_bool: false,
+	}
+	fs.flags.push(f)
+}
+
+pub fn (mut fs FlagSet) int_flag(name string, short_name string, def int, usage string) {
+	f := Flag{
+		name: name,
+		short_name: short_name,
+		usage: usage,
+		def_val: "${def}",
+		val: "${def}",
+		is_bool: false,
+	}
+	fs.flags.push(f)
+}
+
+pub fn (mut fs FlagSet) i64_flag(name string, short_name string, def i64, usage string) {
+	f := Flag{
+		name: name,
+		short_name: short_name,
+		usage: usage,
+		def_val: "${def}",
+		val: "${def}",
+		is_bool: false,
+	}
+	fs.flags.push(f)
+}
+
+pub fn (mut fs FlagSet) f64_flag(name string, short_name string, def f64, usage string) {
+	f := Flag{
+		name: name,
+		short_name: short_name,
+		usage: usage,
+		def_val: "${def}",
+		val: "${def}",
+		is_bool: false,
+	}
+	fs.flags.push(f)
+}
+
+pub fn (mut fs FlagSet) parse(raw_args []string) !bool {
+	fs.args.clear()
+	mut i := 0
+	mut pass_through := false
+	for i < raw_args.len {
+		arg := raw_args[i]
+		if pass_through {
+			fs.args.push(arg)
+			i = i + 1
+			continue
+		}
+		if arg == "--" {
+			pass_through = true
+			i = i + 1
+			continue
+		}
+		if arg.starts_with("--") {
+			eq_idx := arg.index_of("=")
+			mut flag_name := ""
+			mut flag_val := ""
+			mut has_eq := false
+			if eq_idx >= 0 {
+				has_eq = true
+				flag_name = arg.slice(2, eq_idx)
+				flag_val = arg.slice(eq_idx + 1, arg.len)
+			} else {
+				flag_name = arg.slice(2, arg.len)
+			}
+			mut found := false
+			for mut idx := 0; idx < fs.flags.len; idx = idx + 1 {
+				if fs.flags[idx].name == flag_name {
+					found = true
+					if fs.flags[idx].is_bool {
+						if has_eq {
+							fs.flags[idx].val = flag_val
+						} else {
+							fs.flags[idx].val = "true"
+						}
+					} else {
+						if has_eq {
+							fs.flags[idx].val = flag_val
+						} else {
+							if i + 1 < raw_args.len {
+								i = i + 1
+								fs.flags[idx].val = raw_args[i]
+							} else {
+								return error("flag '--${flag_name}' requires an argument")
+							}
+						}
+					}
+					break
+				}
+			}
+			if !found {
+				return error("unknown flag '--${flag_name}'")
+			}
+			i = i + 1
+			continue
+		}
+		if arg.starts_with("-") && arg.len > 1 {
+			eq_idx := arg.index_of("=")
+			mut flag_short := ""
+			mut flag_val := ""
+			mut has_eq := false
+			if eq_idx >= 0 {
+				has_eq = true
+				flag_short = arg.slice(1, eq_idx)
+				flag_val = arg.slice(eq_idx + 1, arg.len)
+			} else {
+				flag_short = arg.slice(1, arg.len)
+			}
+			mut found := false
+			for mut idx := 0; idx < fs.flags.len; idx = idx + 1 {
+				if fs.flags[idx].short_name == flag_short || fs.flags[idx].name == flag_short {
+					found = true
+					if fs.flags[idx].is_bool {
+						if has_eq {
+							fs.flags[idx].val = flag_val
+						} else {
+							fs.flags[idx].val = "true"
+						}
+					} else {
+						if has_eq {
+							fs.flags[idx].val = flag_val
+						} else {
+							if i + 1 < raw_args.len {
+								i = i + 1
+								fs.flags[idx].val = raw_args[i]
+							} else {
+								return error("flag '-${flag_short}' requires an argument")
+							}
+						}
+					}
+					break
+				}
+			}
+			if !found {
+				return error("unknown flag '-${flag_short}'")
+			}
+			i = i + 1
+			continue
+		}
+		fs.args.push(arg)
+		i = i + 1
+	}
+	fs.parsed = true
+	return true
+}
+
+pub fn (fs FlagSet) get_bool(name string) bool {
+	for f in fs.flags {
+		if f.name == name || f.short_name == name {
+			return f.val == "true" || f.val == "1"
+		}
+	}
+	return false
+}
+
+pub fn (fs FlagSet) get_string(name string) string {
+	for f in fs.flags {
+		if f.name == name || f.short_name == name {
+			return f.val
+		}
+	}
+	return ""
+}
+
+pub fn (fs FlagSet) get_int(name string) int {
+	for f in fs.flags {
+		if f.name == name || f.short_name == name {
+			res := f.val.to_int() or { 0 }
+			return res
+		}
+	}
+	return 0
+}
+
+pub fn (fs FlagSet) get_i64(name string) i64 {
+	for f in fs.flags {
+		if f.name == name || f.short_name == name {
+			res := f.val.to_i64() or { 0i64 }
+			return res
+		}
+	}
+	return 0i64
+}
+
+pub fn (fs FlagSet) get_f64(name string) f64 {
+	for f in fs.flags {
+		if f.name == name || f.short_name == name {
+			res := f.val.to_f64() or { 0.0 }
+			return res
+		}
+	}
+	return 0.0
+}
+
+pub fn (fs FlagSet) positional() []string {
+	return fs.args
+}
+
+pub fn (fs FlagSet) help_string() string {
+	mut s := "Usage of ${fs.name}:\n"
+	for f in fs.flags {
+		mut line := "  "
+		if f.short_name.len > 0 {
+			line = "${line}-${f.short_name}, "
+		}
+		line = "${line}--${f.name}"
+		if !f.is_bool {
+			line = "${line}=<value>"
+		}
+		if f.def_val.len > 0 {
+			line = "${line} (default: ${f.def_val})"
+		}
+		if f.usage.len > 0 {
+			line = "${line}\n        ${f.usage}"
+		}
+		s = "${s}${line}\n"
+	}
+	return s
+}
+
+pub fn (fs FlagSet) print_help() {
+	h := fs.help_string()
+	print(h)
+}
+
+pub fn ansi_bold(text string) string {
+	return "\033[1m${text}\033[0m"
+}
+
+pub fn ansi_green(text string) string {
+	return "\033[32m${text}\033[0m"
+}
+
+pub fn ansi_yellow(text string) string {
+	return "\033[33m${text}\033[0m"
+}
+
+pub fn ansi_red(text string) string {
+	return "\033[31m${text}\033[0m"
+}
+
+pub fn ansi_blue(text string) string {
+	return "\033[34m${text}\033[0m"
+}
+
+pub fn ansi_cyan(text string) string {
+	return "\033[36m${text}\033[0m"
+}

@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.5.12)  
+> **Version:** Production Toolchain (v0.5.13)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 
@@ -76,11 +76,15 @@ vira <command> [flags] <file.vir>
 | Command | Purpose | Example |
 | :--- | :--- | :--- |
 | `run` | Compile and immediately execute a Vira program | `vira run main.vir` |
-| `build` | Compile into a native standalone executable (`.exe` / ELF) | `vira build -prod -o app main.vir` |
+| `build` | Compile into a native standalone executable (`.exe` / ELF / Mach-O) | `vira build -prod -o app main.vir` |
+| `init` | Scaffold a standard multi-package enterprise project | `vira init my_service` |
+| `init-gui` | Scaffold a dedicated native desktop GUI application with theme tokens and icons | `vira init-gui my_app` |
+| `bundle` | Package a GUI app into native production bundles for macOS (`.app`), Linux, and Windows | `vira bundle --target darwin -release` |
 | `test` | Discover and execute `*_test.vir` test suites | `vira test ./...` |
 | `fmt` | Format `.vir` source files to canonical style | `vira fmt main.vir` |
-| `doc` | Generate documentation from `.vir` module declarations | `vira doc packages/http` |
-| `pkg` | Manage `vira.mod` dependencies and cryptographic `vira.lock` files | `vira pkg lock` |
+| `add` | Add and download a package dependency | `vira add github.com/user/pkg@v1.0.0` |
+| `install` | Install all dependencies declared in `vira.mod` / `vira.lock` | `vira install` |
+| `vendor` | Vendor all dependencies into `./vendor` for air-gapped builds | `vira vendor` |
 | `lsp` | Start the JSON-RPC 2.0 Language Server (`virals`) over stdio | `vira lsp` |
 | `cgen` | Lower the Vira AST into human-readable C99 code | `vira cgen main.vir` |
 | `check` | Run syntax, 4-quadrant mutability, and print the autofree escape analysis report | `vira check main.vir` |
@@ -93,6 +97,22 @@ vira <command> [flags] <file.vir>
 - `-o <path>`: Specifies output binary filename.
 - `-cc <bin>`: Overrides backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
 - `-keep-c`: Preserves intermediate generated `.c` files in `build/`.
+
+### Desktop GUI App Scaffolding & Packaging
+
+Vira provides built-in, zero-dependency tools for building and shipping commercial desktop software:
+- **`vira init-gui <name>`**: Scaffolds a complete desktop GUI project with `vira.mod`, high-resolution vector icon, theme tokens (`src/config/theme.vir`), and immediate-mode 60 FPS lifecycle loop (`src/main.vir`).
+- **`vira.mod` Manifest Extensions**:
+  - `app_name = "My App"`: Human-readable window and dock title.
+  - `app_id = "com.company.myapp"`: Reverse-DNS identifier for macOS and XDG desktop systems.
+  - `icon = "assets/icon.png"`: Relative path to primary application icon.
+  - `assets = ["assets"]`: Directories automatically copied into distribution bundles.
+- **`vira bundle`**: Packages the app into platform-specific native formats:
+  - **macOS (`--target darwin`)**: Builds a `.app` bundle with `Contents/Info.plist`, High-DPI Retina support (`NSHighResolutionCapable`), native icons, and `.zip` distribution archive.
+  - **Linux (`--target linux`)**: Builds a portable directory with FreeDesktop `.desktop` entry, `icon.png`, environment `run.sh` launcher, and `.tar.gz` distribution archive.
+  - **Windows (`--target windows`)**: Compiles with Win32 GUI subsystem (`-mwindows` linker flag to eliminate the black CMD console window), multi-resolution `.ico`, and `.zip` distribution archive.
+
+> For the comprehensive guide, see [**Tutorial 35: Native GUI App Scaffolding & Cross-Platform Bundling**](tutorials/35_gui_app_scaffolding_and_cross_platform_bundling.md).
 
 ---
 
@@ -180,6 +200,48 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |
 | `bool`| Boolean (`true` or `false`) | 8-bit |
 | `string`| Immutable UTF-8 string slice (16 bytes: `data`, `len`, `is_lit`) | 16 bytes |
+
+---
+
+### Numeric Literals & Type Casts
+
+Vira supports decimal, hexadecimal (`0x`), octal (`0o`), and binary (`0b`) integer literals:
+```v
+mask := 0b10110010
+permissions := 0o755
+hex_code := 0xFF
+```
+
+Convert between primitive types using explicit casts:
+```v
+val_int := 42
+val_i64 := i64(val_int)
+val_f64 := f64(val_int)
+val_u8  := u8(val_int)
+```
+
+---
+
+### Constants (`const` / `pub const`)
+
+Compile-time immutable typed constants:
+```v
+pub const MAX_CONNECTIONS = 1000
+const DEFAULT_TIMEOUT_MS = 5000
+```
+
+---
+
+### Cleanup with `defer`
+
+The `defer` statement schedules a cleanup action to execute in **LIFO** (Last-In, First-Out) order when the enclosing function or block scope exits:
+```v
+mut f := io.File.open('records.csv', 'rb') or { return }
+defer f.close()
+
+// Normal processing...
+// f.close() runs deterministically upon return, error unwrap, or panic!
+```
 
 ---
 
@@ -690,12 +752,23 @@ println(data) // Buffer freed automatically at scope exit!
 
 ### Standard Library Packages (`packages/`)
 
-Vira's compiler resolves built-in pure-Vira standard library packages automatically under `packages/`:
-- `import io` — Unified `Reader`/`Writer`/`Closer` streams and `io.File` handles.
-- `import net` — Cross-platform TCP/UDP sockets, DNS resolution, and non-blocking pollers.
-- `import http` — HTTP/1.1 request parser, response builder, header maps, and SSE streaming.
+Vira's compiler resolves built-in pure-Vira standard library packages automatically under [`packages/`](file:///mnt/flutter_drive/vira/packages) (Tier 0 resolution):
+- `import os` — Operating system platform queries, process IDs, command-line arguments (`os.args()`), environment variables, filesystem operations, and path manipulation.
+- `import exec` — Child process spawning (`exec.Command`), stdio pipe redirection, `CLONE_*` namespace flags, and split async execution (`cmd.start()`, `cmd.wait()`).
+- `import syscall` — Low-level kernel system calls, raw file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux container isolation (`mount`, `chroot`, `mknod`, namespaces), and signal trapping.
+- `import flag` — Declarative POSIX/GNU command-line flag parsing (`bool_flag`, `int_flag`, `string_flag`, `f64_flag`) with automated `--help` generation.
+- `import log` — Leveled structured stderr logger (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) with timestamps and process prefixes.
+- `import strings` — String processing: whitespace field splitting (`strings.fields`), joining (`strings.join`), delimiter splitting (`strings.split`), replacement, trimming, padding, sorting, and `StringBuilder`.
+- `import math` — High-performance C99 math intrinsics: trigonometry, logarithms, exponentials, roots, rounding, clamping, and constants (`PI`, `TAU`, `E`).
+- `import time` — Nanosecond wall-clock timestamps, monotonic timers, microsecond sleep, `strftime` formatting, and `Duration`.
+- `import ctype` — Fast ASCII character classification (`is_alpha`, `is_digit`, `is_space`, `is_upper`, `is_lower`) and case conversion (`to_lower`, `to_upper`).
+- `import io` — Unified `Reader`/`Writer`/`Closer` stream traits, `File` handles, `BufReader`, interactive console input (`prompt`, `read_line`), and temporary files.
+- `import net` — Cross-platform TCP listeners/streams, UDP sockets, DNS resolution, and non-blocking pollers.
+- `import http` — HTTP/1.1 request parser, response builder, header maps, server loops, and SSE streaming.
 - `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
-- `import viraserve` — Work-stealing actor HTTP microframework.
+- `import viraserve` — Work-stealing actor HTTP microframework with route dispatch and zero memory leaks.
+
+For complete API signatures and runnable examples, see the [**Standard Library Manual**](file:///mnt/flutter_drive/vira/docs/STANDARD_LIBRARY.md).
 
 ---
 

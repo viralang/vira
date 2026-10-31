@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.5.12)  
+> **Version:** Production Toolchain (v0.5.13)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 
@@ -180,6 +180,48 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |
 | `bool`| Boolean (`true` or `false`) | 8-bit |
 | `string`| Immutable UTF-8 string slice (16 bytes: `data`, `len`, `is_lit`) | 16 bytes |
+
+---
+
+### Numeric Literals & Type Casts
+
+Vira supports decimal, hexadecimal (`0x`), octal (`0o`), and binary (`0b`) integer literals:
+```v
+mask := 0b10110010
+permissions := 0o755
+hex_code := 0xFF
+```
+
+Convert between primitive types using explicit casts:
+```v
+val_int := 42
+val_i64 := i64(val_int)
+val_f64 := f64(val_int)
+val_u8  := u8(val_int)
+```
+
+---
+
+### Constants (`const` / `pub const`)
+
+Compile-time immutable typed constants:
+```v
+pub const MAX_CONNECTIONS = 1000
+const DEFAULT_TIMEOUT_MS = 5000
+```
+
+---
+
+### Cleanup with `defer`
+
+The `defer` statement schedules a cleanup action to execute in **LIFO** (Last-In, First-Out) order when the enclosing function or block scope exits:
+```v
+mut f := io.File.open('records.csv', 'rb') or { return }
+defer f.close()
+
+// Normal processing...
+// f.close() runs deterministically upon return, error unwrap, or panic!
+```
 
 ---
 
@@ -690,12 +732,23 @@ println(data) // Buffer freed automatically at scope exit!
 
 ### Standard Library Packages (`packages/`)
 
-Vira's compiler resolves built-in pure-Vira standard library packages automatically under `packages/`:
-- `import io` — Unified `Reader`/`Writer`/`Closer` streams and `io.File` handles.
-- `import net` — Cross-platform TCP/UDP sockets, DNS resolution, and non-blocking pollers.
-- `import http` — HTTP/1.1 request parser, response builder, header maps, and SSE streaming.
+Vira's compiler resolves built-in pure-Vira standard library packages automatically under [`packages/`](file:///mnt/flutter_drive/vira/packages) (Tier 0 resolution):
+- `import os` — Operating system platform queries, process IDs, command-line arguments (`os.args()`), environment variables, filesystem operations, and path manipulation.
+- `import exec` — Child process spawning (`exec.Command`), stdio pipe redirection, `CLONE_*` namespace flags, and split async execution (`cmd.start()`, `cmd.wait()`).
+- `import syscall` — Low-level kernel system calls, raw file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux container isolation (`mount`, `chroot`, `mknod`, namespaces), and signal trapping.
+- `import flag` — Declarative POSIX/GNU command-line flag parsing (`bool_flag`, `int_flag`, `string_flag`, `f64_flag`) with automated `--help` generation.
+- `import log` — Leveled structured stderr logger (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) with timestamps and process prefixes.
+- `import strings` — String processing: whitespace field splitting (`strings.fields`), joining (`strings.join`), delimiter splitting (`strings.split`), replacement, trimming, padding, sorting, and `StringBuilder`.
+- `import math` — High-performance C99 math intrinsics: trigonometry, logarithms, exponentials, roots, rounding, clamping, and constants (`PI`, `TAU`, `E`).
+- `import time` — Nanosecond wall-clock timestamps, monotonic timers, microsecond sleep, `strftime` formatting, and `Duration`.
+- `import ctype` — Fast ASCII character classification (`is_alpha`, `is_digit`, `is_space`, `is_upper`, `is_lower`) and case conversion (`to_lower`, `to_upper`).
+- `import io` — Unified `Reader`/`Writer`/`Closer` stream traits, `File` handles, `BufReader`, interactive console input (`prompt`, `read_line`), and temporary files.
+- `import net` — Cross-platform TCP listeners/streams, UDP sockets, DNS resolution, and non-blocking pollers.
+- `import http` — HTTP/1.1 request parser, response builder, header maps, server loops, and SSE streaming.
 - `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
-- `import viraserve` — Work-stealing actor HTTP microframework.
+- `import viraserve` — Work-stealing actor HTTP microframework with route dispatch and zero memory leaks.
+
+For complete API signatures and runnable examples, see the [**Standard Library Manual**](file:///mnt/flutter_drive/vira/docs/STANDARD_LIBRARY.md).
 
 ---
 
