@@ -103,4 +103,6 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/36_linux_container_runtime_reference.vir
 .\vira.exe run docs/examples/37_gui_image_and_asset_loading.vir
 .\vira.exe run docs/examples/38_gui_remote_url_image_loading.vir
+.\vira.exe run docs/examples/39_gui_realworld_cloud_ai_hub.vir
 ```
+

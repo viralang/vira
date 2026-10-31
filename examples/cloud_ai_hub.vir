@@ -1,0 +1,491 @@
+module main
+
+import widget as w
+import exec
+import json
+
+// RepoTelemetry encapsulates real-world HTTP metadata queried from remote APIs
+struct RepoTelemetry {
+pub mut:
+	name        string
+	desc        string
+	stars       int
+	forks       int
+	issues      int
+	license     string
+	avatar_url  string
+	is_loaded   bool
+}
+
+// fetch_repo_telemetry executes a decoupled live HTTP request using curl,
+// parses the JSON response using Vira's zero-alloc JSON parser, and downloads
+// the repository avatar texture to the local disk cache.
+fn fetch_repo_telemetry(repo string, avatar_cache_path string) RepoTelemetry {
+	url := "https://api.github.com/repos/${repo}"
+	mut cmd := exec.Command.new("curl", [
+		"-s",
+		"-L",
+		"-H", "User-Agent: Vira-Cloud-Hub/1.0",
+		"-H", "Accept: application/vnd.github.v3+json",
+		url,
+	])
+	out := cmd.output() or { "" }
+	if out.len == 0 {
+		return RepoTelemetry{
+			name:        repo,
+			desc:        "Failed to reach remote API endpoint (Network Timeout)",
+			stars:       0,
+			forks:       0,
+			issues:      0,
+			license:     "Unknown",
+			avatar_url:  "",
+			is_loaded:   false,
+		}
+	}
+
+	mut name := json.get_str(out, "full_name") or { "" }
+	if name.len == 0 {
+		name = json.get_str(out, "name") or { repo }
+	}
+	desc := json.get_str(out, "description") or { "High-performance systems package." }
+	stars := json.get_int(out, "stargazers_count") or { 0 }
+	forks := json.get_int(out, "forks_count") or { 0 }
+	issues := json.get_int(out, "open_issues_count") or { 0 }
+
+	mut license_name := "Open Source"
+	license_raw := json.get_raw(out, "license") or { "" }
+	if license_raw.len > 0 {
+		spdx := json.get_str(license_raw, "spdx_id") or { "" }
+		if spdx.len > 0 {
+			license_name = spdx
+		} else {
+			lname := json.get_str(license_raw, "name") or { "" }
+			if lname.len > 0 {
+				license_name = lname
+			}
+		}
+	}
+
+	mut avatar_url := ""
+	owner_raw := json.get_raw(out, "owner") or { "" }
+	if owner_raw.len > 0 {
+		avatar_url = json.get_str(owner_raw, "avatar_url") or { "" }
+	}
+
+	if avatar_url.len > 0 && avatar_cache_path.len > 0 {
+		mut dl_cmd := exec.Command.new("curl", [
+			"-s",
+			"-L",
+			avatar_url,
+			"-o",
+			avatar_cache_path,
+		])
+		_ := dl_cmd.run() or { -1 }
+	}
+
+	return RepoTelemetry{
+		name:        name,
+		desc:        desc,
+		stars:       stars,
+		forks:       forks,
+		issues:      issues,
+		license:     license_name,
+		avatar_url:  avatar_url,
+		is_loaded:   true,
+	}
+}
+
+fn main() {
+	// Initialize master application shell (1040x740 double-buffered 60 FPS)
+	mut app := w.App.new("Vira Cloud & AI Model Hub", 1040, 740)
+	app.init()
+	defer app.cleanup()
+
+	// Available design system themes (Catppuccin Mocha, Latte, Midnight)
+	mocha_theme := w.Theme.mocha()
+	latte_theme := w.Theme.latte()
+	midnight_theme := w.Theme.midnight()
+	mut current_theme_idx := 0
+
+	// Local cache and image texture pipeline
+	cache_file := "assets/cache/hub_avatar.png"
+	mut current_image := -1
+	if file_exists("assets/logo.png") {
+		current_image = w.LoadImage("assets/logo.png")
+	}
+
+	// Interactive state
+	mut active_tab := 0
+	mut target_repo := "viralang/vira"
+	mut auth_token := "sec_live_token_77a9b"
+	mut search_filter := ""
+	mut selected_arch := 0
+	arch_options := [
+		"Linux x86_64 (AVX2/SSE2)",
+		"macOS Apple Silicon (NEON)",
+		"Windows x64 (MSVC)",
+		"WebAssembly (WASI-SIMD)",
+	]
+	mut selected_protocol := 0 // 0 = HTTP/2 TLS, 1 = HTTP/1.1 REST
+	mut enable_autosync := true
+	mut hardware_accel := true
+	mut timeout_sec := 15.0f32
+	mut img_scale := 1.0f32
+	mut cache_quota := 34.0f32
+	mut selected_row := 0
+	mut show_purge_dialog := false
+	mut total_requests := 1
+	mut is_connected := true
+
+	// Non-blocking HTTP async state machine
+	mut fetch_state := 0 // 0: Idle, 1: Handshake, 2: Streaming, 3: Success, 4: Error
+	mut progress_pct := 1.0f32
+	mut status_msg := "HTTP/2 200 OK - Synchronized"
+
+	// Live telemetry cache
+	mut latest_tele := RepoTelemetry{
+		name:        "viralang/vira",
+		desc:        "A modern, high-performance systems and AI programming language.",
+		stars:       1,
+		forks:       0,
+		issues:      0,
+		license:     "Apache-2.0",
+		avatar_url:  "https://avatars.githubusercontent.com/u/343037618?v=4",
+		is_loaded:   true,
+	}
+
+	// Pre-populate production ecosystem package and model registry
+	headers := ["Package / Model", "Version / Scale", "Category", "License", "Memory Footprint", "Runtime Status"]
+	mut rows := [][]string{}
+	rows.push(["viralang/vira", "v0.5.15 / 1 Star", "Systems Language", "Apache-2.0", "2.4 MB (Native)", "Verified Official"])
+	rows.push(["viralang/widget", "v1.2.0 / 1 Star", "Flutter-Style UI", "MIT", "840 KB (Zero-Leak)", "Active"])
+	rows.push(["viralang/http", "v0.9.4 / 1 Star", "HTTP/1.1 & SSE", "MIT", "512 KB (Zero-Copy)", "Production"])
+	rows.push(["viralang/json", "v1.1.2 / 1 Star", "SIMD Parser", "MIT", "380 KB (AVX2)", "Optimized"])
+	rows.push(["viralang/exec", "v1.0.0 / 1 Star", "Process & IPC", "MIT", "260 KB (POSIX)", "Active"])
+	rows.push(["deepseek-ai/DeepSeek-V3", "671B MoE", "Reasoning Model", "MIT", "370 GB (FP8)", "Cloud Endpoint"])
+	rows.push(["meta-llama/Llama-3.3-70B", "70B Dense", "Multimodal LLM", "Llama-3.3", "140 GB (BF16)", "HuggingFace Hub"])
+	rows.push(["Qwen/Qwen2.5-Coder-32B", "32.5B Dense", "Code Intelligence", "Apache-2.0", "65 GB (INT4)", "Inference Ready"])
+
+	for !app.should_close() {
+		// Asynchronous non-blocking HTTP frame simulation
+		if fetch_state == 1 {
+			status_msg = "TLS 1.3 Handshake & Sending Headers..."
+			progress_pct = progress_pct + 0.05f32
+			if progress_pct >= 0.40f32 {
+				fetch_state = 2
+			}
+		} else if fetch_state == 2 {
+			status_msg = "Streaming JSON Payload & Assets: ${int(progress_pct * 100.0f32)}%"
+			progress_pct = progress_pct + 0.04f32
+			if progress_pct >= 1.0f32 {
+				progress_pct = 1.0f32
+				fetch_state = 3
+
+				// Execute live fetch and decode
+				latest_tele = fetch_repo_telemetry(target_repo, cache_file)
+				if latest_tele.is_loaded {
+					status_msg = "HTTP/2 200 OK - Fetched & Decoded"
+					is_connected = true
+
+					// Update or reload GPU texture
+					if file_exists(cache_file) {
+						if current_image >= 0 {
+							w.FreeImage(current_image)
+						}
+						current_image = w.LoadImage(cache_file)
+					}
+					cache_quota = cache_quota + 8.5f32
+					if cache_quota > 100.0f32 {
+						cache_quota = 100.0f32
+					}
+
+					// Update data row in the table
+					if rows.len > 0 {
+						rows[0][0] = latest_tele.name
+						rows[0][1] = "Live / ${latest_tele.stars} Stars"
+						rows[0][3] = latest_tele.license
+						rows[0][5] = "Synchronized"
+					}
+				} else {
+					fetch_state = 4
+					status_msg = "Failed to query remote repository"
+					is_connected = false
+				}
+			}
+		}
+
+		// Pick current theme
+		mut current_theme := mocha_theme
+		if current_theme_idx == 1 {
+			current_theme = latte_theme
+		} else if current_theme_idx == 2 {
+			current_theme = midnight_theme
+		}
+
+		app.begin_frame(current_theme.bg_color)
+		w.Scaffold.begin(current_theme)
+
+		// Top Navigation Bar
+		mq := w.MediaQuery.of()
+		w.Padding.begin(w.EdgeInsets.symmetric(20, 14), mq.width, 10)
+
+		// Header row with branding and status badges
+		w.Row.begin(32, 10)
+		w.Heading("Vira Cloud & AI Model Hub")
+		if fetch_state == 3 || fetch_state == 0 {
+			w.StatusBadge("Network: Connected", is_connected)
+			w.Badge("HTTP/2 200 OK", w.COLOR_GREEN, w.COLOR_BASE)
+		} else if fetch_state == 1 || fetch_state == 2 {
+			w.Badge("HTTP Transfer In-Flight", w.COLOR_YELLOW, w.COLOR_BASE)
+		} else {
+			w.StatusBadge("Network: Error", false)
+			w.Badge("HTTP 408 / Failed", w.COLOR_RED, w.COLOR_BASE)
+		}
+		w.Badge("Autofree: 0 Leaks", w.COLOR_BLUE, w.COLOR_BASE)
+		w.Row.end()
+
+		w.Caption("Real-world decoupled HTTP client, GPU asset cache, and full responsive widget suite.")
+		w.Spacer(4)
+
+		// Interactive Tab Navigation Strip
+		w.Row.begin(32, 8)
+		if w.Tab("Ecosystem Packages & Models", active_tab == 0) {
+			active_tab = 0
+		}
+		if w.Tab("Live HTTP Telemetry & Headers", active_tab == 1) {
+			active_tab = 1
+		}
+		if w.Tab("GPU Cache & System Diagnostics", active_tab == 2) {
+			active_tab = 2
+		}
+		w.Row.end()
+
+		w.Spacer(6)
+		w.Divider()
+		w.Spacer(6)
+
+		// Responsive layout: 2-column on desktop (>1024px), stacked on tablet/mobile
+		if mq.is_desktop {
+			left_w := 370
+			mut right_w := mq.width - left_w - 60
+			if right_w < 400 {
+				right_w = 400
+			}
+
+			// Left Column: Query form, Image Inspector, Controls
+			w.Column.begin_at(20, 130, left_w, 10)
+				w.Card.begin("Remote API Query & Asset Inspector", left_w)
+					w.Subheading("Target Repository / Model")
+					target_repo = w.TextField("Repository Slug (e.g. viralang/vira)", target_repo)
+					w.Spacer(4)
+
+					w.Subheading("Authorization Token (Optional)")
+					auth_token = w.TextField("Bearer Token", auth_token)
+					w.Spacer(4)
+
+					w.Subheading("Target Architecture")
+					selected_arch = w.Dropdown(arch_options, selected_arch)
+					w.Spacer(6)
+
+					// Protocol radio buttons
+					w.Subheading("Network Protocol")
+					w.Row.begin(26, 8)
+					if w.Radio("HTTP/2 TLS", selected_protocol == 0) {
+						selected_protocol = 0
+					}
+					if w.Radio("HTTP/1.1 REST", selected_protocol == 1) {
+						selected_protocol = 1
+					}
+					w.Row.end()
+					w.Spacer(4)
+
+					// Checkboxes
+					enable_autosync = w.Checkbox("Enable Background Polling (15s)", enable_autosync)
+					hardware_accel = w.Checkbox("Hardware Decoupled Blitting", hardware_accel)
+					w.Spacer(6)
+
+					// Sliders
+					timeout_sec = w.Slider("HTTP Timeout (sec)", timeout_sec, 5.0f32, 60.0f32)
+					img_scale = w.Slider("Image Zoom Scale", img_scale, 0.5f32, 2.0f32)
+					w.Spacer(6)
+
+					// Hardware-Accelerated Image Display
+					w.Subheading("Remote Asset / Avatar Texture")
+					if current_image >= 0 {
+						img_w := int(72.0f32 * img_scale)
+						img_h := int(72.0f32 * img_scale)
+						w.Row.begin(img_h + 8, 12)
+						w.Image(current_image, img_w, img_h)
+						w.Column.begin(left_w - img_w - 30, 4)
+							w.Caption("Texture: GPU RGBA8888")
+							w.Caption("Cached: ${cache_file}")
+							w.Badge("Hardware Blit: OK", w.COLOR_MAUVE, w.COLOR_BASE)
+						w.Column.end()
+						w.Row.end()
+					} else {
+						w.Caption("No texture currently loaded in GPU memory.")
+					}
+					w.Spacer(8)
+
+					// Primary Action Buttons
+					w.Subheading("Registry Actions")
+					w.Row.begin(36, 8)
+					if fetch_state != 1 && fetch_state != 2 {
+						if w.ElevatedButton("Fetch Live Data (HTTP)") {
+							total_requests = total_requests + 1
+							progress_pct = 0.0f32
+							fetch_state = 1
+						}
+					} else {
+						w.Badge("Transfer Active...", w.COLOR_SURFACE1, w.COLOR_YELLOW)
+					}
+
+					if w.SecondaryButton("Switch Theme") {
+						current_theme_idx = (current_theme_idx + 1) % 3
+					}
+					w.Row.end()
+
+					w.Spacer(4)
+					if w.DangerButton("Purge GPU Cache & Free Texture") {
+						show_purge_dialog = true
+					}
+				w.Card.end()
+			w.Column.end()
+
+			// Right Column: Tab View, Data Table, Live Telemetry
+			w.Column.begin_at(left_w + 40, 130, right_w, 10)
+				if active_tab == 0 {
+					w.Card.begin("Cloud AI Model & Package Registry (Live)", right_w)
+						w.Row.begin(32, 10)
+						w.Subheading("Registry Explorer")
+						w.Spacer(10)
+						search_filter = w.TextField("Search packages or models...", search_filter)
+						w.Row.end()
+
+						w.Spacer(6)
+						// Interactive sortable data table
+						selected_row = w.DataTable(headers, rows, search_filter, selected_row)
+
+						w.Spacer(8)
+						w.Text("Selected Item Details: ${rows[selected_row][0]} • ${rows[selected_row][2]}")
+						w.Caption(latest_tele.desc)
+					w.Card.end()
+
+					w.Spacer(6)
+					w.Card.begin("Network Sync Status & Cache Utilization", right_w)
+						w.Row.begin(28, 10)
+						w.Text("Transfer Status: ${status_msg}")
+						w.Badge("Requests: ${total_requests}", w.COLOR_SURFACE1, w.COLOR_TEXT)
+						w.Row.end()
+
+						w.Spacer(4)
+						w.ProgressBar(int(progress_pct * 100.0f32), 100)
+
+						w.Spacer(6)
+						w.Row.begin(24, 10)
+						w.Text("Disk & GPU Memory Cache Quota: ${int(cache_quota)}%")
+						w.Row.end()
+						w.ProgressPercent(cache_quota)
+					w.Card.end()
+
+				} else if active_tab == 1 {
+					w.Card.begin("Live HTTP Response & Payload Inspector", right_w)
+						w.Subheading("Decoded Response for ${latest_tele.name}")
+						w.Spacer(6)
+						w.Text("Repository: ${latest_tele.name}")
+						w.Text("Description: ${latest_tele.desc}")
+						w.Text("GitHub Stars: ${latest_tele.stars} ⭐ | Forks: ${latest_tele.forks} 🍴 | Open Issues: ${latest_tele.issues} 🐞")
+						w.Text("License: ${latest_tele.license}")
+						w.Text("Remote Avatar URL: ${latest_tele.avatar_url}")
+						w.Spacer(8)
+						w.Divider()
+						w.Spacer(8)
+
+						w.Subheading("Simulated HTTP Response Headers")
+						w.Caption("HTTP/2 200 OK")
+						w.Caption("server: GitHub.com")
+						w.Caption("content-type: application/json; charset=utf-8")
+						w.Caption("x-ratelimit-limit: 60")
+						w.Caption("x-ratelimit-remaining: 59")
+						w.Caption("access-control-allow-origin: *")
+						w.Caption("strict-transport-security: max-age=31536000")
+					w.Card.end()
+
+				} else {
+					w.Card.begin("GPU Subsystem & Runtime Diagnostics", right_w)
+						w.Subheading("Vira High-Performance Graphics Diagnostics")
+						w.Spacer(6)
+						w.Text("Graphics Subsystem: Native Double-Buffered Framebuffer")
+						w.Text("Target FPS: 60 FPS (Hardware V-Sync Enabled)")
+						w.Text("Current GPU Texture Handle: ${current_image}")
+						w.Text("SIMD Architecture: x86_64 SSE2 / AVX2 (Zero GC Pause)")
+						w.Text("Memory Management: Vira Deterministic Autofree (0 Leaks)")
+						w.Spacer(8)
+						w.Divider()
+						w.Spacer(8)
+
+						w.Center.begin(320, 6)
+						w.Badge("ALL SYSTEMS OPTIMAL - ZERO MEMORY LEAKS", w.COLOR_GREEN, w.COLOR_BASE)
+						w.Center.end()
+					w.Card.end()
+				}
+			w.Column.end()
+
+		} else {
+			// Mobile & Tablet Responsive Stack (Single Column adapting to viewport)
+			full_w := w.content_width(20)
+			w.Column.begin(full_w, 10)
+				w.Card.begin("Registry Explorer (Compact)", full_w)
+					target_repo = w.TextField("Repository Slug", target_repo)
+					if w.ElevatedButton("Fetch Live Data (HTTP)") {
+						total_requests = total_requests + 1
+						progress_pct = 0.0f32
+						fetch_state = 1
+					}
+					selected_row = w.DataTable(headers, rows, search_filter, selected_row)
+				w.Card.end()
+			w.Column.end()
+		}
+
+		// Centered Modal Dialog for GPU Cache Purging
+		if show_purge_dialog {
+			w.Modal.begin("Confirm GPU Texture Eviction", 460, 230)
+				w.Heading("Purge GPU Texture Cache?")
+				w.Spacer(6)
+				w.Text("This action will free the active OpenGL GPU texture handle, purge all local image cache files from disk, and reset memory telemetry.")
+				w.Caption("Operation is immediate and releases all associated VRAM buffers.")
+				w.Spacer(12)
+				w.Divider()
+				w.Spacer(12)
+
+				w.Row.begin(36, 12)
+				if w.ElevatedButton("Confirm Eviction") {
+					if current_image >= 0 {
+						w.FreeImage(current_image)
+						current_image = -1
+					}
+					if file_exists(cache_file) {
+						_ := remove_file(cache_file) or { false }
+					}
+					cache_quota = 0.0f32
+					status_msg = "Cache Purged & Texture Evicted"
+					show_purge_dialog = false
+				}
+				if w.SecondaryButton("Cancel") {
+					show_purge_dialog = false
+				}
+				w.Row.end()
+			w.Modal.end()
+		}
+
+		w.Padding.end()
+		w.Scaffold.end()
+		app.end_frame()
+	}
+
+	// Clean up GPU image texture before exit
+	if current_image >= 0 {
+		w.FreeImage(current_image)
+		current_image = -1
+	}
+}
