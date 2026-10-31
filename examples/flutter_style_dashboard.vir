@@ -7,7 +7,7 @@ fn main() {
 	app.init()
 	defer app.cleanup()
 
-	theme := w.Theme.latte()
+	theme := w.Theme.midnight()
 	mut counter := 0
 	mut progress := 40
 	mut volume := 65.0f32

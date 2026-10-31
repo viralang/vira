@@ -564,7 +564,10 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 		cDir := filepath.Dir(curr.filePath)
 
 		for _, imp := range curr.ast.Imports {
-			impTarget := imp.Name
+			impTarget := imp.Path
+			if impTarget == "" {
+				impTarget = imp.Name
+			}
 			if visitedPkg[impTarget] {
 				continue
 			}
@@ -1205,12 +1208,15 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 
 		// 1A. Module / Package Namespace Completion (e.g., 'http.' or 'net.')
 		for _, imp := range astFile.Imports {
-			cleanTarget := strings.Trim(imp.Name, `"`)
-			alias := imp.Alias
-			modName := filepath.Base(cleanTarget)
-			if alias == "" {
-				alias = modName
+			cleanTarget := strings.Trim(imp.Path, `"`)
+			if cleanTarget == "" {
+				cleanTarget = strings.Trim(imp.Name, `"`)
 			}
+			alias := imp.Alias
+			if alias == "" {
+				alias = imp.Name
+			}
+			modName := filepath.Base(cleanTarget)
 			if receiverIdent == alias || receiverIdent == modName {
 				for _, impDoc := range imported {
 					docMod := impDoc.AST.Module.Name
