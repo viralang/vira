@@ -1096,9 +1096,13 @@ func (p *Parser) parsePrefix() ast.Expr {
 	case token.TokString:
 		tok := p.advance()
 		raw := tok.Lexeme(p.src)
+		inner := raw
+		if len(raw) >= 2 && (raw[0] == '\'' || raw[0] == '"') && raw[len(raw)-1] == raw[0] {
+			inner = raw[1 : len(raw)-1]
+		}
 		return &ast.LiteralExpr{
 			Kind:    tok.Kind,
-			Value:   unescapeString(strings.Trim(raw, "'\"")),
+			Value:   unescapeString(inner),
 			LitSpan: tok.Span,
 		}
 
@@ -1318,8 +1322,10 @@ func unescapeString(s string) string {
 func (p *Parser) parseStringInterp() *ast.StringInterpExpr {
 	startTok := p.expect(token.TokStrStart)
 	rawFirst := startTok.Lexeme(p.src)
-	firstSeg := strings.TrimPrefix(rawFirst, "'")
-	firstSeg = strings.TrimPrefix(firstSeg, "\"")
+	firstSeg := rawFirst
+	if len(rawFirst) >= 1 && (rawFirst[0] == '\'' || rawFirst[0] == '"') {
+		firstSeg = rawFirst[1:]
+	}
 
 	segments := []string{unescapeString(firstSeg)}
 	var exprs []ast.Expr
@@ -1338,8 +1344,10 @@ func (p *Parser) parseStringInterp() *ast.StringInterpExpr {
 		} else if p.cur.Kind == token.TokStrEnd {
 			endTok := p.advance()
 			rawLast := endTok.Lexeme(p.src)
-			lastSeg := strings.TrimSuffix(rawLast, "'")
-			lastSeg = strings.TrimSuffix(lastSeg, "\"")
+			lastSeg := rawLast
+			if len(rawLast) >= 1 && (rawLast[len(rawLast)-1] == '\'' || rawLast[len(rawLast)-1] == '"') {
+				lastSeg = rawLast[:len(rawLast)-1]
+			}
 			segments = append(segments, unescapeString(lastSeg))
 			endPos = endTok.Span.End
 			break

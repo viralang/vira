@@ -428,6 +428,38 @@ func (a *Analyzer) rewriteBlock(
 				if call, isCall := s.Value.(*ast.CallExpr); isCall {
 					if id, isId := call.Callee.(*ast.IdentExpr); isId && id.Ident.Name == "error" {
 						isErrorCall = true
+						if len(call.Args) > 0 {
+							argExpr := call.Args[0].Expr
+							if identArg, isIdent := argExpr.(*ast.IdentExpr); isIdent {
+								skipVar = identArg.Ident.Name
+								if isFnRoot {
+									if tv := scope.Find(identArg.Ident.Name); tv != nil {
+										tv.State = StateEscapesViaReturn
+									}
+								}
+							} else if _, isLit := argExpr.(*ast.LiteralExpr); !isLit {
+								a.tmpCounter++
+								argType := a.chk.ExprTypes[argExpr]
+								if argType == nil {
+									argType = checker.TypeString
+								}
+								tmpName := fmt.Sprintf("_vira_ret_err_%d", a.tmpCounter)
+								tmpIdent := ast.Ident{Name: tmpName, NamePos: argExpr.Span()}
+								varDecl := &ast.VarDeclStmt{
+									Name:     tmpIdent,
+									Value:    argExpr,
+									IsMut:    false,
+									StmtSpan: argExpr.Span(),
+								}
+								a.chk.ExprTypes[varDecl.Value] = argType
+								identExpr := &ast.IdentExpr{Ident: tmpIdent}
+								a.chk.ExprTypes[identExpr] = argType
+
+								rewritten = append(rewritten, varDecl)
+								call.Args[0].Expr = identExpr
+								skipVar = tmpName
+							}
+						}
 					}
 				}
 				if !isErrorCall {
@@ -927,6 +959,12 @@ func (a *Analyzer) walkAndHoistCallArgs(
 
 	case *ast.SelectorExpr:
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
+
+	case *ast.StringInterpExpr:
+		for i := range e.Exprs {
+			a.walkAndHoistCallArgs(e.Exprs[i], inArena, preStmts, postFrees, report)
+			e.Exprs[i] = a.maybeHoistSubExpr(e.Exprs[i], inArena, preStmts, postFrees, report)
+		}
 	}
 }
 
