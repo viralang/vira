@@ -34,19 +34,17 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.5.9] Native Collections: Arrays & Slices   ✅ COMPLETED
        │
- [v0.5.9-dev] Stdlib, Switch Statements & Namespaces ✅ COMPLETED
+ [v0.6] CLI, Containers & Complete GUI Suite    ✅ COMPLETED
+       │
+ [v0.7] Native C & Python FFI / Shared Libs     ✅ COMPLETED
        │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
- [v0.6] Phase 1: ViraServe Full Production Suite ⏳ NEXT MILESTONE
+ [v0.8] Cross-Platform GPU Compute Acceleration ⏳ NEXT MILESTONE
        │
- [v0.7] Phase 2: C & Python FFI / Shared Libs  📅 PLANNED
+ [v0.9] Generics & Pattern Matching Expressiveness 📅 PLANNED
        │
- [v0.8] Phase 3: Cross-Platform GPU Compute    📅 PLANNED
-       │
- [v0.9] Phase 4: Generics & Pattern Matching    📅 PLANNED
-       │
- [v1.0] Phase 5: Production Registry & Freeze   📅 PLANNED
+ [v1.0] Production Registry, Stability & Freeze 📅 PLANNED
 ```
 
 ---
@@ -146,50 +144,52 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
   - [Tutorial 29: Control Flow & Switch Statement Patterns](docs/tutorials/29_control_flow_and_switch_patterns.md) & [30_switch_statement.vir](docs/examples/30_switch_statement.vir).
   - [Tutorial 30: Package Namespacing, Modules & Dependency Management](docs/tutorials/30_package_namespacing_and_dependency_management.md) & [31_package_namespacing_and_modules.vir](docs/examples/31_package_namespacing_and_modules.vir).
 
+### 10. CLI Systems Engineering, Linux Containers & Declarative GUI Suite (v0.6)
+- [x] **Complete Standard Library Suite (`packages/`):**
+  - Expanded stdlib with 15 production-grade packages: `os`, `exec`, `syscall`, `flag`, `log`, `strings`, `math`, `time`, `ctype`, `io`, `net`, `http`, `json`, `viraserve`, and `widget`.
+  - Process management, argument parsing, leveled logging, environment variables, and monotonic timers.
+- [x] **Pure-Vira Linux Container Runtime Reference:**
+  - Full Linux container engine: private namespaces (`CLONE_NEWPID`, `CLONE_NEWUTS`, `CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWIPC`), cgroups v2 resource capping, virtual ethernet plumbing, `/dev` character devices via `syscall.mknod`, and pipe-based IPC.
+- [x] **Hardware-Accelerated IMGUI & Declarative Widget Kit (`packages/widget`):**
+  - Flutter-inspired declarative UI kit (`w.App`, `w.Scaffold`, `w.Column`, `w.Row`, `w.Card`, `w.Padding`, `w.MediaQuery`).
+  - Interactive controls: buttons, inputs, dropdown select, sliders, checkboxes, radio groups, progress bars, and sortable data tables.
+  - Non-blocking remote URL asset loading over HTTP/TLS, disk caching, and GPU image texture rendering (`w.LoadImage`, `w.Image`, `w.FreeImage`).
+  - Cross-platform packaging: Windows Win32 subsystem (`-mwindows`), macOS `.app` bundle with Retina High-DPI support, and Linux FreeDesktop bundles.
+- [x] **Tutorials & Examples:**
+  - Tutorials 31 through 37 (CLI apps, flags, Linux containers, data tables, GUI app bundling, Flutter-style widgets, real-world Cloud AI Hub).
+  - Examples 34 through 39 with verified zero memory leaks (`active_leaks=0`).
+
+### 11. Native C & Python FFI, Shared Library Export & ctypes (v0.7)
+- [x] **Zero-Overhead Native C Interoperability (`extern "C"`):**
+  - Direct C-ABI symbol calling convention without reflection or wrapper trampolines.
+  - Declarations for external functions using bodiless function prototypes in `extern "C" { ... }` blocks.
+  - `#include` directives for native headers and `#flag` directives for compiler/linker options.
+- [x] **Deterministic Safety Boundary (`unsafe { ... }` & `@[unsafe]`):**
+  - Compiler-enforced boundary preventing memory hazards from leaking into safe Vira code.
+  - Calling external C functions or dereferencing pointers outside an `unsafe` block triggers a compile error.
+- [x] **C-ABI Scalar Primitives & Raw Pointer Operations:**
+  - Primitive types matching exact C99 types: `c_char`, `c_uchar`, `c_short`, `c_ushort`, `c_int`, `c_uint`, `c_long`, `c_ulong`, `c_longlong`, `c_ulonglong`, `c_size`, `c_ssize`, `c_float`, `c_double`, and `voidptr`.
+  - Address-of (`&x`, `&mut x`) and pointer dereference (`*ptr`) operators.
+  - Automatic argument marshaling: Vira `string` auto-marshals to `(const char*)`, Vira `tensor` and `slice` auto-marshal to `.data`.
+- [x] **C-Compatible Struct Layouts & Opaque Handles:**
+  - `@[c_layout]` struct attribute enforcing standard C alignment and padding.
+  - `@[opaque]` attribute for type-safe foreign pointer handles (e.g., `sqlite3*`).
+- [x] **Shared Dynamic Library Compilation (`vira build -shared`):**
+  - Direct generation of `.dll` (Windows), `.so` (Linux), and `.dylib` (macOS) shared libraries.
+  - Exporting C-linkage symbols with `@[export]` and custom export names with `@[export: "c_name"]`.
+- [x] **Zero-Boilerplate Python `ctypes` Interop:**
+  - Native loading of compiled Vira shared libraries via Python's standard `ctypes.CDLL`.
+  - High-performance numeric acceleration and C-struct passing from Python.
+- [x] **Tutorials & Examples:**
+  - [Tutorial 38: Native C & Python FFI: Zero-Overhead Interop, Shared Libraries & ctypes](docs/tutorials/38_native_c_and_python_ffi.md).
+  - Runnable example [40_native_c_and_python_ffi.vir](docs/examples/40_native_c_and_python_ffi.vir).
+  - Python companion script [40_python_ffi_caller.py](docs/examples/40_python_ffi_caller.py) with verified 0 leaks (`active_leaks=0`).
+
 ---
 
 ## 🚀 Upcoming Strategic Frontiers
 
-### 🌐 Phase 1: VexServe — Asynchronous Web & LLM Streaming Framework (v0.6)
-*Target: High-throughput AI microservices, REST APIs, and real-time streaming.*
-
-- [ ] **HTTP Request Parser & Router:**
-  - Fast, zero-copy HTTP/1.1 request line and header parser.
-  - Path pattern matching with dynamic URL parameters (e.g., `GET /v1/models`, `POST /v1/chat/completions`).
-  - Extensible middleware chain (CORS headers, bearer token authentication, request timing).
-- [ ] **Actor Connection Pool:**
-  - Dedicated connection-acceptor actors fanning out incoming client sockets across worker actors via work-stealing queues.
-  - Non-blocking socket polling (`select`/`epoll`/`kqueue`/`WSAPoll`).
-- [ ] **Real-Time Token Streaming (SSE):**
-  - Native Server-Sent Events (`text/event-stream`) chunked response writer.
-  - Hook the pure Vira GGUF inference engine directly into the streaming writer, yielding tokens to web clients token-by-token with sub-millisecond dispatch.
-- [ ] **Standardized JSON Schema Serialization:**
-  - High-level struct-to-JSON serialization (`json_encode(struct)`) matching OpenAI-compatible completion specifications.
-
----
-
-### 🔌 Phase 2: C & Python FFI & Shared Library Export (v0.7)
-*Target: Seamless interoperability with the broader software ecosystem.*
-
-- [ ] **Native C Interoperability (`extern "C"`):**
-  - Header declaration syntax for linking external C functions and structs directly:
-    ```vira
-    extern "C" {
-        fn sqlite3_open(filename: string, db: &void) -> int
-        fn sqlite3_exec(db: void, sql: string, callback: void, arg: void, errmsg: &string) -> int
-    }
-    ```
-  - Linking flags (`-l`, `-L`) integrated into `vira.mod` manifests.
-- [ ] **Shared Dynamic Library Compilation (`vira build -shared`):**
-  - Produce `.dll` (Windows), `.so` (Linux), and `.dylib` (macOS) shared libraries adhering to standard C-ABI calling conventions.
-  - Automatic C header file (`.h`) generation matching exported public Vira functions.
-- [ ] **Python Interoperability / C-Extension Generator:**
-  - Tooling command `vira pybind` generating Python C-extension bindings with zero-copy NumPy / PyTorch tensor buffer interchange.
-  - Enables Python data science stacks to invoke Vira SIMD tensors and local GGUF models directly.
-
----
-
-### ⚡ Phase 3: Cross-Platform GPU Compute Acceleration (v0.8)
+### ⚡ Phase 1: Cross-Platform GPU Compute Acceleration (v0.8) ⏳ NEXT MILESTONE
 *Target: Accelerating heavy model inference beyond CPU SIMD limits.*
 
 - [ ] **Compute Shader Pipeline (Vulkan / Direct3D 12 / Metal):**
@@ -204,7 +204,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 
 ---
 
-### 🧩 Phase 4: Advanced Language Features & Expressiveness (v0.9)
+### 🧩 Phase 2: Advanced Language Features & Expressiveness (v0.9) 📅 PLANNED
 *Target: Modern type system ergonomic enhancements while preserving mechanical sympathy.*
 
 - [ ] **Parametric Polymorphism (Generics):**
@@ -233,7 +233,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 
 ---
 
-### 📦 Phase 5: Production Registry & Ecosystem Maturity (v1.0)
+### 📦 Phase 3: Production Registry & Ecosystem Maturity (v1.0) 📅 PLANNED
 *Target: Production readiness and distributed developer tooling.*
 
 - [x] **Package Management CLI & Lockfiles (Completed in v0.5.7):**

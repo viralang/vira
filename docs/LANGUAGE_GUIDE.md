@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.5.16)  
+> **Version:** Production Toolchain (v0.7.1)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 
@@ -45,6 +45,7 @@
 10. [Native File I/O & Buffer Operations](#10-native-file-io--buffer-operations)
 11. [Diagnostic Engine](#11-diagnostic-engine)
 12. [Complete End-to-End Program Walkthrough](#12-complete-end-to-end-program-walkthrough)
+13. [Native C & Python FFI (v0.7)](#13-native-c--python-ffi-v07)
 
 ---
 
@@ -946,3 +947,103 @@ Worker #2 recovered Future result -> w2=196608.00
 [vira_rt] pool_workers=4 | actor_tasks_run=4 | work_steals=3
 [vira_rt] active_leaks=0 | total_freed=12
 ```
+
+---
+
+## 13. Native C & Python FFI (v0.7)
+
+Vira provides zero-overhead, direct C-ABI foreign function interop and shared library export.
+
+### 13.1 Native Directives & `extern "C"` Blocks
+
+Include native C library headers with `#include` and link flags with `#flag`. Declare external C functions in `extern "C"` blocks:
+
+```v
+#include <stdio.h>
+#include <string.h>
+#flag -lsqlite3
+
+extern "C" {
+    fn puts(str &c_char) c_int
+    fn strlen(str &c_char) c_size
+}
+```
+
+### 13.2 `unsafe` Context & Raw Pointer Operations
+
+Calls to `extern "C"` functions and raw pointer operations require an `unsafe { ... }` block or an `@[unsafe]` function:
+
+```v
+fn main() {
+    unsafe {
+        // Vira strings automatically marshal to (const char*) for C calls
+        puts("Hello from native C puts!")
+        msg := "Measure length with strlen"
+        len := strlen(msg)
+        println("String length: ${len}")
+
+        // Address-of (&x, &mut x) and Dereferencing (*ptr)
+        mut count := 42
+        ptr := &count
+        val := *ptr
+        println("Dereferenced: ${val}")
+    }
+}
+```
+
+### 13.3 C-ABI Primitive Types & Opaque Structs
+
+Vira defines exact C-ABI scalar types for high-performance cross-language bindings:
+- `c_char`, `c_uchar`, `c_short`, `c_ushort`, `c_int`, `c_uint`, `c_long`, `c_ulong`, `c_longlong`, `c_ulonglong`
+- `c_size`, `c_ssize`, `c_float`, `c_double`, `voidptr`
+
+Use `@[opaque]` to declare external opaque handles and `@[c_layout]` for C-compatible struct layout:
+
+```v
+@[opaque]
+struct Sqlite3 {}
+
+@[c_layout]
+struct Point2D {
+    pub:
+    x c_int
+    y c_int
+}
+```
+
+### 13.4 Exporting Shared Libraries & Python Interop
+
+Export functions to C ABI (`__declspec(dllexport)` on Windows, default visibility on GCC/Clang) using `@[export]` or `@[export: "custom_name"]`:
+
+```v
+// math_lib.vir
+@[export: "vira_add"]
+fn vira_add(a c_int, b c_int) c_int {
+    return a + b
+}
+
+@[export: "vira_multiply"]
+fn vira_multiply(a c_int, b c_int) c_int {
+    return a * b
+}
+```
+
+Compile directly into a shared library (`.dll` on Windows, `.dylib` on macOS, `.so` on Linux):
+
+```powershell
+vira build -shared -o build/math_lib.dll math_lib.vir
+```
+
+Call the exported Vira library directly from Python with zero boilerplate:
+
+```python
+import ctypes
+
+lib = ctypes.CDLL("./build/math_lib.dll")
+lib.vira_add.argtypes = [ctypes.c_int, ctypes.c_int]
+lib.vira_add.restype = ctypes.c_int
+
+res = lib.vira_add(15, 27)
+print(f"Result from Vira: {res}")  # 42
+```
+

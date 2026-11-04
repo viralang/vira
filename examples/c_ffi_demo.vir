@@ -1,0 +1,34 @@
+// Vira v0.7 Native C FFI & Shared Library Export Demo
+#include <stdio.h>
+#include <string.h>
+
+extern "C" {
+    fn puts(str &c_char) c_int
+    fn strlen(str &c_char) c_size
+}
+
+@[export: "vira_add"]
+fn vira_add(a c_int, b c_int) c_int {
+    return a + b
+}
+
+fn main() {
+    println("=== Vira v0.7 Native C FFI Demonstration ===")
+
+    unsafe {
+        puts("Hello from native C puts via Vira extern \"C\"!")
+        msg := "Counting string length with C strlen"
+        len := strlen(msg)
+        println("String length measured by libc strlen: ${len}")
+
+        // Pointer operations
+        mut num := 42
+        ptr := &num
+        deref_val := *ptr
+        println("Original via pointer dereference: ${deref_val}")
+    }
+
+    sum := vira_add(15, 27)
+    println("Exported C function result (15 + 27): ${sum}")
+    println("=== C FFI Demo Completed Successfully ===")
+}

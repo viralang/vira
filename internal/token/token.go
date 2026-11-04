@@ -121,6 +121,11 @@ const (
 	TokDot       // .
 	TokColon     // :
 	TokSemicolon // ;
+
+	// C FFI (v0.7)
+	TokExtern    // extern
+	TokUnsafe    // unsafe
+	TokDirective // #include <...> / #flag ... (whole line)
 )
 
 var keywords = map[string]Kind{
@@ -159,6 +164,8 @@ var keywords = map[string]Kind{
 	"actor":     TokActor,
 	"spawn":     TokSpawn,
 	"supervise": TokSupervise,
+	"extern":    TokExtern,
+	"unsafe":    TokUnsafe,
 }
 
 // LookupIdent maps an identifier slice to a keyword Kind or TokIdent.
@@ -282,6 +289,9 @@ func (k Kind) String() string {
 		TokDot:        ".",
 		TokColon:      ":",
 		TokSemicolon:  ";",
+		TokExtern:     "extern",
+		TokUnsafe:     "unsafe",
+		TokDirective:  "DIRECTIVE",
 	}
 	if int(k) < len(names) {
 		return names[k]

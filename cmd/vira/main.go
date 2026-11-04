@@ -67,6 +67,8 @@ type compileOptions struct {
 	showAutofree bool
 	quietRT      bool
 	guiApp       bool
+	shared       bool
+	cFlags       []string
 }
 
 func main() {
@@ -136,7 +138,7 @@ func runCmd(args []string) {
 	}
 	vexPath := fs.Arg(0)
 
-	cCode, _, _ := compileVexToC99(vexPath, false)
+	cCode, _, _, cFlags := compileVexToC99(vexPath, false)
 
 	tmpDir, err := os.MkdirTemp("", "vira_run_*")
 	if err != nil {
@@ -158,6 +160,7 @@ func runCmd(args []string) {
 		prod:    *prodFlag,
 		cc:      *ccFlag,
 		quietRT: *quietRTFlag,
+		cFlags:  cFlags,
 	}
 	compiler, _ := invokeCBackend(cFile, binFile, opts)
 
@@ -180,6 +183,7 @@ func runCmd(args []string) {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	prod := fs.Bool("prod", false, "Compile with -O3 -march=native -flto")
+	sharedFlag := fs.Bool("shared", false, "Compile as dynamic shared library (.dll, .so, .dylib)")
 	guiFlag := fs.Bool("gui", false, "Compile as native GUI application (no Windows console)")
 	sanitize := fs.Bool("sanitize", false, "Enable ASan and UBSan")
 	outPath := fs.String("o", "", "Output binary path")
@@ -189,19 +193,32 @@ func buildCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-shared] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
 	start := time.Now()
 
-	cCode, _, _ := compileVexToC99(vexPath, false)
+	cCode, _, _, cFlags := compileVexToC99(vexPath, false)
 
 	baseName := strings.TrimSuffix(filepath.Base(vexPath), filepath.Ext(vexPath))
 	targetBin := *outPath
+	isShared := *sharedFlag
+	if strings.HasSuffix(strings.ToLower(targetBin), ".dll") || strings.HasSuffix(strings.ToLower(targetBin), ".so") || strings.HasSuffix(strings.ToLower(targetBin), ".dylib") {
+		isShared = true
+	}
 	if targetBin == "" {
 		targetBin = baseName
-		if os.PathSeparator == '\\' && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
+		if isShared {
+			switch goRuntime.GOOS {
+			case "windows":
+				targetBin += ".dll"
+			case "darwin":
+				targetBin += ".dylib"
+			default:
+				targetBin += ".so"
+			}
+		} else if os.PathSeparator == '\\' && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
 			targetBin += ".exe"
 		}
 	}
@@ -220,6 +237,8 @@ func buildCmd(args []string) {
 		keepC:    *keepC,
 		quietRT:  *quietRTFlag,
 		guiApp:   *guiFlag,
+		shared:   isShared,
+		cFlags:   cFlags,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, targetBin, opts)
@@ -245,7 +264,7 @@ func cgenCmd(args []string) {
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
-	cCode, _, _ := compileVexToC99(vexPath, false)
+	cCode, _, _, _ := compileVexToC99(vexPath, false)
 
 	if *outPath != "" {
 		if err := os.WriteFile(*outPath, []byte(cCode), 0644); err != nil {
@@ -269,7 +288,7 @@ func checkCmd(args []string) {
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
-	_, chk, af := compileVexToC99(vexPath, false)
+	_, chk, af, _ := compileVexToC99(vexPath, false)
 
 	fmt.Printf("✓ %s passed syntax, 4-quadrant mutability, and type checks (0 errors)\n", vexPath)
 	if *showAutofree {
@@ -322,7 +341,7 @@ func testCmd(args []string) {
 	for _, tFile := range testFiles {
 		fmt.Printf("=== RUN   %s\n", tFile)
 		start := time.Now()
-		cCode, _, _ := compileVexToC99(tFile, true)
+		cCode, _, _, cFlags := compileVexToC99(tFile, true)
 
 		tmpDir, err := os.MkdirTemp("", "vira_test_*")
 		if err != nil {
@@ -336,7 +355,7 @@ func testCmd(args []string) {
 		binFile := filepath.Join(tmpDir, "test_bin"+binExt)
 		_ = os.WriteFile(cFile, []byte(cCode), 0644)
 
-		opts := compileOptions{prod: false}
+		opts := compileOptions{prod: false, cFlags: cFlags}
 		compiler, _ := invokeCBackend(cFile, binFile, opts)
 
 		cmd := exec.Command(binFile)
@@ -763,7 +782,7 @@ func vendorCmd(args []string) {
 
 // --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
-func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer) {
+func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer, []string) {
 	ensureStdPackagesExtracted()
 	fi, err := os.Stat(targetPath)
 	if err != nil {
@@ -973,14 +992,23 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 	}
 
 	var mergedImports []ast.ImportSpec
+	var mergedCIncludes []string
+	var mergedCFlags []string
 	for _, af := range astFiles {
 		mergedImports = append(mergedImports, af.Imports...)
+		mergedCIncludes = append(mergedCIncludes, af.CIncludes...)
+		for _, f := range af.CFlags {
+			fields := strings.Fields(strings.TrimPrefix(f, "#flag"))
+			mergedCFlags = append(mergedCFlags, fields...)
+		}
 	}
 
 	mergedAst := &ast.File{
-		Module:  firstMod,
-		Imports: mergedImports,
-		Decls:   mergedDecls,
+		Module:    firstMod,
+		Imports:   mergedImports,
+		Decls:     mergedDecls,
+		CIncludes: mergedCIncludes,
+		CFlags:    mergedCFlags,
 	}
 
 	// Phase 2: 3-Pass Type, Mutability, Tensor & Actor Checker
@@ -1003,7 +1031,7 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 	gen := cgen.New(chk, af)
 	cCode := gen.EmitFile(mergedAst)
 
-	return cCode, chk, af
+	return cCode, chk, af, mergedCFlags
 }
 
 // --- C99 COMPILER DRIVER ---
@@ -1060,7 +1088,12 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	extraLibs := []string{}
 	staticFlags := []string{}
 
-	if goRuntime.GOOS == "windows" {
+	if opts.shared {
+		staticFlags = append(staticFlags, "-shared")
+		if goRuntime.GOOS != "windows" {
+			staticFlags = append(staticFlags, "-fPIC")
+		}
+	} else if goRuntime.GOOS == "windows" {
 		staticFlags = append(staticFlags, "-static")
 		if opts.guiApp {
 			staticFlags = append(staticFlags, "-mwindows")
@@ -1135,6 +1168,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		appendCFile(&cFlags)
 	}
 
+	cFlags = append(cFlags, opts.cFlags...)
 	cmd := exec.Command(compiler, cFlags...)
 	compilerDir := filepath.Dir(compiler)
 	cmd.Env = append(os.Environ(), "PATH="+compilerDir+string(os.PathListSeparator)+os.Getenv("PATH"))

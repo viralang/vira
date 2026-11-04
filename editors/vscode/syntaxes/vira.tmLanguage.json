@@ -4,6 +4,7 @@
   "scopeName": "source.vira",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#directives" },
     { "include": "#strings" },
     { "include": "#attributes" },
     { "include": "#modules" },
@@ -22,6 +23,18 @@
     { "include": "#numbers" }
   ],
   "repository": {
+    "directives": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.directive.vira",
+          "match": "^\\s*(#(?:include|flag))\\s+(.*)$",
+          "captures": {
+            "1": { "name": "keyword.control.directive.vira" },
+            "2": { "name": "string.unquoted.directive.vira" }
+          }
+        }
+      ]
+    },
     "attributes": {
       "patterns": [
         {
@@ -209,7 +222,7 @@
       "patterns": [
         {
           "name": "keyword.control.vira",
-          "match": "\\b(module|import|pub|mut|const|defer|fn|return|if|else|switch|case|default|match|for|in|or|is|as|break|continue)\\b"
+          "match": "\\b(module|import|pub|mut|const|defer|fn|return|if|else|switch|case|default|match|for|in|or|is|as|break|continue|extern|unsafe)\\b"
         },
         {
           "name": "keyword.declaration.vira",
@@ -336,7 +349,7 @@
         },
         {
           "name": "entity.name.type.primitive.vira",
-          "match": "\\b(u8|byte|int|i64|f32|f16|bf16|f64|bool|string|void)\\b"
+          "match": "\\b(u8|byte|int|i64|f32|f16|bf16|f64|bool|string|void|c_char|c_uchar|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_longlong|c_ulonglong|c_size|c_ssize|c_float|c_double|voidptr)\\b"
         },
         {
           "name": "entity.name.type.tensor.vira",

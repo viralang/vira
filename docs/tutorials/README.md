@@ -23,7 +23,9 @@ Beginner                           Intermediate                               Ad
                                          │                                        │
                                          ├── [33. ND Tensors & JSON]              ├── [21-23. Native Desktop GUI]
                                          │                                        │
-                                         └── [34. Advanced GUI Controls]          └── [35. GUI Scaffolding & Bundling]
+                                         └── [34. Advanced GUI Controls]          ├── [35. GUI Scaffolding & Bundling]
+                                                                                  │
+                                                                                  └── [38. Native C & Python FFI]
 ```
 
 ---
@@ -69,6 +71,7 @@ Beginner                           Intermediate                               Ad
 | **35** | [**Native GUI App Scaffolding & Cross-Platform Bundling**](./35_gui_app_scaffolding_and_cross_platform_bundling.md) | Intermediate to Adv | `vira init-gui my_app`<br>`vira bundle -release` | Dedicated GUI app scaffolding (`vira init-gui`), desktop manifest metadata (`app_name`, `app_id`, `icon`, `assets`), macOS `.app` bundle with `Contents/Info.plist` and High-DPI Retina support, Linux portable directory with FreeDesktop `.desktop` entry and `run.sh`, Windows Win32 GUI subsystem (`-mwindows` without console window) and `.ico` icons, and automated CI/CD release archiving. |
 | **36** | [**Flutter-Style Declarative Widgets & Responsive Desktop UI**](./36_flutter_style_widgets_and_responsive_ui.md) | Intermediate to Adv | [`flutter_style_dashboard.vir`](../../examples/flutter_style_dashboard.vir) | Flutter-inspired declarative UI kit (`package widget`), `w.App` lifecycle runner, `w.Scaffold`, auto-layout stacks (`w.Column`, `w.Row`, `w.Card`), `w.Padding` with `w.EdgeInsets`, responsive `w.MediaQuery` and breakpoints, interactive inputs (`w.ElevatedButton`, `w.TextField`, `w.Slider`, `w.Dropdown`), data tables, progress bars, and Catppuccin theme tokens with 0 memory leaks. |
 | **37** | [**Real-World GUI Apps: HTTP Networking, Image Textures & The Complete Widget Suite**](./37_realworld_gui_http_images_and_complete_widget_suite.md) | Advanced | [`39_gui_realworld_cloud_ai_hub.vir`](../examples/39_gui_realworld_cloud_ai_hub.vir)<br>[`cloud_ai_hub.vir`](../../examples/cloud_ai_hub.vir) | Production-grade Cloud AI Hub desktop app: live decoupled HTTP REST API querying over TLS, zero-alloc SIMD JSON parsing, GPU image texture caching & rendering (`w.LoadImage`, `w.Image`, `w.FreeImage`), complete widget catalog (`w.App`, `w.Scaffold`, `w.Theme` switching, `w.Tab`, `w.Modal`, `w.DataTable`, `w.ProgressBar`, `w.Slider`, `w.Dropdown`, `w.Checkbox`, `w.Radio`), responsive dual-column layout, and 0 memory leaks. |
+| **38** | [**Native C & Python FFI: Zero-Overhead Interop, Shared Libraries & ctypes**](./38_native_c_and_python_ffi.md) | Advanced / Systems | [`40_native_c_and_python_ffi.vir`](../examples/40_native_c_and_python_ffi.vir)<br>[`40_python_ffi_caller.py`](../examples/40_python_ffi_caller.py) | Direct C-ABI interop, `#include` and `#flag` directives, `extern "C"` declarations, mandatory `unsafe { ... }` safety boundary, C-ABI scalar types (`c_int`, `c_double`, `voidptr`), raw pointer operations (`&`, `&mut`, `*`), `@[c_layout]` and `@[opaque]` structs, exporting shared libraries (`@[export]` & `vira build -shared`), and zero-boilerplate Python `ctypes` bindings. |
 
 
 

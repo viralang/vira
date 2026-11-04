@@ -1,4 +1,29 @@
 {
+  "Extern C Block": {
+    "prefix": "extern",
+    "body": [
+      "extern \"C\" {",
+      "\tfn ${1:name}(${2:params}) ${3:ret_type}",
+      "}"
+    ],
+    "description": "Declare foreign C function prototypes"
+  },
+  "Unsafe Block": {
+    "prefix": "unsafe",
+    "body": [
+      "unsafe {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Unsafe block for raw pointer access and C FFI calls"
+  },
+  "C Directive Include": {
+    "prefix": "#inc",
+    "body": [
+      "#include <${1:header.h}>"
+    ],
+    "description": "Include native C header for FFI"
+  },
   "For In Loop": {
     "prefix": "forin",
     "body": [

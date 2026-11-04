@@ -127,6 +127,30 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	}
 	out.WriteString("\n")
 
+	// Shared library / C ABI export definition
+	out.WriteString("#ifndef VIRA_EXPORT\n")
+	out.WriteString("#if defined(_WIN32) || defined(__CYGWIN__)\n")
+	out.WriteString("#define VIRA_EXPORT __declspec(dllexport)\n")
+	out.WriteString("#elif defined(__GNUC__) && __GNUC__ >= 4\n")
+	out.WriteString("#define VIRA_EXPORT __attribute__((visibility(\"default\")))\n")
+	out.WriteString("#else\n")
+	out.WriteString("#define VIRA_EXPORT\n")
+	out.WriteString("#endif\n")
+	out.WriteString("#endif\n\n")
+
+	// Native C FFI directives
+	if len(file.CIncludes) > 0 {
+		out.WriteString("// --- NATIVE C FFI DIRECTIVES ---\n")
+		for _, inc := range file.CIncludes {
+			if strings.HasPrefix(inc, "#include") {
+				out.WriteString(inc + "\n")
+			} else {
+				out.WriteString(fmt.Sprintf("#include %s\n", inc))
+			}
+		}
+		out.WriteString("\n")
+	}
+
 	// 0.5. Emit Fixed Array ([N]T) typedefs
 	if len(g.arrayTypes) > 0 {
 		out.WriteString("// --- 0.5 FIXED ARRAYS ([N]T) ---\n")
@@ -141,6 +165,9 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	out.WriteString("// --- 1. STRUCTS, ACTORS & DETERMINISTIC DESTRUCTORS ---\n")
 	for _, decl := range file.Decls {
 		if sd, ok := decl.(*ast.StructDecl); ok {
+			if sd.IsOpaque {
+				continue
+			}
 			modName := sd.Module
 			if modName == "" {
 				modName = g.currentModule()
@@ -223,8 +250,12 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	// 4. Emit Function & Method Forward Declarations
 	out.WriteString("// --- 4. FUNCTION & METHOD PROTOTYPES ---\n")
 	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FnDecl); ok && fn.Name.Name != "main" && (fn.Intrinsic == "" || fn.Body != nil) {
-			out.WriteString(g.fnSignature(fn) + ";\n")
+		if fn, ok := decl.(*ast.FnDecl); ok && fn.Name.Name != "main" {
+			if fn.IsExtern {
+				out.WriteString("extern " + g.fnSignature(fn) + ";\n")
+			} else if fn.Intrinsic == "" || fn.Body != nil {
+				out.WriteString(g.fnSignature(fn) + ";\n")
+			}
 		}
 	}
 	out.WriteString("\n")
@@ -334,6 +365,8 @@ func (g *Generator) scanBlockRequirements(b *ast.BlockStmt) {
 			}
 			g.scanExprRequirements(s.Iter)
 			g.scanBlockRequirements(s.Body)
+		case *ast.BlockStmt:
+			g.scanBlockRequirements(s)
 		case *ast.DeferStmt:
 			g.scanBlockRequirements(s.Body)
 		case *ast.ArenaStmt:
@@ -531,11 +564,14 @@ func (g *Generator) emitStructsTopologically(out *strings.Builder, file *ast.Fil
 }
 
 func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.StructDecl) {
+	if sd.IsOpaque {
+		return
+	}
 	st := g.chk.LookupStructInModule(sd.Module, sd.Name.Name)
 	if st == nil {
 		st = g.chk.LookupStruct(sd.Name.Name)
 	}
-	if st == nil {
+	if st == nil || st.IsOpaque {
 		return
 	}
 	cStructName := fmt.Sprintf("%s__%s", st.Module, st.Name)
@@ -1287,7 +1323,19 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 	var cName string
 	var params []string
 
-	if fn.Receiver != nil {
+	if fn.IsExtern {
+		if fn.CName != "" {
+			cName = fn.CName
+		} else {
+			cName = fn.Name.Name
+		}
+	} else if fn.IsExport {
+		if fn.ExportName != "" {
+			cName = fn.ExportName
+		} else {
+			cName = fn.Name.Name
+		}
+	} else if fn.Receiver != nil {
 		var stName string
 		if it, ok := fn.Receiver.Type.(*ast.IdentType); ok {
 			stName = it.Name.Name
@@ -1332,7 +1380,11 @@ func (g *Generator) fnSignature(fn *ast.FnDecl) string {
 	if len(params) == 0 {
 		params = append(params, "void")
 	}
-	return fmt.Sprintf("%s %s(%s)", cRet, cName, strings.Join(params, ", "))
+	sig := fmt.Sprintf("%s %s(%s)", cRet, cName, strings.Join(params, ", "))
+	if fn.IsExport {
+		sig = "VIRA_EXPORT " + sig
+	}
+	return sig
 }
 
 func collectFnDeferVarNames(b *ast.BlockStmt, out map[string]bool) {
@@ -1369,6 +1421,8 @@ func collectFnDeferVarNames(b *ast.BlockStmt, out map[string]bool) {
 			collectFnDeferVarNames(s.Body, out)
 		case *ast.ForInStmt:
 			collectFnDeferVarNames(s.Body, out)
+		case *ast.BlockStmt:
+			collectFnDeferVarNames(s, out)
 		case *ast.ArenaStmt:
 			collectFnDeferVarNames(s.Body, out)
 		}
@@ -1376,7 +1430,7 @@ func collectFnDeferVarNames(b *ast.BlockStmt, out map[string]bool) {
 }
 
 func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
-	if fn.Intrinsic != "" && fn.Body == nil {
+	if fn.IsExtern || fn.Body == nil || (fn.Intrinsic != "" && fn.Body == nil) {
 		return
 	}
 	prevMod := g.currentMod
@@ -1526,6 +1580,11 @@ func isFreshOwningRValue(expr ast.Expr) bool {
 
 func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string, fnRet checker.Type) {
 	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		out.WriteString(fmt.Sprintf("%s{\n", indent))
+		g.emitBlockStmts(out, s, indent+"    ", fnRet)
+		out.WriteString(fmt.Sprintf("%s}\n", indent))
+
 	case *ast.VarDeclStmt:
 		if s.Name.Name == "_" {
 			if detached, ok := g.tryEmitDetachedActorSend(s.Value); ok {
@@ -2476,8 +2535,22 @@ func (g *Generator) emitLValue(expr ast.Expr) string {
 }
 
 func (g *Generator) emitRawCall(call *ast.CallExpr) string {
+	var externSig *checker.FnSig
+	switch callee := call.Callee.(type) {
+	case *ast.IdentExpr:
+		if s, ok := g.chk.Functions()[callee.Ident.Name]; ok && s.IsExtern {
+			externSig = s
+		}
+	case *ast.SelectorExpr:
+		if identLeft, ok := callee.Left.(*ast.IdentExpr); ok && identLeft.Ident.Name == "C" {
+			if s, ok := g.chk.Functions()[callee.Field.Name]; ok && s.IsExtern {
+				externSig = s
+			}
+		}
+	}
+
 	var argStrs []string
-	for _, arg := range call.Args {
+	for i, arg := range call.Args {
 		if arg.IsMut {
 			if ident, ok := arg.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
 				argStrs = append(argStrs, ident.Ident.Name)
@@ -2491,6 +2564,27 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 					argVal = "*" + argVal
 				} else if _, isTen := g.chk.ExprTypes[arg.Expr].(*checker.TensorType); isTen {
 					argVal = "*" + argVal
+				}
+			}
+			if externSig != nil && i < len(externSig.Params) {
+				argType := g.chk.ExprTypes[arg.Expr]
+				paramType := externSig.Params[i].Type
+				if argType != nil {
+					if argType.Equals(checker.TypeString) {
+						if ref, ok := paramType.(*checker.RefType); ok && (checker.ExactEquals(ref.Inner, checker.TypeCChar) || checker.ExactEquals(ref.Inner, checker.TypeU8)) {
+							argVal = fmt.Sprintf("(const char*)(%s.data)", argVal)
+						} else if paramType.Equals(checker.TypeVoidPtr) {
+							argVal = fmt.Sprintf("(void*)(%s.data)", argVal)
+						}
+					} else if _, isTen := argType.(*checker.TensorType); isTen {
+						if _, isRef := paramType.(*checker.RefType); isRef || paramType.Equals(checker.TypeVoidPtr) {
+							argVal = fmt.Sprintf("(%s).data", argVal)
+						}
+					} else if _, isSl := argType.(*checker.SliceType); isSl {
+						if _, isRef := paramType.(*checker.RefType); isRef || paramType.Equals(checker.TypeVoidPtr) {
+							argVal = fmt.Sprintf("(%s).data", argVal)
+						}
+					}
 				}
 			}
 			argStrs = append(argStrs, argVal)
@@ -2856,11 +2950,32 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s_box_%s(%s)",
 				g.cStructName(iface.Name), st.Name, argStrs[0])
 		}
-		if sig, ok := g.chk.Functions()[name]; ok && sig.Intrinsic != "" {
+		var sig *checker.FnSig
+		if s, ok := g.chk.Functions()[name]; ok {
+			sig = s
+		}
+		if sig == nil {
+			sig = g.chk.LookupFunctionInModule(g.mod, name)
+		}
+		if sig != nil && sig.Intrinsic != "" {
 			return fmt.Sprintf("%s(%s)", sig.Intrinsic, strings.Join(argStrs, ", "))
 		}
+		if sig != nil && sig.IsExtern {
+			cName := sig.CName
+			if cName == "" {
+				cName = name
+			}
+			return fmt.Sprintf("%s(%s)", cName, strings.Join(argStrs, ", "))
+		}
+		if sig != nil && sig.IsExport {
+			cName := sig.ExportName
+			if cName == "" {
+				cName = name
+			}
+			return fmt.Sprintf("%s(%s)", cName, strings.Join(argStrs, ", "))
+		}
 		fnMod := g.mod
-		if sig, ok := g.chk.Functions()[name]; ok && sig.Module != "" {
+		if sig != nil && sig.Module != "" {
 			fnMod = sig.Module
 		}
 		return fmt.Sprintf("%s__%s(%s)", fnMod, name, strings.Join(argStrs, ", "))
@@ -2909,10 +3024,17 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			}
 		}
 
-		// 1c. Top-level Module Function: `io.copy(...)`
+		// 1c. Top-level Module Function: `io.copy(...)` or `C.puts(...)`
 		if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
 			pkgName := identLeft.Ident.Name
 			fnName := callee.Field.Name
+			if pkgName == "C" {
+				cName := fnName
+				if sig, ok := g.chk.Functions()[fnName]; ok && sig.CName != "" {
+					cName = sig.CName
+				}
+				return fmt.Sprintf("%s(%s)", cName, strings.Join(argStrs, ", "))
+			}
 			if fnSig := g.chk.LookupFunctionInModule(pkgName, fnName); fnSig != nil {
 				if fnSig.Intrinsic != "" {
 					return fmt.Sprintf("%s(%s)", fnSig.Intrinsic, strings.Join(argStrs, ", "))
@@ -3170,23 +3292,31 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 
 			switch t := subType.(type) {
 			case *checker.PrimitiveType:
-				switch t.Kind {
-				case checker.PrimString:
+				switch {
+				case t.Kind == checker.PrimString:
 					fmtBuf.WriteString("%.*s")
 					cArgs = append(cArgs, fmt.Sprintf("%s.len, (const char*)%s.data", subExpr, subExpr))
-				case checker.PrimI64:
+				case t.Kind == checker.PrimI64 || t.Kind == checker.PrimCLong || t.Kind == checker.PrimCULong ||
+					t.Kind == checker.PrimCLongLong || t.Kind == checker.PrimCULongLong ||
+					t.Kind == checker.PrimCSize || t.Kind == checker.PrimCSSize:
 					fmtBuf.WriteString("%lld")
 					cArgs = append(cArgs, fmt.Sprintf("(long long)(%s)", subExpr))
-				case checker.PrimF32, checker.PrimF64, checker.PrimBF16:
+				case checker.IsFloatLike(t.Kind):
 					fmtBuf.WriteString("%.2f")
 					cArgs = append(cArgs, fmt.Sprintf("(double)(%s)", subExpr))
-				case checker.PrimBool:
+				case t.Kind == checker.PrimBool:
 					fmtBuf.WriteString("%s")
 					cArgs = append(cArgs, fmt.Sprintf("((%s) ? \"true\" : \"false\")", subExpr))
+				case t.Kind == checker.PrimVoidPtr:
+					fmtBuf.WriteString("%p")
+					cArgs = append(cArgs, fmt.Sprintf("(void*)(%s)", subExpr))
 				default:
 					fmtBuf.WriteString("%d")
 					cArgs = append(cArgs, subExpr)
 				}
+			case *checker.RefType:
+				fmtBuf.WriteString("%p")
+				cArgs = append(cArgs, fmt.Sprintf("(void*)(%s)", subExpr))
 			default:
 				fmtBuf.WriteString("%d")
 				cArgs = append(cArgs, subExpr)
@@ -3261,14 +3391,53 @@ func (g *Generator) cType(t checker.Type) string {
 			return "bool"
 		case checker.PrimString:
 			return "vira_string"
+		case checker.PrimCChar:
+			return "char"
+		case checker.PrimCUChar:
+			return "unsigned char"
+		case checker.PrimCShort:
+			return "short"
+		case checker.PrimCUShort:
+			return "unsigned short"
+		case checker.PrimCInt:
+			return "int"
+		case checker.PrimCUInt:
+			return "unsigned int"
+		case checker.PrimCLong:
+			return "long"
+		case checker.PrimCULong:
+			return "unsigned long"
+		case checker.PrimCLongLong:
+			return "long long"
+		case checker.PrimCULongLong:
+			return "unsigned long long"
+		case checker.PrimCSize:
+			return "size_t"
+		case checker.PrimCSSize:
+			return "ssize_t"
+		case checker.PrimCFloat:
+			return "float"
+		case checker.PrimCDouble:
+			return "double"
+		case checker.PrimVoidPtr:
+			return "void*"
 		default:
 			return "void"
 		}
+	case *checker.RefType:
+		if p, ok := v.Inner.(*checker.PrimitiveType); ok && p.Kind == checker.PrimCChar && !v.IsMut {
+			return "const char*"
+		}
+		inner := g.cType(v.Inner)
+		return inner + "*"
 	case *checker.TensorType:
 		return "vira_tensor_f32"
 	case *checker.FutureType:
 		return "vira_future"
 	case *checker.StructType:
+		if v.Module == "C" {
+			return v.Name
+		}
 		if v.Module != "" {
 			return fmt.Sprintf("%s__%s", v.Module, v.Name)
 		}

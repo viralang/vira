@@ -101,6 +101,7 @@ type Checker struct {
 	// Function context during Pass 3
 	curFnReturn    Type
 	inDeferDiscard bool
+	inUnsafeContext bool
 }
 
 func New() *Checker {
@@ -1218,6 +1219,8 @@ func (c *Checker) registerStructMembers(d *ast.StructDecl) {
 	if st == nil {
 		return
 	}
+	st.IsOpaque = d.IsOpaque
+	st.IsCLayout = d.IsCLayout
 
 	for _, embExpr := range d.Embeds {
 		embType := c.resolveTypeExpr(embExpr)
@@ -1316,6 +1319,11 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 		Params:     params,
 		ReturnType: ret,
 		Intrinsic:  d.Intrinsic,
+		IsExtern:   d.IsExtern,
+		CName:      d.CName,
+		IsUnsafe:   d.IsUnsafe,
+		IsExport:   d.IsExport,
+		ExportName: d.ExportName,
 		Span:       d.DeclSpan,
 	}
 
@@ -1349,7 +1357,7 @@ func (c *Checker) registerFnHeader(d *ast.FnDecl) {
 	modScope := c.getOrCreateModule(dMod)
 	modScope.Functions[d.Name.Name] = sig
 	c.functions[dMod+"."+d.Name.Name] = sig
-	if _, exists := c.functions[d.Name.Name]; !exists || dMod == "main" {
+	if _, exists := c.functions[d.Name.Name]; !exists || dMod == "main" || d.IsExtern {
 		c.functions[d.Name.Name] = sig
 	}
 }
@@ -1456,6 +1464,15 @@ func (c *Checker) promoteEmbeddedMembers(root *StructType) {
 // --- PASS 3: BODY TYPE CHECKING, MUTABILITY & RESULT (!T) VERIFICATION ---
 
 func (c *Checker) checkFnBody(d *ast.FnDecl) {
+	if d.IsExtern || d.Body == nil {
+		return
+	}
+	prevUnsafe := c.inUnsafeContext
+	if d.IsUnsafe {
+		c.inUnsafeContext = true
+	}
+	defer func() { c.inUnsafeContext = prevUnsafe }()
+
 	scope := NewScope(nil)
 
 	if d.Receiver != nil {
@@ -1489,6 +1506,12 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, scope *Scope) {
 	if block == nil {
 		return
 	}
+	prevUnsafe := c.inUnsafeContext
+	if block.IsUnsafe {
+		c.inUnsafeContext = true
+	}
+	defer func() { c.inUnsafeContext = prevUnsafe }()
+
 	for _, stmt := range block.Stmts {
 		c.checkStmt(stmt, scope)
 	}
@@ -1496,6 +1519,10 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, scope *Scope) {
 
 func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		blockScope := NewScope(scope)
+		c.checkBlock(s, blockScope)
+
 	case *ast.VarDeclStmt:
 		valType := c.checkExpr(s.Value, scope)
 		if s.Name.Name != "_" {
@@ -1995,6 +2022,20 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 				c.errorf(e.UnarySpan, "operator '-' expects numeric type, got '%s'", t)
 			}
 			return t
+		case token.TokAmp:
+			if e.IsMut {
+				rootSym := c.findRootSymbol(e.Expr, scope)
+				if rootSym != nil && !rootSym.IsMut {
+					c.errorf(e.UnarySpan, "cannot take mutable reference '&mut' to immutable variable '%s'", rootSym.Name)
+				}
+			}
+			return &RefType{Inner: t, IsMut: e.IsMut}
+		case token.TokStar:
+			if ref, ok := t.(*RefType); ok {
+				return ref.Inner
+			}
+			c.errorf(e.UnarySpan, "cannot dereference non-pointer type '%s'", t)
+			return TypeVoid
 		default:
 			return t
 		}
@@ -2146,11 +2187,18 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			}
 		}
 
-		// 1c. Top-level Module Function: `io.copy(...)`
+		// 1c. Top-level Module Function: `io.copy(...)` or `C.puts(...)`
 		if sig == nil {
 			if identLeft, ok := callee.Left.(*ast.IdentExpr); ok {
 				if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
 					pkgName := identLeft.Ident.Name
+					if pkgName == "C" {
+						fnName := callee.Field.Name
+						if fnSig, ok := c.functions[fnName]; ok && fnSig.IsExtern {
+							sig = fnSig
+							callName = "C." + fnName
+						}
+					}
 					targetMod := pkgName
 					if resolvedMod, ok := c.currentImports[pkgName]; ok {
 						targetMod = resolvedMod
@@ -2544,6 +2592,12 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 		}
 	}
 
+	// Unsafe context verification: calling an extern C function or @[unsafe] function requires unsafe context
+	if (sig.IsExtern || sig.IsUnsafe) && !c.inUnsafeContext {
+		c.errorf(call.CallSpan, "call to %s function '%s' is unsafe; requires an 'unsafe { ... }' block or '@[unsafe]' function",
+			map[bool]string{true: "extern C", false: "unsafe"}[sig.IsExtern], callName)
+	}
+
 	// Verify argument count, types, and explicit `mut` call-site modifiers
 	if len(call.Args) != len(sig.Params) {
 		c.errorf(call.CallSpan, "call to '%s' expects %d arguments, got %d",
@@ -2563,12 +2617,44 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					c.errorf(arg.ArgSpan, "cannot pass immutable variable as 'mut' argument to '%s'", callName)
 				}
 			}
+			isCompat := param.Type.Equals(argType)
+			if !isCompat && sig.IsExtern {
+				if argType.Equals(TypeString) {
+					if ref, ok := param.Type.(*RefType); ok && (ref.Inner.Equals(TypeCChar) || ref.Inner.Equals(TypeU8)) {
+						isCompat = true
+					} else if param.Type.Equals(TypeVoidPtr) {
+						isCompat = true
+					}
+				}
+				if tt, ok := argType.(*TensorType); ok {
+					if ref, ok := param.Type.(*RefType); ok && ref.Inner.Equals(tt.DType) {
+						isCompat = true
+					} else if param.Type.Equals(TypeVoidPtr) {
+						isCompat = true
+					}
+				}
+				if sl, ok := argType.(*SliceType); ok {
+					if ref, ok := param.Type.(*RefType); ok && ref.Inner.Equals(sl.Elem) {
+						isCompat = true
+					} else if param.Type.Equals(TypeVoidPtr) {
+						isCompat = true
+					}
+				}
+				if param.Type.Equals(TypeVoidPtr) {
+					if _, ok := argType.(*RefType); ok {
+						isCompat = true
+					}
+				}
+				if _, ok := param.Type.(*RefType); ok && argType.Equals(TypeVoidPtr) {
+					isCompat = true
+				}
+			}
 			if param.IsMut {
 				if !ExactEquals(param.Type, argType) {
 					c.errorf(arg.ArgSpan, "argument %d ('%s') of '%s' expects 'mut %s', got '%s'",
 						i+1, param.Name, callName, param.Type, argType)
 				}
-			} else if !param.Type.Equals(argType) {
+			} else if !isCompat {
 				c.errorf(arg.ArgSpan, "argument %d ('%s') of '%s' expects '%s', got '%s'",
 					i+1, param.Name, callName, param.Type, argType)
 			}
@@ -2759,6 +2845,13 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 	switch t := te.(type) {
 	case *ast.SelectorType:
 		pkgName := t.Pkg.Name
+		if pkgName == "C" {
+			return &StructType{
+				Module: "C",
+				Name:   t.Name.Name,
+				IsPub:  true,
+			}
+		}
 		targetMod := pkgName
 		if resolvedMod, ok := c.currentImports[pkgName]; ok {
 			targetMod = resolvedMod
@@ -2807,6 +2900,36 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			return TypeString
 		case "void":
 			return TypeVoid
+		case "c_char":
+			return TypeCChar
+		case "c_uchar":
+			return TypeCUChar
+		case "c_short":
+			return TypeCShort
+		case "c_ushort":
+			return TypeCUShort
+		case "c_int":
+			return TypeCInt
+		case "c_uint":
+			return TypeCUInt
+		case "c_long":
+			return TypeCLong
+		case "c_ulong":
+			return TypeCULong
+		case "c_longlong":
+			return TypeCLongLong
+		case "c_ulonglong":
+			return TypeCULongLong
+		case "c_size":
+			return TypeCSize
+		case "c_ssize":
+			return TypeCSSize
+		case "c_float":
+			return TypeCFloat
+		case "c_double":
+			return TypeCDouble
+		case "voidptr":
+			return TypeVoidPtr
 		case "tensor":
 			if len(t.TypeParams) == 1 {
 				return &TensorType{DType: c.resolveTypeExpr(t.TypeParams[0])}

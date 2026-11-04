@@ -26,7 +26,52 @@ const (
 	PrimF64    PrimitiveKind = "f64"
 	PrimBool   PrimitiveKind = "bool"
 	PrimString PrimitiveKind = "string"
+
+	// C-ABI Primitive Types (v0.7 FFI)
+	PrimCChar      PrimitiveKind = "c_char"
+	PrimCUChar     PrimitiveKind = "c_uchar"
+	PrimCShort     PrimitiveKind = "c_short"
+	PrimCUShort    PrimitiveKind = "c_ushort"
+	PrimCInt       PrimitiveKind = "c_int"
+	PrimCUInt      PrimitiveKind = "c_uint"
+	PrimCLong      PrimitiveKind = "c_long"
+	PrimCULong     PrimitiveKind = "c_ulong"
+	PrimCLongLong  PrimitiveKind = "c_longlong"
+	PrimCULongLong PrimitiveKind = "c_ulonglong"
+	PrimCSize      PrimitiveKind = "c_size"
+	PrimCSSize     PrimitiveKind = "c_ssize"
+	PrimCFloat     PrimitiveKind = "c_float"
+	PrimCDouble    PrimitiveKind = "c_double"
+	PrimVoidPtr    PrimitiveKind = "voidptr"
 )
+
+func IsIntLike(k PrimitiveKind) bool {
+	switch k {
+	case PrimU8, PrimInt, PrimI64, PrimCChar, PrimCUChar, PrimCShort, PrimCUShort,
+		PrimCInt, PrimCUInt, PrimCLong, PrimCULong, PrimCLongLong, PrimCULongLong,
+		PrimCSize, PrimCSSize:
+		return true
+	default:
+		return false
+	}
+}
+
+func isIntLike(k PrimitiveKind) bool {
+	return IsIntLike(k)
+}
+
+func IsFloatLike(k PrimitiveKind) bool {
+	switch k {
+	case PrimF32, PrimF64, PrimBF16, PrimCFloat, PrimCDouble:
+		return true
+	default:
+		return false
+	}
+}
+
+func isFloatLike(k PrimitiveKind) bool {
+	return IsFloatLike(k)
+}
 
 type PrimitiveType struct {
 	Kind PrimitiveKind
@@ -37,20 +82,39 @@ func (p *PrimitiveType) String() string { return string(p.Kind) }
 func (p *PrimitiveType) Equals(other Type) bool {
 	o, ok := other.(*PrimitiveType)
 	if !ok {
+		// voidptr matches any &T or &mut T raw pointer
+		if p.Kind == PrimVoidPtr {
+			_, isRef := other.(*RefType)
+			return isRef
+		}
+		if p.Kind == PrimVoidPtr {
+			if _, isRef := other.(*RefType); isRef {
+				return true
+			}
+		}
+		if oRef, isRef := other.(*RefType); isRef {
+			if _, isInnerVoid := oRef.Inner.(*PrimitiveType); isInnerVoid && p.Kind == PrimVoidPtr {
+				return true
+			}
+		}
 		return false
 	}
-	// Allow seamless integer literal promotion between u8, int and i64 for ergonomics
-	if (p.Kind == PrimInt && o.Kind == PrimI64) || (p.Kind == PrimI64 && o.Kind == PrimInt) ||
-		(p.Kind == PrimU8 && (o.Kind == PrimInt || o.Kind == PrimI64)) ||
-		((p.Kind == PrimInt || p.Kind == PrimI64) && o.Kind == PrimU8) {
+	if p.Kind == o.Kind {
 		return true
 	}
-	// Allow float literals (f64) to promote cleanly to f32 / bf16
-	if (p.Kind == PrimF32 || p.Kind == PrimF64 || p.Kind == PrimBF16) &&
-		(o.Kind == PrimF32 || o.Kind == PrimF64 || o.Kind == PrimBF16) {
+	// voidptr matches any pointer or voidptr
+	if p.Kind == PrimVoidPtr || o.Kind == PrimVoidPtr {
 		return true
 	}
-	return p.Kind == o.Kind
+	// Allow seamless integer literal and C integer promotion
+	if isIntLike(p.Kind) && isIntLike(o.Kind) {
+		return true
+	}
+	// Allow float literals and C float promotion
+	if isFloatLike(p.Kind) && isFloatLike(o.Kind) {
+		return true
+	}
+	return false
 }
 
 // ExactEquals checks strict type identity without implicit numeric primitive promotion.
@@ -76,6 +140,23 @@ var (
 	TypeF64    = &PrimitiveType{Kind: PrimF64}
 	TypeBool   = &PrimitiveType{Kind: PrimBool}
 	TypeString = &PrimitiveType{Kind: PrimString}
+
+	// C-ABI Primitive Types (v0.7 FFI)
+	TypeCChar      = &PrimitiveType{Kind: PrimCChar}
+	TypeCUChar     = &PrimitiveType{Kind: PrimCUChar}
+	TypeCShort     = &PrimitiveType{Kind: PrimCShort}
+	TypeCUShort    = &PrimitiveType{Kind: PrimCUShort}
+	TypeCInt       = &PrimitiveType{Kind: PrimCInt}
+	TypeCUInt      = &PrimitiveType{Kind: PrimCUInt}
+	TypeCLong      = &PrimitiveType{Kind: PrimCLong}
+	TypeCULong     = &PrimitiveType{Kind: PrimCULong}
+	TypeCLongLong  = &PrimitiveType{Kind: PrimCLongLong}
+	TypeCULongLong = &PrimitiveType{Kind: PrimCULongLong}
+	TypeCSize      = &PrimitiveType{Kind: PrimCSize}
+	TypeCSSize     = &PrimitiveType{Kind: PrimCSSize}
+	TypeCFloat     = &PrimitiveType{Kind: PrimCFloat}
+	TypeCDouble    = &PrimitiveType{Kind: PrimCDouble}
+	TypeVoidPtr    = &PrimitiveType{Kind: PrimVoidPtr}
 )
 
 // ResultType represents `!T` (or bare `!` when Inner is TypeVoid).
@@ -121,8 +202,20 @@ func (r *RefType) String() string {
 }
 
 func (r *RefType) Equals(other Type) bool {
+	if pt, ok := other.(*PrimitiveType); ok && pt.Kind == PrimVoidPtr {
+		return true
+	}
+	if other.Equals(TypeString) && (r.Inner.Equals(TypeCChar) || r.Inner.Equals(TypeU8)) {
+		return true
+	}
 	o, ok := other.(*RefType)
-	return ok && r.IsMut == o.IsMut && ExactEquals(r.Inner, o.Inner)
+	if !ok {
+		return false
+	}
+	if o.Inner.Equals(TypeVoidPtr) || r.Inner.Equals(TypeVoidPtr) {
+		return true
+	}
+	return r.IsMut == o.IsMut && ExactEquals(r.Inner, o.Inner)
 }
 
 // TensorType represents `tensor[T]`.
@@ -202,6 +295,11 @@ type FnSig struct {
 	Params        []ParamInfo
 	ReturnType    Type
 	Intrinsic     string
+	IsExtern      bool
+	CName         string
+	IsUnsafe      bool
+	IsExport      bool
+	ExportName    string
 	Span          token.Span
 }
 
@@ -237,6 +335,8 @@ type StructType struct {
 	Name            string
 	IsPub           bool
 	IsActor         bool // true if declared with `actor Name { ... }`
+	IsOpaque        bool // `@[opaque]`: C struct known only by pointer
+	IsCLayout       bool // `@[c_layout]`: struct matching exact C memory layout
 	Embeds          []*StructType
 	Fields          map[string]*FieldInfo
 	FieldOrder      []string

@@ -379,6 +379,11 @@ func (a *Analyzer) rewriteBlock(
 			rewritten = append(rewritten, s)
 			diverged = true
 
+		case *ast.BlockStmt:
+			blockScope := &LexicalScope{Parent: scope, InArena: scope.InArena}
+			a.rewriteBlock(s, blockScope, false, report)
+			rewritten = append(rewritten, s)
+
 		case *ast.DeferStmt:
 			if s.Body != nil {
 				deferScope := &LexicalScope{Parent: scope, InArena: scope.InArena}

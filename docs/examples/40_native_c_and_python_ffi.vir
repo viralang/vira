@@ -1,0 +1,105 @@
+module main
+
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+// 1. Declare external standard C library functions with exact C-ABI types
+extern "C" {
+    fn puts(str &c_char) c_int
+    fn strlen(str &c_char) c_size
+    fn sqrt(x c_double) c_double
+    fn abs(n c_int) c_int
+}
+
+// 2. Struct with C-compatible layout for FFI memory mapping
+@[c_layout]
+pub struct NativeVec2 {
+pub:
+    x c_double
+    y c_double
+}
+
+// 3. Exported functions with C-linkage callable by C, C++, Rust, or Python ctypes
+@[export: "vira_add_integers"]
+pub fn vira_add_integers(a c_int, b c_int) c_int {
+    return a + b
+}
+
+@[export: "vira_vector_norm"]
+pub fn vira_vector_norm(x c_double, y c_double) c_double {
+    unsafe {
+        return sqrt(x * x + y * y)
+    }
+}
+
+@[export: "vira_string_length"]
+pub fn vira_string_length(s string) c_size {
+    unsafe {
+        return strlen(s)
+    }
+}
+
+// 4. Safe Vira wrapper encapsulating low-level C FFI unsafe boundary
+pub fn safe_c_strlen(text string) int {
+    unsafe {
+        len := strlen(text)
+        return int(len)
+    }
+}
+
+pub fn safe_c_sqrt(val f64) f64 {
+    unsafe {
+        res := sqrt(val)
+        return res
+    }
+}
+
+fn main() {
+    println("=== VIRA v0.7 NATIVE C & PYTHON FFI RUNTIME DEMO ===")
+
+    // Part A: Calling external C functions directly inside unsafe block
+    unsafe {
+        // Automatic string marshaling: Vira string passes directly as const char*
+        puts("[C libc puts] Direct invocation of puts() from C runtime")
+        
+        msg := "Vira Native Interop Engine"
+        len := strlen(msg)
+        println("[C libc strlen] Measured length: ${len}")
+
+        sq := sqrt(144.0)
+        println("[C libc sqrt] sqrt(144.0): ${sq}")
+
+        neg := -42
+        a := abs(neg)
+        println("[C libc abs] abs(-42): ${a}")
+    }
+
+    // Part B: Invoking safe wrapper functions without caller-side unsafe
+    safe_len := safe_c_strlen("Safe Wrapper String")
+    println("[Safe Wrapper] String length: ${safe_len}")
+
+    safe_root := safe_c_sqrt(81.0)
+    println("[Safe Wrapper] Square root: ${safe_root}")
+
+    // Part C: Testing exported C functions locally
+    sum := vira_add_integers(25, 17)
+    println("[Exported vira_add_integers] 25 + 17 = ${sum}")
+
+    norm := vira_vector_norm(3.0, 4.0)
+    println("[Exported vira_vector_norm] Norm of (3.0, 4.0) = ${norm}")
+
+    str_len := vira_string_length("Hello shared library!")
+    println("[Exported vira_string_length] Length = ${str_len}")
+
+    // Part D: Raw pointer operations (address-of and dereference)
+    unsafe {
+        mut counter := 99
+        ptr := &counter
+        val := *ptr
+        println("[Raw Pointers] &counter dereferenced (*ptr): ${val}")
+    }
+
+    println("=== FFI DEMO COMPLETED SUCCESSFULLY ===")
+}
+

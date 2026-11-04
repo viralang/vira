@@ -118,6 +118,17 @@ func (p *Parser) ParseFile() *ast.File {
 	}
 
 	for p.cur.Kind != token.TokEOF {
+		if p.cur.Kind == token.TokDirective {
+			line := strings.TrimSpace(p.advance().Lexeme(p.src))
+			if strings.HasPrefix(line, "#include") {
+				inc := strings.TrimSpace(strings.TrimPrefix(line, "#include"))
+				file.CIncludes = append(file.CIncludes, inc)
+			} else if strings.HasPrefix(line, "#flag") {
+				flag := strings.TrimSpace(strings.TrimPrefix(line, "#flag"))
+				file.CFlags = append(file.CFlags, flag)
+			}
+			continue
+		}
 		decls := p.parseDecls()
 		file.Decls = append(file.Decls, decls...)
 	}
@@ -190,18 +201,46 @@ func (p *Parser) parseImportItem() ast.ImportSpec {
 func (p *Parser) parseDecls() []ast.Decl {
 	startSpan := p.cur.Span
 	var intrinsicName string
-	if p.cur.Kind == token.TokAt {
+	var exportName string
+	var isExport bool
+	var isUnsafe bool
+	var isOpaque bool
+	var isCLayout bool
+
+	for p.cur.Kind == token.TokAt {
 		p.advance() // consume @
 		if p.cur.Kind == token.TokLBracket {
 			p.advance() // consume [
-			attrIdent := p.parseIdent()
-			if attrIdent.Name == "intrinsic" {
-				if p.cur.Kind == token.TokColon || p.cur.Kind == token.TokAssign {
-					p.advance()
+			for p.cur.Kind != token.TokRBracket && p.cur.Kind != token.TokEOF {
+				attrIdent := p.parseIdent()
+				switch attrIdent.Name {
+				case "intrinsic":
+					if p.cur.Kind == token.TokColon || p.cur.Kind == token.TokAssign {
+						p.advance()
+					}
+					if p.cur.Kind == token.TokString {
+						strLit := p.cur.Lexeme(p.src)
+						intrinsicName = strings.Trim(strLit, "'\"")
+						p.advance()
+					}
+				case "export":
+					isExport = true
+					if p.cur.Kind == token.TokColon || p.cur.Kind == token.TokAssign {
+						p.advance()
+						if p.cur.Kind == token.TokString {
+							strLit := p.cur.Lexeme(p.src)
+							exportName = strings.Trim(strLit, "'\"")
+							p.advance()
+						}
+					}
+				case "unsafe":
+					isUnsafe = true
+				case "opaque":
+					isOpaque = true
+				case "c_layout":
+					isCLayout = true
 				}
-				if p.cur.Kind == token.TokString {
-					strLit := p.cur.Lexeme(p.src)
-					intrinsicName = strings.Trim(strLit, "'\"")
+				if p.cur.Kind == token.TokComma {
 					p.advance()
 				}
 			}
@@ -216,14 +255,23 @@ func (p *Parser) parseDecls() []ast.Decl {
 	}
 
 	switch p.cur.Kind {
+	case token.TokExtern:
+		return p.parseExternBlock()
 	case token.TokStruct:
-		return []ast.Decl{p.parseStructDecl(isPub, false, startSpan)}
+		sd := p.parseStructDecl(isPub, false, startSpan)
+		sd.IsOpaque = isOpaque
+		sd.IsCLayout = isCLayout
+		return []ast.Decl{sd}
 	case token.TokActor:
 		return []ast.Decl{p.parseStructDecl(isPub, true, startSpan)}
 	case token.TokInterface:
 		return []ast.Decl{p.parseInterfaceDecl(isPub, startSpan)}
 	case token.TokFn:
-		return []ast.Decl{p.parseFnDecl(isPub, startSpan, intrinsicName)}
+		fn := p.parseFnDecl(isPub, startSpan, intrinsicName, false)
+		fn.IsUnsafe = isUnsafe
+		fn.IsExport = isExport
+		fn.ExportName = exportName
+		return []ast.Decl{fn}
 	case token.TokConst:
 		return p.parseConstDecls(isPub, startSpan)
 	default:
@@ -231,6 +279,31 @@ func (p *Parser) parseDecls() []ast.Decl {
 		p.advance()
 		return nil
 	}
+}
+
+func (p *Parser) parseExternBlock() []ast.Decl {
+	p.expect(token.TokExtern)
+	if p.cur.Kind == token.TokString {
+		abiStr := strings.Trim(p.advance().Lexeme(p.src), "'\"")
+		if abiStr != "C" {
+			p.errorf(p.prev.Span, "unsupported extern ABI %q, only \"C\" is supported", abiStr)
+		}
+	} else {
+		p.errorf(p.cur.Span, "expected \"C\" after extern")
+	}
+	p.expect(token.TokLBrace)
+	var decls []ast.Decl
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind == token.TokFn {
+			fnDecl := p.parseFnDecl(true, p.cur.Span, "", true)
+			decls = append(decls, fnDecl)
+		} else {
+			p.errorf(p.cur.Span, "unexpected token %s in extern block, expected 'fn'", p.cur.Kind)
+			p.advance()
+		}
+	}
+	p.expect(token.TokRBrace)
+	return decls
 }
 
 func (p *Parser) parseConstDecls(isPub bool, startSpan token.Span) []ast.Decl {
@@ -445,10 +518,14 @@ func (p *Parser) parseInterfaceDecl(isPub bool, startSpan token.Span) *ast.Inter
 
 // --- FUNCTIONS, RECEIVER METHODS & STATIC TYPE FACTORIES ---
 
-func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string) *ast.FnDecl {
+func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string, isExtern bool) *ast.FnDecl {
 	p.expect(token.TokFn)
 
-	decl := &ast.FnDecl{IsPub: isPub, Intrinsic: intrinsic}
+	decl := &ast.FnDecl{
+		IsPub:     isPub,
+		Intrinsic: intrinsic,
+		IsExtern:  isExtern,
+	}
 
 	// 1. Optional Receiver: `fn (inv Invoice)` or `fn (mut inv Invoice)`
 	if p.cur.Kind == token.TokLParen {
@@ -478,6 +555,9 @@ func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string)
 	} else {
 		decl.Name = firstIdent
 	}
+	if isExtern {
+		decl.CName = decl.Name.Name
+	}
 
 	decl.TypeParams = p.parseOptionalTypeParams()
 	decl.Params = p.parseParamList()
@@ -490,7 +570,7 @@ func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string)
 	if p.cur.Kind == token.TokLBrace {
 		decl.Body = p.parseBlock()
 		decl.DeclSpan = token.Span{Start: startSpan.Start, End: decl.Body.BlockSpan.End}
-	} else if decl.Intrinsic != "" {
+	} else if decl.Intrinsic != "" || decl.IsExtern {
 		decl.DeclSpan = token.Span{Start: startSpan.Start, End: p.prev.Span.End}
 	} else {
 		p.expect(token.TokLBrace)
@@ -772,6 +852,12 @@ func (p *Parser) parseStmt() ast.Stmt {
 			StmtSpan: token.Span{Start: arenaTok.Span.Start, End: body.BlockSpan.End},
 		}
 
+	case token.TokUnsafe:
+		p.advance()
+		body := p.parseBlock()
+		body.IsUnsafe = true
+		return body
+
 	case token.TokConst:
 		constTok := p.advance()
 		name := p.parseIdent()
@@ -1025,12 +1111,18 @@ func (p *Parser) parsePrefix() ast.Expr {
 		p.expect(token.TokRParen)
 		return expr
 
-	case token.TokBang, token.TokMinus:
+	case token.TokBang, token.TokMinus, token.TokAmp, token.TokStar:
 		opTok := p.advance()
+		isMut := false
+		if opTok.Kind == token.TokAmp && p.cur.Kind == token.TokMut {
+			p.advance()
+			isMut = true
+		}
 		operand := p.parseExpr(7)
 		return &ast.UnaryExpr{
 			Op:        opTok.Kind,
 			Expr:      operand,
+			IsMut:     isMut,
 			UnarySpan: token.Span{Start: opTok.Span.Start, End: operand.Span().End},
 		}
 

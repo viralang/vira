@@ -570,6 +570,65 @@ arena {
 } // Instant O(1) slab teardown here! 0 memory fragmentation!
 ```
 
+### v0.7 Native C & Python FFI Reference
+
+Starting in v0.7, Vira supports direct, zero-overhead C-ABI interop and shared library compilation.
+
+#### Directives
+- `#include <header.h>` or `#include "header.h"`: Injects native C headers into the compiled translation unit.
+- `#flag -l<lib>` or `#flag <args>`: Passes compiler and linker flags to the underlying C backend.
+
+#### `extern "C"` Blocks
+Declares external C function prototypes resolved at link time or run time:
+```v
+extern "C" {
+    fn puts(str &c_char) c_int
+    fn strlen(str &c_char) c_size
+    fn sqrt(x c_double) c_double
+}
+```
+
+#### Safety Boundaries
+- `unsafe { ... }`: Block required when invoking `extern "C"` functions or performing raw pointer dereferencing.
+- `@[unsafe]`: Function attribute marking a function that can invoke unsafe operations directly.
+
+#### C-ABI Scalar Types
+| Type | C99 Equivalent | Description |
+| :--- | :--- | :--- |
+| `c_char` / `c_uchar` | `char` / `unsigned char` | 8-bit character |
+| `c_short` / `c_ushort` | `short` / `unsigned short` | 16-bit integer |
+| `c_int` / `c_uint` | `int` / `unsigned int` | 32-bit integer |
+| `c_long` / `c_ulong` | `long` / `unsigned long` | Platform-dependent integer |
+| `c_longlong` / `c_ulonglong` | `long long` / `unsigned long long` | 64-bit integer |
+| `c_size` / `c_ssize` | `size_t` / `ssize_t` | Pointer-sized word length |
+| `c_float` / `c_double` | `float` / `double` | 32-bit / 64-bit IEEE 754 float |
+| `voidptr` | `void*` | Generic untyped pointer |
+
+#### Raw Pointer Operations
+- `&x`: Takes the immutable raw address of variable `x` (`&T`).
+- `&mut x`: Takes the mutable raw address of variable `x` (`&mut T`).
+- `*ptr`: Dereferences raw pointer `ptr` (valid only inside `unsafe` contexts).
+
+#### Struct Layout & Handle Attributes
+- `@[c_layout]`: Formats struct fields following standard C alignment and padding rules.
+- `@[opaque]`: Declares an external opaque type whose size and fields are internal to a foreign library.
+
+#### Shared Library Export
+- `@[export]`: Exports function with unmangled C name.
+- `@[export: "c_symbol_name"]`: Exports function under an explicit C symbol name.
+- Build command: `vira build -shared -o output.dll input.vir` (creates `.dll` on Windows, `.so` on Linux, `.dylib` on macOS).
+
+#### Python `ctypes` Interop
+Exported Vira shared libraries are loaded using Python's standard `ctypes.CDLL`:
+```python
+import ctypes
+
+lib = ctypes.CDLL("./build/math_lib.dll")
+lib.vira_add.argtypes = [ctypes.c_int, ctypes.c_int]
+lib.vira_add.restype = ctypes.c_int
+res = lib.vira_add(15, 27)  # 42
+```
+
 ---
 
 ## 11. Native Collections (`[]T` & `[N]T`) & String Methods

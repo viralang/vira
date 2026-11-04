@@ -929,6 +929,40 @@ func formatDeclHover(astFile *ast.File, word string, originFile string) string {
 
 func (s *Server) computeBuiltinHover(text string, pos Position, word string) string {
 	switch word {
+	case "extern":
+		return "**Vira C FFI Block (`extern \"C\" { ... }`)**\n\nDeclares foreign C function prototypes and library bindings without name mangling. Calls to extern C functions require an `unsafe { ... }` block or `@[unsafe]` context."
+	case "unsafe":
+		return "**Vira Unsafe Block (`unsafe { ... }`)**\n\nAuthorizes raw memory operations, pointer dereferencing (`*ptr`), address-of (`&mut x`), and foreign C ABI function invocations."
+	case "voidptr":
+		return "**Vira Raw Pointer (`voidptr`)**\n\nRepresents an untyped C `void*` pointer for foreign function interfaces and memory manipulation."
+	case "c_char":
+		return "**C-ABI Character (`c_char`)**\n\nDirect mapping to C `char`. Compatible with Vira `string` in C FFI calls."
+	case "c_uchar":
+		return "**C-ABI Unsigned Character (`c_uchar`)**\n\nDirect mapping to C `unsigned char`."
+	case "c_short":
+		return "**C-ABI Short (`c_short`)**\n\nDirect mapping to C `short`."
+	case "c_ushort":
+		return "**C-ABI Unsigned Short (`c_ushort`)**\n\nDirect mapping to C `unsigned short`."
+	case "c_int":
+		return "**C-ABI Integer (`c_int`)**\n\nDirect mapping to C `int` (32-bit signed integer)."
+	case "c_uint":
+		return "**C-ABI Unsigned Integer (`c_uint`)**\n\nDirect mapping to C `unsigned int` (32-bit unsigned integer)."
+	case "c_long":
+		return "**C-ABI Long (`c_long`)**\n\nDirect mapping to C `long` (platform-dependent 32/64-bit integer)."
+	case "c_ulong":
+		return "**C-ABI Unsigned Long (`c_ulong`)**\n\nDirect mapping to C `unsigned long`."
+	case "c_longlong":
+		return "**C-ABI Long Long (`c_longlong`)**\n\nDirect mapping to C `long long` (64-bit signed integer)."
+	case "c_ulonglong":
+		return "**C-ABI Unsigned Long Long (`c_ulonglong`)**\n\nDirect mapping to C `unsigned long long` (64-bit unsigned integer)."
+	case "c_size":
+		return "**C-ABI Size (`c_size`)**\n\nDirect mapping to C `size_t` (unsigned pointer-sized integer)."
+	case "c_ssize":
+		return "**C-ABI Signed Size (`c_ssize`)**\n\nDirect mapping to C `ssize_t` (signed pointer-sized integer)."
+	case "c_float":
+		return "**C-ABI Single-Precision Float (`c_float`)**\n\nDirect mapping to C `float` (IEEE 754 32-bit floating point)."
+	case "c_double":
+		return "**C-ABI Double-Precision Float (`c_double`)**\n\nDirect mapping to C `double` (IEEE 754 64-bit floating point)."
 	case "actor":
 		return "**Vira Actor Keyword**\n\nDefines an isolated, concurrent message-passing entity managed by a lock-free work-stealing pool and supervised for fault tolerance."
 	case "arena":
@@ -1484,11 +1518,19 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		}
 	}
 
-	for _, kw := range []string{"module", "import", "pub", "mut", "const", "defer", "fn", "struct", "actor", "interface", "enum", "type", "return", "if", "else", "switch", "case", "default", "match", "for", "in", "or", "is", "as", "break", "continue", "spawn", "supervise", "arena", "true", "false"} {
+	for _, kw := range []string{"module", "import", "pub", "mut", "const", "defer", "fn", "struct", "actor", "interface", "enum", "type", "return", "if", "else", "switch", "case", "default", "match", "for", "in", "or", "is", "as", "break", "continue", "spawn", "supervise", "arena", "extern", "unsafe", "true", "false"} {
 		items = append(items, CompletionItem{
 			Label:  kw,
 			Kind:   14, // Keyword
 			Detail: "keyword",
+		})
+	}
+
+	for _, pt := range []string{"u8", "byte", "int", "i64", "f32", "f16", "bf16", "f64", "bool", "string", "void", "c_char", "c_uchar", "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong", "c_longlong", "c_ulonglong", "c_size", "c_ssize", "c_float", "c_double", "voidptr"} {
+		items = append(items, CompletionItem{
+			Label:  pt,
+			Kind:   7, // Class/Type
+			Detail: "primitive type",
 		})
 	}
 

@@ -133,6 +133,13 @@ func (l *Lexer) Next() token.Token {
 	}
 
 	// 6. Operators and Delimiters
+	if ch == '#' {
+		// C FFI directive (`#include <x.h>`, `#flag -lfoo`): consumes the whole line.
+		for int(l.pos) < len(l.src) && l.src[l.pos] != '\n' && l.src[l.pos] != '\r' {
+			l.pos++
+		}
+		return l.makeTok(token.TokDirective, start, l.pos)
+	}
 	l.pos++
 	switch ch {
 	case '@':

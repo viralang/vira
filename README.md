@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.5.16-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/viralang/vira/releases"><img src="https://img.shields.io/badge/version-v0.7.1-blue.svg?style=flat-square" alt="Version"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.22+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
   <a href="#7-memory-management-deterministic-autofree--arenas"><img src="https://img.shields.io/badge/memory-deterministic_autofree_(no_GC)-orange.svg?style=flat-square" alt="Memory"></a>
@@ -48,6 +48,7 @@
    - [Native Desktop GUI Engine](#native-desktop-gui-engine)
    - [Native Package Management & Air-Gapped Vendoring](#native-package-management--air-gapped-vendoring)
    - [Rust/V-Style Diagnostic Engine](#rustv-style-diagnostic-engine)
+   - [Native C & Python FFI (v0.7)](#native-c--python-ffi-v07)
 6. [Complete End-to-End Production Program](#6-complete-end-to-end-production-program)
 7. [VS Code Extension & LSP Integration](#7-vs-code-extension--lsp-integration)
 8. [Cross-Platform Release Packager](#8-cross-platform-release-packager)
@@ -67,6 +68,7 @@ Vira is engineered from the ground up for modern systems development, numerical 
 - **First-Class AI Tensors & Multi-Threaded CPU SIMD:** 1D–4D strided tensors (`tensor[f32]`) are language primitives with batched & broadcast `@` matrix multiplication vectorized via AVX2+FMA / SSE2 on x86_64 and ARM NEON on Apple Silicon/AArch64, auto-parallelized across the work-stealing thread pool, and 64-byte aligned for zero-copy C99 FFI interop.
 - **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights with Q4_0/Q8_0 SIMD dequantization, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
 - **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries, LIFO `defer_stack` unwinding, deep-cloned async envelopes, and `OneForOne` supervisor restarts.
+- **Native C & Python FFI (Shared Library Export):** First-class foreign function interop via `extern "C" { ... }`, `#include` / `#flag` directives, typed raw pointers (`&x`, `&mut x`, `*ptr`, `voidptr`), strict `unsafe { ... }` boundaries, and zero-overhead C-ABI shared library export (`vira build -shared` / `@[export]`) callable directly from Python `ctypes`, C, C++, and Rust.
 - **Native Desktop GUI, Flutter-Style Widgets, Web Networking & Pure-Vira JSON:** Built-in lightweight Canvas/Win32/X11 GUI framework, Flutter-inspired declarative UI kit (`packages/widget`), HTTP/1.1 asynchronous request processing (`packages/http`, `packages/viraserve`), and a 100% pure-Vira RFC 8259 JSON parser & $O(N)$ `JsonBuilder` (`packages/json`).
 - **Clean C99 Backend:** Lowers directly into portable, readable C99, compiled via GCC, Clang, MinGW-w64, or TCC with `-O3 -flto -march=native` optimizations.
 
@@ -152,7 +154,7 @@ vira <command> [flags] [arguments]
 ---
 
 ## 4. Master Catalog: Tutorials & Runnable Examples Table
-The repository includes 35 comprehensive step-by-step tutorials paired directly with standalone, self-contained runnable `.vir` example programs and benchmark suites.
+The repository includes 38 comprehensive step-by-step tutorials paired directly with 40 standalone, self-contained runnable `.vir` example programs and benchmark suites.
 
 | # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
 | :-: | :--- | :--- | :--- | :--- | :--- |
@@ -192,6 +194,8 @@ The repository includes 35 comprehensive step-by-step tutorials paired directly 
 | **34** | **Advanced GUI: Dropdowns & Data Tables** | Intermediate/Adv | [`gui_table_dropdown_demo.vir`](examples/gui_table_dropdown_demo.vir) | [`34_advanced_gui_tables_and_dropdowns.md`](docs/tutorials/34_advanced_gui_tables_and_dropdowns.md) | Dropdown select (`gui_select`/`gui_dropdown`) with deferred top-layer popup rendering, interactive data tables (`gui_tbl`/`gui_table`) with natural sorting, real-time search filtering, row selection, automated pagination, vector icons (`gui_btn_danger`), local image loading, and non-blocking remote URL asset fetching with custom HTTP headers on macOS, Linux, and Windows. |
 | **35** | **Native GUI App Scaffolding & Bundling** | Intermediate/Adv | `vira init-gui my_app`<br>`vira bundle -release` | [`35_gui_app_scaffolding_and_cross_platform_bundling.md`](docs/tutorials/35_gui_app_scaffolding_and_cross_platform_bundling.md) | Dedicated GUI scaffolding (`vira init-gui`), desktop manifest metadata (`app_name`, `app_id`, `icon`, `assets`), macOS `.app` bundle with `Contents/Info.plist` and High-DPI Retina support, Linux portable directory with FreeDesktop `.desktop` entry and `run.sh`, Windows Win32 GUI subsystem (`-mwindows` without console window) and `.ico` icons, and automated CI/CD release archiving. |
 | **36** | **Flutter-Style Declarative Widgets & Responsive Desktop UI** | Intermediate/Adv | [`flutter_style_dashboard.vir`](examples/flutter_style_dashboard.vir) | [`36_flutter_style_widgets_and_responsive_ui.md`](docs/tutorials/36_flutter_style_widgets_and_responsive_ui.md) | Flutter-inspired declarative UI kit (`package widget`), `w.App` lifecycle runner, `w.Scaffold`, auto-layout stacks (`w.Column`, `w.Row`, `w.Card`), `w.Padding` with `w.EdgeInsets`, responsive `w.MediaQuery` and breakpoints, interactive inputs (`w.ElevatedButton`, `w.TextField`, `w.Slider`, `w.Dropdown`), data tables, progress bars, and Catppuccin theme tokens with 0 memory leaks. |
+| **37** | **Real-World GUI Apps: HTTP, Images & Widget Suite** | Advanced | [`39_gui_realworld_cloud_ai_hub.vir`](docs/examples/39_gui_realworld_cloud_ai_hub.vir)<br>[`cloud_ai_hub.vir`](examples/cloud_ai_hub.vir) | [`37_realworld_gui_http_images_and_complete_widget_suite.md`](docs/tutorials/37_realworld_gui_http_images_and_complete_widget_suite.md) | Production Cloud AI Hub desktop app: live decoupled HTTP REST API querying over TLS, zero-alloc SIMD JSON parsing, GPU image texture caching & rendering (`w.LoadImage`, `w.Image`, `w.FreeImage`), complete widget catalog (`w.App`, `w.Scaffold`, `w.Theme` switching, `w.Tab`, `w.Modal`, `w.DataTable`, `w.ProgressBar`), responsive dual-column layout, and 0 leaks. |
+| **38** | **Native C & Python FFI: Shared Libraries & ctypes** | Advanced/Systems | [`40_native_c_and_python_ffi.vir`](docs/examples/40_native_c_and_python_ffi.vir)<br>[`40_python_ffi_caller.py`](docs/examples/40_python_ffi_caller.py) | [`38_native_c_and_python_ffi.md`](docs/tutorials/38_native_c_and_python_ffi.md) | Direct C-ABI interop, `#include` and `#flag` directives, `extern "C"` declarations, mandatory `unsafe { ... }` safety boundary, C-ABI scalar types (`c_int`, `c_double`, `voidptr`), raw pointer operations (`&`, `&mut`, `*`), `@[c_layout]` and `@[opaque]` structs, exporting shared libraries (`@[export]` & `vira build -shared`), and zero-boilerplate Python `ctypes` bindings with 0 leaks. |
 
 ---
 
@@ -779,6 +783,56 @@ error[SEMANTIC]: field 'Account.id' is 'pub:' (read-only) and cannot be mutated
 
 ---
 
+### Native C & Python FFI (v0.7)
+
+Vira provides zero-overhead, direct C-ABI foreign function interop and shared library export:
+
+```v
+#include <stdio.h>
+#include <math.h>
+
+extern "C" {
+    fn puts(s &c_char) c_int
+    fn sqrt(x c_double) c_double
+}
+
+@[export: "vira_vector_norm"]
+pub fn vira_vector_norm(x c_double, y c_double) c_double {
+    unsafe {
+        return sqrt(x * x + y * y)
+    }
+}
+
+fn main() {
+    unsafe {
+        puts("Direct C puts() invocation from Vira")
+    }
+    norm := vira_vector_norm(3.0, 4.0)
+    println("Vector norm: ${norm}")
+}
+```
+
+Compile directly into a high-performance native shared library (`.dll`, `.so`, or `.dylib`):
+
+```powershell
+vira build -shared -o build/math_lib.dll math_lib.vir
+```
+
+Call the exported Vira library directly from Python using `ctypes`:
+
+```python
+import ctypes
+
+lib = ctypes.CDLL("./build/math_lib.dll")
+lib.vira_vector_norm.argtypes = [ctypes.c_double, ctypes.c_double]
+lib.vira_vector_norm.restype = ctypes.c_double
+
+res = lib.vira_vector_norm(3.0, 4.0)
+print(f"Norm from Vira: {res}")  # 5.0
+```
+
+---
+
 ## 6. Complete End-to-End Production Program
 
 The following program combines all core language features: OOP composition, fat-pointer interfaces, SIMD tensors, work-stealing actor concurrency, and fault tolerance:
@@ -956,20 +1010,19 @@ The automated Go packager compiles and packages release bundles for Windows, Lin
 ```
 
 Generates compressed artifacts in `dist/`:
-- `vira-v0.5.16-windows-amd64.zip`
-- `vira-v0.5.16-linux-amd64.tar.gz`
-- `vira-v0.5.16-darwin-arm64.tar.gz`
-- `vira-v0.5.16-darwin-amd64.tar.gz`
+- `vira-v0.7.1-windows-amd64.zip`
+- `vira-v0.7.1-linux-amd64.tar.gz`
+- `vira-v0.7.1-darwin-arm64.tar.gz`
+- `vira-v0.7.1-darwin-amd64.tar.gz`
 
 ---
 
 ## 9. Roadmap & Contributing
 
-See [`ROADMAP.md`](ROADMAP.md) for planned features including:
-- GPU Device Kernel Compilation (PTX / SPIR-V)
-- Distributed Multi-Node Actor Clustering
-- WebAssembly (Wasm + WASI) Compilation Target
-- Standard Library Networking Extensions
+Vira has completed **v0.7 (Native C & Python FFI and Shared Library Export)**. See [`ROADMAP.md`](ROADMAP.md) for full milestone details and future frontiers:
+- **v0.8 (Next Milestone):** Cross-Platform GPU Compute Acceleration (Vulkan / Direct3D 12 / Metal compute kernels, unified DMA, supervisor-managed GPU OOM fallback)
+- **v0.9:** Advanced Language Ergonomics & Expressiveness (Generics, exhaustive pattern matching `match`, zero-copy range slicing)
+- **v1.0:** Production Ecosystem Maturity (documentation generator `vira doc`, cryptographic standard libraries, API stability freeze)
 
 Contributions are welcome! Please open an issue or submit a pull request on GitHub at [github.com/viralang/vira](https://github.com/viralang/vira).
 

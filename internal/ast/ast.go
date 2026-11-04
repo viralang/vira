@@ -74,6 +74,10 @@ type File struct {
 	Imports  []ImportSpec
 	Decls    []Decl
 	FileSpan token.Span
+
+	// C FFI directives (v0.7)
+	CIncludes []string // `#include <foo.h>` / `#include "foo.h"` (verbatim header token)
+	CFlags    []string // `#flag -lfoo -L/path` linker / compiler flags
 }
 
 func (f *File) Span() token.Span { return f.FileSpan }
@@ -158,6 +162,8 @@ type StructDecl struct {
 	TypeParams []Ident       // generic parameters `[T]`
 	Embeds     []TypeExpr    // anonymous embedded structs (e.g., `AuditMeta`)
 	Fields     []StructField // fields tagged with their AccessMode quadrant
+	IsOpaque   bool          // `@[opaque]`: C struct known only by pointer
+	IsCLayout  bool          // `@[c_layout]`: struct matching exact C memory layout
 	DeclSpan   token.Span
 }
 
@@ -222,6 +228,11 @@ type FnDecl struct {
 	ReturnType TypeExpr // nil means void
 	Body       *BlockStmt
 	Intrinsic  string // non-empty for @[intrinsic: '...'] bindings
+	IsExtern   bool   // declared inside an `extern "C" { ... }` block (C ABI marshaling applies)
+	CName      string // raw C symbol name for extern functions
+	IsUnsafe   bool   // `@[unsafe]` attribute: body may call extern C functions without `unsafe { }`
+	IsExport   bool   // `@[export]` attribute: exported for C / foreign callers
+	ExportName string // exported C symbol name (or function name if empty)
 	DeclSpan   token.Span
 }
 
@@ -246,6 +257,7 @@ func (d *ConstDecl) declNode()        {}
 type BlockStmt struct {
 	Stmts     []Stmt
 	BlockSpan token.Span
+	IsUnsafe  bool // `unsafe { ... }` block: permits calls into extern C functions
 }
 
 func (s *BlockStmt) Span() token.Span { return s.BlockSpan }
@@ -505,6 +517,7 @@ func (e *BinaryExpr) exprNode()        {}
 type UnaryExpr struct {
 	Op        token.Kind
 	Expr      Expr
+	IsMut     bool
 	UnarySpan token.Span
 }
 

@@ -140,7 +140,7 @@ func bundleCmd(args []string) {
 	}
 	tempBin := filepath.Join(tempBuildDir, execName)
 
-	cCode, _, _ := compileVexToC99(entrypoint, false)
+	cCode, _, _, cFlags := compileVexToC99(entrypoint, false)
 	cFile := filepath.Join(tempBuildDir, strings.TrimSuffix(filepath.Base(entrypoint), ".vir")+".c")
 	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
 		fatalIO(err)
@@ -151,6 +151,7 @@ func bundleCmd(args []string) {
 		outPath: tempBin,
 		guiApp:  true,
 		quietRT: true,
+		cFlags:  cFlags,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, tempBin, opts)

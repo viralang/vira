@@ -1,0 +1,17 @@
+// Vira Shared Library Export for C and Python FFI
+
+@[export: "vira_add"]
+fn vira_add(a c_int, b c_int) c_int {
+    return a + b
+}
+
+@[export: "vira_multiply"]
+fn vira_multiply(a c_int, b c_int) c_int {
+    return a * b
+}
+
+@[export: "vira_square"]
+fn vira_square(x c_double) c_double {
+    return x * x
+}
+
