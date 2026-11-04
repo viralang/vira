@@ -102,8 +102,8 @@ func (p *PrimitiveType) Equals(other Type) bool {
 	if p.Kind == o.Kind {
 		return true
 	}
-	// voidptr matches any pointer or voidptr
-	if p.Kind == PrimVoidPtr || o.Kind == PrimVoidPtr {
+	// voidptr matches integer literals / addresses (e.g. 0 / NULL)
+	if (p.Kind == PrimVoidPtr && isIntLike(o.Kind)) || (o.Kind == PrimVoidPtr && isIntLike(p.Kind)) {
 		return true
 	}
 	// Allow seamless integer literal and C integer promotion
@@ -205,14 +205,14 @@ func (r *RefType) Equals(other Type) bool {
 	if pt, ok := other.(*PrimitiveType); ok && pt.Kind == PrimVoidPtr {
 		return true
 	}
-	if other.Equals(TypeString) && (r.Inner.Equals(TypeCChar) || r.Inner.Equals(TypeU8)) {
+	if ExactEquals(other, TypeString) && (ExactEquals(r.Inner, TypeCChar) || ExactEquals(r.Inner, TypeU8)) {
 		return true
 	}
 	o, ok := other.(*RefType)
 	if !ok {
 		return false
 	}
-	if o.Inner.Equals(TypeVoidPtr) || r.Inner.Equals(TypeVoidPtr) {
+	if ExactEquals(o.Inner, TypeVoidPtr) || ExactEquals(r.Inner, TypeVoidPtr) {
 		return true
 	}
 	return r.IsMut == o.IsMut && ExactEquals(r.Inner, o.Inner)

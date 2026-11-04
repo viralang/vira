@@ -1614,7 +1614,7 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		}
 
 		qual := "const "
-		if s.IsMut || g.needsMutableAddressForCleanup(valType) {
+		if s.IsMut || g.needsMutableAddressForCleanup(valType) || checker.ExactEquals(valType, checker.TypeVoidPtr) {
 			qual = ""
 		}
 		valExpr := g.emitExpr(s.Value)
@@ -2570,18 +2570,18 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				argType := g.chk.ExprTypes[arg.Expr]
 				paramType := externSig.Params[i].Type
 				if argType != nil {
-					if argType.Equals(checker.TypeString) {
+					if checker.ExactEquals(argType, checker.TypeString) {
 						if ref, ok := paramType.(*checker.RefType); ok && (checker.ExactEquals(ref.Inner, checker.TypeCChar) || checker.ExactEquals(ref.Inner, checker.TypeU8)) {
 							argVal = fmt.Sprintf("(const char*)(%s.data)", argVal)
-						} else if paramType.Equals(checker.TypeVoidPtr) {
+						} else if checker.ExactEquals(paramType, checker.TypeVoidPtr) {
 							argVal = fmt.Sprintf("(void*)(%s.data)", argVal)
 						}
 					} else if _, isTen := argType.(*checker.TensorType); isTen {
-						if _, isRef := paramType.(*checker.RefType); isRef || paramType.Equals(checker.TypeVoidPtr) {
+						if _, isRef := paramType.(*checker.RefType); isRef || checker.ExactEquals(paramType, checker.TypeVoidPtr) {
 							argVal = fmt.Sprintf("(%s).data", argVal)
 						}
 					} else if _, isSl := argType.(*checker.SliceType); isSl {
-						if _, isRef := paramType.(*checker.RefType); isRef || paramType.Equals(checker.TypeVoidPtr) {
+						if _, isRef := paramType.(*checker.RefType); isRef || checker.ExactEquals(paramType, checker.TypeVoidPtr) {
 							argVal = fmt.Sprintf("(%s).data", argVal)
 						}
 					}
