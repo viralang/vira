@@ -2774,13 +2774,13 @@ static void _vira_park(void) {
   pthread_mutex_lock(&_vira_parker.mu);
   __atomic_add_fetch(&_vira_parker.sleepers, 1, __ATOMIC_SEQ_CST);
   if (!_vira_any_work() && !__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
+    // `_vira_parker.cv` uses `PTHREAD_COND_INITIALIZER`, which measures timeouts
+    // against `CLOCK_REALTIME`. Using `CLOCK_MONOTONIC` here caused
+    // `pthread_cond_timedwait` to return `ETIMEDOUT` immediately (0 ns) and
+    // busy-spin all worker threads at 100% CPU while idle.
     struct timespec ts;
-#if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-#else
     clock_gettime(CLOCK_REALTIME, &ts);
-#endif
-    ts.tv_nsec += 2000000;
+    ts.tv_nsec += 50000000L; // 50 ms fallback poll (producers wake via cond_signal immediately)
     if (ts.tv_nsec >= 1000000000L) {
       ts.tv_sec++;
       ts.tv_nsec -= 1000000000L;

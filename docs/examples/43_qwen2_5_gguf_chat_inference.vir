@@ -497,6 +497,8 @@ fn generate_reply(
     mut kv_pos := start_kv_pos
     mut next_token := meta.eos_id
 
+    print('Qwen2.5  > ')
+
     // 1. Prefill all ChatML prompt tokens (only compute 151,936-vocab logits on the final prompt token)
     mut idx := 0
     for idx < turn_tokens.len {
@@ -519,7 +521,6 @@ fn generate_reply(
     }
 
     prefill_ms := time.now_ms() - t0
-    print('Qwen2.5  > ')
 
     // 2. Autoregressive token generation loop with real-time streaming output
     t_gen0 := time.now_ms()
