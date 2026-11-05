@@ -417,7 +417,8 @@ Vira also ships with **[`docs/examples/43_qwen2_5_gguf_chat_inference.vir`](../e
 Model File      : models/qwen2.5-0.5b-instruct-q4_0.gguf
 Architecture    : qwen2 (qwen2.5-0.5b-instruct, GGUF v3, 291 tensors)
 Hyperparameters : layers=24, dim=896, ffn_dim=4864, head_dim=64
-GQA & RoPE      : 14 Q heads / 2 KV heads (7:1 GQA), NeoX RoPE=1000000
+GQA & RoPE      : 14 Q heads / 2 KV heads, RoPE=1000000
+Context Window  : max_context=512 tokens (KV cache: 6144 KB across 24 layers)
 ChatML Vocab    : 151936 tokens indexed in 128 ms (<|im_start|>=151644, <|im_end|>=151645)
 Loading 291 GGUF tensors (24 layers, Q4_0/Q8_0/F32)... done in 1677 ms!
 ------------------------------------------------------------------------
@@ -443,18 +444,291 @@ Qwen 2.5 GGUF v3 Inference Completed Successfully (Zero FFI).
 
 ---
 
+## 11. How to Load & Run *Any* Hugging Face GGUF Model in Pure Vira
+
+Because GGUF v2/v3 is a self-describing container format, you can point a pure-Vira engine at **any** decoder-only Transformer model on Hugging Face (LLaMA 2, LLaMA 3.1/3.2, Qwen 2.5, Mistral 7B, SmolLM2, TinyLlama, DeepSeek-R1-Distill) by handling five standard architectural variations.
+
+### 11.1 Model Family Comparison Table
+
+| Model Family | GGUF `general.architecture` | QKV Bias (`attn_q/k/v.bias`) | Output Head (`output.weight`) | RoPE Base (`rope.freq_base`) | Tokenizer Pre-Tokenizer | Chat Template |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **LLaMA 2 / TinyLlama** | `llama` | No | Untied (`output.weight`) | `10,000.0` | SentencePiece (`▁` = `0xE2 0x96 0x81`) | `[INST] ... [/INST]` or ChatML |
+| **LLaMA 3 / 3.1 / 3.2** | `llama` | No | Tied (1B/3B) or Untied (8B+) | `500,000.0` | GPT-2 Byte-Level BPE (`Ġ` = `0xC4 0xA0`) | `<\|begin_of_text\|><\|start_header_id\|>` |
+| **Qwen 2 / Qwen 2.5** | `qwen2` | **Yes** (`blk.{l}.attn_q/k/v.bias`) | Tied or Untied | `1,000,000.0` | GPT-2 Byte-Level BPE (`Ġ` = `0xC4 0xA0`) | ChatML (`<\|im_start\|>...<\|im_end\|>`) |
+| **Mistral / Ministral** | `llama` | No | Untied (`output.weight`) | `10,000.0` – `1,000,000.0` | SentencePiece or Tekken BPE | `[INST] ... [/INST]` |
+| **SmolLM2 (135M–1.7B)** | `llama` | No | Tied (`token_embd.weight`) | `10,000.0` – `100,000.0` | GPT-2 Byte-Level BPE (`Ġ` = `0xC4 0xA0`) | ChatML (`<\|im_start\|>...<\|im_end\|>`) |
+
+---
+
+### 11.2 Architecture-Agnostic GGUF Metadata Discovery
+
+In GGUF files, hyperparameter keys are prefixed with the value of `general.architecture` (for example, `llama.block_count` vs. `qwen2.block_count` vs. `phi3.block_count`). Instead of hardcoding a single architecture prefix, match the key suffixes using `.ends_with()` so your parser works across **all** GGUF architectures:
+
+```vira
+if key == 'general.architecture' && vtype == 8 {
+    meta.arch = read_gguf_string(raw, cursor)
+    cursor = skip_gguf_value(raw, cursor, vtype)
+} else if key == 'general.name' && vtype == 8 {
+    meta.name = read_gguf_string(raw, cursor)
+    cursor = skip_gguf_value(raw, cursor, vtype)
+} else if key.ends_with('.block_count') && vtype == 4 {
+    meta.n_layers = read_u32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.embedding_length') && vtype == 4 {
+    meta.dim = read_u32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.feed_forward_length') && vtype == 4 {
+    meta.ffn_dim = read_u32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.attention.head_count') && vtype == 4 {
+    meta.n_heads = read_u32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.attention.head_count_kv') && vtype == 4 {
+    meta.n_kv_heads = read_u32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.rope.freq_base') && vtype == 6 {
+    meta.rope_base = read_f32_le(raw, cursor)
+    cursor = cursor + 4
+} else if key.ends_with('.attention.layer_norm_rms_epsilon') && vtype == 6 {
+    meta.rms_eps = read_f32_le(raw, cursor)
+    cursor = cursor + 4
+}
+```
+
+---
+
+### 11.3 Handling Optional QKV Biases (`load_gguf_bias_or_zeros`)
+
+Models like **Qwen 2.5** include additive 1D bias tensors (`blk.{l}.attn_q.bias`, `blk.{l}.attn_k.bias`, `blk.{l}.attn_v.bias`), whereas **LLaMA**, **Mistral**, and **SmolLM2** omit them. Using Vira's `or {}` error-handling block on `gguf_load_tensor`, you can load the bias tensor when present or fall back to a zero vector so the exact same forward pass runs both biased and bias-free architectures:
+
+```vira
+// Loads `blk.{l}.attn_q/k/v.bias` if present in the GGUF file,
+// or returns a zero bias vector `(1, dim)` for bias-free models (LLaMA, Mistral, SmolLM).
+fn load_gguf_bias_or_zeros(path string, name string, dim int) tensor[f32] {
+    t := gguf_load_tensor(path, name) or {
+        return tensor_fill(1, dim, 0.0)
+    }
+    return t
+}
+```
+
+---
+
+### 11.4 Handling Tied vs. Untied Output Embeddings (`output.weight`)
+
+Compact models (such as **SmolLM2-135M**, **LLaMA-3.2-1B**, and some **Qwen 2.5** quantizations) tie their language-modeling classifier head directly to `token_embd.weight` and omit `output.weight` from the GGUF tensor directory to save ~15–25% disk space. Always load `output.weight` with a fallback to `tok_emb.clone()`:
+
+```vira
+tok_emb := load_gguf_or_die(model_path, 'token_embd.weight')
+out_norm := load_gguf_or_die(model_path, 'output_norm.weight')
+
+// Automatically handle both untied (`output.weight`) and tied (`token_embd.weight`) models:
+out_weight := gguf_load_tensor(model_path, 'output.weight') or {
+    tok_emb.clone()
+}
+```
+
+---
+
+### 11.5 Choosing the Right RoPE Layout (`tensor_rope`)
+
+Vira's built-in `tensor_rope(x, pos, rope_base)` adapts its rotation pairing based on the shape of `x`:
+1. **Per-Head NeoX Split-Half RoPE (Qwen 2.5, Phi-3, Gemma):**
+   When you reshape `q_lin` and `k_lin` to `(n_heads, head_dim)` (`rows > 1`) *before* calling `tensor_rope`, Vira rotates `(d, d + head_dim / 2)` inside each attention head independently:
+   ```vira
+   q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
+   k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
+   ```
+2. **Interleaved Pair RoPE (LLaMA 1/2/3, TinyLlama, Stories260K):**
+   When you pass a flat row vector `(1, dim)` (`rows == 1`) to `tensor_rope`, Vira rotates adjacent even/odd pairs `(2*i, 2*i + 1)`:
+   ```vira
+   q_rot := tensor_rope(q_lin, i64(pos), meta.rope_base)
+   k_rot := tensor_rope(k_lin, i64(pos), meta.rope_base)
+   ```
+
+---
+
+### 11.6 Swapping Prompt Templates (ChatML vs. LLaMA-3 vs. Mistral)
+
+To switch between instruction-tuned model families, format each user turn with the model's native control tokens:
+
+- **ChatML (Qwen 2.5, SmolLM2, OpenHermes, Yi):**
+  ```text
+  <|im_start|>system
+  {sys_prompt}<|im_end|>
+  <|im_start|>user
+  {user_prompt}<|im_end|>
+  <|im_start|>assistant
+  ```
+- **LLaMA-3 / LLaMA-3.1 / LLaMA-3.2 Instruct:**
+  ```text
+  <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+  {sys_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+  {user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+  ```
+- **Mistral / LLaMA-2 Instruct:**
+  ```text
+  <s>[INST] {sys_prompt}
+
+  {user_prompt} [/INST]
+  ```
+
+---
+
+## 12. Controlling & Managing the Context Window (`max_context` & KV Cache)
+
+In an autoregressive Transformer, the **Context Window** (`max_context`) determines how many total tokens (system prompt + multi-turn conversation history + generated reply) the model can attend to simultaneously.
+
+### 12.1 KV-Cache Memory Formula & Sizing Table
+
+For every layer $l \in [0, N_{\text{layers}})$, Vira pre-allocates two 2D `f32` matrices—`k_caches[l]` and `v_caches[l]`—each of shape `(max_context, kv_dim)`, where $\text{kv\_dim} = N_{\text{kv\_heads}} \times d_{\text{head}}$.
+
+The total persistent RAM consumed by the KV cache is:
+
+$$\text{KV Cache Bytes} = 2 \times N_{\text{layers}} \times \text{max\_context} \times \left(N_{\text{kv\_heads}} \times d_{\text{head}}\right) \times 4\text{ bytes}$$
+
+Because Grouped-Query Attention (GQA) reduces $N_{\text{kv\_heads}}$ relative to $N_{\text{heads}}$ (for example, Qwen2.5-0.5B uses $14$ Q heads but only $2$ KV heads, a $7:1$ reduction), the KV cache remains remarkably compact even at large context lengths:
+
+| Context Window (`--ctx`) | Stories260K (`8L, kv_dim=32`) | Qwen2.5-0.5B (`24L, kv_dim=128`) | LLaMA-3.2-1B (`16L, kv_dim=512`) | Qwen2.5-7B (`28L, kv_dim=512`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **`256` tokens** | `512 KB` | `3.0 MB` | `16.0 MB` | `28.0 MB` |
+| **`512` tokens** *(default)* | `1.0 MB` | `6.0 MB` | `32.0 MB` | `56.0 MB` |
+| **`2048` tokens** | `4.0 MB` | `24.0 MB` | `128.0 MB` | `224.0 MB` |
+| **`8192` tokens** | `16.0 MB` | `96.0 MB` | `512.0 MB` | `896.0 MB` |
+| **`32768` tokens** | `64.0 MB` | `384.0 MB` | `2.0 GB` | `3.5 GB` |
+
+---
+
+### 12.2 Configuring `max_context` via CLI Flags (`-c` / `--ctx`)
+
+In [43_qwen2_5_gguf_chat_inference.vir](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir), `max_context` is configurable at startup via `-c` / `--ctx` / `--context` and directly controls the row capacity of `k_caches` and `v_caches`:
+
+```powershell
+# Run with a 2048-token context window and generate up to 256 tokens per turn
+.\vira.exe run docs/examples/43_qwen2_5_gguf_chat_inference.vir -autofree=false -- --ctx 2048 --steps 256 -i
+
+# Run with a compact 256-token context window for low-memory edge devices
+.\vira.exe run docs/examples/43_qwen2_5_gguf_chat_inference.vir -autofree=false -- --ctx 256 -i
+```
+
+Inside `main()`, Vira computes the exact KV-cache memory footprint and allocates the per-layer cache tensors to `(max_context, kv_dim)`:
+
+```vira
+kv_cache_kb := (2 * meta.n_layers * max_context * kv_dim * 4) / 1024
+println('Context Window  : max_context=${max_context} tokens (KV cache: ${kv_cache_kb} KB across ${meta.n_layers} layers)')
+
+mut l := 0
+for l < meta.n_layers {
+    k_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+    v_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+    l += 1
+}
+```
+
+---
+
+### 12.3 Three Context Window Management Strategies in Pure Vira
+
+#### Strategy 1: Active Prefix Slicing (`.slice_rows(0, pos + 1)`)
+Even if you allocate `max_context = 8192`, you should **never** multiply queries against unused zero rows `[pos + 1 .. max_context)`, which would waste CPU cycles and corrupt `tensor_softmax` with $\exp(0)$ terms. Instead, always bound attention to `seq_len := pos + 1` using `.slice_rows(0, seq_len)` (or iterating `t < seq_len`):
+
+```vira
+seq_len := pos + 1
+k_caches[l].copy_row(pos, k_rot)
+v_caches[l].copy_row(pos, v)
+
+// Slice ONLY the active context window [0 .. pos + 1)
+k_ctx := k_caches[l].slice_rows(0, seq_len)
+v_ctx := v_caches[l].slice_rows(0, seq_len)
+```
+
+This keeps per-token attention complexity strictly $O(\text{kv\_pos})$ instead of $O(\text{max\_context})$.
+
+#### Strategy 2: Sliding-Window Context Shifting with Pinned System-Prompt "Attention Sinks"
+In long multi-turn REPL sessions, `kv_pos` will eventually approach `max_context`. If you simply reset `kv_pos = 0`, the model loses all conversation memory; if you shift all rows uniformly (`[shift_by .. kv_pos) -> [0 .. kv_pos - shift_by)`), the model loses its initial `<|im_start|>system...` instructions and "attention sink" tokens.
+
+The production solution implemented in [`shift_kv_cache_window`](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir#L357-L387) pins the first `keep_prefix` rows (`[0 .. keep_prefix)`, containing the system prompt) and shifts only the rolling conversation window `[keep_prefix + shift_by .. kv_pos)` left into `[keep_prefix .. kv_pos - shift_by)`:
+
+```vira
+// Preserves rows `[0 .. keep_prefix)` (the pinned system prompt / attention sinks)
+// and shifts recent conversation rows `[keep_prefix + shift_by .. kv_pos)` left.
+fn shift_kv_cache_window(
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32],
+    n_layers int,
+    keep_prefix int,
+    kv_pos int,
+    shift_by int
+) int {
+    if shift_by <= 0 || keep_prefix + shift_by >= kv_pos {
+        return keep_prefix
+    }
+    new_kv_pos := kv_pos - shift_by
+    arena {
+        mut l := 0
+        for l < n_layers {
+            mut r := keep_prefix
+            for r < new_kv_pos {
+                src_r := r + shift_by
+                k_row := k_caches[l].slice_rows(src_r, src_r + 1)
+                v_row := v_caches[l].slice_rows(src_r, src_r + 1)
+                k_caches[l].copy_row(r, k_row)
+                v_caches[l].copy_row(r, v_row)
+                r += 1
+            }
+            l += 1
+        }
+    }
+    return new_kv_pos
+}
+```
+
+Before each turn in [`generate_reply`](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir#L542-L555), Vira checks if `kv_pos + turn_tokens.len + max_new_tokens` would exceed `max_context` and automatically slides the KV-cache window:
+
+```vira
+needed := turn_tokens.len + max_new_tokens + 4
+if kv_pos > 0 && kv_pos + needed >= max_context {
+    mut keep_prefix := 24
+    if keep_prefix > kv_pos / 4 {
+        keep_prefix = kv_pos / 4
+    }
+    mut shift_by := (kv_pos + needed) - max_context + 32
+    if shift_by < (kv_pos - keep_prefix) / 2 {
+        shift_by = (kv_pos - keep_prefix) / 2
+    }
+    kv_pos = shift_kv_cache_window(mut k_caches, mut v_caches, meta.n_layers, keep_prefix, kv_pos, shift_by)
+}
+```
+
+#### Strategy 3: Interactive Context Monitoring (`/ctx` & `/reset`)
+During interactive REPL sessions (`-i`), you can inspect your live KV-cache occupancy at any time with `/ctx` or wipe conversation history in $O(1)$ time with `/reset`:
+
+```text
+Interactive Qwen2.5-0.5B-Instruct CLI Session (Commands: /ctx, /reset, /exit)
+User     > /ctx
+[Context Window: 137 / 512 tokens used (6144 KB KV cache)]
+User     > /reset
+[KV Cache cleared: kv_pos reset to 0]
+```
+
+---
+
 ## Summary of Pure-Vira Capabilities Used
 
 | Layer | Pure-Vira Feature / API | Role in CLI LLM Engine |
 | :--- | :--- | :--- |
 | **Model Download** | `os.exists()`, `os.mkdir_all()`, `exec.Command.new('curl', ...)` | Automatically fetches pretrained `.gguf` weights from Hugging Face |
-| **Binary Ingestion** | `os.read_bytes(path)`, `.slice()`, `.to_string()` | Parses GGUF v3 header, KV metadata, `tokenizer.ggml.tokens` & `tokenizer.ggml.scores` |
-| **Weight Loading** | `gguf_load_tensor(path, name)`, `.transpose()` | Loads `F32`, `Q4_0`, and `Q8_0` LLaMA & Qwen 2.5 tensors into 64-byte aligned buffers |
-| **Tokenization** | SentencePiece BPE (`bpe_encode`), ChatML (`encode_chatml_prompt`) & Word Tokenizer | Encodes prompts into SentencePiece subwords, Qwen 2.5 ChatML (`<\|im_start\|>`/`<\|im_end\|>`), or role tokens |
-| **Stateful KV Cache** | `k_cache.copy_row(pos, k)`, `k_cache.slice_rows(0, pos + 1)` | Appends RoPE-rotated K/V vectors and slices active context window across layers |
-| **Transformer Math** | `@`, `+` (QKV bias), `tensor_embedding`, `tensor_rmsnorm`, `tensor_rope`, `tensor_softmax`, `tensor_silu`, `tensor_elemwise_mul` | Executes multi-layer Grouped-Query Attention (GQA), NeoX/Interleaved RoPE, and SwiGLU FFN inside `arena {}` |
+| **Binary Ingestion** | `os.read_bytes_head()`, `os.read_bytes()`, `.slice()`, `.to_string()` | Parses GGUF v2/v3 header, dynamic `{arch}.*` metadata, and 151,936-token vocabularies |
+| **Weight Loading** | `gguf_load_tensor(path, name) or { ... }`, `.linear(w)` | Loads `F32`, `Q4_0`, and `Q8_0` tensors + optional QKV biases & tied embeddings |
+| **Tokenization** | SentencePiece (`▁`), GPT-2 Byte-Level BPE (`Ġ`, `Ċ`), FNV-1a Hash Index | Encodes prompts into SentencePiece subwords, ChatML (`<\|im_start\|>`), or LLaMA-3 templates |
+| **Context & KV Cache** | `tensor_fill(max_context, kv_dim, 0.0)`, `.copy_row()`, `.slice_rows()`, `shift_kv_cache_window()` | Configurable `--ctx` window, $O(\text{kv\_pos})$ active slicing, and sliding-window attention sinks |
+| **Transformer Math** | `.linear()`, `@`, `+`, `tensor_embedding`, `tensor_rmsnorm`, `tensor_rope`, `tensor_softmax`, `tensor_silu`, `tensor_elemwise_mul` | Executes multi-layer Grouped-Query Attention (GQA), NeoX/Interleaved RoPE, and SwiGLU FFN inside `arena {}` |
 | **Logit Sampling** | `logits.get()`, `logits.set()`, `sample_token()` | Applies repetition penalty, masks control tokens, and samples next token ID |
-| **CLI & REPL** | `flag.FlagSet`, `io.prompt()`, `print()`, `println()` | Parses CLI flags and drives interactive streaming chat REPL |
+| **CLI & REPL** | `os.args()`, `io.prompt()`, `print()`, `println()` | Parses `--model`, `--ctx`, `--steps`, `--temp`, `--system` and drives real-time streaming REPL |
+
 
 
 

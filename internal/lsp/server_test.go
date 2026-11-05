@@ -562,7 +562,7 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 	ex43URI := "file:///" + strings.Replace(filepath.ToSlash(ex43Abs), ":", "%3A", 1)
 	sendRPC(&in, "textDocument/hover", map[string]interface{}{
 		"textDocument": map[string]interface{}{"uri": ex43URI},
-		"position":     map[string]interface{}{"line": 390, "character": 25},
+		"position":     map[string]interface{}{"line": 432, "character": 25},
 	}, 2)
 
 	sendRPC(&in, "shutdown", map[string]interface{}{}, 3)

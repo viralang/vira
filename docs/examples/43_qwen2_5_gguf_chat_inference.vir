@@ -206,25 +206,25 @@ fn parse_qwen2_gguf(raw []u8, mut vocab []string, mut bucket_head []int, mut nex
         } else if key == 'general.name' && vtype == 8 {
             meta.name = read_gguf_string(raw, cursor)
             cursor = skip_gguf_value(raw, cursor, vtype)
-        } else if key == 'qwen2.block_count' && vtype == 4 {
+        } else if key.ends_with('.block_count') && vtype == 4 {
             meta.n_layers = read_u32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.embedding_length' && vtype == 4 {
+        } else if key.ends_with('.embedding_length') && vtype == 4 {
             meta.dim = read_u32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.feed_forward_length' && vtype == 4 {
+        } else if key.ends_with('.feed_forward_length') && vtype == 4 {
             meta.ffn_dim = read_u32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.attention.head_count' && vtype == 4 {
+        } else if key.ends_with('.attention.head_count') && vtype == 4 {
             meta.n_heads = read_u32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.attention.head_count_kv' && vtype == 4 {
+        } else if key.ends_with('.attention.head_count_kv') && vtype == 4 {
             meta.n_kv_heads = read_u32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.rope.freq_base' && vtype == 6 {
+        } else if key.ends_with('.rope.freq_base') && vtype == 6 {
             meta.rope_base = read_f32_le(raw, cursor)
             cursor = cursor + 4
-        } else if key == 'qwen2.attention.layer_norm_rms_epsilon' && vtype == 6 {
+        } else if key.ends_with('.attention.layer_norm_rms_epsilon') && vtype == 6 {
             meta.rms_eps = read_f32_le(raw, cursor)
             cursor = cursor + 4
         } else if key == 'tokenizer.ggml.bos_token_id' && vtype == 4 {
@@ -340,6 +340,48 @@ fn load_gguf_or_die(path string, name string) tensor[f32] {
         os.exit(1)
     }
     return t
+}
+
+// Loads an optional QKV bias tensor (`blk.{l}.attn_q/k/v.bias`) or returns a zero bias vector
+// when running bias-free architectures (LLaMA, Mistral, SmolLM, Gemma).
+fn load_gguf_bias_or_zeros(path string, name string, dim int) tensor[f32] {
+    t := gguf_load_tensor(path, name) or {
+        return tensor_fill(1, dim, 0.0)
+    }
+    return t
+}
+
+// Sliding-window KV-cache shift with pinned system-prompt "attention sinks":
+// Preserves rows `[0 .. keep_prefix)` (the system prompt) and shifts recent conversation
+// rows `[keep_prefix + shift_by .. kv_pos)` left into `[keep_prefix .. kv_pos - shift_by)`.
+fn shift_kv_cache_window(
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32],
+    n_layers int,
+    keep_prefix int,
+    kv_pos int,
+    shift_by int
+) int {
+    if shift_by <= 0 || keep_prefix + shift_by >= kv_pos {
+        return keep_prefix
+    }
+    new_kv_pos := kv_pos - shift_by
+    arena {
+        mut l := 0
+        for l < n_layers {
+            mut r := keep_prefix
+            for r < new_kv_pos {
+                src_r := r + shift_by
+                k_row := k_caches[l].slice_rows(src_r, src_r + 1)
+                v_row := v_caches[l].slice_rows(src_r, src_r + 1)
+                k_caches[l].copy_row(r, k_row)
+                v_caches[l].copy_row(r, v_row)
+                r += 1
+            }
+            l += 1
+        }
+    }
+    return new_kv_pos
 }
 
 // ============================================================================
@@ -497,6 +539,21 @@ fn generate_reply(
     mut kv_pos := start_kv_pos
     mut next_token := meta.eos_id
 
+    // Sliding-window context management: if this turn would exceed `max_context`,
+    // keep the first 24 tokens (system prompt attention sinks) and shift older history out.
+    needed := turn_tokens.len + max_new_tokens + 4
+    if kv_pos > 0 && kv_pos + needed >= max_context {
+        mut keep_prefix := 24
+        if keep_prefix > kv_pos / 4 {
+            keep_prefix = kv_pos / 4
+        }
+        mut shift_by := (kv_pos + needed) - max_context + 32
+        if shift_by < (kv_pos - keep_prefix) / 2 {
+            shift_by = (kv_pos - keep_prefix) / 2
+        }
+        kv_pos = shift_kv_cache_window(mut k_caches, mut v_caches, meta.n_layers, keep_prefix, kv_pos, shift_by)
+    }
+
     print('Qwen2.5  > ')
 
     // 1. Prefill all ChatML prompt tokens (only compute 151,936-vocab logits on the final prompt token)
@@ -585,6 +642,7 @@ fn main() {
     mut custom_prompt := ''
     mut temperature := f32(0.0)
     mut max_new_tokens := 96
+    mut max_context := 512
     mut interactive := false
 
     cli_args := os.args()
@@ -610,6 +668,12 @@ fn main() {
             a_idx += 1
         } else if (arg == '-n' || arg == '--steps' || arg == '--max-tokens') && a_idx + 1 < cli_args.len {
             max_new_tokens = cli_args[a_idx + 1].to_int() or { 64 }
+            a_idx += 1
+        } else if (arg == '-c' || arg == '--ctx' || arg == '--context') && a_idx + 1 < cli_args.len {
+            max_context = cli_args[a_idx + 1].to_int() or { 512 }
+            if max_context < 64 {
+                max_context = 64
+            }
             a_idx += 1
         }
         a_idx += 1
@@ -657,19 +721,24 @@ fn main() {
     kv_dim := meta.n_kv_heads * head_dim
     rope_int := int(meta.rope_base)
 
+    kv_cache_kb := (2 * meta.n_layers * max_context * kv_dim * 4) / 1024
+
     println('Model File      : ${model_path}')
     println('Architecture    : ${meta.arch} (${meta.name}, GGUF v${meta.version}, ${meta.n_tensors} tensors)')
     println('Hyperparameters : layers=${meta.n_layers}, dim=${meta.dim}, ffn_dim=${meta.ffn_dim}, head_dim=${head_dim}')
-    println('GQA & RoPE      : ${meta.n_heads} Q heads / ${meta.n_kv_heads} KV heads (7:1 GQA), NeoX RoPE=${rope_int}')
+    println('GQA & RoPE      : ${meta.n_heads} Q heads / ${meta.n_kv_heads} KV heads, RoPE=${rope_int}')
+    println('Context Window  : max_context=${max_context} tokens (KV cache: ${kv_cache_kb} KB across ${meta.n_layers} layers)')
     println('ChatML Vocab    : ${vocab.len} tokens indexed in ${hdr_ms} ms (<|im_start|>=${meta.im_start_id}, <|im_end|>=${meta.im_end_id})')
 
-    // 3. Load all 291 GGUF tensors (Q4_0, Q8_0, F32) across 24 layers
-    print('Loading 291 GGUF tensors (24 layers, Q4_0/Q8_0/F32)... ')
+    // 3. Load all GGUF tensors (Q4_0, Q8_0, F32) across all layers
+    print('Loading ${meta.n_tensors} GGUF tensors (${meta.n_layers} layers, Q4_0/Q8_0/F32)... ')
     t_load0 := time.now_ms()
 
     tok_emb := load_gguf_or_die(model_path, 'token_embd.weight')
     out_norm := load_gguf_or_die(model_path, 'output_norm.weight')
-    out_weight := load_gguf_or_die(model_path, 'output.weight')
+    out_weight := gguf_load_tensor(model_path, 'output.weight') or {
+        tok_emb.clone()
+    }
 
     mut l_an := []tensor[f32]{}
     mut l_wq := []tensor[f32]{}
@@ -684,7 +753,6 @@ fn main() {
     mut l_w_up := []tensor[f32]{}
     mut l_w_down := []tensor[f32]{}
 
-    max_context := 512
     mut k_caches := []tensor[f32]{}
     mut v_caches := []tensor[f32]{}
 
@@ -705,11 +773,11 @@ fn main() {
 
         l_an.push(load_gguf_or_die(model_path, n_an))
         l_wq.push(load_gguf_or_die(model_path, n_wq))
-        l_bq.push(load_gguf_or_die(model_path, n_bq))
+        l_bq.push(load_gguf_bias_or_zeros(model_path, n_bq, meta.dim))
         l_wk.push(load_gguf_or_die(model_path, n_wk))
-        l_bk.push(load_gguf_or_die(model_path, n_bk))
+        l_bk.push(load_gguf_bias_or_zeros(model_path, n_bk, kv_dim))
         l_wv.push(load_gguf_or_die(model_path, n_wv))
-        l_bv.push(load_gguf_or_die(model_path, n_bv))
+        l_bv.push(load_gguf_bias_or_zeros(model_path, n_bv, kv_dim))
         l_wo.push(load_gguf_or_die(model_path, n_wo))
         l_fn.push(load_gguf_or_die(model_path, n_fn))
         l_w_gate.push(load_gguf_or_die(model_path, n_wg))
@@ -746,7 +814,7 @@ fn main() {
             mut k_caches, mut v_caches
         )
     } else if interactive {
-        println('Interactive Qwen2.5-0.5B-Instruct CLI Session (Commands: /reset, /exit)')
+        println('Interactive Qwen2.5-0.5B-Instruct CLI Session (Commands: /ctx, /reset, /exit)')
         for {
             line := io.prompt('User     > ') or { break }
             trimmed := line.trim()
@@ -756,6 +824,10 @@ fn main() {
             if trimmed == '/exit' || trimmed == '/quit' {
                 println('Exiting Qwen 2.5 CLI Chat Engine.')
                 break
+            }
+            if trimmed == '/ctx' {
+                println('[Context Window: ${kv_pos} / ${max_context} tokens used (${kv_cache_kb} KB KV cache)]')
+                continue
             }
             if trimmed == '/reset' || trimmed == '/clear' {
                 kv_pos = 0
