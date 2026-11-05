@@ -38,11 +38,13 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.7] Native C & Python FFI / Shared Libs     ✅ COMPLETED
        │
+ [v0.7.1] Pure-Vira Hugging Face & Qwen2.5 LLM  ✅ COMPLETED
+       │
+ [v0.8] Cross-Platform GPU Compute Acceleration ✅ COMPLETED
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
- [v0.8] Cross-Platform GPU Compute Acceleration ⏳ NEXT MILESTONE
-       │
- [v0.9] Generics & Pattern Matching Expressiveness 📅 PLANNED
+ [v0.9] Generics & Pattern Matching Expressiveness ⏳ NEXT MILESTONE
        │
  [v1.0] Production Registry, Stability & Freeze 📅 PLANNED
 ```
@@ -185,26 +187,33 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
   - Runnable example [40_native_c_and_python_ffi.vir](docs/examples/40_native_c_and_python_ffi.vir).
   - Python companion script [40_python_ffi_caller.py](docs/examples/40_python_ffi_caller.py) with verified 0 leaks (`active_leaks=0`).
 
+### 12. Pure-Vira CLI LLM Chat Engine, Hugging Face GGUF v2/v3 & Qwen 2.5 (v0.7.1)
+- [x] **Multi-Threaded Linear Projection (`.linear(w)`):** Parallel Chase-Lev work-stealing + AVX2+FMA / NEON $x W^T$ projection operating directly on GGUF row-major weights without transposing.
+- [x] **Qwen 2.5 & Universal GGUF Architecture Support:**
+  - Per-head NeoX split-half RoPE (`1,000,000.0` base) and interleaved LLaMA RoPE (`10,000.0` / `500,000.0`).
+  - Grouped-Query Attention (7:1 GQA), additive QKV bias broadcasting (`+ bq`, `+ bk`, `+ bv`), and tied/untied `output.weight` fallback.
+  - 65,536-bucket FNV-1a hash-indexed ChatML BPE tokenizer (`151,936` tokens indexed in ~120 ms) and sliding-window KV-cache context management (`--ctx`, `shift_kv_cache_window`).
+- [x] **Tutorials & Examples:**
+  - [Tutorial 39: Pure-Vira CLI LLM Chat Engine & Hugging Face GGUF Inference](docs/tutorials/39_pure_vira_cli_llm_chat_engine.md).
+  - Runnable examples [41_cli_llm_chat_engine.vir](docs/examples/41_cli_llm_chat_engine.vir), [42_huggingface_gguf_llm_inference.vir](docs/examples/42_huggingface_gguf_llm_inference.vir), and [43_qwen2_5_gguf_chat_inference.vir](docs/examples/43_qwen2_5_gguf_chat_inference.vir).
+
+### 13. Cross-Platform GPU Compute Acceleration (v0.8)
+- [x] **Zero-SDK Dynamic GPU Driver Pipeline (`runtime/vira_gpu.h` & `packages/gpu`):**
+  - Runtime dynamic discovery (`LoadLibraryA` / `dlopen`) of native OS GPU drivers (OpenCL / Vulkan) with zero compile-time SDK dependencies.
+  - JIT-compiled GPU compute kernels for `.gpu_linear(w)` ($x W^T$) and `.gpu_matmul(b)` ($A B$), plus `gpu.rmsnorm`, `gpu.rope`, `gpu.softmax`, and `gpu.silu`.
+- [x] **Unified 64-Byte DMA & Persistent GPU Weight Cache:**
+  - Zero-copy host pointer mapping (`CL_MEM_USE_HOST_PTR`) on unified-memory GPUs and 512-slot persistent GPU weight caching for GGUF LLM weights with automatic eviction in `vira_tensor_f32_free()`.
+- [x] **Actor Fault-Tolerant GPU Supervision:**
+  - Automatic VRAM Out-of-Memory (`OOM`) cache eviction and transparent fallback to Vira's multi-threaded AVX2+FMA / NEON CPU pool (`gpu.oom_fallbacks()`) with `active_leaks=0`.
+- [x] **Tutorials & Examples:**
+  - [Tutorial 40: Cross-Platform GPU Compute Acceleration & Actor OOM Supervision](docs/tutorials/40_cross_platform_gpu_compute_acceleration.md).
+  - Runnable example [44_gpu_compute_acceleration.vir](docs/examples/44_gpu_compute_acceleration.vir) and `--gpu` / `/gpu` offload controls in [43_qwen2_5_gguf_chat_inference.vir](docs/examples/43_qwen2_5_gguf_chat_inference.vir).
+
 ---
 
 ## 🚀 Upcoming Strategic Frontiers
 
-### ⚡ Phase 1: Cross-Platform GPU Compute Acceleration (v0.8) ⏳ NEXT MILESTONE
-*Target: Accelerating heavy model inference beyond CPU SIMD limits.*
-
-- [ ] **Compute Shader Pipeline (Vulkan / Direct3D 12 / Metal):**
-  - Portable GPU compute kernels (SPIR-V / HLSL / MSL) for matrix multiplication (`@`), RMSNorm, and Softmax.
-  - Headless GPU device discovery and command queue creation.
-- [ ] **Unified DMA & Device Allocators:**
-  - 64-byte aligned host-visible device memory allocations.
-  - Zero-copy tensor handoff over PCIe bus and Apple Silicon unified memory.
-- [ ] **Actor Fault-Tolerant GPU Supervision:**
-  - Asynchronous GPU compute fence tracking inside actor tasks.
-  - Automatic fallback to CPU SIMD kernels if GPU device memory encounters Out-of-Memory (OOM) or hardware faults.
-
----
-
-### 🧩 Phase 2: Advanced Language Features & Expressiveness (v0.9) 📅 PLANNED
+### 🧩 Phase 1: Advanced Language Features & Expressiveness (v0.9) ⏳ NEXT MILESTONE
 *Target: Modern type system ergonomic enhancements while preserving mechanical sympathy.*
 
 - [ ] **Parametric Polymorphism (Generics):**

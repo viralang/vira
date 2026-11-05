@@ -502,7 +502,7 @@ fn qwen2_forward_step(
     }
 
     xf := tensor_rmsnorm(x, out_norm, meta.rms_eps)
-    logits := xf.linear(out_weight)
+    logits := xf.gpu_linear(out_weight)
     return logits
 }
 
@@ -628,8 +628,13 @@ fn generate_reply(
         safe_gen_ms = 1
     }
     tok_per_sec := (gen_steps * 1000) / int(safe_gen_ms)
+    mut compute_tag := 'CPU (AVX2/NEON)'
+    if gpu_is_enabled() && gpu_is_available() {
+        cached_kb := gpu_allocated_bytes() / 1024
+        compute_tag = 'GPU (${gpu_backend_name()}, cached=${cached_kb}KB)'
+    }
     println('')
-    println('           [arch=${meta.arch} | layers=${meta.n_layers} | GQA=${meta.n_heads}Q/${meta.n_kv_heads}KV | prefill=${prefill_ms}ms | gen=${gen_steps} tok (~${tok_per_sec} tok/s) | kv_pos=${kv_pos}]')
+    println('           [arch=${meta.arch} | compute=${compute_tag} | prefill=${prefill_ms}ms | gen=${gen_steps} tok (~${tok_per_sec} tok/s) | kv_pos=${kv_pos}]')
     return kv_pos
 }
 
@@ -644,6 +649,7 @@ fn main() {
     mut max_new_tokens := 96
     mut max_context := 512
     mut interactive := false
+    mut use_gpu := false
 
     cli_args := os.args()
     mut a_idx := 1
@@ -651,6 +657,10 @@ fn main() {
         arg := cli_args[a_idx]
         if arg == '-i' || arg == '--repl' || arg == '--interactive' {
             interactive = true
+        } else if arg == '--gpu' {
+            use_gpu = true
+        } else if arg == '--cpu' {
+            use_gpu = false
         } else if (arg == '-m' || arg == '--model') && a_idx + 1 < cli_args.len {
             model_path = cli_args[a_idx + 1]
             a_idx += 1
@@ -721,12 +731,16 @@ fn main() {
     kv_dim := meta.n_kv_heads * head_dim
     rope_int := int(meta.rope_base)
 
+    gpu_set_enabled(use_gpu)
+    gpu_dev := gpu_device_name()
+    gpu_back := gpu_backend_name()
     kv_cache_kb := (2 * meta.n_layers * max_context * kv_dim * 4) / 1024
 
     println('Model File      : ${model_path}')
     println('Architecture    : ${meta.arch} (${meta.name}, GGUF v${meta.version}, ${meta.n_tensors} tensors)')
     println('Hyperparameters : layers=${meta.n_layers}, dim=${meta.dim}, ffn_dim=${meta.ffn_dim}, head_dim=${head_dim}')
     println('GQA & RoPE      : ${meta.n_heads} Q heads / ${meta.n_kv_heads} KV heads, RoPE=${rope_int}')
+    println('Compute Engine  : ${gpu_dev} (backend=${gpu_back}, gpu_offload=${use_gpu})')
     println('Context Window  : max_context=${max_context} tokens (KV cache: ${kv_cache_kb} KB across ${meta.n_layers} layers)')
     println('ChatML Vocab    : ${vocab.len} tokens indexed in ${hdr_ms} ms (<|im_start|>=${meta.im_start_id}, <|im_end|>=${meta.im_end_id})')
 
@@ -814,7 +828,7 @@ fn main() {
             mut k_caches, mut v_caches
         )
     } else if interactive {
-        println('Interactive Qwen2.5-0.5B-Instruct CLI Session (Commands: /ctx, /reset, /exit)')
+        println('Interactive Qwen2.5-0.5B-Instruct CLI Session (Commands: /ctx, /gpu, /reset, /exit)')
         for {
             line := io.prompt('User     > ') or { break }
             trimmed := line.trim()
@@ -827,6 +841,13 @@ fn main() {
             }
             if trimmed == '/ctx' {
                 println('[Context Window: ${kv_pos} / ${max_context} tokens used (${kv_cache_kb} KB KV cache)]')
+                continue
+            }
+            if trimmed == '/gpu' {
+                use_gpu = !use_gpu
+                gpu_set_enabled(use_gpu)
+                alloc_kb := gpu_allocated_bytes() / 1024
+                println('[GPU Compute Offload: enabled=${use_gpu} | device=${gpu_dev} | cached=${alloc_kb} KB]')
                 continue
             }
             if trimmed == '/reset' || trimmed == '/clear' {

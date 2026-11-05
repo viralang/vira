@@ -1,0 +1,97 @@
+module gpu
+
+pub struct DeviceInfo {
+pub:
+	available bool
+	enabled bool
+	device_name string
+	backend_name string
+	vram_bytes i64
+	allocated_bytes i64
+	oom_fallbacks i64
+}
+
+pub fn is_available() bool {
+	return gpu_is_available()
+}
+
+pub fn device_name() string {
+	return gpu_device_name()
+}
+
+pub fn backend_name() string {
+	return gpu_backend_name()
+}
+
+pub fn vram_bytes() i64 {
+	return gpu_vram_bytes()
+}
+
+pub fn vram_mb() i64 {
+	return gpu_vram_bytes() / 1048576
+}
+
+pub fn allocated_bytes() i64 {
+	return gpu_allocated_bytes()
+}
+
+pub fn allocated_kb() i64 {
+	return gpu_allocated_bytes() / 1024
+}
+
+pub fn oom_fallbacks() i64 {
+	return gpu_oom_fallbacks()
+}
+
+pub fn set_enabled(enabled bool) {
+	gpu_set_enabled(enabled)
+}
+
+pub fn is_enabled() bool {
+	return gpu_is_enabled()
+}
+
+pub fn sync() {
+	gpu_sync()
+}
+
+pub fn simulate_oom(enable bool) {
+	gpu_simulate_oom(enable)
+}
+
+pub fn info() DeviceInfo {
+	return DeviceInfo{
+		available: gpu_is_available(),
+		enabled: gpu_is_enabled(),
+		device_name: gpu_device_name(),
+		backend_name: gpu_backend_name(),
+		vram_bytes: gpu_vram_bytes(),
+		allocated_bytes: gpu_allocated_bytes(),
+		oom_fallbacks: gpu_oom_fallbacks()
+	}
+}
+
+pub fn linear(x tensor[f32], weight tensor[f32]) tensor[f32] {
+	return gpu_linear(x, weight)
+}
+
+pub fn matmul(a tensor[f32], b tensor[f32]) tensor[f32] {
+	return gpu_matmul(a, b)
+}
+
+pub fn rmsnorm(x tensor[f32], weight tensor[f32], eps f32) tensor[f32] {
+	return gpu_rmsnorm(x, weight, eps)
+}
+
+pub fn rope(q tensor[f32], pos int, freq_base f32) tensor[f32] {
+	return gpu_rope(q, pos, freq_base)
+}
+
+pub fn softmax(logits tensor[f32]) tensor[f32] {
+	return gpu_softmax(logits)
+}
+
+pub fn silu(x tensor[f32]) tensor[f32] {
+	return gpu_silu(x)
+}
+

@@ -686,14 +686,14 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 		if call, ok := rhs.(*ast.CallExpr); ok {
 			if ident, ok := call.Callee.(*ast.IdentExpr); ok {
 				switch ident.Ident.Name {
-				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin":
+				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin", "gpu_linear", "gpu_matmul":
 					return true
 				}
 			}
 			if sel, ok := call.Callee.(*ast.SelectorExpr); ok {
 				if _, isTensor := a.chk.ExprTypes[sel.Left].(*checker.TensorType); isTensor {
 					switch sel.Field.Name {
-					case "reshape_2d", "reshape_3d", "reshape_4d", "transpose", "slice_rows", "linear":
+					case "reshape_2d", "reshape_3d", "reshape_4d", "transpose", "slice_rows", "linear", "gpu_linear", "gpu_matmul":
 						return true
 					}
 				}

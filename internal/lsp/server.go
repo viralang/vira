@@ -1002,6 +1002,38 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`tensor.transpose() -> tensor[f32]`**\n\nTransposes the trailing two matrix axes `(..., M, N) -> (..., N, M)` for 2D, 3D, or 4D strided tensors."
 	case "linear":
 		return "**`tensor.linear(weight: tensor[f32]) -> tensor[f32]`**\n\nComputes the linear projection `tensor @ weight.T` (`(M, K) × (N, K)^T -> (M, N)`) directly on GGUF/PyTorch `[out_features, in_features]` weights using multi-threaded AVX2+FMA / NEON SIMD dot-products without transposing."
+	case "gpu_linear":
+		return "**`gpu_linear(x: tensor[f32], weight: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU-accelerated linear projection `x @ weight.T` with persistent GPU weight caching and automatic actor-supervised OOM fallback to multi-threaded CPU SIMD."
+	case "gpu_matmul":
+		return "**`gpu_matmul(a: tensor[f32], b: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU-accelerated matrix multiplication `a @ b` with persistent GPU buffer caching and automatic OOM fallback to multi-threaded CPU SIMD."
+	case "gpu_is_available":
+		return "**`gpu_is_available() -> bool`**\n\nReturns `true` if a hardware GPU compute backend (OpenCL / Vulkan) is initialized and available."
+	case "gpu_device_name":
+		return "**`gpu_device_name() -> string`**\n\nReturns the active GPU compute device name, or the active multi-threaded CPU SIMD backend description."
+	case "gpu_backend_name":
+		return "**`gpu_backend_name() -> string`**\n\nReturns the active compute backend identifier (`\"OpenCL\"`, `\"Vulkan\"`, or `\"CPU-SIMD\"`)."
+	case "gpu_vram_bytes":
+		return "**`gpu_vram_bytes() -> i64`**\n\nReturns the total global GPU device memory (VRAM) in bytes."
+	case "gpu_allocated_bytes":
+		return "**`gpu_allocated_bytes() -> i64`**\n\nReturns the number of bytes currently cached in GPU device memory."
+	case "gpu_oom_fallbacks":
+		return "**`gpu_oom_fallbacks() -> i64`**\n\nReturns the number of times GPU compute operations gracefully recovered from VRAM Out-of-Memory (OOM) by falling back to CPU SIMD."
+	case "gpu_set_enabled":
+		return "**`gpu_set_enabled(enabled: bool)`**\n\nEnables or disables hardware GPU compute acceleration at runtime."
+	case "gpu_is_enabled":
+		return "**`gpu_is_enabled() -> bool`**\n\nReturns `true` if GPU compute dispatch is currently enabled."
+	case "gpu_sync":
+		return "**`gpu_sync()`**\n\nSynchronizes all in-flight GPU command queues."
+	case "gpu_simulate_oom":
+		return "**`gpu_simulate_oom(enable: bool)`**\n\nEnables or disables simulated GPU VRAM Out-of-Memory (OOM) faults to test actor supervision and CPU SIMD fallback."
+	case "gpu_rmsnorm":
+		return "**`gpu_rmsnorm(x: tensor[f32], weight: tensor[f32], eps: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD Root Mean Square Layer Normalization across each row."
+	case "gpu_rope":
+		return "**`gpu_rope(q: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD Rotary Position Embeddings (RoPE) at sequence position `pos`."
+	case "gpu_softmax":
+		return "**`gpu_softmax(logits: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU/SIMD numerically stable row-wise Softmax."
+	case "gpu_silu":
+		return "**`gpu_silu(x: tensor[f32]) -> tensor[f32]`**\n\nApplies GPU/SIMD Sigmoid Linear Unit (`SiLU`) activation."
 	case "copy_row":
 		return "**`tensor.copy_row(dst_row: int, src: tensor[f32])`**\n\nCopies a `1 × D` vector `src` into row `dst_row` of a `MaxSeq × D` tensor (e.g., updating a Transformer KV cache)."
 	case "slice_rows":
@@ -1399,6 +1431,8 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 				CompletionItem{Label: "reshape_4d", Kind: 2, Detail: "reshape_4d(d0: int, d1: int, d2: int, d3: int) -> tensor[f32]", Documentation: "Reshape to 4D (O(1) zero-copy view inside arena)"},
 				CompletionItem{Label: "transpose", Kind: 2, Detail: "transpose() -> tensor[f32]", Documentation: "Swap trailing two matrix axes (..., M, N) -> (..., N, M)"},
 				CompletionItem{Label: "linear", Kind: 2, Detail: "linear(weight: tensor[f32]) -> tensor[f32]", Documentation: "Multi-threaded SIMD linear projection x @ weight.T without transposing"},
+				CompletionItem{Label: "gpu_linear", Kind: 2, Detail: "gpu_linear(weight: tensor[f32]) -> tensor[f32]", Documentation: "GPU-accelerated linear projection x @ weight.T with persistent weight caching and OOM fallback"},
+				CompletionItem{Label: "gpu_matmul", Kind: 2, Detail: "gpu_matmul(b: tensor[f32]) -> tensor[f32]", Documentation: "GPU-accelerated matrix multiplication a @ b with OOM fallback"},
 				CompletionItem{Label: "clone", Kind: 2, Detail: "clone() -> tensor[f32]", Documentation: "Allocate an independent deep copy of the tensor"},
 				CompletionItem{Label: "get", Kind: 2, Detail: "get(row: int, col: int) -> f32", Documentation: "Bounds-checked element read at (row, col)"},
 				CompletionItem{Label: "set", Kind: 2, Detail: "set(row: int, col: int, val: f32)", Documentation: "Bounds-checked element write at (row, col)"},

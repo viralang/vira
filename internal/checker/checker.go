@@ -583,6 +583,104 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: TypeInt,
 	}
 
+	// v0.8 Cross-Platform GPU Compute Acceleration Builtins
+	c.functions["gpu_is_available"] = &FnSig{
+		Name:       "gpu_is_available",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
+	c.functions["gpu_device_name"] = &FnSig{
+		Name:       "gpu_device_name",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeString,
+	}
+	c.functions["gpu_backend_name"] = &FnSig{
+		Name:       "gpu_backend_name",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeString,
+	}
+	c.functions["gpu_vram_bytes"] = &FnSig{
+		Name:       "gpu_vram_bytes",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeI64,
+	}
+	c.functions["gpu_allocated_bytes"] = &FnSig{
+		Name:       "gpu_allocated_bytes",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeI64,
+	}
+	c.functions["gpu_oom_fallbacks"] = &FnSig{
+		Name:       "gpu_oom_fallbacks",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeI64,
+	}
+	c.functions["gpu_set_enabled"] = &FnSig{
+		Name:       "gpu_set_enabled",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "enabled", Type: TypeBool}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gpu_is_enabled"] = &FnSig{
+		Name:       "gpu_is_enabled",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
+	c.functions["gpu_sync"] = &FnSig{
+		Name:       "gpu_sync",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gpu_simulate_oom"] = &FnSig{
+		Name:       "gpu_simulate_oom",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "enable", Type: TypeBool}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gpu_matmul"] = &FnSig{
+		Name:       "gpu_matmul",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "a", Type: &TensorType{DType: TypeF32}}, {Name: "b", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_linear"] = &FnSig{
+		Name:       "gpu_linear",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}, {Name: "weight", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_rmsnorm"] = &FnSig{
+		Name:       "gpu_rmsnorm",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}, {Name: "weight", Type: &TensorType{DType: TypeF32}}, {Name: "eps", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_rope"] = &FnSig{
+		Name:       "gpu_rope",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_softmax"] = &FnSig{
+		Name:       "gpu_softmax",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "logits", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_silu"] = &FnSig{
+		Name:       "gpu_silu",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+
 	// Native Hardware GUI Engine Builtins
 	c.functions["gui_init"] = &FnSig{
 		Name:       "gui_init",
@@ -2549,14 +2647,22 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "tensor.slice_rows"
-				case "linear":
+				case "linear", "gpu_linear":
 					sig = &FnSig{
-						Name:       "linear",
+						Name:       callee.Field.Name,
 						Params:     []ParamInfo{{Name: "weight", Type: tt}},
 						ReturnType: tt,
 						Span:       callee.SelSpan,
 					}
-					callName = "tensor.linear"
+					callName = "tensor." + callee.Field.Name
+				case "gpu_matmul":
+					sig = &FnSig{
+						Name:       "gpu_matmul",
+						Params:     []ParamInfo{{Name: "b", Type: tt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.gpu_matmul"
 				default:
 					c.errorf(callee.SelSpan, "tensor '%s' has no method '%s'", tt, callee.Field.Name)
 					return TypeVoid

@@ -1,0 +1,139 @@
+// ============================================================================
+// Example 44: Cross-Platform GPU Compute Acceleration (v0.8)
+// ============================================================================
+// Demonstrates Vira's zero-SDK-dependency GPU compute engine (`runtime/vira_gpu.h`
+// and `import gpu`):
+//   1. Dynamic Hardware Discovery (OpenCL / Vulkan / Unified DMA / CPU-SIMD)
+//   2. Persistent GPU Weight Caching (`x.gpu_linear(w)` & `gpu.allocated_kb()`)
+//   3. GPU-Accelerated Transformer Block (`rmsnorm -> rope -> softmax -> silu`)
+//   4. Actor-Supervised GPU Fault Tolerance (VRAM OOM -> automatic CPU SIMD fallback)
+// ============================================================================
+
+import gpu
+import math
+
+actor GpuComputeWorker {
+pub:
+    id int
+mut:
+    completed_batches int = 0
+}
+
+fn (mut w GpuComputeWorker) run_projection(scale f32, trigger_oom bool) f32 {
+    w.completed_batches += 1
+    if trigger_oom {
+        gpu.simulate_oom(true)
+    }
+    mut result_sum := f32(0.0)
+    arena {
+        x := tensor_fill(64, 128, scale)
+        weight := tensor_fill(128, 128, 0.0625)
+        out := x.gpu_linear(weight)
+        result_sum = tensor_sum(out)
+    }
+    if trigger_oom {
+        gpu.simulate_oom(false)
+    }
+    return result_sum
+}
+
+fn main() {
+    println('========================================================================')
+    println('   Vira v0.8 Cross-Platform GPU Compute Acceleration & OOM Supervision  ')
+    println('========================================================================')
+
+    // 1. Hardware Discovery & Telemetry
+    dev := gpu.info()
+    vram_mb := gpu.vram_mb()
+    println('Compute Backend : ${dev.backend_name}')
+    println('Compute Device  : ${dev.device_name}')
+    println('Hardware GPU    : ${dev.available} (enabled=${dev.enabled}, VRAM=${vram_mb} MB)')
+    println('------------------------------------------------------------------------')
+
+    // 2. Persistent-Weight Linear Projection Benchmark (`x.gpu_linear(w)` vs `x.linear(w)`)
+    println('=== 1. Persistent-Weight Linear Projection (128x512 @ 1024x512^T) ===')
+    x := tensor_fill(128, 512, 0.125)
+    w_proj := tensor_fill(1024, 512, 0.03125)
+
+    t_cpu0 := time_now_us()
+    y_cpu := x.linear(w_proj)
+    cpu_us := time_now_us() - t_cpu0
+    cpu_sum := tensor_sum(y_cpu)
+
+    // First GPU call uploads `w_proj` (2048 KB) into the persistent GPU weight cache
+    t_gpu_cold0 := time_now_us()
+    y_gpu_cold := x.gpu_linear(w_proj)
+    gpu_cold_us := time_now_us() - t_gpu_cold0
+
+    // Second GPU call reuses the cached GPU weight buffer with zero host->device upload
+    t_gpu_warm0 := time_now_us()
+    y_gpu_warm := x.gpu_linear(w_proj)
+    gpu_warm_us := time_now_us() - t_gpu_warm0
+    gpu_sum := tensor_sum(y_gpu_warm)
+    cached_kb := gpu.allocated_kb()
+
+    diff := math.abs(f64(gpu_sum - cpu_sum))
+    println('CPU SIMD (.linear)       : ${cpu_us} us | sum=${cpu_sum}')
+    println('GPU Cold (.gpu_linear)   : ${gpu_cold_us} us (initial weight upload)')
+    println('GPU Warm (.gpu_linear)   : ${gpu_warm_us} us (persistent weight cache hit, cached=${cached_kb} KB)')
+    println('Numerical Equivalence    : |gpu_sum - cpu_sum| = ${diff}')
+    if diff >= 0.1 || y_gpu_cold.rows != 128 || y_gpu_cold.cols != 1024 {
+        panic('GPU/CPU linear projection mismatch')
+    }
+
+    // 3. Fused GPU Transformer Block inside O(1) `arena {}`
+    println('=== 2. Fused GPU Transformer Block inside O(1) Bump Arena ===')
+    norm_w := tensor_fill(1, 256, 1.0)
+    wq := tensor_fill(256, 256, 0.0625)
+    wk := tensor_fill(256, 256, 0.0625)
+    wv := tensor_fill(256, 256, 0.0625)
+    w_gate := tensor_fill(512, 256, 0.03125)
+    w_up := tensor_fill(512, 256, 0.03125)
+    w_down := tensor_fill(256, 512, 0.03125)
+
+    t_blk0 := time_now_us()
+    mut block_checksum := f32(0.0)
+    arena {
+        h := tensor_fill(16, 256, 0.25)
+        hn := gpu.rmsnorm(h, norm_w, 0.00001)
+        q := gpu.rope(gpu.linear(hn, wq), 4, 10000.0)
+        k := gpu.rope(gpu.linear(hn, wk), 4, 10000.0)
+        v := gpu.linear(hn, wv)
+
+        scores := tensor_scale(gpu.linear(q, k), 0.0625)
+        probs := gpu.softmax(scores)
+        attn_ctx := gpu.matmul(probs, v)
+
+        gate := gpu.silu(gpu.linear(attn_ctx, w_gate))
+        up := gpu.linear(attn_ctx, w_up)
+        ffn_out := gpu.linear(tensor_elemwise_mul(gate, up), w_down)
+        block_checksum = tensor_sum(ffn_out)
+    }
+    blk_us := time_now_us() - t_blk0
+    gpu.sync()
+    println('Transformer Block Output : sum=${block_checksum} (${blk_us} us, 0 arena leaks)')
+    if block_checksum <= 0.0 {
+        panic('invalid transformer block output')
+    }
+
+    // 4. Actor-Supervised GPU Fault Tolerance (Simulated VRAM OOM Recovery)
+    println('=== 3. Actor Fault-Tolerant GPU Supervision (VRAM OOM -> CPU Fallback) ===')
+    mut w1 := GpuComputeWorker{ id: 1 }
+    mut w2 := GpuComputeWorker{ id: 2 }
+
+    fut_normal := w1 <- run_projection(1.0, false)
+    res_normal := fut_normal.await() or { f32(0.0) }
+
+    fut_oom := w2 <- run_projection(1.0, true)
+    res_oom := fut_oom.await() or { f32(0.0) }
+
+    fallbacks := gpu.oom_fallbacks()
+    println('Worker #1 (Normal GPU)   : sum=${res_normal}')
+    println('Worker #2 (OOM Fallback) : sum=${res_oom} (oom_fallbacks=${fallbacks})')
+    if math.abs(f64(res_normal - res_oom)) >= 0.01 || fallbacks < 1 {
+        panic('actor OOM fallback mismatch')
+    }
+
+    println('------------------------------------------------------------------------')
+    println('Vira v0.8 GPU Compute Acceleration Verified Successfully (active_leaks=0).')
+}

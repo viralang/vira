@@ -1,0 +1,34 @@
+module main
+
+import gpu
+
+fn test_gpu_telemetry_and_linear() {
+	dev := gpu.info()
+	if dev.backend_name.len == 0 {
+		panic('expected non-empty gpu backend_name')
+	}
+	if dev.device_name.len == 0 {
+		panic('expected non-empty gpu device_name')
+	}
+
+	x := tensor_fill(64, 64, 0.5)
+	w := tensor_fill(64, 64, 0.25)
+	y := gpu.linear(x, w)
+	if y.rows != 64 || y.cols != 64 {
+		panic('unexpected gpu.linear output shape')
+	}
+	gpu.sync()
+	println('✓ test_gpu_telemetry_and_linear passed')
+}
+
+fn test_gpu_oom_fallback() {
+	gpu.simulate_oom(true)
+	a := tensor_fill(64, 64, 1.0)
+	b := tensor_fill(64, 64, 2.0)
+	c := gpu.matmul(a, b)
+	gpu.simulate_oom(false)
+	if c.rows != 64 || gpu.oom_fallbacks() < 1 {
+		panic('expected gpu OOM fallback to recover on CPU SIMD')
+	}
+	println('✓ test_gpu_oom_fallback passed')
+}

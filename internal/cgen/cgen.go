@@ -2745,6 +2745,46 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vira_tensor_embedding(%s)", strings.Join(argStrs, ", "))
 		case "sample_token":
 			return fmt.Sprintf("vira_sample_token(%s)", strings.Join(argStrs, ", "))
+		case "gpu_is_available":
+			return "vira_gpu_is_available()"
+		case "gpu_device_name":
+			return "vira_gpu_device_name()"
+		case "gpu_backend_name":
+			return "vira_gpu_backend_name()"
+		case "gpu_vram_bytes":
+			return "vira_gpu_vram_bytes()"
+		case "gpu_allocated_bytes":
+			return "vira_gpu_allocated_bytes()"
+		case "gpu_oom_fallbacks":
+			return "vira_gpu_oom_fallbacks()"
+		case "gpu_set_enabled":
+			return fmt.Sprintf("vira_gpu_set_enabled(%s)", strings.Join(argStrs, ", "))
+		case "gpu_is_enabled":
+			return "vira_gpu_is_enabled()"
+		case "gpu_sync":
+			return "vira_gpu_sync()"
+		case "gpu_simulate_oom":
+			return fmt.Sprintf("vira_gpu_simulate_oom(%s)", strings.Join(argStrs, ", "))
+		case "gpu_matmul":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_matmul(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_linear":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_linear(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_rmsnorm":
+			return fmt.Sprintf("vira_gpu_rmsnorm(%s)", strings.Join(argStrs, ", "))
+		case "gpu_rope":
+			return fmt.Sprintf("vira_gpu_rope(%s)", strings.Join(argStrs, ", "))
+		case "gpu_softmax":
+			return fmt.Sprintf("vira_gpu_softmax(%s)", strings.Join(argStrs, ", "))
+		case "gpu_silu":
+			return fmt.Sprintf("vira_gpu_silu(%s)", strings.Join(argStrs, ", "))
 		case "gui_init":
 			return fmt.Sprintf("vira_gui_init(%s)", strings.Join(argStrs, ", "))
 		case "gui_should_close":
@@ -3281,6 +3321,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				return fmt.Sprintf("vira_tensor_slice_rows(%s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1])
 			case "linear":
 				return fmt.Sprintf("vira_tensor_linear(%s, %s, %s)", arenaArg, tExpr, argStrs[0])
+			case "gpu_linear":
+				return fmt.Sprintf("vira_gpu_linear(%s, %s, %s)", arenaArg, tExpr, argStrs[0])
+			case "gpu_matmul":
+				return fmt.Sprintf("vira_gpu_matmul(%s, %s, %s)", arenaArg, tExpr, argStrs[0])
 			}
 		}
 	}

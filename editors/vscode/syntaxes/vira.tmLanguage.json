@@ -320,7 +320,7 @@
       "patterns": [
         {
           "name": "support.function.method.collection.vira",
-          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|copy_row|slice_rows|data_ptr|await)\\b(?=\\s*\\()"
+          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|gpu_linear|gpu_matmul|copy_row|slice_rows|data_ptr|await)\\b(?=\\s*\\()"
         },
         {
           "name": "support.variable.property.collection.vira",
@@ -482,7 +482,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.vira",
-          "match": "\\b(print|println|eprint|eprintln|panic|file_exists|read_file|write_file|append_file|remove_file|net_listen|net_accept|net_read|net_write|net_close|http_response|json_get_str|json_get_int|json_get_f32|json_is_valid|time_now_us|time_now_ms|time_sleep_ms|arena_alloc|arena_reset|arena_free|tensor_fill|tensor_fill_3d|tensor_fill_4d|tensor_sum|tensor_relu|tensor_add|tensor_scale|tensor_elemwise_mul|tensor_silu|tensor_softmax|tensor_embedding|tensor_transpose|tensor_load_bin|tensor_save_bin|tensor_matmul_grad_a|tensor_matmul_grad_b|tensor_relu_backward|tensor_sgd_step|safetensors_load|gguf_load|gguf_load_tensor|gguf_tensor_dequant|tensor_rmsnorm|tensor_rope|rmsnorm|rope|swiglu|causal_self_attention|sample_token|sample_argmax|sample_top_p)\\b"
+          "match": "\\b(print|println|eprint|eprintln|panic|file_exists|read_file|write_file|append_file|remove_file|net_listen|net_accept|net_read|net_write|net_close|http_response|json_get_str|json_get_int|json_get_f32|json_is_valid|time_now_us|time_now_ms|time_sleep_ms|arena_alloc|arena_reset|arena_free|tensor_fill|tensor_fill_3d|tensor_fill_4d|tensor_sum|tensor_relu|tensor_add|tensor_scale|tensor_elemwise_mul|tensor_silu|tensor_softmax|tensor_embedding|tensor_transpose|tensor_load_bin|tensor_save_bin|tensor_matmul_grad_a|tensor_matmul_grad_b|tensor_relu_backward|tensor_sgd_step|safetensors_load|gguf_load|gguf_load_tensor|gguf_tensor_dequant|tensor_rmsnorm|tensor_rope|rmsnorm|rope|swiglu|causal_self_attention|sample_token|sample_argmax|sample_top_p|gpu_is_available|gpu_device_name|gpu_backend_name|gpu_vram_bytes|gpu_allocated_bytes|gpu_oom_fallbacks|gpu_set_enabled|gpu_is_enabled|gpu_sync|gpu_simulate_oom|gpu_matmul|gpu_linear|gpu_rmsnorm|gpu_rope|gpu_softmax|gpu_silu)\\b"
         },
         {
           "name": "entity.name.function.member.vira",

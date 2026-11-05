@@ -2343,8 +2343,12 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   return out;
 }
 
+static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr);
+static inline void vira_gpu_shutdown(void);
+
 static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
   if (t != NULL && !t->is_arena && !t->is_view && t->raw_alloc != NULL) {
+    _vira_gpu_evict_ptr(t->data);
     free(t->raw_alloc);
     t->raw_alloc = NULL;
     t->data = NULL;
@@ -6529,6 +6533,7 @@ static inline Result_int vira_sys_proc_wait(int32_t pid) {
 
 static inline void vira_report_mem_stats(void) {
   _vira_flush_tls_mem_stats();
+  vira_gpu_shutdown();
   vira_scheduler_shutdown();
 #if defined(VIRA_QUIET_RT)
   return;
@@ -6554,6 +6559,7 @@ static inline void vira_report_mem_stats(void) {
 #endif
 }
 
+#include "vira_gpu.h"
 #include "vira_gui.h"
 
 #endif // VIRA_RT_H
