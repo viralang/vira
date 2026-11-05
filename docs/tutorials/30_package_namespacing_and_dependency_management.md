@@ -155,10 +155,46 @@ When packages are installed or built, Vira writes a cryptographic `vira.lock` co
 | `vira remove <package>` | Removes a dependency from `vira.mod` and `vira.lock`. |
 | `vira vendor` | Vendors all dependencies locally into `./vendor` for air-gapped, offline builds. |
 | `vira test <path>` | Runs all package tests under `<path>/tests/*.vir`. |
+| `vira build [-target <os>] [-gui]` | Compiles package/application into a native binary for `linux`, `windows`, or `darwin`. |
+| `vira bundle [-target <os>] [-gui\|-cli]` | Packages a distributable release bundle (auto-detects GUI vs Console CLI subsystem). |
 
 ---
 
-## 7. Complete Runnable Example
+## 7. Cross-Platform Native C FFI (`#flag`) & Multi-OS Bundling
+
+External Vira packages that wrap native C libraries (such as [`github.com/viralang/odbc`](https://github.com/viralang/odbc)) can declare platform-specific C compiler and linker flags directly inside `.vir` source files using `#flag`:
+
+```vira
+// Unconditional flag (automatically mapped where appropriate, e.g. -lodbc -> -lodbc32 on Windows)
+#flag -lodbc
+
+// Or OS-specific linker flags evaluated against the target OS (-target linux | windows | darwin):
+#flag linux -lodbc
+#flag darwin -lodbc
+#flag windows -lodbc32
+```
+
+### 7.1 Cross-Compiling Packages from Linux/macOS to Windows
+
+When `-target windows` is passed to `vira build` or `vira bundle` on Linux or macOS (with `gcc-mingw-w64-x86-64` / `mingw-w64` installed):
+1. Vira evaluates `#flag <os>` directives against the **target OS** (`windows`), not the host OS.
+2. Vira automatically maps Unix ODBC (`-lodbc`) to Windows' built-in ODBC Driver Manager import library (`-lodbc32`) and skips host Linux `/usr/include` and `/usr/lib` paths so MinGW-w64 headers resolve cleanly.
+3. `vira bundle` inspects the compiled code to determine whether the package entrypoint is a **Native GUI** app (uses `gui_init`, linked with `-mwindows`) or a **Console / CLI** app (keeps the terminal console attached and generates `run.bat` on Windows / `.command` on macOS so the app never runs invisibly as a background ghost process).
+
+```bash
+# Cross-compile a CLI package/app for Windows
+vira build -prod -target windows -o my_app.exe src/main.vir
+
+# Cross-compile a GUI package/app for Windows (suppresses cmd.exe console window)
+vira build -prod -target windows -gui -o my_gui_app.exe src/main.vir
+
+# Bundle for Windows, macOS, or Linux (auto-detects GUI vs CLI subsystem)
+vira bundle -target windows src/main.vir
+```
+
+---
+
+## 8. Complete Runnable Example
 
 Run Example 31:
 ```bash

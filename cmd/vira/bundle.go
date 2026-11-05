@@ -25,6 +25,8 @@ func bundleCmd(args []string) {
 	outDirFlag := fs.String("o", "dist", "Output distribution directory")
 	targetFlag := fs.String("target", goRuntime.GOOS, "Target operating system (darwin, linux, windows)")
 	prodFlag := fs.Bool("prod", true, "Compile with full production optimizations")
+	guiFlag := fs.Bool("gui", false, "Force GUI subsystem (suppresses console window on Windows)")
+	cliFlag := fs.Bool("cli", false, "Force Console/CLI subsystem (keeps terminal window visible)")
 	_ = fs.Parse(args)
 
 	start := time.Now()
@@ -119,18 +121,7 @@ func bundleCmd(args []string) {
 	}
 	_ = os.MkdirAll(outDir, 0755)
 
-	fmt.Printf("📦 Bundling Native GUI Application: %s (v%s)\n", appName, appVersion)
-	fmt.Printf("   • Identifier : %s\n", appID)
-	fmt.Printf("   • Target OS  : %s (%s)\n", targetOS, goRuntime.GOARCH)
-	fmt.Printf("   • Entrypoint : %s\n", entrypoint)
-	if iconPath != "" && fileExists(iconPath) {
-		fmt.Printf("   • App Icon   : %s\n", iconPath)
-	}
-	if assetsDir != "" && dirExists(assetsDir) {
-		fmt.Printf("   • Assets Dir : %s\n", assetsDir)
-	}
-
-	// 4. Compile application
+	// 4. Compile application to C99 and detect GUI vs Console/CLI subsystem
 	tempBuildDir := filepath.Join(projectRoot, "build")
 	_ = os.MkdirAll(tempBuildDir, 0755)
 
@@ -141,6 +132,30 @@ func bundleCmd(args []string) {
 	tempBin := filepath.Join(tempBuildDir, execName)
 
 	cCode, _, _, cFlags := compileVexToC99(entrypoint, false, targetOS)
+	isGUI := strings.Contains(cCode, "vira_gui_init(") || strings.Contains(cCode, `#include "vira_gui.h"`)
+	if *guiFlag {
+		isGUI = true
+	} else if *cliFlag {
+		isGUI = false
+	}
+
+	if isGUI {
+		fmt.Printf("📦 Bundling Native GUI Application: %s (v%s)\n", appName, appVersion)
+		fmt.Printf("   • Subsystem  : Native GUI (Windowed)\n")
+	} else {
+		fmt.Printf("📦 Bundling Native Console Application: %s (v%s)\n", appName, appVersion)
+		fmt.Printf("   • Subsystem  : Console / CLI (Terminal Attached)\n")
+	}
+	fmt.Printf("   • Identifier : %s\n", appID)
+	fmt.Printf("   • Target OS  : %s (%s)\n", targetOS, goRuntime.GOARCH)
+	fmt.Printf("   • Entrypoint : %s\n", entrypoint)
+	if iconPath != "" && fileExists(iconPath) {
+		fmt.Printf("   • App Icon   : %s\n", iconPath)
+	}
+	if assetsDir != "" && dirExists(assetsDir) {
+		fmt.Printf("   • Assets Dir : %s\n", assetsDir)
+	}
+
 	cFile := filepath.Join(tempBuildDir, strings.TrimSuffix(filepath.Base(entrypoint), ".vir")+".c")
 	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
 		fatalIO(err)
@@ -150,7 +165,7 @@ func bundleCmd(args []string) {
 		prod:     *prodFlag,
 		outPath:  tempBin,
 		targetOS: targetOS,
-		guiApp:   true,
+		guiApp:   isGUI,
 		quietRT:  true,
 		cFlags:   cFlags,
 	}
@@ -163,13 +178,13 @@ func bundleCmd(args []string) {
 	// 5. Package per target OS
 	switch targetOS {
 	case "darwin", "macos", "mac":
-		bundleDarwin(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir)
+		bundleDarwin(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir, isGUI)
 	case "windows", "win":
-		bundleWindows(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir)
+		bundleWindows(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir, isGUI)
 	case "linux":
-		bundleLinux(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir)
+		bundleLinux(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir, isGUI)
 	default:
-		bundleLinux(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir)
+		bundleLinux(appName, appID, appVersion, tempBin, iconPath, assetsDir, outDir, isGUI)
 	}
 
 	_ = os.Remove(tempBin)
@@ -177,7 +192,39 @@ func bundleCmd(args []string) {
 	fmt.Printf("\n✨ Successfully bundled %s in %s! Output directory: %s\n", appName, elapsed, outDir)
 }
 
-func bundleDarwin(appName, appID, version, binPath, iconPath, assetsDir, outDir string) {
+func bundleDarwin(appName, appID, version, binPath, iconPath, assetsDir, outDir string, isGUI bool) {
+	if !isGUI {
+		pkgDir := filepath.Join(outDir, appName)
+		_ = os.RemoveAll(pkgDir)
+		_ = os.MkdirAll(pkgDir, 0755)
+
+		binDest := filepath.Join(pkgDir, appName)
+		if err := copyFile(binPath, binDest); err != nil {
+			fatalIO(err)
+		}
+		_ = os.Chmod(binDest, 0755)
+
+		if assetsDir != "" && dirExists(assetsDir) {
+			_ = copyDir(assetsDir, filepath.Join(pkgDir, "assets"))
+		}
+
+		cmdScript := fmt.Sprintf(`#!/bin/sh
+APPDIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$APPDIR"
+"./%s" "$@"
+`, appName)
+		cmdPath := filepath.Join(pkgDir, appName+".command")
+		_ = os.WriteFile(cmdPath, []byte(cmdScript), 0755)
+		_ = os.Chmod(cmdPath, 0755)
+
+		zipArchive := filepath.Join(outDir, fmt.Sprintf("%s-%s-macos.zip", appName, version))
+		if err := zipDirectory(pkgDir, zipArchive); err == nil {
+			fmt.Printf("✓ Created macOS standalone archive: %s\n", filepath.Base(zipArchive))
+		}
+		fmt.Printf("✓ Created macOS Console Package (with %s.command Terminal launcher): %s\n", appName, pkgDir)
+		return
+	}
+
 	appBundle := filepath.Join(outDir, appName+".app")
 	_ = os.RemoveAll(appBundle)
 
@@ -247,7 +294,7 @@ func bundleDarwin(appName, appID, version, binPath, iconPath, assetsDir, outDir 
 	fmt.Printf("✓ Created macOS Application Bundle: %s\n", appBundle)
 }
 
-func bundleLinux(appName, appID, version, binPath, iconPath, assetsDir, outDir string) {
+func bundleLinux(appName, appID, version, binPath, iconPath, assetsDir, outDir string, isGUI bool) {
 	pkgDir := filepath.Join(outDir, appName)
 	_ = os.RemoveAll(pkgDir)
 	_ = os.MkdirAll(pkgDir, 0755)
@@ -271,16 +318,22 @@ func bundleLinux(appName, appID, version, binPath, iconPath, assetsDir, outDir s
 	}
 
 	// 4. Generate .desktop file
+	terminalStr := "false"
+	commentStr := "Native Vira GUI Application"
+	if !isGUI {
+		terminalStr = "true"
+		commentStr = "Native Vira Console Application"
+	}
 	desktopContent := fmt.Sprintf(`[Desktop Entry]
 Type=Application
 Name=%s
-Comment=Native Vira GUI Application
-Exec=./%s
+Comment=%s
+Exec=./run.sh
 Icon=%s
-Terminal=false
+Terminal=%s
 Categories=Utility;Graphics;Development;
 StartupNotify=true
-`, appName, appName, iconName)
+`, appName, commentStr, iconName, terminalStr)
 	_ = os.WriteFile(filepath.Join(pkgDir, appName+".desktop"), []byte(desktopContent), 0644)
 
 	// 5. Generate run.sh launcher
@@ -301,7 +354,7 @@ exec "./%s" "$@"
 	fmt.Printf("✓ Created Linux Portable Package: %s\n", pkgDir)
 }
 
-func bundleWindows(appName, appID, version, binPath, iconPath, assetsDir, outDir string) {
+func bundleWindows(appName, appID, version, binPath, iconPath, assetsDir, outDir string, isGUI bool) {
 	pkgDir := filepath.Join(outDir, appName)
 	_ = os.RemoveAll(pkgDir)
 	_ = os.MkdirAll(pkgDir, 0755)
@@ -326,7 +379,13 @@ func bundleWindows(appName, appID, version, binPath, iconPath, assetsDir, outDir
 		_ = copyFile(iconPath, filepath.Join(pkgDir, filepath.Base(iconPath)))
 	}
 
-	// 4. Create .zip archive
+	// 4. For Console/CLI apps, generate a run.bat launcher so double-clicking keeps the console open on exit
+	if !isGUI {
+		batScript := fmt.Sprintf("@echo off\r\ncd /d \"%%~dp0\"\r\n\"%%~dp0%s\" %%*\r\necho.\r\npause\r\n", execName)
+		_ = os.WriteFile(filepath.Join(pkgDir, "run.bat"), []byte(batScript), 0644)
+	}
+
+	// 5. Create .zip archive
 	zipArchive := filepath.Join(outDir, fmt.Sprintf("%s-%s-windows.zip", appName, version))
 	if err := zipDirectory(pkgDir, zipArchive); err == nil {
 		fmt.Printf("✓ Created Windows standalone archive: %s\n", filepath.Base(zipArchive))

@@ -326,8 +326,8 @@ You can execute the example immediately from your terminal:
 To produce a production executable (`gui_demo.exe`) with full `-O3` speed and stripped symbols:
 
 ```powershell
-# Windows (links GDI32, User32, WinMM automatically)
-.\vira.exe build -prod -o gui_demo.exe examples\gui_demo.vir
+# Windows (use -gui to suppress the black cmd.exe console window)
+.\vira.exe build -prod -gui -o gui_demo.exe examples\gui_demo.vir
 .\gui_demo.exe
 ```
 
@@ -341,6 +341,34 @@ sudo apt-get install -y libx11-dev libgl1-mesa-dev
 ./gui_demo
 ```
 
+### 3. Cross-Compiling Windows GUI Executables from Linux / macOS
+
+You can cross-compile a Windows PE32+ executable directly from Linux or macOS after installing the `mingw-w64` cross-compiler:
+
+```bash
+# Install MinGW-w64 cross-compiler (Ubuntu / Debian)
+sudo apt-get install -y gcc-mingw-w64-x86-64
+
+# Cross-compile a Windows GUI executable (no console window)
+vira build -prod -target windows -gui -o gui_demo.exe examples/gui_demo.vir
+
+# Or package a complete portable Windows release bundle (auto-detects GUI vs CLI)
+vira bundle -target windows -name "ViraGUIDemo" examples/gui_demo.vir
+```
+
+### 4. Understanding GUI vs. Console Subsystem (`-gui` vs `-cli` & Ghost Processes)
+
+On Windows, macOS, and Linux, desktop applications and terminal applications use different OS launch subsystems:
+
+| Mode | Windows Subsystem | macOS Bundle | Linux `.desktop` | When to Use |
+| :--- | :--- | :--- | :--- | :--- |
+| **Native GUI (`-gui`)** | `IMAGE_SUBSYSTEM_WINDOWS_GUI` (`-mwindows`, hides `cmd.exe` console) | `.app` bundle (`Contents/MacOS/<app>`) | `Terminal=false` | Applications that open a window with `gui_init(...)` or `widget.App.init()`. |
+| **Console / CLI (`-cli`)** | `IMAGE_SUBSYSTEM_WINDOWS_CUI` (keeps console `stdin`/`stdout` attached + `run.bat`) | Portable folder + `<app>.command` Terminal launcher | `Terminal=true` | Command-line tools, interactive `input()` apps, servers, and benchmarks. |
+
+> **Why forcing `-gui` on a CLI app causes a "Ghost Process":**  
+> If a command-line program (which never calls `gui_init(...)`) is compiled with `-gui` (Windows `-mwindows` or a raw macOS `.app` bundle), the operating system detaches `stdin`, `stdout`, and `stderr` and does not open a terminal window. Any `println(...)` output is silently discarded, and if the program waits for input or runs a server loop, it runs invisibly in the background (visible only in Task Manager / Activity Monitor).  
+> **`vira bundle` automatically inspects your compiled program for `gui_init` calls** and selects the **Native GUI** subsystem for windowed apps and the **Console / CLI** subsystem for terminal apps. You can also explicitly override this with `vira bundle -gui` or `vira bundle -cli`.
+
 ---
 
 ## 8. Summary & Next Steps
@@ -348,9 +376,9 @@ sudo apt-get install -y libx11-dev libgl1-mesa-dev
 Vira's native GUI architecture demonstrates that desktop graphical applications don't need gigabytes of browser dependencies or complicated retained-mode object hierarchies:
 - **Zero GC & Zero Leaks:** The compiler's **Deterministic Autofree** manages memory automatically without pauses or memory fragmentation.
 - **Lightweight Executable:** Produces standalone native binaries under 2 MB in size with instant millisecond startup.
-- **Multicore Actor Integration:** Keep heavy AI matrix multiplication (`@`), LLM token generation, and network calls on background actors while the UI thread stays silky-smooth at 60 FPS.
+- **Multicore Actor & Non-Blocking Frame Integration:** Keep heavy AI matrix multiplication (`@`), LLM token generation, and network calls non-blocking while the UI thread stays silky-smooth at 60 FPS.
 
 Now that you understand native GUI programming in Vira:
 - Build an interactive real-time visualizer for **[Tutorial 06: First-Class AI Tensors & SIMD Acceleration](06_simd_tensors_and_ai_math.md)**.
 - Connect interactive buttons to **[Tutorial 17: High-Performance HTTP 1.1 Web Services & Fast JSON](17_http_web_service_and_json.md)** to build a native REST API client.
-- Create a desktop interface for **[Tutorial 20: Pure Vira Local LLM Inference Engine](20_gguf_llm_inference_engine.md)** to chat with quantized GGUF models directly on your desktop!
+- Explore **[`docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir`](../examples/45_gui_qwen2_5_gguf_chat_studio.vir)** and **[Tutorial 20: Pure Vira Local LLM Inference Engine](20_gguf_llm_inference_engine.md)** to run a live 24-layer Qwen 2.5 GGUF desktop chat studio with frame-by-frame token streaming!

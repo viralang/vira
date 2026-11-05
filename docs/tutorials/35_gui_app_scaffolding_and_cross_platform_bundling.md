@@ -431,17 +431,39 @@ User double-clicks app.exe  -->  [cmd.exe Console Window] (Ugly black box)
                                        └── [Your GUI Window]
 ```
 
-**Vira's Automatic Solution:**
-When compiling for Windows with `guiApp` enabled or via `vira bundle --target windows`, the Vira compiler automatically passes the **`-mwindows`** linker flag:
+**Vira's Automatic GUI vs. CLI Subsystem Detection:**
+When running `vira bundle`, the compiler inspects your program's call graph to determine whether it initializes a native GUI window (`gui_init` or `widget.App.init`):
+
+- **If your app is a Native GUI app (`isGUI = true`):**
+  - **Windows:** Passes `-mwindows` (`IMAGE_SUBSYSTEM_WINDOWS_GUI`) so no black `cmd.exe` console window appears behind your GUI window.
+  - **macOS:** Packages a native `.app` bundle (`CFBundlePackageType = APPL`, `NSHighResolutionCapable = true`).
+  - **Linux:** Sets `Terminal=false` in the generated FreeDesktop `.desktop` launcher.
+- **If your app is a Console / CLI app (`isGUI = false`):**
+  - **Windows:** Uses the Console Subsystem (`IMAGE_SUBSYSTEM_WINDOWS_CUI`) so Windows attaches a real terminal window (`stdin`, `stdout`, `stderr`), and generates a `run.bat` launcher so double-clicking keeps output visible upon completion.
+  - **macOS:** Generates an executable `<AppName>.command` launcher alongside the binary so double-clicking in Finder opens `Terminal.app` interactively.
+  - **Linux:** Sets `Terminal=true` in the `.desktop` launcher.
 
 ```
-[Vira Bundle Build]
-User double-clicks app.exe  -->  [Your GUI Window] (Clean native presentation)
+[Vira Bundle Build — GUI App]
+User double-clicks app.exe  -->  [Your GUI Window] (Clean native presentation, no console box)
+
+[Vira Bundle Build — CLI App]
+User double-clicks run.bat  -->  [Windows Console Terminal] (Full stdout/stdin visibility)
 ```
 
-The `-mwindows` flag instructs the linker to set the executable subsystem to `IMAGE_SUBSYSTEM_WINDOWS_GUI`. Windows initializes the process directly without allocating a console buffer.
+> **Why this matters (Avoiding "Ghost" Background Processes):**  
+> If a non-GUI (CLI) application is forced into the GUI subsystem (`-mwindows` on Windows or a raw `.app` bundle on macOS), the OS detaches `stdin`, `stdout`, and `stderr` without creating any visible window. If the CLI app waits for input or runs a loop, it appears to run invisibly like a "ghost" in Task Manager or Activity Monitor. Auto-detection prevents this automatically, and you can also override the mode explicitly using `vira bundle -gui` or `vira bundle -cli`.
 
-### 2. Multi-Resolution Windows `.ico`
+### 2. Cross-Compiling for Windows from Linux or macOS
+
+Once you install the MinGW-w64 cross-compiler on Linux (`sudo apt-get install -y gcc-mingw-w64-x86-64`) or macOS (`brew install mingw-w64`), `vira bundle -target windows` and `vira build -target windows` automatically invoke `x86_64-w64-mingw32-gcc` to produce genuine 64-bit Windows `.exe` binaries and `.zip` bundles directly from your Linux or macOS machine:
+
+```bash
+# Bundle a Windows GUI or CLI release directly from Linux/macOS
+vira bundle -target windows
+```
+
+### 3. Multi-Resolution Windows `.ico`
 
 Windows Explorer and the taskbar require icons in multiple resolutions (`16x16`, `32x32`, `48x48`, `256x256`).
 
@@ -535,9 +557,10 @@ jobs:
 | `vira init-gui <name>` | Scaffold complete GUI desktop project | `vira.mod`, `assets/icon.png`, `src/config/theme.vir`, `src/main.vir` |
 | `vira run src/main.vir` | Live development testing (< 400ms) | Immediate-Mode native GUI window |
 | `vira bundle` | Bundle for current host OS | Native bundle in `dist/` with `-prod` optimizations |
-| `vira bundle --target darwin` | Bundle for macOS | `.app` bundle, `Contents/Info.plist`, High-DPI flag, `.zip` |
-| `vira bundle --target linux` | Bundle for Linux | Portable directory, FreeDesktop `.desktop`, `run.sh`, `.tar.gz` |
-| `vira bundle --target windows` | Bundle for Windows | Win32 GUI subsystem (`-mwindows`), `.ico`, `.zip` |
+| `vira bundle -target darwin` | Bundle for macOS | `.app` bundle (GUI) or `.command` launcher (CLI), `.zip` |
+| `vira bundle -target linux` | Bundle for Linux | Portable directory, FreeDesktop `.desktop`, `run.sh`, `.tar.gz` |
+| `vira bundle -target windows` | Bundle for Windows | Win32 GUI (`-mwindows`) or Console (`run.bat`) `.exe`, `.zip` |
+| `vira bundle -gui` / `-cli` | Override subsystem auto-detection | Forces Windowed GUI subsystem or Console CLI subsystem |
 | `vira bundle -o <dir>` | Specify custom output directory | Builds bundle directly inside specified target folder |
 
 By pairing Vira's fast immediate-mode GUI engine with built-in zero-dependency application bundling, you can write high-performance, single-digit-megabyte desktop software that looks and feels native on every major operating system!
