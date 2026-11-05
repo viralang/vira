@@ -112,7 +112,7 @@ func bundleCmd(args []string) {
 		assetsDir = filepath.Join(projectRoot, assetsDir)
 	}
 
-	targetOS := strings.ToLower(*targetFlag)
+	targetOS := normalizeTargetOS(*targetFlag)
 	outDir := *outDirFlag
 	if !filepath.IsAbs(outDir) {
 		outDir = filepath.Join(projectRoot, outDir)
@@ -140,18 +140,19 @@ func bundleCmd(args []string) {
 	}
 	tempBin := filepath.Join(tempBuildDir, execName)
 
-	cCode, _, _, cFlags := compileVexToC99(entrypoint, false)
+	cCode, _, _, cFlags := compileVexToC99(entrypoint, false, targetOS)
 	cFile := filepath.Join(tempBuildDir, strings.TrimSuffix(filepath.Base(entrypoint), ".vir")+".c")
 	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
 		fatalIO(err)
 	}
 
 	opts := compileOptions{
-		prod:    *prodFlag,
-		outPath: tempBin,
-		guiApp:  true,
-		quietRT: true,
-		cFlags:  cFlags,
+		prod:     *prodFlag,
+		outPath:  tempBin,
+		targetOS: targetOS,
+		guiApp:   true,
+		quietRT:  true,
+		cFlags:   cFlags,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, tempBin, opts)

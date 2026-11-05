@@ -158,14 +158,25 @@ if ($SourceExe) {
 
 # 3. Copy Runtime Headers & Examples
 Write-Host "[3/5] Deploying runtime headers and examples..." -ForegroundColor Yellow
+$ViraCacheDir = "$env:USERPROFILE\.vira"
+$ViraCacheRuntime = "$ViraCacheDir\runtime"
+$ViraCacheBin = "$ViraCacheDir\bin"
+New-Item -ItemType Directory -Force -Path $ViraCacheRuntime | Out-Null
+New-Item -ItemType Directory -Force -Path $ViraCacheBin | Out-Null
+
 if (Test-Path ".\runtime\vira_rt.h") {
     Copy-Item -Path ".\runtime\*.h" -Destination $RuntimeDir -Force
+    Copy-Item -Path ".\runtime\*.h" -Destination $ViraCacheRuntime -Force
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } elseif (Test-Path "..\runtime\vira_rt.h") {
     Copy-Item -Path "..\runtime\*.h" -Destination $RuntimeDir -Force
+    Copy-Item -Path "..\runtime\*.h" -Destination $ViraCacheRuntime -Force
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } else {
     Write-Host "  ✓ Embedded runtime headers will auto-extract on first run" -ForegroundColor Green
+}
+if (Test-Path "$BinDir\vira.exe") {
+    Install-BinaryFile -src "$BinDir\vira.exe" -dst "$ViraCacheBin\vira.exe"
 }
 
 if (Test-Path ".\examples") {
@@ -216,11 +227,11 @@ if (-not $CompilerFound) {
 
 if (-not $CompilerFound) {
     Write-Host "  ! No C99 compiler found in PATH." -ForegroundColor Yellow
-    Write-Host "    Vira compiles to optimized native C99/SIMD code and requires GCC or Clang." -ForegroundColor Gray
+    Write-Host "    Vira compiles to optimized native C99/SIMD code and requires MinGW-w64 GCC or Clang." -ForegroundColor Gray
     Write-Host "    Quick Fix Options:" -ForegroundColor Cyan
-    Write-Host "      1. winget install -e --id GnuWin32.GCC" -ForegroundColor White
-    Write-Host "      2. winget install -e --id LLVM.LLVM" -ForegroundColor White
-    Write-Host "      3. Download w64devkit from: https://github.com/skeeto/w64devkit/releases" -ForegroundColor White
+    Write-Host "      1. Download w64devkit (extract to C:\w64devkit): https://github.com/skeeto/w64devkit/releases" -ForegroundColor White
+    Write-Host "      2. winget install -e --id MSYS2.MSYS2  (then install mingw-w64-ucrt-x86_64-gcc)" -ForegroundColor White
+    Write-Host "      3. winget install -e --id LLVM.LLVM" -ForegroundColor White
 } else {
     Write-Host "  ✓ Graphics libraries: GDI32, User32, WinMM, OpenGL32 (native Windows)" -ForegroundColor Green
 }
@@ -243,6 +254,8 @@ Write-Host "==========================================================" -Foregro
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Open a new terminal window" -ForegroundColor White
-Write-Host "  2. Verify:  vira -h" -ForegroundColor White
-Write-Host "  3. Run GUI: vira run examples\gui_demo.vir" -ForegroundColor White
+Write-Host "  2. Verify:             vira -h" -ForegroundColor White
+Write-Host "  3. Run GUI demo:       vira run examples\gui_demo.vir" -ForegroundColor White
+Write-Host "  4. Build standalone:   vira build -prod -o app.exe main.vir" -ForegroundColor White
+Write-Host "  5. Bundle GUI release: vira bundle -target windows -prod" -ForegroundColor White
 Write-Host ""

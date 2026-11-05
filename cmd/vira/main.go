@@ -50,12 +50,13 @@ Commands:
   version  Display compiler version and target platform
 
 Flags for 'vira build':
-  -prod       Enable production optimizations (-O3 -march=native -flto)
-  -gui        Build as GUI application (suppresses Windows console window)
-  -sanitize   Enable AddressSanitizer & UndefinedBehaviorSanitizer
-  -o <path>   Output binary path (default: <filename>)
-  -cc <bin>   Specify C compiler backend (cc, clang, gcc, tcc)
-  -keep-c     Keep the intermediate .c file in build/
+  -prod          Enable production optimizations (-O3 -march=native -flto)
+  -target <os>   Target operating system (linux, windows, darwin)
+  -gui           Build as GUI application (suppresses Windows console window)
+  -sanitize      Enable AddressSanitizer & UndefinedBehaviorSanitizer
+  -o <path>      Output binary path (default: <filename>)
+  -cc <bin>      Specify C compiler backend (cc, clang, gcc, tcc)
+  -keep-c        Keep the intermediate .c file in build/
 `
 
 type compileOptions struct {
@@ -63,12 +64,26 @@ type compileOptions struct {
 	sanitize     bool
 	cc           string
 	outPath      string
+	targetOS     string
 	keepC        bool
 	showAutofree bool
 	quietRT      bool
 	guiApp       bool
 	shared       bool
 	cFlags       []string
+}
+
+func normalizeTargetOS(target string) string {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "windows", "win":
+		return "windows"
+	case "darwin", "macos", "mac":
+		return "darwin"
+	case "linux":
+		return "linux"
+	default:
+		return goRuntime.GOOS
+	}
 }
 
 func main() {
@@ -183,6 +198,7 @@ func runCmd(args []string) {
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	prod := fs.Bool("prod", false, "Compile with -O3 -march=native -flto")
+	targetFlag := fs.String("target", "", "Target operating system (linux, windows, darwin)")
 	sharedFlag := fs.Bool("shared", false, "Compile as dynamic shared library (.dll, .so, .dylib)")
 	guiFlag := fs.Bool("gui", false, "Compile as native GUI application (no Windows console)")
 	sanitize := fs.Bool("sanitize", false, "Enable ASan and UBSan")
@@ -193,16 +209,33 @@ func buildCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-shared] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
+		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-target os] [-shared] [-gui] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
 		os.Exit(1)
 	}
 	vexPath := fs.Arg(0)
 	start := time.Now()
 
-	cCode, _, _, cFlags := compileVexToC99(vexPath, false)
+	targetBin := *outPath
+	targetOS := normalizeTargetOS(*targetFlag)
+	if *targetFlag == "" && targetBin != "" {
+		lowerOut := strings.ToLower(targetBin)
+		if strings.HasSuffix(lowerOut, ".exe") || strings.HasSuffix(lowerOut, ".dll") {
+			targetOS = "windows"
+		} else if strings.HasSuffix(lowerOut, ".dylib") {
+			targetOS = "darwin"
+		} else if strings.HasSuffix(lowerOut, ".so") {
+			targetOS = "linux"
+		}
+	}
+
+	cCode, _, _, cFlags := compileVexToC99(vexPath, false, targetOS)
 
 	baseName := strings.TrimSuffix(filepath.Base(vexPath), filepath.Ext(vexPath))
-	targetBin := *outPath
+	if baseName == "." || baseName == "" {
+		if abs, err := filepath.Abs(vexPath); err == nil {
+			baseName = filepath.Base(abs)
+		}
+	}
 	isShared := *sharedFlag
 	if strings.HasSuffix(strings.ToLower(targetBin), ".dll") || strings.HasSuffix(strings.ToLower(targetBin), ".so") || strings.HasSuffix(strings.ToLower(targetBin), ".dylib") {
 		isShared = true
@@ -210,7 +243,7 @@ func buildCmd(args []string) {
 	if targetBin == "" {
 		targetBin = baseName
 		if isShared {
-			switch goRuntime.GOOS {
+			switch targetOS {
 			case "windows":
 				targetBin += ".dll"
 			case "darwin":
@@ -218,9 +251,11 @@ func buildCmd(args []string) {
 			default:
 				targetBin += ".so"
 			}
-		} else if os.PathSeparator == '\\' && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
+		} else if targetOS == "windows" && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
 			targetBin += ".exe"
 		}
+	} else if targetOS == "windows" && !isShared && !strings.HasSuffix(strings.ToLower(targetBin), ".exe") {
+		targetBin += ".exe"
 	}
 
 	_ = os.MkdirAll("build", 0755)
@@ -234,6 +269,7 @@ func buildCmd(args []string) {
 		sanitize: *sanitize,
 		cc:       *ccFlag,
 		outPath:  targetBin,
+		targetOS: targetOS,
 		keepC:    *keepC,
 		quietRT:  *quietRTFlag,
 		guiApp:   *guiFlag,
@@ -783,7 +819,11 @@ func vendorCmd(args []string) {
 
 // --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
-func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Checker, *autofree.Analyzer, []string) {
+func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) (string, *checker.Checker, *autofree.Analyzer, []string) {
+	effTargetOS := goRuntime.GOOS
+	if len(targetOSOpt) > 0 && targetOSOpt[0] != "" {
+		effTargetOS = normalizeTargetOS(targetOSOpt[0])
+	}
 	ensureStdPackagesExtracted()
 	fi, err := os.Stat(targetPath)
 	if err != nil {
@@ -1005,17 +1045,16 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 			}
 			first := strings.ToLower(fields[0])
 			if first == "linux" || first == "windows" || first == "darwin" || first == "macos" || first == "unix" {
-				targetOS := goRuntime.GOOS
-				matched := (first == targetOS) ||
-					(first == "macos" && targetOS == "darwin") ||
-					(first == "unix" && (targetOS == "linux" || targetOS == "darwin"))
+				matched := (first == effTargetOS) ||
+					(first == "macos" && effTargetOS == "darwin") ||
+					(first == "unix" && (effTargetOS == "linux" || effTargetOS == "darwin"))
 				if !matched {
 					continue
 				}
 				fields = fields[1:]
 			}
 			for i, fl := range fields {
-				if goRuntime.GOOS == "windows" && fl == "-lodbc" {
+				if effTargetOS == "windows" && fl == "-lodbc" {
 					fields[i] = "-lodbc32"
 				}
 			}
@@ -1064,48 +1103,74 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 
 func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string) {
 	runtimeDir := resolveRuntimeDir()
+	targetOS := normalizeTargetOS(opts.targetOS)
+	isCross := targetOS != goRuntime.GOOS
 	compiler := opts.cc
 	var cFlags []string
 	var modeDesc string
 
 	if compiler == "" {
-		candidates := []string{"gcc", "clang", "cc", "tcc"}
-		if goRuntime.GOOS == "darwin" {
-			candidates = []string{"clang", "gcc", "cc", "tcc"}
-		}
-		for _, cand := range candidates {
-			if _, err := exec.LookPath(cand); err == nil {
-				compiler = cand
-				break
-			}
-		}
-		if compiler == "" {
-			if home, err := os.UserHomeDir(); err == nil {
-				cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
-				if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-					compiler = cand
-				}
-			}
-		}
-		if compiler == "" {
-			for _, cand := range []string{`C:\w64devkit\bin\gcc.exe`, `C:\msys64\ucrt64\bin\gcc.exe`, `C:\msys64\mingw64\bin\gcc.exe`} {
-				if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+		if targetOS == "windows" && goRuntime.GOOS != "windows" {
+			// Cross-compiling to Windows from Linux or macOS requires MinGW-w64
+			for _, cand := range []string{"x86_64-w64-mingw32-gcc", "x86_64-w64-mingw32-clang", "i686-w64-mingw32-gcc"} {
+				if _, err := exec.LookPath(cand); err == nil {
 					compiler = cand
 					break
 				}
 			}
-		}
-		if compiler == "" {
-			fmt.Fprintln(os.Stderr, "error: no C99 backend compiler found in PATH (searched: gcc, clang, cc, tcc)")
-			fmt.Fprintln(os.Stderr, "  = help: Install GCC (MinGW-w64 or w64devkit) or Clang (LLVM) and add it to your PATH.")
-			fmt.Fprintln(os.Stderr, "  = note: You can inspect and emit C99 code directly using: vira cgen <file.vir>")
-			os.Exit(1)
+			if compiler == "" {
+				fmt.Fprintf(os.Stderr, "error: cross-compiling to Windows from %s requires a MinGW-w64 C compiler, which was not found in PATH\n", goRuntime.GOOS)
+				fmt.Fprintln(os.Stderr, "  = searched: x86_64-w64-mingw32-gcc, x86_64-w64-mingw32-clang")
+				fmt.Fprintln(os.Stderr, "  = help (Ubuntu/Debian): sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64")
+				fmt.Fprintln(os.Stderr, "  = help (Fedora/RHEL)  : sudo dnf install -y mingw64-gcc")
+				fmt.Fprintln(os.Stderr, "  = help (Arch Linux)   : sudo pacman -S mingw-w64-gcc")
+				fmt.Fprintln(os.Stderr, "  = help (macOS Brew)   : brew install mingw-w64")
+				os.Exit(1)
+			}
+		} else {
+			candidates := []string{"gcc", "clang", "cc", "tcc"}
+			if goRuntime.GOOS == "darwin" {
+				candidates = []string{"clang", "gcc", "cc", "tcc"}
+			}
+			for _, cand := range candidates {
+				if _, err := exec.LookPath(cand); err == nil {
+					compiler = cand
+					break
+				}
+			}
+			if compiler == "" {
+				if home, err := os.UserHomeDir(); err == nil {
+					cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
+					if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+						compiler = cand
+					}
+				}
+			}
+			if compiler == "" {
+				for _, cand := range []string{`C:\w64devkit\bin\gcc.exe`, `C:\msys64\ucrt64\bin\gcc.exe`, `C:\msys64\mingw64\bin\gcc.exe`} {
+					if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+						compiler = cand
+						break
+					}
+				}
+			}
+			if compiler == "" {
+				fmt.Fprintln(os.Stderr, "error: no C99 backend compiler found in PATH (searched: gcc, clang, cc, tcc)")
+				fmt.Fprintln(os.Stderr, "  = help: Install GCC (MinGW-w64 or w64devkit) or Clang (LLVM) and add it to your PATH.")
+				fmt.Fprintln(os.Stderr, "  = note: You can inspect and emit C99 code directly using: vira cgen <file.vir>")
+				os.Exit(1)
+			}
 		}
 	}
 
 	archFlag := "-march=native"
+	if isCross {
+		// When cross-compiling to another OS/machine, avoid host-CPU-specific instructions
+		// (like AVX-512 on a Linux server) that could fault on the target machine.
+		archFlag = "-march=x86-64"
+	}
 
-	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths()
+	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths(targetOS)
 	if os.Getenv("VIRA_NO_RAYLIB") == "1" || os.Getenv("VIRA_GUI") == "native" || os.Getenv("VIRA_GUI") == "x11" {
 		hasRaylib = false
 		staticRaylibPath = ""
@@ -1116,10 +1181,10 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 
 	if opts.shared {
 		staticFlags = append(staticFlags, "-shared")
-		if goRuntime.GOOS != "windows" {
+		if targetOS != "windows" {
 			staticFlags = append(staticFlags, "-fPIC")
 		}
-	} else if goRuntime.GOOS == "windows" {
+	} else if targetOS == "windows" {
 		staticFlags = append(staticFlags, "-static")
 		if opts.guiApp {
 			staticFlags = append(staticFlags, "-mwindows")
@@ -1132,7 +1197,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 			}
 		}
 		extraLibs = append(extraLibs, "-lopengl32", "-lgdi32", "-luser32", "-lwinmm", "-lws2_32")
-	} else if goRuntime.GOOS == "linux" {
+	} else if targetOS == "linux" {
 		extraLibs = append(extraLibs, "-lX11")
 		if hasRaylib {
 			if staticRaylibPath != "" {
@@ -1142,13 +1207,16 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 			}
 		}
 		extraLibs = append(extraLibs, "-lm")
-	} else if goRuntime.GOOS == "darwin" {
+	} else if targetOS == "darwin" {
 		extraLibs = append(extraLibs, "-framework", "Cocoa", "-framework", "CoreGraphics")
 	}
 
 	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
 	baseIncludes = append(baseIncludes, libFlags...)
-	if hasRaylib && goRuntime.GOOS != "darwin" {
+	if targetOS == "windows" {
+		baseIncludes = append(baseIncludes, "-D_WIN32_WINNT=0x0601")
+	}
+	if hasRaylib && targetOS != "darwin" {
 		baseIncludes = append(baseIncludes, "-DVIRA_USE_RAYLIB")
 	}
 	if opts.quietRT {
@@ -1156,12 +1224,12 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	}
 
 	waFlags := []string{}
-	if goRuntime.GOOS != "darwin" && strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
+	if targetOS != "darwin" && strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
 		waFlags = append(waFlags, "-Wa,-muse-unaligned-vector-move")
 	}
 
 	appendCFile := func(targetFlags *[]string) {
-		if goRuntime.GOOS == "darwin" {
+		if targetOS == "darwin" {
 			*targetFlags = append(*targetFlags, "-x", "objective-c", cFile, "-o", binFile)
 		} else {
 			*targetFlags = append(*targetFlags, cFile, "-o", binFile)
@@ -1207,11 +1275,19 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	return compiler, modeDesc
 }
 
-func resolveExternalLibPaths() ([]string, []string, bool, string) {
+func resolveExternalLibPaths(targetOS string) ([]string, []string, bool, string) {
 	var incPaths []string
 	var libPaths []string
 	hasRaylib := false
 	staticRaylibPath := ""
+	isCross := targetOS != goRuntime.GOOS
+
+	// When cross-compiling to another OS, do not inject host system include/lib paths
+	// (such as /usr/include or /usr/lib/x86_64-linux-gnu), which would break cross-compilers
+	// like x86_64-w64-mingw32-gcc.
+	if isCross {
+		return incPaths, libPaths, false, ""
+	}
 
 	home, _ := os.UserHomeDir()
 	exe, _ := os.Executable()
@@ -1229,7 +1305,7 @@ func resolveExternalLibPaths() ([]string, []string, bool, string) {
 			filepath.Join(home, ".vex"),
 		)
 	}
-	if goRuntime.GOOS != "windows" {
+	if targetOS != "windows" {
 		searchRoots = append(searchRoots,
 			"/usr/local",
 			"/usr",
@@ -1250,7 +1326,7 @@ func resolveExternalLibPaths() ([]string, []string, bool, string) {
 		if !seenLib[p] {
 			seenLib[p] = true
 			libPaths = append(libPaths, "-L"+p)
-			if goRuntime.GOOS == "linux" {
+			if targetOS == "linux" {
 				libPaths = append(libPaths, "-Wl,-rpath,"+p)
 			}
 		}

@@ -1,0 +1,874 @@
+module main
+
+// ============================================================================
+// Vira Native GUI: Qwen 2.5 (0.5B-Instruct) GGUF v3 Interactive Chat Studio
+// ============================================================================
+// Combines the 100% Pure-Vira 24-layer Qwen 2.5 GGUF v3 LLM inference engine
+// (`43_qwen2_5_gguf_chat_inference.vir`) with Vira's non-blocking frame-driven
+// native desktop GUI architecture (`38_gui_remote_url_image_loading.vir`).
+//
+// Key Features:
+//   1. Non-Blocking Frame-by-Frame Layer Loader: Streams all 24 Qwen2 transformer
+//      layers (`Q4_0`/`Q8_0`/`F32` + QKV biases) 1 layer per frame with a live
+//      progress bar so the 60 FPS GUI window never freezes.
+//   2. Live Token-by-Token GUI Streaming: Prefills ChatML tokens and generates
+//      autoregressive tokens 1 step per frame, rendering each decoded BPE token
+//      live onto the conversation canvas with real-time `tok/s` telemetry.
+//   3. Interactive Controls: Editable ChatML System & User prompts, Quick Prompt
+//      presets, Temperature & Max-Tokens sliders, live CPU/GPU Compute Offload
+//      toggle (`gpu_set_enabled`), and sliding-window KV Cache inspection/reset.
+// ============================================================================
+
+import os
+import time
+import math
+import exec
+
+struct Qwen2Metadata {
+mut:
+	version     int
+	n_tensors   int
+	n_kv        int
+	arch        string
+	name        string
+	n_layers    int
+	dim         int
+	ffn_dim     int
+	n_heads     int
+	n_kv_heads  int
+	rope_base   f32
+	rms_eps     f32
+	bos_id      int
+	eos_id      int
+	im_start_id int
+	im_end_id   int
+	newline_id  int
+}
+
+fn read_u32_le(buf []u8, offset int) int {
+	b0 := int(buf[offset])
+	b1 := int(buf[offset + 1])
+	b2 := int(buf[offset + 2])
+	b3 := int(buf[offset + 3])
+	return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn read_u64_le_as_int(buf []u8, offset int) int {
+	return read_u32_le(buf, offset)
+}
+
+fn read_f32_le(buf []u8, offset int) f32 {
+	bits := read_u32_le(buf, offset)
+	sign := (bits >> 31) & 1
+	exp := (bits >> 23) & 255
+	mant := bits & 8388607
+	if exp == 0 && mant == 0 {
+		return f32(0.0)
+	}
+	mut m := 1.0 + (f64(mant) / 8388608.0)
+	mut e := exp - 127
+	mut scale := 1.0
+	if e > 0 {
+		for e > 0 {
+			scale = scale * 2.0
+			e -= 1
+		}
+	} else if e < 0 {
+		for e < 0 {
+			scale = scale * 0.5
+			e += 1
+		}
+	}
+	mut res := m * scale
+	if sign == 1 {
+		res = -res
+	}
+	return f32(res)
+}
+
+fn read_gguf_string(buf []u8, offset int) string {
+	slen := read_u64_le_as_int(buf, offset)
+	start := offset + 8
+	if slen <= 0 || start + slen > buf.len {
+		return ''
+	}
+	sub := buf.slice(start, start + slen)
+	return sub.to_string()
+}
+
+fn skip_gguf_value(buf []u8, offset int, vtype int) int {
+	if vtype == 0 || vtype == 1 || vtype == 7 {
+		return offset + 1
+	}
+	if vtype == 2 || vtype == 3 {
+		return offset + 2
+	}
+	if vtype == 4 || vtype == 5 || vtype == 6 {
+		return offset + 4
+	}
+	if vtype == 10 || vtype == 11 || vtype == 12 {
+		return offset + 8
+	}
+	if vtype == 8 {
+		slen := read_u64_le_as_int(buf, offset)
+		return offset + 8 + slen
+	}
+	if vtype == 9 {
+		elem_type := read_u32_le(buf, offset)
+		elem_count := read_u64_le_as_int(buf, offset + 4)
+		mut cur := offset + 12
+		if elem_type == 0 || elem_type == 1 || elem_type == 7 {
+			return cur + elem_count
+		}
+		if elem_type == 2 || elem_type == 3 {
+			return cur + (elem_count * 2)
+		}
+		if elem_type == 4 || elem_type == 5 || elem_type == 6 {
+			return cur + (elem_count * 4)
+		}
+		if elem_type == 10 || elem_type == 11 || elem_type == 12 {
+			return cur + (elem_count * 8)
+		}
+		mut i := 0
+		for i < elem_count {
+			cur = skip_gguf_value(buf, cur, elem_type)
+			i += 1
+		}
+		return cur
+	}
+	return offset + 4
+}
+
+fn hash_token_str(s string) int {
+	mut h := 5381
+	mut i := 0
+	for i < s.len {
+		b := s.byte_at(i) or { 0 }
+		h = ((h * 33) + b) & 2147483647
+		i += 1
+	}
+	return h & 65535
+}
+
+fn parse_qwen2_gguf(raw []u8, mut meta Qwen2Metadata, mut vocab []string, mut bucket_head []int, mut next_in_bucket []int) bool {
+	if raw.len < 24 {
+		return false
+	}
+	magic := read_u32_le(raw, 0)
+	if magic != 1179993927 {
+		return false
+	}
+	meta.version = read_u32_le(raw, 4)
+	meta.n_tensors = read_u64_le_as_int(raw, 8)
+	meta.n_kv = read_u64_le_as_int(raw, 16)
+
+	mut b_init := 0
+	for b_init < 65536 {
+		bucket_head.push(-1)
+		b_init += 1
+	}
+
+	mut cursor := 24
+	mut k := 0
+	for k < meta.n_kv {
+		key := read_gguf_string(raw, cursor)
+		cursor = cursor + 8 + key.len
+		vtype := read_u32_le(raw, cursor)
+		cursor = cursor + 4
+
+		if key == 'general.architecture' && vtype == 8 {
+			meta.arch = read_gguf_string(raw, cursor)
+			cursor = skip_gguf_value(raw, cursor, vtype)
+		} else if key == 'general.name' && vtype == 8 {
+			meta.name = read_gguf_string(raw, cursor)
+			cursor = skip_gguf_value(raw, cursor, vtype)
+		} else if key.ends_with('.block_count') && vtype == 4 {
+			meta.n_layers = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.embedding_length') && vtype == 4 {
+			meta.dim = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.feed_forward_length') && vtype == 4 {
+			meta.ffn_dim = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.attention.head_count') && vtype == 4 {
+			meta.n_heads = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.attention.head_count_kv') && vtype == 4 {
+			meta.n_kv_heads = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.rope.freq_base') && vtype == 6 {
+			meta.rope_base = read_f32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key.ends_with('.attention.layer_norm_rms_epsilon') && vtype == 6 {
+			meta.rms_eps = read_f32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key == 'tokenizer.ggml.bos_token_id' && vtype == 4 {
+			meta.bos_id = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key == 'tokenizer.ggml.eos_token_id' && vtype == 4 {
+			meta.eos_id = read_u32_le(raw, cursor)
+			cursor = cursor + 4
+		} else if key == 'tokenizer.ggml.tokens' && vtype == 9 {
+			elem_type := read_u32_le(raw, cursor)
+			elem_count := read_u64_le_as_int(raw, cursor + 4)
+			cursor = cursor + 12
+			if elem_type == 8 {
+				mut t_idx := 0
+				for t_idx < elem_count {
+					tok_str := read_gguf_string(raw, cursor)
+					cursor = cursor + 8 + tok_str.len
+					if tok_str == '<|im_start|>' {
+						meta.im_start_id = t_idx
+					} else if tok_str == '<|im_end|>' {
+						meta.im_end_id = t_idx
+					}
+					b := hash_token_str(tok_str)
+					prev_head := bucket_head[b]
+					next_in_bucket.push(prev_head)
+					bucket_head.set(b, t_idx)
+					vocab.push(tok_str)
+					t_idx += 1
+				}
+			}
+		} else {
+			cursor = skip_gguf_value(raw, cursor, vtype)
+		}
+		k += 1
+	}
+
+	return true
+}
+
+fn lookup_token_id(target string, vocab []string, bucket_head []int, next_in_bucket []int) int {
+	b := hash_token_str(target)
+	mut cur := bucket_head[b]
+	for cur >= 0 {
+		if vocab[cur] == target {
+			return cur
+		}
+		cur = next_in_bucket[cur]
+	}
+	return -1
+}
+
+fn bpe_encode_segment(text string, gpt2_space string, gpt2_newline string, vocab []string, bucket_head []int, next_in_bucket []int, mut out_ids []int) {
+	if text.len == 0 {
+		return
+	}
+	pre := text.replace(' ', gpt2_space).replace('\n', gpt2_newline)
+	mut pos := 0
+	for pos < pre.len {
+		mut max_l := pre.len - pos
+		if max_l > 24 {
+			max_l = 24
+		}
+		mut matched_id := -1
+		mut matched_len := 1
+		mut l := max_l
+		for l >= 1 {
+			sub := pre.slice(pos, pos + l)
+			tid := lookup_token_id(sub, vocab, bucket_head, next_in_bucket)
+			if tid >= 0 {
+				matched_id = tid
+				matched_len = l
+				break
+			}
+			l -= 1
+		}
+		if matched_id >= 0 {
+			out_ids.push(matched_id)
+		}
+		pos = pos + matched_len
+	}
+}
+
+fn encode_qwen2_chatml_turn(sys_prompt string, user_prompt string, include_sys bool, meta Qwen2Metadata, gpt2_space string, gpt2_newline string, vocab []string, bucket_head []int, next_in_bucket []int) []int {
+	mut ids := []int{}
+	if include_sys {
+		ids.push(meta.im_start_id)
+		bpe_encode_segment('system\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+		bpe_encode_segment(sys_prompt, gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+		ids.push(meta.im_end_id)
+		ids.push(meta.newline_id)
+	}
+	ids.push(meta.im_start_id)
+	bpe_encode_segment('user\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+	bpe_encode_segment(user_prompt, gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+	ids.push(meta.im_end_id)
+	ids.push(meta.newline_id)
+	ids.push(meta.im_start_id)
+	bpe_encode_segment('assistant\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+	return ids
+}
+
+fn decode_qwen2_token(raw_tok string, gpt2_space string, gpt2_newline string, gpt2_tab string) string {
+	return raw_tok.replace(gpt2_space, ' ').replace(gpt2_newline, ' ').replace(gpt2_tab, ' ')
+}
+
+fn load_gguf_or_zeros(path string, name string, rows int, cols int) tensor[f32] {
+	t := gguf_load_tensor(path, name) or {
+		return tensor_fill(rows, cols, 0.0)
+	}
+	return t
+}
+
+fn load_output_weight(path string, tok_emb tensor[f32]) tensor[f32] {
+	t := gguf_load_tensor(path, 'output.weight') or {
+		return tok_emb.clone()
+	}
+	return t
+}
+
+fn load_gguf_bias_or_zeros(path string, name string, dim int) tensor[f32] {
+	t := gguf_load_tensor(path, name) or {
+		return tensor_fill(1, dim, 0.0)
+	}
+	return t
+}
+
+fn shift_kv_cache_window(
+	mut k_caches []tensor[f32],
+	mut v_caches []tensor[f32],
+	n_layers int,
+	keep_prefix int,
+	kv_pos int,
+	shift_by int
+) int {
+	if shift_by <= 0 || keep_prefix + shift_by >= kv_pos {
+		return keep_prefix
+	}
+	new_kv_pos := kv_pos - shift_by
+	arena {
+		mut l := 0
+		for l < n_layers {
+			mut r := keep_prefix
+			for r < new_kv_pos {
+				src_r := r + shift_by
+				k_row := k_caches[l].slice_rows(src_r, src_r + 1)
+				v_row := v_caches[l].slice_rows(src_r, src_r + 1)
+				k_caches[l].copy_row(r, k_row)
+				v_caches[l].copy_row(r, v_row)
+				r += 1
+			}
+			l += 1
+		}
+	}
+	return new_kv_pos
+}
+
+fn qwen2_forward_step(
+	token_id int,
+	pos int,
+	meta Qwen2Metadata,
+	tok_emb tensor[f32],
+	l_an []tensor[f32],
+	l_wq []tensor[f32],
+	l_bq []tensor[f32],
+	l_wk []tensor[f32],
+	l_bk []tensor[f32],
+	l_wv []tensor[f32],
+	l_bv []tensor[f32],
+	l_wo []tensor[f32],
+	l_fn []tensor[f32],
+	l_w_gate []tensor[f32],
+	l_w_up []tensor[f32],
+	l_w_down []tensor[f32],
+	out_norm tensor[f32],
+	out_weight tensor[f32],
+	mut k_caches []tensor[f32],
+	mut v_caches []tensor[f32],
+	compute_logits bool
+) tensor[f32] {
+	head_dim := meta.dim / meta.n_heads
+	kv_dim := meta.n_kv_heads * head_dim
+	kv_mul := meta.n_heads / meta.n_kv_heads
+	scale := f32(1.0 / math.sqrt(f64(head_dim)))
+	seq_len := pos + 1
+
+	mut x := tensor_embedding(tok_emb, token_id)
+
+	mut l := 0
+	for l < meta.n_layers {
+		arena {
+			xn := tensor_rmsnorm(x, l_an[l], meta.rms_eps)
+
+			q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+			k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+			v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+
+			q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
+			k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
+			k_flat := k_heads.reshape_2d(1, kv_dim)
+
+			k_caches[l].copy_row(pos, k_flat)
+			v_caches[l].copy_row(pos, v)
+
+			attn_out := tensor_fill(meta.n_heads, head_dim, 0.0)
+			mut kv_h := 0
+			for kv_h < meta.n_kv_heads {
+				q_group := q_heads.slice_rows(kv_h * kv_mul, (kv_h + 1) * kv_mul)
+
+				k_head := tensor_fill(seq_len, head_dim, 0.0)
+				v_head := tensor_fill(seq_len, head_dim, 0.0)
+				kv_col_base := kv_h * head_dim
+				mut t := 0
+				for t < seq_len {
+					mut d := 0
+					for d < head_dim {
+						k_head.set(t, d, k_caches[l].get(t, kv_col_base + d))
+						v_head.set(t, d, v_caches[l].get(t, kv_col_base + d))
+						d += 1
+					}
+					t += 1
+				}
+
+				scores := tensor_scale(q_group.linear(k_head), scale)
+				probs := tensor_softmax(scores)
+				group_ctx := probs @ v_head
+
+				mut gh := 0
+				for gh < kv_mul {
+					q_h := (kv_h * kv_mul) + gh
+					mut d := 0
+					for d < head_dim {
+						attn_out.set(q_h, d, group_ctx.get(gh, d))
+						d += 1
+					}
+					gh += 1
+				}
+				kv_h += 1
+			}
+
+			attn_flat := attn_out.reshape_2d(1, meta.dim)
+			attn_proj := attn_flat.gpu_linear(l_wo[l])
+			x2 := x + attn_proj
+
+			x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
+			gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
+			up := x2n.gpu_linear(l_w_up[l])
+			ffn_hidden := tensor_elemwise_mul(gate, up)
+			down := ffn_hidden.gpu_linear(l_w_down[l])
+			x_next := x2 + down
+			x.copy_row(0, x_next)
+		}
+		l += 1
+	}
+
+	if !compute_logits {
+		return tensor_fill(1, 1, 0.0)
+	}
+
+	xf := tensor_rmsnorm(x, out_norm, meta.rms_eps)
+	logits := xf.gpu_linear(out_weight)
+	return logits
+}
+
+fn main() {
+	os.set_quiet_rt(true)
+	gui_init(1040, 740, 'Vira AI Studio - Qwen 2.5 (0.5B-Instruct) GGUF v3 Live Chat')
+	gui_set_target_fps(60)
+
+	// Model & Prompt Configuration
+	mut hf_url := 'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_0.gguf'
+	mut model_path := 'models/qwen2.5-0.5b-instruct-q4_0.gguf'
+	mut sys_prompt := 'You are Qwen, created by Alibaba Cloud. You are a concise, helpful assistant.'
+	mut user_prompt := 'What is 25 * 4? Answer briefly.'
+	mut temperature := 0.0f32
+	mut max_tokens_f := 64.0f32
+	max_context := 512
+	mut use_gpu := true
+
+	// Engine State Machine:
+	//   0 = Unloaded (Idle)
+	//   1 = Checking/Downloading & Parsing 6.5 MB GGUF Header + 151,936-Token Vocab
+	//   2 = Streaming 24 Transformer Layers Frame-by-Frame (Non-Blocking Progress)
+	//   3 = Model Ready (Waiting for User Prompt)
+	//   4 = Prefilling ChatML Prompt Tokens Frame-by-Frame
+	//   5 = Streaming Autoregressive Token Generation Frame-by-Frame
+	//   6 = Error State
+	mut engine_state := 0
+	mut auto_start_load := os.exists(model_path)
+	mut frame_count := 0
+
+	mut status_msg := 'Ready to load Qwen2.5-0.5B-Instruct GGUF v3'
+	mut progress_pct := 0.0f32
+	mut load_layer_idx := 0
+
+	// GGUF Model Weights & Tokenizer State
+	mut meta := Qwen2Metadata{
+		version:     3,
+		n_tensors:   290,
+		n_kv:        26,
+		arch:        'qwen2',
+		name:        'qwen2.5-0.5b-instruct',
+		n_layers:    24,
+		dim:         896,
+		ffn_dim:     4864,
+		n_heads:     14,
+		n_kv_heads:  2,
+		rope_base:   f32(1000000.0),
+		rms_eps:     f32(0.000001),
+		bos_id:      151643,
+		eos_id:      151645,
+		im_start_id: 151644,
+		im_end_id:   151645,
+		newline_id:  198,
+	}
+
+	mut vocab := []string{}
+	mut bucket_head := []int{}
+	mut next_in_bucket := []int{}
+
+	// base_weights[0] = token_embd.weight, [1] = output_norm.weight, [2] = output.weight
+	mut base_weights := []tensor[f32]{}
+
+	mut l_an := []tensor[f32]{}
+	mut l_wq := []tensor[f32]{}
+	mut l_bq := []tensor[f32]{}
+	mut l_wk := []tensor[f32]{}
+	mut l_bk := []tensor[f32]{}
+	mut l_wv := []tensor[f32]{}
+	mut l_bv := []tensor[f32]{}
+	mut l_wo := []tensor[f32]{}
+	mut l_fn := []tensor[f32]{}
+	mut l_w_gate := []tensor[f32]{}
+	mut l_w_up := []tensor[f32]{}
+	mut l_w_down := []tensor[f32]{}
+	mut k_caches := []tensor[f32]{}
+	mut v_caches := []tensor[f32]{}
+
+	// GPT-2 Byte-Level BPE Token Markers
+	sp_bytes := []u8{196, 160}
+	nl_bytes := []u8{196, 138}
+	tb_bytes := []u8{196, 137}
+	gpt2_space := sp_bytes.to_string()
+	gpt2_newline := nl_bytes.to_string()
+	gpt2_tab := tb_bytes.to_string()
+
+	// Conversation & Streaming Generation State
+	mut kv_pos := 0
+	mut turn_tokens := []int{}
+	mut prefill_idx := 0
+	mut gen_steps := 0
+	mut next_token := 151645
+	mut gen_start_ms := i64(0)
+	mut prefill_start_ms := i64(0)
+	mut last_prefill_ms := i64(0)
+	mut last_tok_per_sec := 0
+	mut turns_completed := 0
+
+	// Chat Transcript History (displayed in the right-hand Chat Canvas)
+	mut chat_user_1 := 'No prompt sent yet.'
+	mut chat_reply_1 := 'Load the model and click "Send & Stream Reply" to run 24-layer Qwen 2.5 inference.'
+	mut chat_user_2 := ''
+	mut chat_reply_2 := ''
+
+	for !gui_should_close() {
+		frame_count += 1
+		if auto_start_load && frame_count == 2 && engine_state == 0 {
+			auto_start_load = false
+			engine_state = 1
+		}
+
+		// ====================================================================
+		// NON-BLOCKING FRAME-BY-FRAME STATE MACHINE (60 FPS Event Loop)
+		// ====================================================================
+		if engine_state == 1 {
+			status_msg = 'Reading GGUF v3 Header & Indexing 151,936 ChatML Tokens...'
+			progress_pct = 0.05f32
+
+			if !os.exists(model_path) {
+				if !os.is_dir('models') {
+					_ := os.mkdir_all('models', 493) or { false }
+				}
+				status_msg = 'Downloading Qwen2.5-0.5B-Instruct GGUF from Hugging Face...'
+				mut dl_cmd := exec.Command.new('curl', ['-L', '-s', '-o', model_path, hf_url])
+				_ := dl_cmd.run() or { -1 }
+			}
+
+			if os.exists(model_path) {
+				raw_hdr := os.read_bytes_head(model_path, 6500000) or { []u8{} }
+				if raw_hdr.len > 24 && parse_qwen2_gguf(raw_hdr, mut meta, mut vocab, mut bucket_head, mut next_in_bucket) {
+					base_weights.push(load_gguf_or_zeros(model_path, 'token_embd.weight', 151936, meta.dim))
+					base_weights.push(load_gguf_or_zeros(model_path, 'output_norm.weight', 1, meta.dim))
+					base_weights.push(load_output_weight(model_path, base_weights[0]))
+					load_layer_idx = 0
+					engine_state = 2
+				} else {
+					engine_state = 6
+					status_msg = 'Failed to read GGUF header from ${model_path}'
+				}
+			} else {
+				engine_state = 6
+				status_msg = 'Model file not found at ${model_path}'
+			}
+		} else if engine_state == 2 {
+			// Load 1 transformer block per GUI frame so the progress bar animates smoothly
+			if load_layer_idx < meta.n_layers {
+				l := load_layer_idx
+				head_dim := meta.dim / meta.n_heads
+				kv_dim := meta.n_kv_heads * head_dim
+
+				l_an.push(load_gguf_or_zeros(model_path, 'blk.${l}.attn_norm.weight', 1, meta.dim))
+				l_wq.push(load_gguf_or_zeros(model_path, 'blk.${l}.attn_q.weight', meta.dim, meta.dim))
+				l_bq.push(load_gguf_bias_or_zeros(model_path, 'blk.${l}.attn_q.bias', meta.dim))
+				l_wk.push(load_gguf_or_zeros(model_path, 'blk.${l}.attn_k.weight', kv_dim, meta.dim))
+				l_bk.push(load_gguf_bias_or_zeros(model_path, 'blk.${l}.attn_k.bias', kv_dim))
+				l_wv.push(load_gguf_or_zeros(model_path, 'blk.${l}.attn_v.weight', kv_dim, meta.dim))
+				l_bv.push(load_gguf_bias_or_zeros(model_path, 'blk.${l}.attn_v.bias', kv_dim))
+				l_wo.push(load_gguf_or_zeros(model_path, 'blk.${l}.attn_output.weight', meta.dim, meta.dim))
+				l_fn.push(load_gguf_or_zeros(model_path, 'blk.${l}.ffn_norm.weight', 1, meta.dim))
+				l_w_gate.push(load_gguf_or_zeros(model_path, 'blk.${l}.ffn_gate.weight', meta.ffn_dim, meta.dim))
+				l_w_up.push(load_gguf_or_zeros(model_path, 'blk.${l}.ffn_up.weight', meta.ffn_dim, meta.dim))
+				l_w_down.push(load_gguf_or_zeros(model_path, 'blk.${l}.ffn_down.weight', meta.dim, meta.ffn_dim))
+
+				k_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+				v_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+
+				load_layer_idx += 1
+				progress_pct = f32(load_layer_idx) / f32(meta.n_layers)
+				status_msg = 'Loading Layer ${load_layer_idx}/${meta.n_layers} (Q4_0/Q8_0 + QKV Biases)...'
+			} else {
+				progress_pct = 1.0f32
+				engine_state = 3
+				status_msg = 'Model Ready (${meta.n_layers} Layers, ${vocab.len} Vocab Tokens)'
+			}
+		} else if engine_state == 4 {
+			// Prefill 1 prompt token per GUI frame
+			if prefill_idx < turn_tokens.len && kv_pos < max_context - 1 {
+				tid := turn_tokens[prefill_idx]
+				is_last := prefill_idx == (turn_tokens.len - 1)
+				logits := qwen2_forward_step(
+					tid, kv_pos, meta, base_weights[0],
+					l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+					l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+					mut k_caches, mut v_caches, is_last
+				)
+				if is_last {
+					next_token = int(sample_token(logits, temperature))
+				}
+				kv_pos += 1
+				prefill_idx += 1
+				progress_pct = f32(prefill_idx) / f32(turn_tokens.len)
+				status_msg = 'Prefilling ChatML Prompt: ${prefill_idx}/${turn_tokens.len} tokens...'
+			} else {
+				last_prefill_ms = time.now_ms() - prefill_start_ms
+				gen_start_ms = time.now_ms()
+				gen_steps = 0
+				engine_state = 5
+				status_msg = 'Streaming Qwen 2.5 Autoregressive Tokens...'
+			}
+		} else if engine_state == 5 {
+			// Generate 1 autoregressive token per GUI frame & stream to screen
+			max_new_tokens := int(max_tokens_f)
+			if gen_steps < max_new_tokens && kv_pos < max_context - 1 && next_token != meta.eos_id && next_token != meta.im_end_id && next_token != meta.bos_id {
+				if next_token >= 0 && next_token < vocab.len {
+					piece := decode_qwen2_token(vocab[next_token], gpt2_space, gpt2_newline, gpt2_tab)
+					if turns_completed == 1 {
+						chat_reply_1 = '${chat_reply_1}${piece}'
+					} else {
+						chat_reply_2 = '${chat_reply_2}${piece}'
+					}
+				}
+				logits := qwen2_forward_step(
+					next_token, kv_pos, meta, base_weights[0],
+					l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+					l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+					mut k_caches, mut v_caches, true
+				)
+				next_token = int(sample_token(logits, temperature))
+				kv_pos += 1
+				gen_steps += 1
+				progress_pct = f32(gen_steps) / f32(max_new_tokens)
+
+				mut elapsed_ms := time.now_ms() - gen_start_ms
+				if elapsed_ms <= 0 {
+					elapsed_ms = 1
+				}
+				last_tok_per_sec = (gen_steps * 1000) / int(elapsed_ms)
+				status_msg = 'Streaming Token ${gen_steps}/${max_new_tokens} (~${last_tok_per_sec} tok/s)...'
+			} else {
+				// Feed closing `<|im_end|>\n` into KV cache for multi-turn continuity
+				if kv_pos + 2 < max_context {
+					_ := qwen2_forward_step(
+						meta.im_end_id, kv_pos, meta, base_weights[0],
+						l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+						l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+						mut k_caches, mut v_caches, false
+					)
+					kv_pos += 1
+					_ := qwen2_forward_step(
+						meta.newline_id, kv_pos, meta, base_weights[0],
+						l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+						l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+						mut k_caches, mut v_caches, false
+					)
+					kv_pos += 1
+				}
+				progress_pct = 1.0f32
+				engine_state = 3
+				status_msg = 'Generation Complete (${gen_steps} tokens @ ~${last_tok_per_sec} tok/s)'
+			}
+		}
+
+		// ====================================================================
+		// DECLARATIVE GUI RENDERING (Catppuccin Mocha Dark Theme)
+		// ====================================================================
+		gui_begin()
+		gui_clear(0x11111B)
+
+		// Top Header Bar
+		gui_draw_rect(0, 0, 1040, 56, 0x1E1E2E)
+		gui_draw_text('Vira AI Studio — Qwen 2.5 (0.5B-Instruct) GGUF v3 Chat', 24, 16, 20, 0xCDD6F4)
+		if engine_state == 3 {
+			gui_draw_badge(620, 16, 'MODEL READY (24 LAYERS)', 0x2D4A3E, 0xA6E3A1)
+		} else if engine_state == 1 || engine_state == 2 {
+			gui_draw_badge(620, 16, 'LOADING GGUF TENSORS', 0x45475A, 0xF9E2AF)
+		} else if engine_state == 4 || engine_state == 5 {
+			gui_draw_badge(620, 16, 'STREAMING INFERENCE', 0x313244, 0x89B4FA)
+		} else if engine_state == 6 {
+			gui_draw_badge(620, 16, 'ERROR', 0x4A1E29, 0xF38BA8)
+		} else {
+			gui_draw_badge(620, 16, 'UNLOADED', 0x313244, 0x6C7086)
+		}
+
+		if use_gpu && gpu_is_available() {
+			gui_draw_badge(860, 16, 'GPU ACCEL', 0x2D4A3E, 0xA6E3A1)
+		} else {
+			gui_draw_badge(860, 16, 'CPU SIMD', 0x313244, 0x89B4FA)
+		}
+
+		// ====================================================================
+		// LEFT COLUMN: Model Loader, Sampling Controls & Prompt Input
+		// ====================================================================
+		gui_vstack_begin(24, 72, 460, 12)
+		gui_card_begin('GGUF v3 Model & Compute Configuration', 460)
+		gui_lbl('Local GGUF Model Path:')
+		model_path = gui_input('Model Path', model_path)
+		gui_spacing(4)
+
+		gui_lbl('System Prompt (ChatML <|im_start|>system):')
+		sys_prompt = gui_input('System Prompt', sys_prompt)
+		gui_spacing(6)
+
+		prev_gpu := use_gpu
+		use_gpu = gui_check('Enable GPU Compute Offload (Vulkan / Metal / CUDA)', use_gpu)
+		if use_gpu != prev_gpu {
+			gpu_set_enabled(use_gpu)
+		}
+
+		gui_spacing(4)
+		temperature = gui_slide('Temperature: ', '', temperature, 0.0f32, 1.2f32)
+		max_tokens_f = gui_slide('Max New Tokens: ', ' tok', max_tokens_f, 16.0f32, 160.0f32)
+		gui_card_end()
+
+		gui_card_begin('Interactive Prompt & Quick Presets', 460)
+		gui_lbl('User Message (ChatML <|im_start|>user):')
+		user_prompt = gui_input('Enter your prompt...', user_prompt)
+		gui_spacing(4)
+
+		gui_lbl('Quick Preset Prompts:')
+		gui_hstack_begin(32, 8)
+		if gui_btn('Math: 25 * 4') {
+			user_prompt = 'What is 25 * 4? Answer briefly.'
+		}
+		if gui_btn('HTML Snippet') {
+			user_prompt = 'Write a minimal HTML page about Vira.'
+		}
+		if gui_btn('Haiku') {
+			user_prompt = 'Write a short haiku about fast compilers.'
+		}
+		gui_stack_end()
+
+		gui_spacing(6)
+		gui_separator()
+		gui_spacing(4)
+
+		gui_hstack_begin(36, 10)
+		if engine_state == 0 || engine_state == 6 {
+			if gui_btn('Download & Load Model') {
+				engine_state = 1
+				progress_pct = 0.0f32
+			}
+		} else if engine_state == 3 {
+			if gui_btn('Send & Stream Reply') {
+				needed := int(max_tokens_f) + 32
+				if kv_pos > 0 && kv_pos + needed >= max_context {
+					kv_pos = shift_kv_cache_window(mut k_caches, mut v_caches, meta.n_layers, 24, kv_pos, 128)
+				}
+				include_sys := kv_pos == 0
+				turn_tokens = encode_qwen2_chatml_turn(
+					sys_prompt, user_prompt, include_sys, meta,
+					gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket
+				)
+				turns_completed += 1
+				if turns_completed == 1 {
+					chat_user_1 = '${user_prompt}'
+					chat_reply_1 = ''
+				} else {
+					if turns_completed > 2 {
+						chat_user_1 = '${chat_user_2}'
+						chat_reply_1 = '${chat_reply_2}'
+					}
+					chat_user_2 = '${user_prompt}'
+					chat_reply_2 = ''
+				}
+				prefill_idx = 0
+				prefill_start_ms = time.now_ms()
+				progress_pct = 0.0f32
+				engine_state = 4
+			}
+			if gui_btn_danger('Reset KV Cache') {
+				kv_pos = 0
+				turns_completed = 0
+				chat_user_1 = 'KV Cache reset to 0.'
+				chat_reply_1 = 'Ready for a fresh multi-turn ChatML conversation.'
+				chat_user_2 = ''
+				chat_reply_2 = ''
+				status_msg = 'KV Cache cleared (kv_pos = 0)'
+			}
+		} else {
+			gui_badge('Engine Busy (Non-Blocking)...', 0x313244, 0xF9E2AF)
+		}
+		gui_stack_end()
+		gui_card_end()
+		gui_stack_end()
+
+		// ====================================================================
+		// RIGHT COLUMN: Live Streaming Chat Transcript & Engine Telemetry
+		// ====================================================================
+		gui_vstack_begin(504, 72, 512, 12)
+		gui_card_begin('Live Streaming ChatML Transcript', 512)
+		gui_badge('TURN #1', 0x313244, 0x89B4FA)
+		gui_lbl('User: ${chat_user_1}')
+		gui_lbl('Qwen2.5: ${chat_reply_1}')
+
+		if chat_user_2.len > 0 {
+			gui_spacing(6)
+			gui_separator()
+			gui_spacing(4)
+			gui_badge('LATEST TURN', 0x2D4A3E, 0xA6E3A1)
+			gui_lbl('User: ${chat_user_2}')
+			gui_lbl('Qwen2.5: ${chat_reply_2}')
+		}
+		gui_card_end()
+
+		gui_card_begin('Transformer & KV-Cache Diagnostic Telemetry', 512)
+		gui_lbl('Status: ${status_msg}')
+		gui_spacing(4)
+		gui_progress(progress_pct)
+		gui_spacing(6)
+		gui_lbl('Architecture: ${meta.arch} (${meta.name}, ${meta.n_layers} layers, dim=${meta.dim})')
+		gui_lbl('Attention: ${meta.n_heads} Q Heads / ${meta.n_kv_heads} KV Heads (GQA 7:1, RoPE=1,000,000)')
+		gui_lbl('KV Cache Position: ${kv_pos} / ${max_context} tokens')
+		gui_lbl('Last Prefill Latency: ${last_prefill_ms} ms | Throughput: ~${last_tok_per_sec} tok/s')
+		gui_lbl('Compute Backend: ${gpu_device_name()} (${gpu_backend_name()})')
+		gui_card_end()
+		gui_stack_end()
+
+		gui_end()
+	}
+
+	gui_close()
+}

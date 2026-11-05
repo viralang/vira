@@ -112,6 +112,28 @@ go build -o vira ./cmd/vira       # Linux / macOS
 ./vira version
 ```
 
+### System C Compiler & Cross-Compilation Setup (Windows / Linux / macOS)
+
+Vira lowers directly to optimized C99 with hardware SIMD intrinsics. Ensure a C99 compiler is installed for your host OS, plus `mingw-w64` if you want to cross-compile standalone Windows `.exe` binaries from Linux or macOS:
+
+```bash
+# Ubuntu / Debian (Host GCC + X11/OpenGL + Windows Cross-Compiler)
+sudo apt-get update
+sudo apt-get install -y build-essential libx11-dev libgl1-mesa-dev gcc-mingw-w64-x86-64
+
+# Fedora / RHEL
+sudo dnf install -y gcc glibc-devel make libX11-devel mesa-libGL-devel mingw64-gcc
+
+# Arch Linux
+sudo pacman -S --needed base-devel libx11 mesa mingw-w64-gcc
+
+# macOS (Xcode Command Line Tools + Homebrew MinGW-w64 for Windows target builds)
+xcode-select --install
+brew install mingw-w64
+```
+
+On **Windows**, install [w64devkit](https://github.com/skeeto/w64devkit/releases), [MSYS2 MinGW-w64](https://www.msys2.org/), or LLVM (`winget install -e --id LLVM.LLVM`).
+
 ---
 
 ## 3. Toolchain & CLI Reference
@@ -134,7 +156,7 @@ vira <command> [flags] [arguments]
 | `fmt` | Format Vira source files in-place to canonical style | `vira fmt ./src` |
 | `init` | Scaffold a modern enterprise multi-package Vira project with `vira.mod`, `src/`, `tests/` | `vira init my_app` |
 | `init-gui` | Scaffold a dedicated native desktop GUI project with theme tokens, vector icon, and GUI manifest | `vira init-gui my_app` |
-| `bundle` | Package a GUI desktop app into native production bundles for macOS (`.app`), Linux, and Windows | `vira bundle --target darwin -release` |
+| `bundle` | Package a GUI desktop app into native production bundles for macOS (`.app`), Linux, and Windows | `vira bundle -target windows -prod` |
 | `add` | Add and download a package dependency (local or Git repository) | `vira add github.com/user/pkg@v1.0.0` |
 | `install` | Install and verify all dependencies declared in `vira.mod` and `vira.lock` | `vira install` |
 | `remove` | Remove a package dependency from manifest, lockfile, and cache | `vira remove github.com/user/pkg` |
@@ -145,11 +167,29 @@ vira <command> [flags] [arguments]
 
 ### Compiler Flags
 
-- `-prod`: Enables aggressive native optimizations (`-O3 -march=native -flto`).
+- `-prod`: Enables aggressive native optimizations (`-O3 -march=native -flto` on host; portable `-O3 -march=x86-64` when cross-compiling).
+- `-target <os>`: Target operating system (`linux`, `windows`, `darwin`). Automatically uses `x86_64-w64-mingw32-gcc` when targeting `windows` from Linux or macOS.
+- `-gui`: Compiles as a native desktop GUI application (suppresses the console window on Windows via `-mwindows`).
+- `-shared`: Compiles as a C-ABI dynamic shared library (`.so`, `.dll`, `.dylib`).
 - `-sanitize`: Compiles with AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (`UBSan`).
 - `-keep-c`: Preserves intermediate generated `.c` files in `build/` for auditing.
-- `-o <filename>`: Specifies the destination path for the compiled binary.
-- `-cc <compiler>`: Overrides the backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
+- `-o <filename>`: Specifies the destination path for the compiled binary (passing `-o app.exe` or `-o lib.dll` automatically infers `-target windows`).
+- `-cc <compiler>`: Overrides the backend C compiler (`gcc`, `clang`, `cc`, `tcc`, `x86_64-w64-mingw32-gcc`).
+
+### Cross-Compiling to Windows from Linux or macOS
+
+Once `gcc-mingw-w64-x86-64` (Linux) or `mingw-w64` (macOS) is installed, you can compile standalone static Windows `.exe` executables and GUI bundles directly from Linux or macOS:
+
+```bash
+# Build a standalone static Windows CLI executable (.exe)
+vira build -target windows -prod -o app.exe src/main.vir
+
+# Build a standalone Windows GUI executable (no console window)
+vira build -target windows -gui -prod -o app.exe src/main.vir
+
+# Package a complete Windows GUI distribution (.zip with .exe, icon & assets)
+vira bundle -target windows -prod
+```
 
 ---
 

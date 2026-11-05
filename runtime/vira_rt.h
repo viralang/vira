@@ -5,6 +5,20 @@
 #define _GNU_SOURCE
 #endif
 
+#ifdef _WIN32
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#if !defined(WINVER) || WINVER < 0x0600
+#undef WINVER
+#define WINVER 0x0601
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
 #include <math.h>
 #include <pthread.h>
 #include <sched.h>

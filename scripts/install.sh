@@ -204,15 +204,15 @@ if [ $CC_FOUND -eq 0 ]; then
 
     if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO_CMD" ]; then
         if [ -f /etc/debian_version ] && command -v apt-get >/dev/null 2>&1; then
-            echo "  ${CYAN}= Installing gcc, make, X11 & OpenGL development packages via apt-get...${RESET}"
+            echo "  ${CYAN}= Installing gcc, make, X11, OpenGL & MinGW-w64 cross-compiler via apt-get...${RESET}"
             $SUDO_CMD apt-get update -qq && $SUDO_CMD apt-get install -y --no-install-recommends \
-                gcc libc6-dev make libx11-dev libgl1-mesa-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev >/dev/null 2>&1 || true
+                gcc libc6-dev make libx11-dev libgl1-mesa-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev gcc-mingw-w64-x86-64 >/dev/null 2>&1 || true
         elif [ -f /etc/alpine-release ] && command -v apk >/dev/null 2>&1; then
             echo "  ${CYAN}= Installing gcc, musl, X11 & mesa dev packages via apk...${RESET}"
             $SUDO_CMD apk add --no-cache gcc musl-dev make libx11-dev mesa-dev >/dev/null 2>&1 || true
         elif command -v dnf >/dev/null 2>&1; then
-            echo "  ${CYAN}= Installing gcc, make, X11 & OpenGL dev packages via dnf...${RESET}"
-            $SUDO_CMD dnf install -y gcc glibc-devel make libX11-devel mesa-libGL-devel libXcursor-devel libXinerama-devel libXi-devel libXrandr-devel >/dev/null 2>&1 || true
+            echo "  ${CYAN}= Installing gcc, make, X11, OpenGL & MinGW-w64 packages via dnf...${RESET}"
+            $SUDO_CMD dnf install -y gcc glibc-devel make libX11-devel mesa-libGL-devel libXcursor-devel libXinerama-devel libXi-devel libXrandr-devel mingw64-gcc >/dev/null 2>&1 || true
         fi
 
         for cc in gcc clang cc tcc; do
@@ -229,14 +229,30 @@ if [ $CC_FOUND -eq 0 ]; then
         if [ "$OS" = "darwin" ]; then
             echo "    ${CYAN}Fix for macOS:${RESET} Run: xcode-select --install"
         elif [ -f /etc/debian_version ]; then
-            echo "    ${CYAN}Fix for Debian/Ubuntu:${RESET} sudo apt-get update && sudo apt-get install -y build-essential libx11-dev libgl1-mesa-dev"
+            echo "    ${CYAN}Fix for Debian/Ubuntu:${RESET} sudo apt-get update && sudo apt-get install -y build-essential libx11-dev libgl1-mesa-dev gcc-mingw-w64-x86-64"
         elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-            echo "    ${CYAN}Fix for Fedora/RHEL:${RESET} sudo dnf groupinstall \"Development Tools\" && sudo dnf install -y libX11-devel mesa-libGL-devel"
+            echo "    ${CYAN}Fix for Fedora/RHEL:${RESET} sudo dnf groupinstall \"Development Tools\" && sudo dnf install -y libX11-devel mesa-libGL-devel mingw64-gcc"
         elif [ -f /etc/arch-release ]; then
-            echo "    ${CYAN}Fix for Arch Linux:${RESET} sudo pacman -S --needed base-devel libx11 mesa raylib"
+            echo "    ${CYAN}Fix for Arch Linux:${RESET} sudo pacman -S --needed base-devel libx11 mesa raylib mingw-w64-gcc"
         elif [ -f /etc/alpine-release ]; then
             echo "    ${CYAN}Fix for Alpine Linux:${RESET} sudo apk add build-base libx11-dev mesa-dev"
         fi
+    fi
+fi
+
+# Check Windows Cross-Compiler (MinGW-w64) for `vira build -target windows` & `vira bundle -target windows`
+if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "  ${GREEN}✓ Found Windows cross-compiler:${RESET} $(command -v x86_64-w64-mingw32-gcc)"
+else
+    echo "  ${YELLOW}i Optional (Windows cross-compilation):${RESET} Install MinGW-w64 to build Windows .exe binaries from $OS:"
+    if [ "$OS" = "darwin" ]; then
+        echo "    ${CYAN}macOS:${RESET}         brew install mingw-w64"
+    elif [ -f /etc/debian_version ]; then
+        echo "    ${CYAN}Ubuntu/Debian:${RESET} sudo apt-get install -y gcc-mingw-w64-x86-64"
+    elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
+        echo "    ${CYAN}Fedora/RHEL:${RESET}   sudo dnf install -y mingw64-gcc"
+    elif [ -f /etc/arch-release ]; then
+        echo "    ${CYAN}Arch Linux:${RESET}    sudo pacman -S mingw-w64-gcc"
     fi
 fi
 
@@ -322,7 +338,9 @@ echo "${GREEN}${BOLD}  ✓ Vira was successfully installed to: $INSTALL_DIR${RES
 echo "${GREEN}${BOLD}==========================================================${RESET}"
 echo ""
 echo "${CYAN}Next steps:${RESET}"
-echo "  1. Reload shell:  ${BOLD}source ~/.bashrc${RESET} (or ${BOLD}source ~/.zshrc${RESET})"
-echo "  2. Verify:        ${BOLD}vira -h${RESET}"
-echo "  3. Run demo:      ${BOLD}vira run examples/gui_demo.vir${RESET}"
+echo "  1. Reload shell:       ${BOLD}source ~/.bashrc${RESET} (or ${BOLD}source ~/.zshrc${RESET})"
+echo "  2. Verify:             ${BOLD}vira -h${RESET}"
+echo "  3. Run demo:           ${BOLD}vira run examples/gui_demo.vir${RESET}"
+echo "  4. Build for Windows:  ${BOLD}vira build -target windows -prod -o app.exe main.vir${RESET}"
+echo "  5. Bundle GUI release: ${BOLD}vira bundle -target windows -prod${RESET}"
 echo ""

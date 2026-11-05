@@ -1691,6 +1691,8 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
 					} else if _, isSelVal := s.Value.(*ast.SelectorExpr); isSelVal {
 						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
+					} else if _, isIdentVal := s.Value.(*ast.IdentExpr); isIdentVal {
+						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
 					}
 				}
 				tmpOld := g.nextTmp("old_str")
