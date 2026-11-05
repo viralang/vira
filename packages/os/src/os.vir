@@ -60,6 +60,9 @@ fn c_dir_exists(path string) bool
 @[intrinsic: 'vira_read_file']
 fn c_read_file(path string) !string
 
+@[intrinsic: 'vira_read_file_head']
+fn c_read_file_head(path string, max_bytes int) !string
+
 @[intrinsic: 'vira_write_file']
 fn c_write_file(path string, content string) !bool
 
@@ -183,6 +186,13 @@ pub fn write_file(path string, content string) !bool {
 		return error(err)
 	}
 	return res
+}
+
+pub fn read_bytes_head(path string, max_bytes int) ![]u8 {
+	s := c_read_file_head(path, max_bytes) or {
+		return error(err)
+	}
+	return s.bytes()
 }
 
 pub fn read_bytes(path string) ![]u8 {

@@ -1625,6 +1625,72 @@ static inline vira_tensor_f32 vira_tensor_transpose_nd(vira_arena *opt_arena,
   return out;
 }
 
+static inline vira_f32 vira_tensor_f32_get(vira_tensor_f32 t, int32_t row,
+                                           int32_t col) {
+  _vira_tensor_norm_shape(&t);
+  if (row < 0 || row >= t.rows || col < 0 || col >= t.cols) {
+    fprintf(stderr,
+            "vira tensor error: .get(%d, %d) out of bounds for shape (%dx%d)\n",
+            row, col, t.rows, t.cols);
+    exit(1);
+  }
+  return t.data[(size_t)row * (size_t)t.cols + (size_t)col];
+}
+
+static inline void vira_tensor_f32_set(vira_tensor_f32 t, int32_t row,
+                                       int32_t col, vira_f32 val) {
+  _vira_tensor_norm_shape(&t);
+  if (row < 0 || row >= t.rows || col < 0 || col >= t.cols) {
+    fprintf(stderr,
+            "vira tensor error: .set(%d, %d) out of bounds for shape (%dx%d)\n",
+            row, col, t.rows, t.cols);
+    exit(1);
+  }
+  t.data[(size_t)row * (size_t)t.cols + (size_t)col] = val;
+}
+
+static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
+                                            int32_t dst_row,
+                                            vira_tensor_f32 src) {
+  _vira_tensor_norm_shape(&dst);
+  _vira_tensor_norm_shape(&src);
+  if (dst_row < 0 || dst_row >= dst.rows) {
+    fprintf(stderr,
+            "vira tensor error: .copy_row(%d) row out of bounds [0, %d)\n",
+            dst_row, dst.rows);
+    exit(1);
+  }
+  if (src.cols != dst.cols || src.rows < 1) {
+    fprintf(stderr,
+            "vira tensor error: .copy_row column mismatch dst=(%dx%d) vs src=(%dx%d)\n",
+            dst.rows, dst.cols, src.rows, src.cols);
+    exit(1);
+  }
+  memcpy(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
+         (size_t)dst.cols * sizeof(vira_f32));
+}
+
+static inline vira_tensor_f32 vira_tensor_slice_rows(vira_arena *opt_arena,
+                                                     vira_tensor_f32 t,
+                                                     int32_t start_row,
+                                                     int32_t end_row) {
+  _vira_tensor_norm_shape(&t);
+  if (start_row < 0 || end_row <= start_row || end_row > t.rows) {
+    fprintf(stderr,
+            "vira tensor error: .slice_rows(%d, %d) invalid for rows=%d\n",
+            start_row, end_row, t.rows);
+    exit(1);
+  }
+  int32_t n_rows = end_row - start_row;
+  int32_t dims[2] = {n_rows, t.cols};
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, dims)
+                : vira_tensor_f32_alloc_nd(2, dims);
+  memcpy(out.data, &t.data[(size_t)start_row * (size_t)t.cols],
+         (size_t)n_rows * (size_t)t.cols * sizeof(vira_f32));
+  return out;
+}
+
 static inline void _vira_matmul_kernel_2d_rows(const vira_f32 *a_data,
                                                const vira_f32 *b_data,
                                                vira_f32 *c_data,
@@ -1877,6 +1943,169 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
                              .gr_start = 0,
                              .gr_end = total_rows};
   _vira_matmul_job_fn(&single);
+  return out;
+}
+
+typedef struct {
+  const vira_f32 *x_base;
+  const vira_f32 *w_base;
+  vira_f32 *y_base;
+  int32_t M;
+  int32_t K;
+  int32_t N;
+  int32_t n_start;
+  int32_t n_end;
+} _vira_linear_job;
+
+static void _vira_linear_job_fn(void *raw_env) {
+  _vira_linear_job *j = (_vira_linear_job *)raw_env;
+  int32_t M = j->M;
+  int32_t K = j->K;
+  int32_t N = j->N;
+  int32_t n_start = j->n_start;
+  int32_t n_end = j->n_end;
+
+  for (int32_t m = 0; m < M; ++m) {
+    const vira_f32 *x_row = &j->x_base[(size_t)m * (size_t)K];
+    vira_f32 *y_row = &j->y_base[(size_t)m * (size_t)N];
+    for (int32_t n = n_start; n < n_end; ++n) {
+      const vira_f32 *w_row = &j->w_base[(size_t)n * (size_t)K];
+      int32_t k = 0;
+      float acc = 0.0f;
+#if defined(__AVX2__)
+      __m256 sum0 = _mm256_setzero_ps();
+      __m256 sum1 = _mm256_setzero_ps();
+      __m256 sum2 = _mm256_setzero_ps();
+      __m256 sum3 = _mm256_setzero_ps();
+      for (; k + 32 <= K; k += 32) {
+        __m256 x0 = _mm256_loadu_ps(&x_row[k]);
+        __m256 w0 = _mm256_loadu_ps(&w_row[k]);
+        __m256 x1 = _mm256_loadu_ps(&x_row[k + 8]);
+        __m256 w1 = _mm256_loadu_ps(&w_row[k + 8]);
+        __m256 x2 = _mm256_loadu_ps(&x_row[k + 16]);
+        __m256 w2 = _mm256_loadu_ps(&w_row[k + 16]);
+        __m256 x3 = _mm256_loadu_ps(&x_row[k + 24]);
+        __m256 w3 = _mm256_loadu_ps(&w_row[k + 24]);
+#if defined(__FMA__)
+        sum0 = _mm256_fmadd_ps(x0, w0, sum0);
+        sum1 = _mm256_fmadd_ps(x1, w1, sum1);
+        sum2 = _mm256_fmadd_ps(x2, w2, sum2);
+        sum3 = _mm256_fmadd_ps(x3, w3, sum3);
+#else
+        sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(x0, w0));
+        sum1 = _mm256_add_ps(sum1, _mm256_mul_ps(x1, w1));
+        sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(x2, w2));
+        sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(x3, w3));
+#endif
+      }
+      sum0 = _mm256_add_ps(_mm256_add_ps(sum0, sum1),
+                           _mm256_add_ps(sum2, sum3));
+      for (; k + 8 <= K; k += 8) {
+        __m256 x0 = _mm256_loadu_ps(&x_row[k]);
+        __m256 w0 = _mm256_loadu_ps(&w_row[k]);
+#if defined(__FMA__)
+        sum0 = _mm256_fmadd_ps(x0, w0, sum0);
+#else
+        sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(x0, w0));
+#endif
+      }
+      __m128 lo = _mm256_castps256_ps128(sum0);
+      __m128 hi = _mm256_extractf128_ps(sum0, 1);
+      __m128 s128 = _mm_add_ps(lo, hi);
+      s128 = _mm_hadd_ps(s128, s128);
+      s128 = _mm_hadd_ps(s128, s128);
+      acc = _mm_cvtss_f32(s128);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+      float32x4_t sum0 = vdupq_n_f32(0.0f);
+      float32x4_t sum1 = vdupq_n_f32(0.0f);
+      for (; k + 8 <= K; k += 8) {
+        sum0 = vfmaq_f32(sum0, vld1q_f32(&x_row[k]), vld1q_f32(&w_row[k]));
+        sum1 =
+            vfmaq_f32(sum1, vld1q_f32(&x_row[k + 4]), vld1q_f32(&w_row[k + 4]));
+      }
+      sum0 = vaddq_f32(sum0, sum1);
+      acc = vaddvq_f32(sum0);
+#endif
+      for (; k < K; ++k) {
+        acc += x_row[k] * w_row[k];
+      }
+      y_row[n] = acc;
+    }
+  }
+}
+
+// Multi-threaded AVX2+FMA / NEON Linear Projection `x.linear(w)` computing `x @ w^T`
+// where `x` has shape `(M, K)` and `w` has shape `(N, K)` (GGUF row-major weight layout),
+// producing `(M, N)` without transposing `w`.
+static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
+                                                 vira_tensor_f32 x,
+                                                 vira_tensor_f32 w) {
+  _vira_tensor_norm_shape(&x);
+  _vira_tensor_norm_shape(&w);
+  int32_t M = x.rows;
+  int32_t K = x.cols;
+  int32_t N = w.rows;
+  if (K != w.cols) {
+    fprintf(stderr,
+            "vira tensor error: .linear() inner dimension mismatch x=(%dx%d) vs w=(%dx%d)\n",
+            M, K, N, w.cols);
+    exit(1);
+  }
+  int32_t out_dims[2] = {M, N};
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
+                : vira_tensor_f32_alloc_nd(2, out_dims);
+
+  int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
+  if (total_ops >= 262144LL && N >= 32 && !_vira_in_active_actor()) {
+    vira_scheduler_ensure_init();
+    int32_t nw = vira_scheduler_num_workers();
+    if (nw > 16)
+      nw = 16;
+    if (nw > N)
+      nw = N;
+    if (nw > 1) {
+      _vira_linear_job jobs[16];
+      vira_task tasks[16];
+      int32_t base_n = N / nw;
+      int32_t extra = N % nw;
+      int32_t cur = 0;
+      for (int32_t wi = 0; wi < nw; ++wi) {
+        int32_t cnt = base_n + (wi < extra ? 1 : 0);
+        jobs[wi] = (_vira_linear_job){.x_base = x.data,
+                                      .w_base = w.data,
+                                      .y_base = out.data,
+                                      .M = M,
+                                      .K = K,
+                                      .N = N,
+                                      .n_start = cur,
+                                      .n_end = cur + cnt};
+        cur += cnt;
+        if (wi > 0) {
+          tasks[wi] = (vira_task){.fn = _vira_linear_job_fn,
+                                  .env = &jobs[wi],
+                                  .next_actor_msg = NULL,
+                                  .done = 0};
+          vira_scheduler_submit_async(&tasks[wi]);
+        }
+      }
+      _vira_linear_job_fn(&jobs[0]);
+      for (int32_t wi = 1; wi < nw; ++wi) {
+        vira_scheduler_await(&tasks[wi]);
+      }
+      return out;
+    }
+  }
+
+  _vira_linear_job single = {.x_base = x.data,
+                             .w_base = w.data,
+                             .y_base = out.data,
+                             .M = M,
+                             .K = K,
+                             .N = N,
+                             .n_start = 0,
+                             .n_end = N};
+  _vira_linear_job_fn(&single);
   return out;
 }
 
@@ -2746,7 +2975,7 @@ static inline void vira_scheduler_ensure_init(void) {
   }
   pthread_mutex_lock(&_vira_sched_init_mu);
   if (!_vira_sched.initialized) {
-    vira_scheduler_init(4);
+    vira_scheduler_init(8);
   }
   pthread_mutex_unlock(&_vira_sched_init_mu);
 }
@@ -3141,6 +3370,49 @@ static inline Result_string vira_read_file(vira_string path) {
         .is_err = true, .err = vira_str_lit("out of memory reading file", 26)};
   }
   size_t read_bytes = fread(buf, 1, (size_t)sz, f);
+  buf[read_bytes] = '\0';
+  fclose(f);
+  _vira_record_alloc();
+  return (Result_string){.is_err = false,
+                         .val = (vira_string){.data = (const uint8_t *)buf,
+                                              .len = (int32_t)read_bytes,
+                                              .is_lit = false}};
+}
+
+static inline Result_string vira_read_file_head(vira_string path,
+                                                int32_t max_bytes) {
+  char stack_path[1024];
+  vira_cstr_buf pbuf =
+      vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
+
+  FILE *f = fopen(pbuf.ptr, "rb");
+  if (!f) {
+    vira_string err = vira_str_format("failed to open file '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_string){.is_err = true, .err = err};
+  }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz < 0) {
+    fclose(f);
+    vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return (Result_string){.is_err = true, .err = err};
+  }
+  vira_cstr_buf_free(&pbuf);
+
+  size_t to_read = (size_t)sz;
+  if (max_bytes > 0 && to_read > (size_t)max_bytes) {
+    to_read = (size_t)max_bytes;
+  }
+  char *buf = (char *)malloc(to_read + 1);
+  if (!buf) {
+    fclose(f);
+    return (Result_string){
+        .is_err = true, .err = vira_str_lit("out of memory reading file", 26)};
+  }
+  size_t read_bytes = fread(buf, 1, to_read, f);
   buf[read_bytes] = '\0';
   fclose(f);
   _vira_record_alloc();
@@ -4529,30 +4801,36 @@ static inline float _vira_fp16_to_fp32(uint16_t h) {
 }
 
 static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
+  uint8_t scratch[256];
   switch (val_type) {
   case 0:
   case 1:
   case 7:
-    fseek(f, 1, SEEK_CUR);
+    fread(scratch, 1, 1, f);
     break;
   case 2:
   case 3:
-    fseek(f, 2, SEEK_CUR);
+    fread(scratch, 1, 2, f);
     break;
   case 4:
   case 5:
   case 6:
-    fseek(f, 4, SEEK_CUR);
+    fread(scratch, 1, 4, f);
     break;
   case 10:
   case 11:
   case 12:
-    fseek(f, 8, SEEK_CUR);
+    fread(scratch, 1, 8, f);
     break;
   case 8: {
     uint64_t slen = 0;
     if (fread(&slen, sizeof(uint64_t), 1, f) == 1) {
-      fseek(f, (long)slen, SEEK_CUR);
+      if (slen <= sizeof(scratch)) {
+        if (slen > 0)
+          fread(scratch, 1, (size_t)slen, f);
+      } else {
+        fseek(f, (long)slen, SEEK_CUR);
+      }
     }
     break;
   }
@@ -4561,14 +4839,45 @@ static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
     uint64_t elem_count = 0;
     if (fread(&elem_type, sizeof(uint32_t), 1, f) == 1 &&
         fread(&elem_count, sizeof(uint64_t), 1, f) == 1) {
-      for (uint64_t i = 0; i < elem_count; ++i) {
-        _vira_gguf_skip_val(f, elem_type);
+      size_t fixed_sz = 0;
+      if (elem_type == 0 || elem_type == 1 || elem_type == 7)
+        fixed_sz = 1;
+      else if (elem_type == 2 || elem_type == 3)
+        fixed_sz = 2;
+      else if (elem_type == 4 || elem_type == 5 || elem_type == 6)
+        fixed_sz = 4;
+      else if (elem_type == 10 || elem_type == 11 || elem_type == 12)
+        fixed_sz = 8;
+      if (fixed_sz > 0) {
+#ifdef _WIN32
+        _fseeki64(f, (int64_t)(elem_count * fixed_sz), SEEK_CUR);
+#else
+        fseeko(f, (off_t)(elem_count * fixed_sz), SEEK_CUR);
+#endif
+      } else {
+        for (uint64_t i = 0; i < elem_count; ++i) {
+          _vira_gguf_skip_val(f, elem_type);
+        }
       }
     }
     break;
   }
   }
 }
+
+typedef struct {
+  char name[128];
+  uint32_t dtype;
+  int32_t ndims;
+  int32_t dims[4];
+  int64_t file_pos;
+} _vira_gguf_tensor_entry;
+
+static struct {
+  char path[1024];
+  int32_t count;
+  _vira_gguf_tensor_entry *entries;
+} _vira_gguf_dir_cache = {"", 0, NULL};
 
 static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
                                                       vira_string tensor_name) {
@@ -4588,115 +4897,154 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     return (Result_tensor_f32){
         .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
+  setvbuf(f, NULL, _IOFBF, 65536);
 
-  uint32_t magic = 0;
-  uint32_t version = 0;
-  uint64_t tensor_count = 0;
-  uint64_t kv_count = 0;
+  if (strcmp(_vira_gguf_dir_cache.path, pbuf.ptr) != 0 ||
+      _vira_gguf_dir_cache.entries == NULL) {
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t tensor_count = 0;
+    uint64_t kv_count = 0;
 
-  if (fread(&magic, 4, 1, f) != 1 || magic != 0x46554747) {
-    fclose(f);
-    vira_string err = vira_str_format("invalid GGUF magic in '%s'", pbuf.ptr);
-    vira_cstr_buf_free(&nbuf);
-    vira_cstr_buf_free(&pbuf);
-    return (Result_tensor_f32){
-        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
-  }
-  if (fread(&version, 4, 1, f) != 1 || (version != 2 && version != 3)) {
-    fclose(f);
-    vira_string err = vira_str_format("unsupported GGUF version %u in '%s'",
-                                      version, pbuf.ptr);
-    vira_cstr_buf_free(&nbuf);
-    vira_cstr_buf_free(&pbuf);
-    return (Result_tensor_f32){
-        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
-  }
-  if (fread(&tensor_count, 8, 1, f) != 1 || fread(&kv_count, 8, 1, f) != 1) {
-    fclose(f);
-    vira_string err = vira_str_format("corrupt GGUF header in '%s'", pbuf.ptr);
-    vira_cstr_buf_free(&nbuf);
-    vira_cstr_buf_free(&pbuf);
-    return (Result_tensor_f32){
-        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
-  }
+    if (fread(&magic, 4, 1, f) != 1 || magic != 0x46554747) {
+      fclose(f);
+      vira_string err = vira_str_format("invalid GGUF magic in '%s'", pbuf.ptr);
+      vira_cstr_buf_free(&nbuf);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
+    if (fread(&version, 4, 1, f) != 1 || (version != 2 && version != 3)) {
+      fclose(f);
+      vira_string err = vira_str_format("unsupported GGUF version %u in '%s'",
+                                        version, pbuf.ptr);
+      vira_cstr_buf_free(&nbuf);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
+    if (fread(&tensor_count, 8, 1, f) != 1 || fread(&kv_count, 8, 1, f) != 1) {
+      fclose(f);
+      vira_string err =
+          vira_str_format("corrupt GGUF header in '%s'", pbuf.ptr);
+      vira_cstr_buf_free(&nbuf);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
 
-  uint32_t alignment = 32;
+    uint32_t alignment = 32;
 
-  for (uint64_t k = 0; k < kv_count; ++k) {
-    uint64_t klen = 0;
-    if (fread(&klen, 8, 1, f) != 1)
-      break;
-    char key_buf[256];
-    size_t to_read = klen < 255 ? klen : 255;
-    if (fread(key_buf, 1, to_read, f) != to_read)
-      break;
-    key_buf[to_read] = '\0';
-    if (klen > to_read)
-      fseek(f, (long)(klen - to_read), SEEK_CUR);
+    for (uint64_t k = 0; k < kv_count; ++k) {
+      uint64_t klen = 0;
+      if (fread(&klen, 8, 1, f) != 1)
+        break;
+      char key_buf[256];
+      size_t to_read = klen < 255 ? (size_t)klen : 255;
+      if (fread(key_buf, 1, to_read, f) != to_read)
+        break;
+      key_buf[to_read] = '\0';
+      if (klen > to_read)
+        fseek(f, (long)(klen - to_read), SEEK_CUR);
 
-    uint32_t val_type = 0;
-    if (fread(&val_type, 4, 1, f) != 1)
-      break;
+      uint32_t val_type = 0;
+      if (fread(&val_type, 4, 1, f) != 1)
+        break;
 
-    if (strcmp(key_buf, "general.alignment") == 0 && val_type == 4) {
-      uint32_t a = 32;
-      if (fread(&a, 4, 1, f) == 1 && a > 0)
-        alignment = a;
-    } else {
-      _vira_gguf_skip_val(f, val_type);
+      if (strcmp(key_buf, "general.alignment") == 0 && val_type == 4) {
+        uint32_t a = 32;
+        if (fread(&a, 4, 1, f) == 1 && a > 0)
+          alignment = a;
+      } else {
+        _vira_gguf_skip_val(f, val_type);
+      }
+    }
+
+    if (_vira_gguf_dir_cache.entries) {
+      free(_vira_gguf_dir_cache.entries);
+      _vira_gguf_dir_cache.entries = NULL;
+    }
+    _vira_gguf_dir_cache.count = (int32_t)tensor_count;
+    _vira_gguf_dir_cache.entries = (_vira_gguf_tensor_entry *)calloc(
+        (size_t)(tensor_count > 0 ? tensor_count : 1),
+        sizeof(_vira_gguf_tensor_entry));
+    strncpy(_vira_gguf_dir_cache.path, pbuf.ptr,
+            sizeof(_vira_gguf_dir_cache.path) - 1);
+    _vira_gguf_dir_cache.path[sizeof(_vira_gguf_dir_cache.path) - 1] = '\0';
+
+    for (uint64_t t = 0; t < tensor_count; ++t) {
+      uint64_t n_len = 0;
+      if (fread(&n_len, 8, 1, f) != 1)
+        break;
+      char cur_name[256];
+      size_t to_read = n_len < 255 ? (size_t)n_len : 255;
+      if (fread(cur_name, 1, to_read, f) != to_read)
+        break;
+      cur_name[to_read] = '\0';
+      if (n_len > to_read)
+        fseek(f, (long)(n_len - to_read), SEEK_CUR);
+
+      uint32_t n_dims = 0;
+      if (fread(&n_dims, 4, 1, f) != 1)
+        break;
+
+      uint64_t dims[4] = {1, 1, 1, 1};
+      for (uint32_t d = 0; d < n_dims && d < 4; ++d) {
+        if (fread(&dims[d], 8, 1, f) != 1)
+          break;
+      }
+      if (n_dims > 4) {
+        fseek(f, (long)(8 * (n_dims - 4)), SEEK_CUR);
+      }
+
+      uint32_t dtype = 0;
+      uint64_t offset = 0;
+      if (fread(&dtype, 4, 1, f) != 1)
+        break;
+      if (fread(&offset, 8, 1, f) != 1)
+        break;
+
+      _vira_gguf_tensor_entry *ent = &_vira_gguf_dir_cache.entries[t];
+      strncpy(ent->name, cur_name, sizeof(ent->name) - 1);
+      ent->name[sizeof(ent->name) - 1] = '\0';
+      ent->dtype = dtype;
+      uint32_t clamped_nd = (n_dims == 0) ? 1 : ((n_dims > 4) ? 4 : n_dims);
+      ent->ndims = (int32_t)clamped_nd;
+      for (uint32_t d = 0; d < clamped_nd; ++d) {
+        int32_t dv = (int32_t)dims[clamped_nd - 1 - d];
+        ent->dims[d] = (dv > 0) ? dv : 1;
+      }
+      ent->file_pos = (int64_t)offset;
+    }
+
+#ifdef _WIN32
+    int64_t cur_pos = _ftelli64(f);
+#else
+    int64_t cur_pos = (int64_t)ftello(f);
+#endif
+    int64_t pad = (alignment - (cur_pos % alignment)) % alignment;
+    int64_t data_start = cur_pos + pad;
+    for (int32_t t = 0; t < _vira_gguf_dir_cache.count; ++t) {
+      _vira_gguf_dir_cache.entries[t].file_pos += data_start;
     }
   }
 
   bool found = false;
   uint32_t matched_type = 0;
-  uint64_t matched_offset = 0;
+  int64_t tensor_file_pos = 0;
   int32_t matched_ndims = 2;
   int32_t matched_dims[4] = {1, 1, 1, 1};
 
-  for (uint64_t t = 0; t < tensor_count; ++t) {
-    uint64_t n_len = 0;
-    if (fread(&n_len, 8, 1, f) != 1)
-      break;
-    char cur_name[256];
-    size_t to_read = n_len < 255 ? n_len : 255;
-    if (fread(cur_name, 1, to_read, f) != to_read)
-      break;
-    cur_name[to_read] = '\0';
-    if (n_len > to_read)
-      fseek(f, (long)(n_len - to_read), SEEK_CUR);
-
-    uint32_t n_dims = 0;
-    if (fread(&n_dims, 4, 1, f) != 1)
-      break;
-
-    uint64_t dims[4] = {1, 1, 1, 1};
-    for (uint32_t d = 0; d < n_dims && d < 4; ++d) {
-      if (fread(&dims[d], 8, 1, f) != 1)
-        break;
-    }
-    if (n_dims > 4) {
-      fseek(f, (long)(8 * (n_dims - 4)), SEEK_CUR);
-    }
-
-    uint32_t dtype = 0;
-    uint64_t offset = 0;
-    if (fread(&dtype, 4, 1, f) != 1)
-      break;
-    if (fread(&offset, 8, 1, f) != 1)
-      break;
-
-    if (n_len == (uint64_t)tensor_name.len &&
-        strcmp(cur_name, nbuf.ptr) == 0) {
+  for (int32_t t = 0; t < _vira_gguf_dir_cache.count; ++t) {
+    _vira_gguf_tensor_entry *ent = &_vira_gguf_dir_cache.entries[t];
+    if (strcmp(ent->name, nbuf.ptr) == 0) {
       found = true;
-      matched_type = dtype;
-      matched_offset = offset;
-      uint32_t clamped_nd = (n_dims == 0) ? 1 : ((n_dims > 4) ? 4 : n_dims);
-      matched_ndims = (int32_t)clamped_nd;
-      // GGUF stores dimensions inner-to-outer (dims[0] = trailing cols)
-      for (uint32_t d = 0; d < clamped_nd; ++d) {
-        int32_t dv = (int32_t)dims[clamped_nd - 1 - d];
-        matched_dims[d] = (dv > 0) ? dv : 1;
-      }
+      matched_type = ent->dtype;
+      tensor_file_pos = ent->file_pos;
+      matched_ndims = ent->ndims;
+      for (int32_t d = 0; d < 4; ++d)
+        matched_dims[d] = ent->dims[d];
+      break;
     }
   }
 
@@ -4713,11 +5061,6 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   vira_cstr_buf_free(&nbuf);
   vira_cstr_buf_free(&pbuf);
 
-  int64_t cur_pos = ftell(f);
-  int64_t pad = (alignment - (cur_pos % alignment)) % alignment;
-  int64_t data_start = cur_pos + pad;
-
-  int64_t tensor_file_pos = data_start + matched_offset;
 #ifdef _WIN32
   _fseeki64(f, tensor_file_pos, SEEK_SET);
 #else
@@ -4725,7 +5068,7 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 #endif
 
   vira_tensor_f32 t = vira_tensor_f32_alloc_nd(matched_ndims, matched_dims);
-  int32_t total = t.rows * t.cols;
+  size_t total = (size_t)t.rows * (size_t)t.cols;
 
   if (matched_type == 0) {
     fread(t.data, sizeof(float), total, f);
@@ -4733,40 +5076,50 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     uint16_t *hbuf = (uint16_t *)malloc(total * sizeof(uint16_t));
     if (hbuf) {
       fread(hbuf, sizeof(uint16_t), total, f);
-      for (int32_t i = 0; i < total; ++i) {
+      for (size_t i = 0; i < total; ++i) {
         t.data[i] = _vira_fp16_to_fp32(hbuf[i]);
       }
       free(hbuf);
     }
-  } else if (matched_type == 7) {
-    int32_t blocks = total / 32;
-    for (int32_t b = 0; b < blocks; ++b) {
-      uint16_t scale_h = 0;
-      int8_t qs[32];
-      fread(&scale_h, 2, 1, f);
-      fread(qs, 1, 32, f);
-      float scale = _vira_fp16_to_fp32(scale_h);
-      int32_t base = b * 32;
-      for (int32_t j = 0; j < 32; ++j) {
-        t.data[base + j] = scale * (float)qs[j];
+  } else if (matched_type == 7 || matched_type == 8) {
+    size_t blocks = total / 32;
+    uint8_t *raw_q = (uint8_t *)malloc(blocks * 34);
+    if (raw_q) {
+      fread(raw_q, 34, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 34;
+        uint16_t scale_h = 0;
+        memcpy(&scale_h, blk, 2);
+        float scale = _vira_fp16_to_fp32(scale_h);
+        const int8_t *qs = (const int8_t *)(blk + 2);
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 32; ++j) {
+          dst[j] = scale * (float)qs[j];
+        }
       }
+      free(raw_q);
     }
   } else if (matched_type == 2) {
-    int32_t blocks = total / 32;
-    for (int32_t b = 0; b < blocks; ++b) {
-      uint16_t scale_h = 0;
-      uint8_t nibbles[16];
-      fread(&scale_h, 2, 1, f);
-      fread(nibbles, 1, 16, f);
-      float scale = _vira_fp16_to_fp32(scale_h);
-      int32_t base = b * 32;
-      for (int32_t j = 0; j < 16; ++j) {
-        uint8_t byte = nibbles[j];
-        int8_t v0 = (int8_t)(byte & 0x0F) - 8;
-        int8_t v1 = (int8_t)(byte >> 4) - 8;
-        t.data[base + j] = scale * (float)v0;
-        t.data[base + j + 16] = scale * (float)v1;
+    size_t blocks = total / 32;
+    uint8_t *raw_q = (uint8_t *)malloc(blocks * 18);
+    if (raw_q) {
+      fread(raw_q, 18, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 18;
+        uint16_t scale_h = 0;
+        memcpy(&scale_h, blk, 2);
+        float scale = _vira_fp16_to_fp32(scale_h);
+        const uint8_t *nibbles = blk + 2;
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 16; ++j) {
+          uint8_t byte = nibbles[j];
+          int8_t v0 = (int8_t)(byte & 0x0F) - 8;
+          int8_t v1 = (int8_t)(byte >> 4) - 8;
+          dst[j] = scale * (float)v0;
+          dst[j + 16] = scale * (float)v1;
+        }
       }
+      free(raw_q);
     }
   } else {
     fread(t.data, sizeof(float), total, f);
@@ -4840,24 +5193,37 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
   _vira_tensor_norm_shape(&q);
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
   int32_t half_dim = q.cols / 2;
+  float cos_stack[256];
+  float sin_stack[256];
+  float *cos_tab =
+      (half_dim <= 256) ? cos_stack : (float *)malloc(half_dim * sizeof(float));
+  float *sin_tab =
+      (half_dim <= 256) ? sin_stack : (float *)malloc(half_dim * sizeof(float));
+
+  for (int32_t i = 0; i < half_dim; ++i) {
+    float exponent = -(2.0f * (float)i) / (float)q.cols;
+    float freq = powf(freq_base, exponent);
+    float angle = (float)pos * freq;
+    cos_tab[i] = cosf(angle);
+    sin_tab[i] = sinf(angle);
+  }
 
   for (int32_t r = 0; r < q.rows; ++r) {
-    float *q_row = &q.data[r * q.cols];
+    const float *q_row = &q.data[r * q.cols];
     float *out_row = &out.data[r * q.cols];
-
     for (int32_t i = 0; i < half_dim; ++i) {
-      float exponent = -(2.0f * (float)i) / (float)q.cols;
-      float freq = powf(freq_base, exponent);
-      float angle = (float)pos * freq;
-      float cos_a = cosf(angle);
-      float sin_a = sinf(angle);
-
+      float cos_a = cos_tab[i];
+      float sin_a = sin_tab[i];
       float q0 = q_row[i];
       float q1 = q_row[i + half_dim];
-
       out_row[i] = q0 * cos_a - q1 * sin_a;
       out_row[i + half_dim] = q0 * sin_a + q1 * cos_a;
     }
+  }
+
+  if (half_dim > 256) {
+    free(cos_tab);
+    free(sin_tab);
   }
   return out;
 }

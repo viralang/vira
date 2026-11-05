@@ -526,3 +526,57 @@ func TestLSPTensorAndJsonHoverAndCompletions(t *testing.T) {
 		}
 	}
 }
+
+func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
+	examples := []string{
+		"../../docs/examples/41_cli_llm_chat_engine.vir",
+		"../../docs/examples/42_huggingface_gguf_llm_inference.vir",
+		"../../docs/examples/43_qwen2_5_gguf_chat_inference.vir",
+	}
+
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	sendRPC(&in, "initialize", map[string]interface{}{}, 1)
+
+	for _, relPath := range examples {
+		absPath, err := filepath.Abs(relPath)
+		if err != nil {
+			t.Fatalf("failed to resolve path %s: %v", relPath, err)
+		}
+		contentBytes, err := os.ReadFile(absPath)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", relPath, err)
+		}
+		uri := "file:///" + strings.Replace(filepath.ToSlash(absPath), ":", "%3A", 1)
+		sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
+			"textDocument": map[string]interface{}{
+				"uri":  uri,
+				"text": string(contentBytes),
+			},
+		}, nil)
+	}
+
+	// Hover on `.linear` in Example 43 (line 390, `q_lin := xn.linear(l_wq[l]) + l_bq[l]`)
+	ex43Abs, _ := filepath.Abs(examples[2])
+	ex43URI := "file:///" + strings.Replace(filepath.ToSlash(ex43Abs), ":", "%3A", 1)
+	sendRPC(&in, "textDocument/hover", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": ex43URI},
+		"position":     map[string]interface{}{"line": 390, "character": 25},
+	}, 2)
+
+	sendRPC(&in, "shutdown", map[string]interface{}{}, 3)
+
+	server := lsp.NewServer(&in, &out)
+	if err := server.Run(); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	res := out.String()
+	if strings.Count(res, `"diagnostics":[]`) < 3 {
+		t.Fatalf("expected all 3 LLM examples (41, 42, 43) to have clean diagnostics:[], got:\n%s", res)
+	}
+	if !strings.Contains(res, "tensor.linear(weight: tensor[f32])") {
+		t.Errorf("expected hover on .linear to show tensor.linear documentation, got:\n%s", res)
+	}
+}

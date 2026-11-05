@@ -661,7 +661,7 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 			if sel, ok := call.Callee.(*ast.SelectorExpr); ok {
 				if _, isTensor := a.chk.ExprTypes[sel.Left].(*checker.TensorType); isTensor {
 					switch sel.Field.Name {
-					case "reshape_2d", "reshape_3d", "reshape_4d", "transpose":
+					case "reshape_2d", "reshape_3d", "reshape_4d", "transpose", "slice_rows", "linear":
 						return true
 					}
 				}

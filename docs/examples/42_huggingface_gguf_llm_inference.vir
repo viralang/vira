@@ -1,0 +1,808 @@
+module main
+
+import os
+import io
+import flag
+import exec
+import math
+
+// ============================================================================
+// 1. HUGGING FACE GGUF MODEL AUTO-DOWNLOADER (PURE VIRA)
+// ============================================================================
+
+pub fn ensure_hf_model(model_path string, hf_url string, force_download bool) !bool {
+	if !force_download && os.exists(model_path) {
+		return true
+	}
+
+	_ := os.mkdir_all('models', 755) or { false }
+	println('[HuggingFace] Downloading pretrained GGUF model from:')
+	println('              ${hf_url}')
+	println('              -> ${model_path}')
+
+	mut cmd := exec.Command.new('curl', ['-L', '-s', '-o', model_path, hf_url])
+	exit_code := cmd.run() or {
+		return error('failed to launch curl for Hugging Face download: ${err}')
+	}
+	if exit_code != 0 {
+		return error('curl exited with status ${exit_code}')
+	}
+	if !os.exists(model_path) {
+		return error('downloaded model file not found at ${model_path}')
+	}
+	return true
+}
+
+// ============================================================================
+// 2. PURE-VIRA GGUF v3 PARSER (METADATA + BPE VOCAB + IEEE-754 MERGE SCORES)
+// ============================================================================
+
+pub struct HfLlamaMeta {
+pub mut:
+	version      int
+	tensor_count int
+	kv_count     int
+	file_bytes   int
+	arch         string
+	n_layers     int
+	embed_dim    int
+	ffn_dim      int
+	n_heads      int
+	n_kv_heads   int
+	vocab_size   int
+	vocab        []string
+	scores       []f32
+}
+
+fn read_u32_le(data []u8, pos int) int {
+	b0 := int(data[pos])
+	b1 := int(data[pos + 1])
+	b2 := int(data[pos + 2])
+	b3 := int(data[pos + 3])
+	return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn read_u64_le(data []u8, pos int) int {
+	return read_u32_le(data, pos)
+}
+
+fn read_f32_le(data []u8, pos int) f32 {
+	b0 := int(data[pos])
+	b1 := int(data[pos + 1])
+	b2 := int(data[pos + 2])
+	b3 := int(data[pos + 3])
+
+	sign := (b3 >> 7) & 1
+	exp := ((b3 & 0x7F) << 1) | ((b2 >> 7) & 1)
+	mant := ((b2 & 0x7F) << 16) | (b1 << 8) | b0
+
+	if exp == 0 && mant == 0 {
+		return 0.0
+	}
+
+	mut val := (1.0 + f64(mant) / 8388608.0) * math.pow(2.0, f64(exp - 127))
+	if sign == 1 {
+		val = -val
+	}
+	return f32(val)
+}
+
+fn skip_gguf_val(data []u8, pos int, vtype int) int {
+	if vtype == 0 || vtype == 1 || vtype == 7 {
+		return pos + 1
+	}
+	if vtype == 2 || vtype == 3 {
+		return pos + 2
+	}
+	if vtype == 4 || vtype == 5 || vtype == 6 {
+		return pos + 4
+	}
+	if vtype == 10 || vtype == 11 || vtype == 12 {
+		return pos + 8
+	}
+	if vtype == 8 {
+		slen := read_u64_le(data, pos)
+		return pos + 8 + slen
+	}
+	return pos
+}
+
+pub fn load_hf_gguf_meta(path string) !HfLlamaMeta {
+	raw := os.read_bytes(path) or {
+		return error('failed to read GGUF file ${path}: ${err}')
+	}
+	if raw.len < 24 {
+		return error('GGUF file too small: ${raw.len} bytes')
+	}
+
+	magic := read_u32_le(raw, 0)
+	if magic != 0x46554747 {
+		return error('invalid GGUF magic header (expected 0x46554747)')
+	}
+
+	version := read_u32_le(raw, 4)
+	tensor_count := read_u64_le(raw, 8)
+	kv_count := read_u64_le(raw, 16)
+
+	mut pos := 24
+	mut arch := 'llama'
+	mut n_layers := 5
+	mut embed_dim := 64
+	mut ffn_dim := 172
+	mut n_heads := 8
+	mut n_kv_heads := 4
+	mut vocab := []string{}
+	mut scores := []f32{}
+
+	mut k := 0
+	for k < kv_count {
+		klen := read_u64_le(raw, pos)
+		pos += 8
+		key_bytes := raw.slice(pos, pos + klen)
+		key := key_bytes.to_string()
+		pos += klen
+
+		vtype := read_u32_le(raw, pos)
+		pos += 4
+
+		if key == 'general.architecture' && vtype == 8 {
+			slen := read_u64_le(raw, pos)
+			pos += 8
+			val_bytes := raw.slice(pos, pos + slen)
+			arch = val_bytes.to_string()
+			pos += slen
+		} else if key == 'llama.block_count' && vtype == 4 {
+			n_layers = read_u32_le(raw, pos)
+			pos += 4
+		} else if key == 'llama.embedding_length' && vtype == 4 {
+			embed_dim = read_u32_le(raw, pos)
+			pos += 4
+		} else if key == 'llama.feed_forward_length' && vtype == 4 {
+			ffn_dim = read_u32_le(raw, pos)
+			pos += 4
+		} else if key == 'llama.attention.head_count' && vtype == 4 {
+			n_heads = read_u32_le(raw, pos)
+			pos += 4
+		} else if key == 'llama.attention.head_count_kv' && vtype == 4 {
+			n_kv_heads = read_u32_le(raw, pos)
+			pos += 4
+		} else if key == 'tokenizer.ggml.tokens' && vtype == 9 {
+			elem_type := read_u32_le(raw, pos)
+			pos += 4
+			elem_count := read_u64_le(raw, pos)
+			pos += 8
+			mut idx := 0
+			for idx < elem_count {
+				if elem_type == 8 {
+					tlen := read_u64_le(raw, pos)
+					pos += 8
+					tok_bytes := raw.slice(pos, pos + tlen)
+					vocab.push(tok_bytes.to_string())
+					pos += tlen
+				} else {
+					pos = skip_gguf_val(raw, pos, elem_type)
+				}
+				idx += 1
+			}
+		} else if key == 'tokenizer.ggml.scores' && vtype == 9 {
+			elem_type := read_u32_le(raw, pos)
+			pos += 4
+			elem_count := read_u64_le(raw, pos)
+			pos += 8
+			mut idx := 0
+			for idx < elem_count {
+				if elem_type == 6 {
+					sc := read_f32_le(raw, pos)
+					scores.push(sc)
+					pos += 4
+				} else {
+					pos = skip_gguf_val(raw, pos, elem_type)
+				}
+				idx += 1
+			}
+		} else if vtype == 9 {
+			elem_type := read_u32_le(raw, pos)
+			pos += 4
+			elem_count := read_u64_le(raw, pos)
+			pos += 8
+			mut idx := 0
+			for idx < elem_count {
+				pos = skip_gguf_val(raw, pos, elem_type)
+				idx += 1
+			}
+		} else {
+			pos = skip_gguf_val(raw, pos, vtype)
+		}
+		k += 1
+	}
+
+	return HfLlamaMeta{
+		version:      version,
+		tensor_count: tensor_count,
+		kv_count:     kv_count,
+		file_bytes:   raw.len,
+		arch:         arch,
+		n_layers:     n_layers,
+		embed_dim:    embed_dim,
+		ffn_dim:      ffn_dim,
+		n_heads:      n_heads,
+		n_kv_heads:   n_kv_heads,
+		vocab_size:   vocab.len,
+		vocab:        vocab,
+		scores:       scores,
+	}
+}
+
+// ============================================================================
+// 3. PURE-VIRA SENTENCEPIECE BPE TOKENIZER & DETOKENIZER
+// ============================================================================
+
+fn find_token_id(vocab []string, target string) int {
+	mut idx := 0
+	for idx < vocab.len {
+		if vocab[idx] == target {
+			return idx
+		}
+		idx += 1
+	}
+	return -1
+}
+
+pub fn bpe_encode(prompt string, vocab []string, scores []f32) []int {
+	mut tokens := []int{}
+	// SentencePiece prepends the '▁' word-boundary marker (token id 410 in stories260K)
+	sp_space_id := find_token_id(vocab, '▁')
+	if sp_space_id >= 0 {
+		tokens.push(sp_space_id)
+	}
+
+	// Step 1: Map each ASCII character of prompt to its initial character token ID
+	mut i := 0
+	for i < prompt.len {
+		ch := prompt.substr(i, i + 1)
+		if ch == ' ' {
+			if sp_space_id >= 0 {
+				tokens.push(sp_space_id)
+			}
+		} else {
+			cid := find_token_id(vocab, ch)
+			if cid >= 0 {
+				tokens.push(cid)
+			}
+		}
+		i += 1
+	}
+
+	// Step 2: Iteratively merge the adjacent token pair with the highest BPE merge score
+	for {
+		if tokens.len < 2 {
+			break
+		}
+		mut best_score := f32(-1000000000.0)
+		mut best_idx := -1
+		mut best_id := -1
+
+		mut idx := 0
+		for idx < tokens.len - 1 {
+			t_left := tokens.get(idx) or { 0 }
+			t_right := tokens.get(idx + 1) or { 0 }
+			merged := '${vocab[t_left]}${vocab[t_right]}'
+			mid := find_token_id(vocab, merged)
+			if mid >= 0 && mid < scores.len {
+				sc := scores.get(mid) or { -1000000000.0 }
+				if sc > best_score {
+					best_score = sc
+					best_idx = idx
+					best_id = mid
+				}
+			}
+			idx += 1
+		}
+
+		if best_idx < 0 {
+			break
+		}
+
+		// Replace tokens[best_idx] with merged best_id and shift tail left by 1
+		tokens[best_idx] = best_id
+		mut shift := best_idx + 1
+		for shift < tokens.len - 1 {
+			tokens[shift] = tokens[shift + 1]
+			shift += 1
+		}
+		_ := tokens.pop()
+	}
+
+	// Prepend BOS control token '<s>' (id = 1)
+	mut full_tokens := []int{}
+	full_tokens.push(1)
+	for tid in tokens {
+		full_tokens.push(tid)
+	}
+	return full_tokens
+}
+
+pub fn print_detokenized_piece(piece string, is_first bool) {
+	replaced := piece.replace('▁', ' ')
+	if is_first && replaced.starts_with(' ') {
+		if replaced.len > 1 {
+			trimmed_first := replaced.substr(1, replaced.len)
+			print(trimmed_first)
+		}
+	} else {
+		print(replaced)
+	}
+}
+
+// ============================================================================
+// 4. 5-LAYER GROUPED-QUERY ATTENTION (GQA) LLAMA FORWARD ENGINE (PURE VIRA)
+// ============================================================================
+
+fn forward_gqa_layer(
+	x tensor[f32],
+	pos int,
+	attn_norm tensor[f32],
+	wq tensor[f32],
+	wk tensor[f32],
+	wv tensor[f32],
+	wo tensor[f32],
+	ffn_norm tensor[f32],
+	w_gate tensor[f32],
+	w_up tensor[f32],
+	w_down tensor[f32],
+	k_cache tensor[f32],
+	v_cache tensor[f32],
+	n_heads int,
+	n_kv_heads int,
+	head_dim int
+) {
+	arena {
+		// 1. Pre-Attention RMSNorm & Linear Q, K, V Projections
+		xb := tensor_rmsnorm(x, attn_norm, 0.00001)
+		q := xb @ wq
+		k := xb @ wk
+		v := xb @ wv
+
+		// 2. Multi-Head Interleaved RoPE (Rotary Position Embeddings per query/KV head)
+		mut h := 0
+		for h < n_heads {
+			mut i := 0
+			for i < head_dim {
+				freq := 1.0 / f32(math.pow(10000.0, f64(i) / f64(head_dim)))
+				angle := f32(pos) * freq
+				fcr := f32(math.cos(f64(angle)))
+				fci := f32(math.sin(f64(angle)))
+
+				q0 := q.get(0, h * head_dim + i)
+				q1 := q.get(0, h * head_dim + i + 1)
+				q.set(0, h * head_dim + i, q0 * fcr - q1 * fci)
+				q.set(0, h * head_dim + i + 1, q0 * fci + q1 * fcr)
+
+				if h < n_kv_heads {
+					k0 := k.get(0, h * head_dim + i)
+					k1 := k.get(0, h * head_dim + i + 1)
+					k.set(0, h * head_dim + i, k0 * fcr - k1 * fci)
+					k.set(0, h * head_dim + i + 1, k0 * fci + k1 * fcr)
+				}
+				i += 2
+			}
+			h += 1
+		}
+
+		// 3. Append rotated K and projected V into this layer's KV cache at row `pos`
+		k_cache.copy_row(pos, k)
+		v_cache.copy_row(pos, v)
+
+		// 4. Grouped-Query Attention (8 Query Heads sharing 4 KV Heads, kv_mul = 2)
+		kv_mul := n_heads / n_kv_heads
+		scale := 1.0 / f32(math.sqrt(f64(head_dim)))
+		xb_attn := tensor_fill(1, n_heads * head_dim, 0.0)
+		scores := tensor_fill(1, pos + 1, 0.0)
+
+		mut qh := 0
+		for qh < n_heads {
+			kv_h := qh / kv_mul
+			q_off := qh * head_dim
+			kv_off := kv_h * head_dim
+
+			mut t := 0
+			for t <= pos {
+				mut dot := f32(0.0)
+				mut d := 0
+				for d < head_dim {
+					dot += q.get(0, q_off + d) * k_cache.get(t, kv_off + d)
+					d += 1
+				}
+				scores.set(0, t, dot * scale)
+				t += 1
+			}
+
+			probs := tensor_softmax(scores)
+
+			mut d := 0
+			for d < head_dim {
+				mut acc := f32(0.0)
+				mut t2 := 0
+				for t2 <= pos {
+					acc += probs.get(0, t2) * v_cache.get(t2, kv_off + d)
+					t2 += 1
+				}
+				xb_attn.set(0, q_off + d, acc)
+				d += 1
+			}
+			qh += 1
+		}
+
+		// 5. Output Projection & Residual Connection
+		attn_out := xb_attn @ wo
+		h_attn := x + attn_out
+
+		// 6. SwiGLU Feed-Forward Network (64 -> 172 -> 64) & Residual Connection
+		xb2 := tensor_rmsnorm(h_attn, ffn_norm, 0.00001)
+		gate_proj := xb2 @ w_gate
+		gate := tensor_silu(gate_proj)
+		up := xb2 @ w_up
+		ffn_mid := tensor_elemwise_mul(gate, up)
+		ffn_out := ffn_mid @ w_down
+		h_ffn := h_attn + ffn_out
+
+		// Copy updated layer state back into `x` before O(1) arena teardown
+		x.copy_row(0, h_ffn)
+	}
+}
+
+fn generate_story(
+	prompt string,
+	meta HfLlamaMeta,
+	token_emb tensor[f32],
+	out_norm tensor[f32],
+	lm_head tensor[f32],
+	// Layer 0
+	l0_an tensor[f32], l0_wq tensor[f32], l0_wk tensor[f32], l0_wv tensor[f32], l0_wo tensor[f32],
+	l0_fn tensor[f32], l0_wg tensor[f32], l0_wu tensor[f32], l0_wd tensor[f32],
+	k_cache_0 tensor[f32], v_cache_0 tensor[f32],
+	// Layer 1
+	l1_an tensor[f32], l1_wq tensor[f32], l1_wk tensor[f32], l1_wv tensor[f32], l1_wo tensor[f32],
+	l1_fn tensor[f32], l1_wg tensor[f32], l1_wu tensor[f32], l1_wd tensor[f32],
+	k_cache_1 tensor[f32], v_cache_1 tensor[f32],
+	// Layer 2
+	l2_an tensor[f32], l2_wq tensor[f32], l2_wk tensor[f32], l2_wv tensor[f32], l2_wo tensor[f32],
+	l2_fn tensor[f32], l2_wg tensor[f32], l2_wu tensor[f32], l2_wd tensor[f32],
+	k_cache_2 tensor[f32], v_cache_2 tensor[f32],
+	// Layer 3
+	l3_an tensor[f32], l3_wq tensor[f32], l3_wk tensor[f32], l3_wv tensor[f32], l3_wo tensor[f32],
+	l3_fn tensor[f32], l3_wg tensor[f32], l3_wu tensor[f32], l3_wd tensor[f32],
+	k_cache_3 tensor[f32], v_cache_3 tensor[f32],
+	// Layer 4
+	l4_an tensor[f32], l4_wq tensor[f32], l4_wk tensor[f32], l4_wv tensor[f32], l4_wo tensor[f32],
+	l4_fn tensor[f32], l4_wg tensor[f32], l4_wu tensor[f32], l4_wd tensor[f32],
+	k_cache_4 tensor[f32], v_cache_4 tensor[f32],
+	max_tokens int,
+	temperature f32
+) int {
+	t_start_us := time_now_us()
+	prompt_tokens := bpe_encode(prompt, meta.vocab, meta.scores)
+	head_dim := meta.embed_dim / meta.n_heads
+
+	print('BPE Tokens > [')
+	mut pt_idx := 0
+	for pt_idx < prompt_tokens.len {
+		tid := prompt_tokens.get(pt_idx) or { 0 }
+		if pt_idx > 0 {
+			print(', ')
+		}
+		print('${tid}')
+		pt_idx += 1
+	}
+	println('] (${prompt_tokens.len} prompt tokens)')
+
+	print('Story      > ')
+	x := tensor_fill(1, meta.embed_dim, 0.0)
+	mut pos := 0
+	mut cur_token := prompt_tokens.get(0) or { 1 }
+	mut total_steps := prompt_tokens.len + max_tokens - 1
+
+	for pos < total_steps {
+		// Print token piece (except BOS token id = 1)
+		if pos > 0 && cur_token >= 0 && cur_token < meta.vocab.len {
+			print_detokenized_piece(meta.vocab[cur_token], pos == 1)
+		}
+
+		// Load current token embedding into `x`
+		arena {
+			emb := tensor_embedding(token_emb, cur_token)
+			x.copy_row(0, emb)
+		}
+
+		// Forward through all 5 Pretrained Transformer Layers (blk.0 .. blk.4)
+		forward_gqa_layer(
+			x, pos, l0_an, l0_wq, l0_wk, l0_wv, l0_wo, l0_fn, l0_wg, l0_wu, l0_wd,
+			k_cache_0, v_cache_0, meta.n_heads, meta.n_kv_heads, head_dim
+		)
+		forward_gqa_layer(
+			x, pos, l1_an, l1_wq, l1_wk, l1_wv, l1_wo, l1_fn, l1_wg, l1_wu, l1_wd,
+			k_cache_1, v_cache_1, meta.n_heads, meta.n_kv_heads, head_dim
+		)
+		forward_gqa_layer(
+			x, pos, l2_an, l2_wq, l2_wk, l2_wv, l2_wo, l2_fn, l2_wg, l2_wu, l2_wd,
+			k_cache_2, v_cache_2, meta.n_heads, meta.n_kv_heads, head_dim
+		)
+		forward_gqa_layer(
+			x, pos, l3_an, l3_wq, l3_wk, l3_wv, l3_wo, l3_fn, l3_wg, l3_wu, l3_wd,
+			k_cache_3, v_cache_3, meta.n_heads, meta.n_kv_heads, head_dim
+		)
+		forward_gqa_layer(
+			x, pos, l4_an, l4_wq, l4_wk, l4_wv, l4_wo, l4_fn, l4_wg, l4_wu, l4_wd,
+			k_cache_4, v_cache_4, meta.n_heads, meta.n_kv_heads, head_dim
+		)
+
+		// Determine next token: teacher-forced during prompt prefill, sampled during generation
+		mut next_tok := 2
+		if pos + 1 < prompt_tokens.len {
+			next_tok = prompt_tokens.get(pos + 1) or { 2 }
+		} else {
+			arena {
+				h_final := tensor_rmsnorm(x, out_norm, 0.00001)
+				logits := h_final @ lm_head
+				// Mask BOS (id=1) and <unk> (id=0) during generation
+				logits.set(0, 0, -1000.0)
+				logits.set(0, 1, -1000.0)
+				next_tok = sample_token(logits, temperature)
+			}
+		}
+
+		// Stop on EOS '</s>' (id = 2) or BOS '<s>' (id = 1)
+		if pos + 1 >= prompt_tokens.len && (next_tok == 2 || next_tok == 1) {
+			break
+		}
+
+		cur_token = next_tok
+		pos += 1
+	}
+
+	// Print the final generated token if we reached total_steps
+	if cur_token > 2 && cur_token < meta.vocab.len {
+		print_detokenized_piece(meta.vocab[cur_token], false)
+	}
+	println('')
+
+	elapsed_us := time_now_us() - t_start_us
+	mut safe_us := elapsed_us
+	if safe_us <= 0 {
+		safe_us = 1
+	}
+	tok_per_sec := (pos * 1000000) / safe_us
+	println('           [layers=5 | heads=8Q/4KV | kv_steps=${pos} | speed=${tok_per_sec} tok/s | latency=${safe_us} us]')
+	return pos
+}
+
+// ============================================================================
+// 5. CLI ENTRYPOINT: AUTO-DOWNLOAD, WEIGHT TRANSPOSE & INFERENCE
+// ============================================================================
+
+fn main() {
+	default_hf_url := 'https://huggingface.co/ggml-org/test-model-stories260K/resolve/main/stories260K-f32.gguf'
+
+	mut fs := flag.FlagSet.new('vira-hf-llama')
+	fs.string_flag('model', 'm', 'models/stories260K.gguf', 'Path to local or downloaded Hugging Face GGUF model')
+	fs.string_flag('url', 'u', default_hf_url, 'Hugging Face GGUF resolve URL for auto-download')
+	fs.bool_flag('download', 'd', false, 'Force download of GGUF model from Hugging Face')
+	fs.f64_flag('temp', 't', 0.0, 'Sampling temperature (0.0 = greedy argmax)')
+	fs.int_flag('max-tokens', 'n', 45, 'Maximum new BPE tokens to generate per prompt')
+	fs.string_flag('prompt', 'p', '', 'Single-shot story prompt to execute and exit')
+	fs.bool_flag('interactive', 'i', false, 'Launch interactive Hugging Face story REPL')
+
+	raw_args := os.args()
+	mut cli_args := []string{}
+	if raw_args.len > 1 {
+		cli_args = raw_args.slice(1, raw_args.len)
+	}
+	_ := fs.parse(cli_args) or {
+		eprintln('Flag error: ${err}')
+		return
+	}
+
+	model_path := fs.get_string('model')
+	hf_url := fs.get_string('url')
+	force_dl := fs.get_bool('download')
+	temp := f32(fs.get_f64('temp'))
+	max_tokens := fs.get_int('max-tokens')
+	single_prompt := fs.get_string('prompt')
+	is_interactive := fs.get_bool('interactive')
+
+	println('=== 1. HUGGING FACE GGUF MODEL CHECK & BINARY HEADER PARSING ===')
+	_ := ensure_hf_model(model_path, hf_url, force_dl) or {
+		eprintln('Hugging Face model download error: ${err}')
+		return
+	}
+
+	meta := load_hf_gguf_meta(model_path) or {
+		eprintln('Failed to parse GGUF file: ${err}')
+		return
+	}
+
+	println('Model File      : ${model_path} (${meta.file_bytes} bytes, GGUF v${meta.version})')
+	println('HF Source Repo  : ggml-org/test-model-stories260K (${meta.arch})')
+	println('Architecture    : ${meta.n_layers} layers | dim=${meta.embed_dim} | ffn_dim=${meta.ffn_dim} | GQA=${meta.n_heads}Q/${meta.n_kv_heads}KV heads')
+	println('BPE Tokenizer   : ${meta.vocab_size} SentencePiece tokens | ${meta.scores.len} IEEE-754 merge scores | ${meta.tensor_count} tensors')
+
+	// Load global embedding, output norm, and LM head weights (transposing GGUF [out, in] -> [in, out])
+	token_emb := gguf_load_tensor(model_path, 'token_embd.weight') or { return }
+	out_norm := gguf_load_tensor(model_path, 'output_norm.weight') or { return }
+	raw_lm_head := gguf_load_tensor(model_path, 'output.weight') or { return }
+	lm_head := raw_lm_head.transpose()
+
+	// Layer 0 weights
+	l0_an := gguf_load_tensor(model_path, 'blk.0.attn_norm.weight') or { return }
+	r_l0_wq := gguf_load_tensor(model_path, 'blk.0.attn_q.weight') or { return }
+	r_l0_wk := gguf_load_tensor(model_path, 'blk.0.attn_k.weight') or { return }
+	r_l0_wv := gguf_load_tensor(model_path, 'blk.0.attn_v.weight') or { return }
+	r_l0_wo := gguf_load_tensor(model_path, 'blk.0.attn_output.weight') or { return }
+	l0_fn := gguf_load_tensor(model_path, 'blk.0.ffn_norm.weight') or { return }
+	r_l0_wg := gguf_load_tensor(model_path, 'blk.0.ffn_gate.weight') or { return }
+	r_l0_wu := gguf_load_tensor(model_path, 'blk.0.ffn_up.weight') or { return }
+	r_l0_wd := gguf_load_tensor(model_path, 'blk.0.ffn_down.weight') or { return }
+	l0_wq := r_l0_wq.transpose()
+	l0_wk := r_l0_wk.transpose()
+	l0_wv := r_l0_wv.transpose()
+	l0_wo := r_l0_wo.transpose()
+	l0_wg := r_l0_wg.transpose()
+	l0_wu := r_l0_wu.transpose()
+	l0_wd := r_l0_wd.transpose()
+
+	// Layer 1 weights
+	l1_an := gguf_load_tensor(model_path, 'blk.1.attn_norm.weight') or { return }
+	r_l1_wq := gguf_load_tensor(model_path, 'blk.1.attn_q.weight') or { return }
+	r_l1_wk := gguf_load_tensor(model_path, 'blk.1.attn_k.weight') or { return }
+	r_l1_wv := gguf_load_tensor(model_path, 'blk.1.attn_v.weight') or { return }
+	r_l1_wo := gguf_load_tensor(model_path, 'blk.1.attn_output.weight') or { return }
+	l1_fn := gguf_load_tensor(model_path, 'blk.1.ffn_norm.weight') or { return }
+	r_l1_wg := gguf_load_tensor(model_path, 'blk.1.ffn_gate.weight') or { return }
+	r_l1_wu := gguf_load_tensor(model_path, 'blk.1.ffn_up.weight') or { return }
+	r_l1_wd := gguf_load_tensor(model_path, 'blk.1.ffn_down.weight') or { return }
+	l1_wq := r_l1_wq.transpose()
+	l1_wk := r_l1_wk.transpose()
+	l1_wv := r_l1_wv.transpose()
+	l1_wo := r_l1_wo.transpose()
+	l1_wg := r_l1_wg.transpose()
+	l1_wu := r_l1_wu.transpose()
+	l1_wd := r_l1_wd.transpose()
+
+	// Layer 2 weights
+	l2_an := gguf_load_tensor(model_path, 'blk.2.attn_norm.weight') or { return }
+	r_l2_wq := gguf_load_tensor(model_path, 'blk.2.attn_q.weight') or { return }
+	r_l2_wk := gguf_load_tensor(model_path, 'blk.2.attn_k.weight') or { return }
+	r_l2_wv := gguf_load_tensor(model_path, 'blk.2.attn_v.weight') or { return }
+	r_l2_wo := gguf_load_tensor(model_path, 'blk.2.attn_output.weight') or { return }
+	l2_fn := gguf_load_tensor(model_path, 'blk.2.ffn_norm.weight') or { return }
+	r_l2_wg := gguf_load_tensor(model_path, 'blk.2.ffn_gate.weight') or { return }
+	r_l2_wu := gguf_load_tensor(model_path, 'blk.2.ffn_up.weight') or { return }
+	r_l2_wd := gguf_load_tensor(model_path, 'blk.2.ffn_down.weight') or { return }
+	l2_wq := r_l2_wq.transpose()
+	l2_wk := r_l2_wk.transpose()
+	l2_wv := r_l2_wv.transpose()
+	l2_wo := r_l2_wo.transpose()
+	l2_wg := r_l2_wg.transpose()
+	l2_wu := r_l2_wu.transpose()
+	l2_wd := r_l2_wd.transpose()
+
+	// Layer 3 weights
+	l3_an := gguf_load_tensor(model_path, 'blk.3.attn_norm.weight') or { return }
+	r_l3_wq := gguf_load_tensor(model_path, 'blk.3.attn_q.weight') or { return }
+	r_l3_wk := gguf_load_tensor(model_path, 'blk.3.attn_k.weight') or { return }
+	r_l3_wv := gguf_load_tensor(model_path, 'blk.3.attn_v.weight') or { return }
+	r_l3_wo := gguf_load_tensor(model_path, 'blk.3.attn_output.weight') or { return }
+	l3_fn := gguf_load_tensor(model_path, 'blk.3.ffn_norm.weight') or { return }
+	r_l3_wg := gguf_load_tensor(model_path, 'blk.3.ffn_gate.weight') or { return }
+	r_l3_wu := gguf_load_tensor(model_path, 'blk.3.ffn_up.weight') or { return }
+	r_l3_wd := gguf_load_tensor(model_path, 'blk.3.ffn_down.weight') or { return }
+	l3_wq := r_l3_wq.transpose()
+	l3_wk := r_l3_wk.transpose()
+	l3_wv := r_l3_wv.transpose()
+	l3_wo := r_l3_wo.transpose()
+	l3_wg := r_l3_wg.transpose()
+	l3_wu := r_l3_wu.transpose()
+	l3_wd := r_l3_wd.transpose()
+
+	// Layer 4 weights
+	l4_an := gguf_load_tensor(model_path, 'blk.4.attn_norm.weight') or { return }
+	r_l4_wq := gguf_load_tensor(model_path, 'blk.4.attn_q.weight') or { return }
+	r_l4_wk := gguf_load_tensor(model_path, 'blk.4.attn_k.weight') or { return }
+	r_l4_wv := gguf_load_tensor(model_path, 'blk.4.attn_v.weight') or { return }
+	r_l4_wo := gguf_load_tensor(model_path, 'blk.4.attn_output.weight') or { return }
+	l4_fn := gguf_load_tensor(model_path, 'blk.4.ffn_norm.weight') or { return }
+	r_l4_wg := gguf_load_tensor(model_path, 'blk.4.ffn_gate.weight') or { return }
+	r_l4_wu := gguf_load_tensor(model_path, 'blk.4.ffn_up.weight') or { return }
+	r_l4_wd := gguf_load_tensor(model_path, 'blk.4.ffn_down.weight') or { return }
+	l4_wq := r_l4_wq.transpose()
+	l4_wk := r_l4_wk.transpose()
+	l4_wv := r_l4_wv.transpose()
+	l4_wo := r_l4_wo.transpose()
+	l4_wg := r_l4_wg.transpose()
+	l4_wu := r_l4_wu.transpose()
+	l4_wd := r_l4_wd.transpose()
+
+	// Preallocate per-layer KV-Cache tensors (MaxSeq = 256, kv_dim = 32)
+	kv_dim := (meta.embed_dim / meta.n_heads) * meta.n_kv_heads
+	k_cache_0 := tensor_fill(256, kv_dim, 0.0)
+	v_cache_0 := tensor_fill(256, kv_dim, 0.0)
+	k_cache_1 := tensor_fill(256, kv_dim, 0.0)
+	v_cache_1 := tensor_fill(256, kv_dim, 0.0)
+	k_cache_2 := tensor_fill(256, kv_dim, 0.0)
+	v_cache_2 := tensor_fill(256, kv_dim, 0.0)
+	k_cache_3 := tensor_fill(256, kv_dim, 0.0)
+	v_cache_3 := tensor_fill(256, kv_dim, 0.0)
+	k_cache_4 := tensor_fill(256, kv_dim, 0.0)
+	v_cache_4 := tensor_fill(256, kv_dim, 0.0)
+
+	// Mode 1: Single-shot CLI prompt (--prompt "...")
+	if single_prompt.len > 0 {
+		println('=== 2. SINGLE-SHOT HUGGING FACE LLAMA INFERENCE ===')
+		println('Prompt     > ${single_prompt}')
+		_ := generate_story(
+			single_prompt, meta, token_emb, out_norm, lm_head,
+			l0_an, l0_wq, l0_wk, l0_wv, l0_wo, l0_fn, l0_wg, l0_wu, l0_wd, k_cache_0, v_cache_0,
+			l1_an, l1_wq, l1_wk, l1_wv, l1_wo, l1_fn, l1_wg, l1_wu, l1_wd, k_cache_1, v_cache_1,
+			l2_an, l2_wq, l2_wk, l2_wv, l2_wo, l2_fn, l2_wg, l2_wu, l2_wd, k_cache_2, v_cache_2,
+			l3_an, l3_wq, l3_wk, l3_wv, l3_wo, l3_fn, l3_wg, l3_wu, l3_wd, k_cache_3, v_cache_3,
+			l4_an, l4_wq, l4_wk, l4_wv, l4_wo, l4_fn, l4_wg, l4_wu, l4_wd, k_cache_4, v_cache_4,
+			max_tokens, temp
+		)
+		return
+	}
+
+	// Mode 2: Interactive REPL (--interactive / -i)
+	if is_interactive {
+		println('=== 2. INTERACTIVE HUGGING FACE LLAMA STORY REPL ===')
+		println('Enter a story opening (e.g. "Once upon a time") or /exit to quit.')
+		for {
+			line := io.prompt('Prompt     > ') or {
+				break
+			}
+			trimmed := line.trim()
+			if trimmed.len == 0 {
+				continue
+			}
+			if trimmed == '/exit' || trimmed == '/quit' {
+				println('Goodbye!')
+				break
+			}
+			_ := generate_story(
+				trimmed, meta, token_emb, out_norm, lm_head,
+				l0_an, l0_wq, l0_wk, l0_wv, l0_wo, l0_fn, l0_wg, l0_wu, l0_wd, k_cache_0, v_cache_0,
+				l1_an, l1_wq, l1_wk, l1_wv, l1_wo, l1_fn, l1_wg, l1_wu, l1_wd, k_cache_1, v_cache_1,
+				l2_an, l2_wq, l2_wk, l2_wv, l2_wo, l2_fn, l2_wg, l2_wu, l2_wd, k_cache_2, v_cache_2,
+				l3_an, l3_wq, l3_wk, l3_wv, l3_wo, l3_fn, l3_wg, l3_wu, l3_wd, k_cache_3, v_cache_3,
+				l4_an, l4_wq, l4_wk, l4_wv, l4_wo, l4_fn, l4_wg, l4_wu, l4_wd, k_cache_4, v_cache_4,
+				max_tokens, temp
+			)
+		}
+		return
+	}
+
+	// Mode 3: Default Multi-Prompt Pretrained Hugging Face Story Generation Suite
+	println('=== 2. 5-LAYER PRETRAINED HUGGING FACE LLAMA INFERENCE (PURE VIRA) ===')
+	prompts := [
+		'Once upon a time',
+		'One day, a little',
+		'In a big forest'
+	]
+
+	mut total_generated := 0
+	for p in prompts {
+		println('Prompt     > ${p}')
+		steps := generate_story(
+			p, meta, token_emb, out_norm, lm_head,
+			l0_an, l0_wq, l0_wk, l0_wv, l0_wo, l0_fn, l0_wg, l0_wu, l0_wd, k_cache_0, v_cache_0,
+			l1_an, l1_wq, l1_wk, l1_wv, l1_wo, l1_fn, l1_wg, l1_wu, l1_wd, k_cache_1, v_cache_1,
+			l2_an, l2_wq, l2_wk, l2_wv, l2_wo, l2_fn, l2_wg, l2_wu, l2_wd, k_cache_2, v_cache_2,
+			l3_an, l3_wq, l3_wk, l3_wv, l3_wo, l3_fn, l3_wg, l3_wu, l3_wd, k_cache_3, v_cache_3,
+			l4_an, l4_wq, l4_wk, l4_wv, l4_wo, l4_fn, l4_wg, l4_wu, l4_wd, k_cache_4, v_cache_4,
+			max_tokens, temp
+		)
+		total_generated += steps
+	}
+
+	println('=== 3. INFERENCE SUMMARY ===')
+	println('Completed ${prompts.len} pretrained Hugging Face LLaMA generations (${total_generated} total BPE steps) in 100% Pure Vira.')
+}

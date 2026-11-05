@@ -59,6 +59,9 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`38_gui_remote_url_image_loading.vir`](./38_gui_remote_url_image_loading.vir)** | Remote URL Image Loading & HTTP Header Inspection | Non-blocking remote asset download, custom HTTP request headers (`Authorization: Bearer`, `User-Agent`, `Accept`), 60 FPS unblocked GUI, disk-backed caching, and alpha-blended canvas rendering. |
 | **[`39_gui_realworld_cloud_ai_hub.vir`](./39_gui_realworld_cloud_ai_hub.vir)** | Real-World GUI Apps: HTTP, Images & Widget Suite | Production Cloud AI Hub desktop app: live HTTP REST API querying over TLS, zero-alloc JSON parsing, GPU image texture caching & rendering, complete widget catalog, and 0 leaks. |
 | **[`40_native_c_and_python_ffi.vir`](./40_native_c_and_python_ffi.vir)** / **[`40_python_ffi_caller.py`](./40_python_ffi_caller.py)** | Native C & Python FFI, Shared Libraries & ctypes | Direct C-ABI interop, `#include`, `extern "C"`, mandatory `unsafe { ... }`, C scalar types (`c_int`, `c_double`, `voidptr`), raw pointers (`&`, `&mut`, `*`), `@[c_layout]` structs, exporting shared libraries (`@[export]` & `vira build -shared`), and Python `ctypes` interop with 0 leaks. |
+| **[`41_cli_llm_chat_engine.vir`](./41_cli_llm_chat_engine.vir)** | Pure-Vira CLI LLM Chat Engine (Zero FFI) | Pure-Vira GGUF v3 header & `tokenizer.ggml.tokens` vocabulary parser (`os.read_bytes`), word/subword tokenizer, stateful KV-cache attention (`k_cache.copy_row`, `k_cache.slice_rows`), RoPE, RMSNorm, SwiGLU inside `arena {}`, repetition penalty (`logits.get`/`set`), CLI flags (`flag.FlagSet`), and interactive REPL (`io.prompt`) with 0 leaks. |
+| **[`42_huggingface_gguf_llm_inference.vir`](./42_huggingface_gguf_llm_inference.vir)** | Pretrained Hugging Face 5-Layer LLaMA GGUF Runner (Zero FFI) | Auto-downloads `ggml-org/test-model-stories260K` (`models/stories260K.gguf`), parses 512 SentencePiece BPE tokens & IEEE-754 merge scores, runs 5-layer 8Q/4KV Grouped-Query Attention (GQA) + interleaved RoPE + SwiGLU at >3,000 tok/s with 0 leaks. |
+| **[`43_qwen2_5_gguf_chat_inference.vir`](./43_qwen2_5_gguf_chat_inference.vir)** | Qwen 2.5 (`qwen2`) GGUF ChatML Inference Engine (Zero FFI) | Loads `models/qwen2_5_instruct.gguf` (or `--download-hf` for `Qwen/Qwen2.5-0.5B-Instruct-GGUF`), parses `qwen2` metadata & GPT-2 ChatML tokens (`<\|im_start\|>`/`<\|im_end\|>`), runs QKV bias addition (`attn_q/k/v.bias`), 1M NeoX half-split RoPE, 8Q/2KV GQA, and `Q4_0`/`Q8_0` SIMD dequantization with 0 leaks. |
 
 ---
 
@@ -108,5 +111,8 @@ You can run each example in sequence from your shell:
 .\vira.exe run docs/examples/39_gui_realworld_cloud_ai_hub.vir
 .\vira.exe run docs/examples/40_native_c_and_python_ffi.vir
 python docs/examples/40_python_ffi_caller.py
+.\vira.exe run docs/examples/41_cli_llm_chat_engine.vir
+.\vira.exe run docs/examples/42_huggingface_gguf_llm_inference.vir
+.\vira.exe run docs/examples/43_qwen2_5_gguf_chat_inference.vir
 ```
 

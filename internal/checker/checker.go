@@ -9,6 +9,7 @@ import (
 )
 
 type SemanticError struct {
+	File *ast.File
 	Span token.Span
 	Msg  string
 }
@@ -99,8 +100,9 @@ type Checker struct {
 	ResolvedConsts map[ast.Expr]*ConstSymbol      // records resolved top-level constant references
 
 	// Function context during Pass 3
-	curFnReturn    Type
-	inDeferDiscard bool
+	curFile         *ast.File
+	curFnReturn     Type
+	inDeferDiscard  bool
 	inUnsafeContext bool
 }
 
@@ -261,6 +263,7 @@ func (c *Checker) SetFileImports(imports []ast.ImportSpec) {
 
 func (c *Checker) errorf(span token.Span, format string, args ...any) {
 	c.errors = append(c.errors, SemanticError{
+		File: c.curFile,
 		Span: span,
 		Msg:  fmt.Sprintf(format, args...),
 	})
@@ -1079,6 +1082,7 @@ func (c *Checker) CheckFile(file *ast.File) {
 func (c *Checker) CheckFiles(files []*ast.File) {
 	// Pass 1A: Register type names (StructDecl, Actor, & InterfaceDecl shells)
 	for _, file := range files {
+		c.curFile = file
 		modName := file.Module.Name
 		if modName == "" {
 			modName = "main"
@@ -1133,6 +1137,7 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 
 	// Pass 1B: Resolve struct fields, embeds, interface members, and function/method headers
 	for _, file := range files {
+		c.curFile = file
 		fileMod := file.Module.Name
 		if fileMod == "" {
 			fileMod = "main"
@@ -1185,6 +1190,7 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 
 	// Pass 3: Type-check function/method bodies, mutability, 4-quadrant visibility, and !T handling
 	for _, file := range files {
+		c.curFile = file
 		fileMod := file.Module.Name
 		if fileMod == "" {
 			fileMod = "main"
@@ -2511,6 +2517,46 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "tensor." + callee.Field.Name
+				case "get":
+					sig = &FnSig{
+						Name:       "get",
+						Params:     []ParamInfo{{Name: "row", Type: TypeInt}, {Name: "col", Type: TypeInt}},
+						ReturnType: TypeF32,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.get"
+				case "set":
+					sig = &FnSig{
+						Name:       "set",
+						Params:     []ParamInfo{{Name: "row", Type: TypeInt}, {Name: "col", Type: TypeInt}, {Name: "val", Type: TypeF32}},
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.set"
+				case "copy_row":
+					sig = &FnSig{
+						Name:       "copy_row",
+						Params:     []ParamInfo{{Name: "dst_row", Type: TypeInt}, {Name: "src", Type: tt}},
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.copy_row"
+				case "slice_rows":
+					sig = &FnSig{
+						Name:       "slice_rows",
+						Params:     []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.slice_rows"
+				case "linear":
+					sig = &FnSig{
+						Name:       "linear",
+						Params:     []ParamInfo{{Name: "weight", Type: tt}},
+						ReturnType: tt,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.linear"
 				default:
 					c.errorf(callee.SelSpan, "tensor '%s' has no method '%s'", tt, callee.Field.Name)
 					return TypeVoid

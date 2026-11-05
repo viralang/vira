@@ -477,13 +477,22 @@ func (s *Server) resolveImports(uri string, astFile *ast.File) []ImportedDoc {
 
 	workList := []workItem{{filePath: rootPath, ast: astFile}}
 
-	// Discover all sibling source files in the same project root or directory
+	// Discover all sibling source files in the same project root or package directory.
+	// Standalone example programs (in `examples/` or `docs/examples/`) and standalone
+	// single-file `main` scripts outside a `vira.mod` project only load explicit `import`s
+	// so sibling examples do not collide with each other in symbol resolution.
+	slashRoot := filepath.ToSlash(rootPath)
+	isExampleFile := strings.Contains(slashRoot, "/examples/") || strings.EqualFold(filepath.Base(fileDir), "examples")
+	isCustomModule := astFile.Module.Name != "" && astFile.Module.Name != "main"
+
 	searchDir := ""
-	if pRoot != "" {
-		searchDir = pRoot
-	} else if fileDir != "" && fileDir != "/" && fileDir != "\\" && fileDir != string(filepath.Separator) && fileDir != "." && !(len(fileDir) <= 3 && strings.Contains(fileDir, ":")) {
-		if fi, err := os.Stat(fileDir); err == nil && fi.IsDir() {
-			searchDir = fileDir
+	if !isExampleFile {
+		if pRoot != "" {
+			searchDir = pRoot
+		} else if isCustomModule && fileDir != "" && fileDir != "/" && fileDir != "\\" && fileDir != string(filepath.Separator) && fileDir != "." && !(len(fileDir) <= 3 && strings.Contains(fileDir, ":")) {
+			if fi, err := os.Stat(fileDir); err == nil && fi.IsDir() {
+				searchDir = fileDir
+			}
 		}
 	}
 
@@ -728,7 +737,7 @@ func (s *Server) validateDocument(uri string, text string) {
 		if semErrs := chk.Errors(); len(semErrs) > 0 {
 			for _, se := range semErrs {
 				// Only publish diagnostics that belong to the active document being validated
-				if belongsToFile(se.Span, astFile) {
+				if (se.File == nil || se.File == astFile) && belongsToFile(se.Span, astFile) {
 					startLine, startCol := f.Location(se.Span.Start)
 					endLine, endCol := f.Location(se.Span.End)
 					if endLine < startLine || (endLine == startLine && endCol <= startCol) {
@@ -991,6 +1000,32 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`tensor.reshape_4d(d0: int, d1: int, d2: int, d3: int) -> tensor[f32]`**\n\nReshapes tensor into 4D `(d0, d1, d2, d3)`. Returns an O(1) zero-copy view inside `arena { ... }`, or an independent autofreed buffer outside arenas."
 	case "transpose":
 		return "**`tensor.transpose() -> tensor[f32]`**\n\nTransposes the trailing two matrix axes `(..., M, N) -> (..., N, M)` for 2D, 3D, or 4D strided tensors."
+	case "linear":
+		return "**`tensor.linear(weight: tensor[f32]) -> tensor[f32]`**\n\nComputes the linear projection `tensor @ weight.T` (`(M, K) × (N, K)^T -> (M, N)`) directly on GGUF/PyTorch `[out_features, in_features]` weights using multi-threaded AVX2+FMA / NEON SIMD dot-products without transposing."
+	case "copy_row":
+		return "**`tensor.copy_row(dst_row: int, src: tensor[f32])`**\n\nCopies a `1 × D` vector `src` into row `dst_row` of a `MaxSeq × D` tensor (e.g., updating a Transformer KV cache)."
+	case "slice_rows":
+		return "**`tensor.slice_rows(start: int, end: int) -> tensor[f32]`**\n\nExtracts rows `[start..end)` into a `(end - start) × D` tensor, allocating on the active bump arena if inside `arena { ... }`."
+	case "gguf_load_tensor":
+		return "**`gguf_load_tensor(path: string, name: string) -> !tensor[f32]`**\n\nLoads a named tensor from a GGUF v2/v3 model file into a 64-byte aligned `tensor[f32]`, automatically dequantizing `Q4_0`, `Q8_0`, `F16`, or `F32` blocks with cached O(1) header indexing."
+	case "tensor_rmsnorm":
+		return "**`tensor_rmsnorm(x: tensor[f32], weight: tensor[f32], eps: f32) -> tensor[f32]`**\n\nApplies Root Mean Square Layer Normalization (`x * weight / sqrt(mean(x^2) + eps)`) across each row."
+	case "tensor_rope":
+		return "**`tensor_rope(x: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies Rotary Position Embeddings (RoPE) at sequence position `pos` with base frequency `freq_base` (e.g. `10000.0` for LLaMA, `1000000.0` NeoX split-half for Qwen 2.5)."
+	case "tensor_silu":
+		return "**`tensor_silu(x: tensor[f32]) -> tensor[f32]`**\n\nApplies the Sigmoid Linear Unit (`SiLU(x) = x / (1 + exp(-x))`) activation function for SwiGLU feed-forward networks."
+	case "tensor_elemwise_mul":
+		return "**`tensor_elemwise_mul(a: tensor[f32], b: tensor[f32]) -> tensor[f32]`**\n\nComputes SIMD-accelerated element-wise Hadamard multiplication `a * b`."
+	case "tensor_softmax":
+		return "**`tensor_softmax(logits: tensor[f32]) -> tensor[f32]`**\n\nComputes numerically stable row-wise Softmax (`exp(x - max(x)) / sum(exp(x - max(x)))`)."
+	case "tensor_embedding":
+		return "**`tensor_embedding(table: tensor[f32], token_id: int) -> tensor[f32]`**\n\nLooks up row `token_id` from embedding matrix `table` (`VocabSize × HiddenDim`) and returns a `1 × HiddenDim` vector."
+	case "sample_token":
+		return "**`sample_token(logits: tensor[f32], temperature: f32) -> int`**\n\nSamples the next token ID from `logits` (`1 × VocabSize`). Uses greedy argmax when `temperature <= 0.0`, or temperature-scaled multinomial sampling when `temperature > 0.0`."
+	case "tensor_scale":
+		return "**`tensor_scale(t: tensor[f32], scale: f32) -> tensor[f32]`**\n\nMultiplies all elements of `t` by scalar `scale` (e.g., `1.0 / sqrt(head_dim)` in scaled dot-product attention)."
+	case "read_bytes_head":
+		return "**`os.read_bytes_head(path: string, max_bytes: int) -> ![]u8`**\n\nReads up to the first `max_bytes` bytes of a file into a `[]u8` slice without loading the entire file into memory (ideal for parsing GGUF headers)."
 	case "await":
 		return "**`future.await() -> !T`**\n\nSynchronizes an asynchronous actor `Future[T]` with cooperative Chase-Lev work helping, returning `!T` for `or { ... }` fault recovery."
 	case "switch":
@@ -1339,7 +1374,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 			for _, l := range lines {
 				lTrim := strings.TrimSpace(l)
 				if strings.Contains(lTrim, receiverIdent) && strings.Contains(lTrim, ":=") {
-					for _, marker := range []string{"tensor_fill(", "tensor_fill_3d(", "tensor_fill_4d(", ".reshape_2d(", ".reshape_3d(", ".reshape_4d(", ".transpose(", " @ ", "tensor_relu(", "tensor_add(", "tensor_scale(", "tensor_elemwise_mul(", "safetensors_load(", "gguf_tensor_dequant("} {
+					for _, marker := range []string{"tensor_fill(", "tensor_fill_3d(", "tensor_fill_4d(", ".reshape_2d(", ".reshape_3d(", ".reshape_4d(", ".transpose(", ".linear(", ".slice_rows(", " @ ", "tensor_relu(", "tensor_add(", "tensor_scale(", "tensor_elemwise_mul(", "tensor_rmsnorm(", "tensor_rope(", "tensor_silu(", "tensor_softmax(", "tensor_embedding(", "safetensors_load(", "gguf_load_tensor(", "gguf_tensor_dequant("} {
 						if strings.Contains(lTrim, marker) {
 							isTensorReceiver = true
 							break
@@ -1363,7 +1398,12 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 				CompletionItem{Label: "reshape_3d", Kind: 2, Detail: "reshape_3d(d0: int, d1: int, d2: int) -> tensor[f32]", Documentation: "Reshape to 3D (O(1) zero-copy view inside arena)"},
 				CompletionItem{Label: "reshape_4d", Kind: 2, Detail: "reshape_4d(d0: int, d1: int, d2: int, d3: int) -> tensor[f32]", Documentation: "Reshape to 4D (O(1) zero-copy view inside arena)"},
 				CompletionItem{Label: "transpose", Kind: 2, Detail: "transpose() -> tensor[f32]", Documentation: "Swap trailing two matrix axes (..., M, N) -> (..., N, M)"},
+				CompletionItem{Label: "linear", Kind: 2, Detail: "linear(weight: tensor[f32]) -> tensor[f32]", Documentation: "Multi-threaded SIMD linear projection x @ weight.T without transposing"},
 				CompletionItem{Label: "clone", Kind: 2, Detail: "clone() -> tensor[f32]", Documentation: "Allocate an independent deep copy of the tensor"},
+				CompletionItem{Label: "get", Kind: 2, Detail: "get(row: int, col: int) -> f32", Documentation: "Bounds-checked element read at (row, col)"},
+				CompletionItem{Label: "set", Kind: 2, Detail: "set(row: int, col: int, val: f32)", Documentation: "Bounds-checked element write at (row, col)"},
+				CompletionItem{Label: "copy_row", Kind: 2, Detail: "copy_row(dst_row: int, src: tensor[f32])", Documentation: "Copy 1xD vector src into row dst_row of KV cache tensor"},
+				CompletionItem{Label: "slice_rows", Kind: 2, Detail: "slice_rows(start: int, end: int) -> tensor[f32]", Documentation: "Extract rows [start..end) into a (end-start)xD tensor"},
 			)
 			return items
 		}

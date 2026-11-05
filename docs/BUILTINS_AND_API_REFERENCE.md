@@ -134,6 +134,10 @@ q := tensor_fill_4d(2, 8, 16, 64, 0.125)
 | `.reshape_4d(d0, d1, d2, d3 int)` | `fn (int, int, int, int) tensor[f32]` | Reshapes to 4D preserving element count |
 | `.transpose()` | `fn () tensor[f32]` | Swaps the last two axes `(..., M, N) -> (..., N, M)` |
 | `.clone()` | `fn () tensor[f32]` | Deep-clones tensor data and N-D shape metadata |
+| `.get(row, col int)` | `fn (int, int) f32` | Bounds-checked scalar read at `(row, col)` |
+| `.set(row, col int, val f32)` | `fn (int, int, f32)` | Bounds-checked scalar write at `(row, col)` (for logit masking & repetition penalties) |
+| `.copy_row(dst_row int, src tensor[f32])` | `fn (int, tensor[f32])` | Copies a `1 × D` vector `src` into row `dst_row` of a pre-allocated `[max_seq_len, D]` KV cache |
+| `.slice_rows(start, end int)` | `fn (int, int) tensor[f32]` | Extracts rows `[start, end)` as a `(end - start) × D` tensor (arena-allocated inside `arena {}`) |
 
 ### Matrix Multiplication Operator: `@`
 Computes hardware-accelerated 2D, batched 3D/4D, or broadcast N-D × 2D matrix multiplication $C = A @ B$.

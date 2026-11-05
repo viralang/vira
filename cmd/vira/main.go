@@ -438,6 +438,7 @@ func formatSingleFile(path string, writeBack bool) {
 // --- SUBCOMMAND 7: `vira lsp` ---
 
 func lspCmd() {
+	ensureStdPackagesExtracted()
 	server := lsp.NewServer(os.Stdin, os.Stdout)
 	if err := server.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "vira lsp error: %v\n", err)
@@ -1017,6 +1018,12 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 	if semErrs := chk.Errors(); len(semErrs) > 0 {
 		for _, se := range semErrs {
 			sFile := srcFiles[0]
+			for idx, af := range astFiles {
+				if se.File != nil && af == se.File && idx < len(srcFiles) {
+					sFile = srcFiles[idx]
+					break
+				}
+			}
 			fmt.Fprintln(os.Stderr, sFile.FormatDiagnostic("SEMANTIC", se.Msg, se.Span))
 		}
 		fmt.Fprintf(os.Stderr, "compilation aborted due to %d semantic error(s)\n", len(semErrs))

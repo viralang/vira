@@ -13,4 +13,5 @@ lib/
 /vira
 scratch/
 assets/cache/
+models/
 .DS_Store

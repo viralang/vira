@@ -2597,34 +2597,26 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 		switch name {
 		case "print":
 			fnName := "vira_print"
-			if len(call.Args) > 0 {
-				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
-					fnName = "vira_print_temp"
-				}
+			if len(call.Args) > 0 && isFreshOwningRValue(call.Args[0].Expr) {
+				fnName = "vira_print_temp"
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "println":
 			fnName := "vira_println"
-			if len(call.Args) > 0 {
-				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
-					fnName = "vira_println_temp"
-				}
+			if len(call.Args) > 0 && isFreshOwningRValue(call.Args[0].Expr) {
+				fnName = "vira_println_temp"
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "eprint":
 			fnName := "vira_eprint"
-			if len(call.Args) > 0 {
-				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
-					fnName = "vira_eprint_temp"
-				}
+			if len(call.Args) > 0 && isFreshOwningRValue(call.Args[0].Expr) {
+				fnName = "vira_eprint_temp"
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "eprintln":
 			fnName := "vira_eprintln"
-			if len(call.Args) > 0 {
-				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
-					fnName = "vira_eprintln_temp"
-				}
+			if len(call.Args) > 0 && isFreshOwningRValue(call.Args[0].Expr) {
+				fnName = "vira_eprintln_temp"
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
 		case "time_sleep_ms":
@@ -3147,6 +3139,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			case "cap":
 				return fmt.Sprintf("%s%scap", recvLValue, sep)
 			case "to_string", "to_str":
+				_, isIdent := callee.Left.(*ast.IdentExpr)
+				_, isSel := callee.Left.(*ast.SelectorExpr)
+				_, isIdx := callee.Left.(*ast.IndexExpr)
+				if !isIdent && !isSel && !isIdx {
+					return fmt.Sprintf("({ %s _tmp_b = %s; vira_str _res_s = vira_bytes_to_string(&_tmp_b); %s_free(&_tmp_b); _res_s; })", sliceTypeName, recvLValue, sliceTypeName)
+				}
 				return fmt.Sprintf("vira_bytes_to_string(%s)", recvPtr)
 			case "get":
 				cRes := g.cResultName(sl.Elem)
@@ -3273,6 +3271,16 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				return fmt.Sprintf("vira_tensor_transpose_nd(%s, %s)", arenaArg, tExpr)
 			case "clone":
 				return fmt.Sprintf("vira_tensor_f32_clone(%s)", tExpr)
+			case "get":
+				return fmt.Sprintf("vira_tensor_f32_get(%s, %s, %s)", tExpr, argStrs[0], argStrs[1])
+			case "set":
+				return fmt.Sprintf("vira_tensor_f32_set(%s, %s, %s, %s)", tExpr, argStrs[0], argStrs[1], argStrs[2])
+			case "copy_row":
+				return fmt.Sprintf("vira_tensor_f32_copy_row(%s, %s, %s)", tExpr, argStrs[0], argStrs[1])
+			case "slice_rows":
+				return fmt.Sprintf("vira_tensor_slice_rows(%s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1])
+			case "linear":
+				return fmt.Sprintf("vira_tensor_linear(%s, %s, %s)", arenaArg, tExpr, argStrs[0])
 			}
 		}
 	}
@@ -3516,6 +3524,8 @@ func (g *Generator) cSliceNameFromTypeName(tName string) string {
 		return "vira_slice_bool"
 	case "string":
 		return "vira_slice_string"
+	case "tensor[f32]":
+		return "vira_slice_tensor_f32"
 	default:
 		return "vira_slice_" + g.cStructName(elem)
 	}

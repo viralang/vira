@@ -10,6 +10,7 @@
     { "include": "#modules" },
     { "include": "#imports" },
     { "include": "#declarations" },
+    { "include": "#quadrants" },
     { "include": "#keywords" },
     { "include": "#constants" },
     { "include": "#gui" },
@@ -18,7 +19,6 @@
     { "include": "#functions" },
     { "include": "#properties" },
     { "include": "#types" },
-    { "include": "#quadrants" },
     { "include": "#operators" },
     { "include": "#numbers" }
   ],
@@ -111,16 +111,17 @@
         },
         {
           "name": "meta.function.receiver.vira",
-          "match": "\\b(pub\\s+)?(fn)\\s*(\\()\\s*([a-zA-Z0-9_]+)\\s*(&)?([A-Z][a-zA-Z0-9_]*)\\s*(\\))\\s*([a-zA-Z0-9_]+)\\s*(?=\\()",
+          "match": "\\b(pub\\s+)?(fn)\\s*(\\()\\s*(mut\\s+)?([a-zA-Z0-9_]+)\\s+(&)?([A-Z][a-zA-Z0-9_]*)\\s*(\\))\\s*([a-zA-Z0-9_]+)\\s*(?=\\()",
           "captures": {
             "1": { "name": "storage.modifier.pub.vira" },
             "2": { "name": "keyword.declaration.function.vira" },
             "3": { "name": "punctuation.definition.parameters.begin.vira" },
-            "4": { "name": "variable.parameter.receiver.vira" },
-            "5": { "name": "keyword.operator.reference.vira" },
-            "6": { "name": "entity.name.type.vira" },
-            "7": { "name": "punctuation.definition.parameters.end.vira" },
-            "8": { "name": "entity.name.function.member.vira" }
+            "4": { "name": "keyword.control.vira" },
+            "5": { "name": "variable.parameter.receiver.vira" },
+            "6": { "name": "keyword.operator.reference.vira" },
+            "7": { "name": "entity.name.type.vira" },
+            "8": { "name": "punctuation.definition.parameters.end.vira" },
+            "9": { "name": "entity.name.function.member.vira" }
           }
         },
         {
@@ -319,11 +320,11 @@
       "patterns": [
         {
           "name": "support.function.method.collection.vira",
-          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|await)\\b(?=\\s*\\()"
+          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|copy_row|slice_rows|data_ptr|await)\\b(?=\\s*\\()"
         },
         {
           "name": "support.variable.property.collection.vira",
-          "match": "(?<=\\.)(len|cap|ndim|rows|cols)\\b"
+          "match": "(?<=\\.)(len|cap|ndim|rows|cols|data)\\b"
         }
       ]
     },
@@ -338,8 +339,16 @@
     "types": {
       "patterns": [
         {
+          "name": "entity.name.type.tensor.vira",
+          "match": "\\b(tensor)\\[(f32|f16|bf16|f64)\\]"
+        },
+        {
+          "name": "entity.name.type.future.vira",
+          "match": "\\b(Future)\\[[a-zA-Z0-9_]+\\]"
+        },
+        {
           "name": "meta.type.array.vira",
-          "match": "(\\[)\\s*([0-9_]*)\\s*(\\])\\s*([a-zA-Z0-9_]+)",
+          "match": "(\\[)\\s*([0-9_]*)\\s*(\\])\\s*(?!tensor\\[|Future\\[)([a-zA-Z0-9_]+)",
           "captures": {
             "1": { "name": "punctuation.bracket.square.vira" },
             "2": { "name": "constant.numeric.integer.vira" },
@@ -350,14 +359,6 @@
         {
           "name": "entity.name.type.primitive.vira",
           "match": "\\b(u8|byte|int|i64|f32|f16|bf16|f64|bool|string|void|c_char|c_uchar|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_longlong|c_ulonglong|c_size|c_ssize|c_float|c_double|voidptr)\\b"
-        },
-        {
-          "name": "entity.name.type.tensor.vira",
-          "match": "\\b(tensor)\\[(f32|f16|bf16|f64)\\]"
-        },
-        {
-          "name": "entity.name.type.future.vira",
-          "match": "\\b(Future)\\[[a-zA-Z0-9_]+\\]"
         },
         {
           "name": "meta.type.qualified.vira",

@@ -300,5 +300,17 @@
       "}"
     ],
     "description": "Responsive screen breakpoint inspection via MediaQuery"
+  },
+  "GGUF Transformer Block": {
+    "prefix": "gguf",
+    "body": [
+      "${1:w} := gguf_load_tensor(${2:model_path}, '${3:blk.0.attn_q.weight}') or { return }",
+      "arena {",
+      "\t${4:xn} := tensor_rmsnorm(${5:x}, ${6:attn_norm}, ${7:0.00001})",
+      "\t${8:proj} := ${4:xn}.linear(${1:w})",
+      "\t$0",
+      "}"
+    ],
+    "description": "Load GGUF v2/v3 tensor and run SIMD linear projection in an arena"
   }
 }
