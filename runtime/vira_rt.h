@@ -4806,32 +4806,33 @@ static inline float _vira_fp16_to_fp32(uint16_t h) {
 
 static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
   uint8_t scratch[256];
+  size_t _nr = 0;
   switch (val_type) {
   case 0:
   case 1:
   case 7:
-    fread(scratch, 1, 1, f);
+    _nr = fread(scratch, 1, 1, f);
     break;
   case 2:
   case 3:
-    fread(scratch, 1, 2, f);
+    _nr = fread(scratch, 1, 2, f);
     break;
   case 4:
   case 5:
   case 6:
-    fread(scratch, 1, 4, f);
+    _nr = fread(scratch, 1, 4, f);
     break;
   case 10:
   case 11:
   case 12:
-    fread(scratch, 1, 8, f);
+    _nr = fread(scratch, 1, 8, f);
     break;
   case 8: {
     uint64_t slen = 0;
     if (fread(&slen, sizeof(uint64_t), 1, f) == 1) {
       if (slen <= sizeof(scratch)) {
         if (slen > 0)
-          fread(scratch, 1, (size_t)slen, f);
+          _nr = fread(scratch, 1, (size_t)slen, f);
       } else {
         fseek(f, (long)slen, SEEK_CUR);
       }
@@ -4867,6 +4868,7 @@ static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
     break;
   }
   }
+  (void)_nr;
 }
 
 typedef struct {
@@ -5073,13 +5075,14 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 
   vira_tensor_f32 t = vira_tensor_f32_alloc_nd(matched_ndims, matched_dims);
   size_t total = (size_t)t.rows * (size_t)t.cols;
+  size_t _nr = 0;
 
   if (matched_type == 0) {
-    fread(t.data, sizeof(float), total, f);
+    _nr = fread(t.data, sizeof(float), total, f);
   } else if (matched_type == 1) {
     uint16_t *hbuf = (uint16_t *)malloc(total * sizeof(uint16_t));
     if (hbuf) {
-      fread(hbuf, sizeof(uint16_t), total, f);
+      _nr = fread(hbuf, sizeof(uint16_t), total, f);
       for (size_t i = 0; i < total; ++i) {
         t.data[i] = _vira_fp16_to_fp32(hbuf[i]);
       }
@@ -5089,7 +5092,7 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     size_t blocks = total / 32;
     uint8_t *raw_q = (uint8_t *)malloc(blocks * 34);
     if (raw_q) {
-      fread(raw_q, 34, blocks, f);
+      _nr = fread(raw_q, 34, blocks, f);
       for (size_t b = 0; b < blocks; ++b) {
         const uint8_t *blk = raw_q + b * 34;
         uint16_t scale_h = 0;
@@ -5107,7 +5110,7 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     size_t blocks = total / 32;
     uint8_t *raw_q = (uint8_t *)malloc(blocks * 18);
     if (raw_q) {
-      fread(raw_q, 18, blocks, f);
+      _nr = fread(raw_q, 18, blocks, f);
       for (size_t b = 0; b < blocks; ++b) {
         const uint8_t *blk = raw_q + b * 18;
         uint16_t scale_h = 0;
@@ -5126,8 +5129,9 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       free(raw_q);
     }
   } else {
-    fread(t.data, sizeof(float), total, f);
+    _nr = fread(t.data, sizeof(float), total, f);
   }
+  (void)_nr;
 
   fclose(f);
   return (Result_tensor_f32){

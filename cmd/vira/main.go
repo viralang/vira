@@ -1000,6 +1000,25 @@ func compileVexToC99(targetPath string, isTestMode bool) (string, *checker.Check
 		mergedCIncludes = append(mergedCIncludes, af.CIncludes...)
 		for _, f := range af.CFlags {
 			fields := strings.Fields(strings.TrimPrefix(f, "#flag"))
+			if len(fields) == 0 {
+				continue
+			}
+			first := strings.ToLower(fields[0])
+			if first == "linux" || first == "windows" || first == "darwin" || first == "macos" || first == "unix" {
+				targetOS := goRuntime.GOOS
+				matched := (first == targetOS) ||
+					(first == "macos" && targetOS == "darwin") ||
+					(first == "unix" && (targetOS == "linux" || targetOS == "darwin"))
+				if !matched {
+					continue
+				}
+				fields = fields[1:]
+			}
+			for i, fl := range fields {
+				if goRuntime.GOOS == "windows" && fl == "-lodbc" {
+					fields[i] = "-lodbc32"
+				}
+			}
 			mergedCFlags = append(mergedCFlags, fields...)
 		}
 	}

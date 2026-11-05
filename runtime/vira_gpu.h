@@ -1,6 +1,10 @@
 #ifndef VIRA_GPU_H
 #define VIRA_GPU_H
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
 #include "vira_rt.h"
 
 // ============================================================================
