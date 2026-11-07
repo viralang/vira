@@ -4,6 +4,12 @@
 // ------------------------------------------------------------------------------
 // Unified Cross-Platform Image Dispatch
 // ------------------------------------------------------------------------------
+/**
+ * Loads an image file (PNG, JPG, BMP) from disk into the GUI image cache and backend texture system.
+ * @param path Vira string holding the filesystem path to the image file.
+ * @return Non-negative integer image ID handle on success, or -1 on failure.
+ * Usage: Called by Vira GUI applications to load textures for display via `gui::image()` or `gui::draw_image()`.
+ */
 static inline int32_t vira_gui_load_image(vira_string path) {
     if (path.len <= 0 || !path.data) return -1;
     char stack_path[512];
@@ -24,6 +30,12 @@ static inline int32_t vira_gui_load_image(vira_string path) {
 #endif
 }
 
+/**
+ * Retrieves the pixel width of a previously loaded image handle.
+ * @param id Non-negative image ID returned by `vira_gui_load_image`.
+ * @return Width in pixels, or 0 if the image ID is invalid or not loaded.
+ * Usage: Used to compute aspect ratios or layout geometry when rendering images.
+ */
 static inline int32_t vira_gui_image_width(int32_t id) {
     if (id >= 0 && id < VIRA_MAX_GUI_IMAGES && _vira_gui_images[id].is_valid) {
         return _vira_gui_images[id].width;
@@ -31,6 +43,12 @@ static inline int32_t vira_gui_image_width(int32_t id) {
     return 0;
 }
 
+/**
+ * Retrieves the pixel height of a previously loaded image handle.
+ * @param id Non-negative image ID returned by `vira_gui_load_image`.
+ * @return Height in pixels, or 0 if the image ID is invalid or not loaded.
+ * Usage: Used to compute aspect ratios or layout geometry when rendering images.
+ */
 static inline int32_t vira_gui_image_height(int32_t id) {
     if (id >= 0 && id < VIRA_MAX_GUI_IMAGES && _vira_gui_images[id].is_valid) {
         return _vira_gui_images[id].height;
@@ -38,6 +56,15 @@ static inline int32_t vira_gui_image_height(int32_t id) {
     return 0;
 }
 
+/**
+ * Draws an image at the specified pixel coordinates with optional width and height scaling.
+ * @param id Valid image handle ID.
+ * @param x Screen X coordinate in pixels.
+ * @param y Screen Y coordinate in pixels.
+ * @param w Destination width (or <= 0 to use native image width).
+ * @param h Destination height (or <= 0 to use native image height).
+ * Usage: Direct manual rendering of textures/images in immediate-mode GUI loops.
+ */
 static inline void vira_gui_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     int32_t draw_w = (w > 0) ? w : _vira_gui_images[id].width;
@@ -56,6 +83,11 @@ static inline void vira_gui_draw_image(int32_t id, int32_t x, int32_t y, int32_t
 #endif
 }
 
+/**
+ * Frees an image from memory, releasing underlying backend textures and slot cache.
+ * @param id Valid image handle ID to release.
+ * Usage: Called when an image is no longer needed to reclaim CPU/GPU texture memory.
+ */
 static inline void vira_gui_free_image(int32_t id) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
 #if defined(VIRA_USE_RAYLIB)
@@ -74,6 +106,14 @@ static inline void vira_gui_free_image(int32_t id) {
 // ------------------------------------------------------------------------------
 // Unified Cross-Platform Scissor / Clipping Dispatch
 // ------------------------------------------------------------------------------
+/**
+ * Restricts subsequent rendering operations to a rectangular scissor/clipping region.
+ * @param x Left coordinate of the clipping rectangle.
+ * @param y Top coordinate of the clipping rectangle.
+ * @param w Width of the clipping rectangle in pixels.
+ * @param h Height of the clipping rectangle in pixels.
+ * Usage: Used internally by scroll containers and modals to prevent child widgets from overflowing their bounds.
+ */
 static inline void vira_gui_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
 #if defined(VIRA_USE_RAYLIB)
     _vira_raylib_set_clip(x, y, w, h);
@@ -88,6 +128,10 @@ static inline void vira_gui_set_clip(int32_t x, int32_t y, int32_t w, int32_t h)
 #endif
 }
 
+/**
+ * Removes any active scissor/clipping rectangle, restoring rendering to the entire window surface.
+ * Usage: Called after completing rendering inside a scroll container or clipped view.
+ */
 static inline void vira_gui_reset_clip(void) {
 #if defined(VIRA_USE_RAYLIB)
     _vira_raylib_reset_clip();
@@ -102,6 +146,11 @@ static inline void vira_gui_reset_clip(void) {
 #endif
 }
 
+/**
+ * Returns the vertical mouse wheel scroll delta accumulated during the current frame.
+ * @return Vertical scroll wheel delta (positive = scroll up, negative = scroll down).
+ * Usage: Used by scrollable containers and custom widgets to support mouse wheel scrolling.
+ */
 static inline float vira_gui_mouse_wheel(void) {
     return _vira_mouse_wheel_delta;
 }
@@ -110,6 +159,11 @@ static inline float vira_gui_mouse_wheel(void) {
 // 3. SHARED WIDGETS & DECLARATIVE AUTO-LAYOUT ENGINE
 // ==============================================================================
 
+/**
+ * Internal helper to check if the left mouse button was clicked without being consumed by an active modal or overlay.
+ * @return True if left button was clicked on unconsumed interactive elements.
+ * Usage: Internal event gate for button, dropdown, and checkbox click detection.
+ */
 static inline bool _vira_gui_mouse_clicked_left(void) {
     if (_vira_click_consumed) return false;
     if (_vira_modal_active) return false;
@@ -118,6 +172,10 @@ static inline bool _vira_gui_mouse_clicked_left(void) {
 
 static inline void _vira_gui_draw_deferred_popups(void);
 
+/**
+ * Initializes the frame layout stack, input focus navigation, and backend render targets.
+ * Usage: Must be called at the beginning of every frame loop before any GUI widgets or layout declarations.
+ */
 static inline void vira_gui_begin(void) {
     _vira_layout_depth = 0;
     _vira_input_counter = 0;
@@ -160,6 +218,10 @@ static inline void vira_gui_begin(void) {
     }
 }
 
+/**
+ * Finalizes the frame, draws deferred popups/modals, updates input focus states, and presents the backbuffer.
+ * Usage: Must be called at the end of every frame loop after all GUI drawing commands.
+ */
 static inline void vira_gui_end(void) {
     _vira_gui_draw_deferred_popups();
     _vira_total_inputs = _vira_input_counter;
@@ -170,6 +232,16 @@ static inline void vira_gui_end(void) {
     _vira_backend_gui_end();
 }
 
+/**
+ * Renders an immediate-mode interactive push button with hover/active animations at explicit coordinates.
+ * @param x Screen X coordinate in pixels.
+ * @param y Screen Y coordinate in pixels.
+ * @param width Button width in pixels.
+ * @param height Button height in pixels.
+ * @param label Text string displayed on the button.
+ * @return True if the button was clicked during the current frame, false otherwise.
+ * Usage: Used for explicit manual positioning of clickable push buttons.
+ */
 static inline bool vira_gui_button(int32_t x, int32_t y, int32_t width, int32_t height, vira_string label) {
     int mx = vira_gui_mouse_x();
     int my = vira_gui_mouse_y();
@@ -190,6 +262,13 @@ static inline bool vira_gui_button(int32_t x, int32_t y, int32_t width, int32_t 
     return is_clicked;
 }
 
+/**
+ * Internal helper to draw a mini vector trash can icon for danger buttons.
+ * @param x Left coordinate in pixels.
+ * @param y Top coordinate in pixels.
+ * @param color 24-bit RGB hex color for icon strokes.
+ * Usage: Renders danger/delete button icons without requiring external image assets.
+ */
 static inline void _vira_gui_draw_trash_icon(int32_t x, int32_t y, int32_t color) {
     // Lid handle
     vira_gui_draw_line(x + 4, y + 1, x + 8, y + 1, color);
@@ -204,6 +283,16 @@ static inline void _vira_gui_draw_trash_icon(int32_t x, int32_t y, int32_t color
     vira_gui_draw_line(x + 7, y + 5, x + 7, y + 11, color);
 }
 
+/**
+ * Renders an immediate-mode danger/delete button featuring a trash icon and warning color palette.
+ * @param x Screen X coordinate in pixels.
+ * @param y Screen Y coordinate in pixels.
+ * @param width Button width in pixels.
+ * @param height Button height in pixels.
+ * @param label Text label displayed beside the icon.
+ * @return True if clicked during the current frame.
+ * Usage: Used for destructive or irreversible actions (delete, clear, discard).
+ */
 static inline bool vira_gui_button_danger(int32_t x, int32_t y, int32_t width, int32_t height, vira_string label) {
     int mx = vira_gui_mouse_x();
     int my = vira_gui_mouse_y();
@@ -229,6 +318,20 @@ static inline bool vira_gui_button_danger(int32_t x, int32_t y, int32_t width, i
     return is_clicked;
 }
 
+/**
+ * Renders an immediate-mode horizontal slider control with value dragging and optional labels.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Total width of the slider track.
+ * @param height Slider control height.
+ * @param text_left Optional label text displayed on the left.
+ * @param text_right Optional label or value text displayed on the right.
+ * @param val Current float value of the slider.
+ * @param min_val Minimum bound of the slider range.
+ * @param max_val Maximum bound of the slider range.
+ * @return Updated float value after mouse interaction.
+ * Usage: Used for numeric range input, volume, temperature, thresholds, etc.
+ */
 static inline float vira_gui_slider(int32_t x, int32_t y, int32_t width, int32_t height,
                                     vira_string text_left, vira_string text_right,
                                     float val, float min_val, float max_val) {
@@ -271,6 +374,17 @@ static inline float vira_gui_slider(int32_t x, int32_t y, int32_t width, int32_t
     return val;
 }
 
+/**
+ * Renders an interactive checkbox with toggle state and label at explicit coordinates.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Bounding box width.
+ * @param height Bounding box height.
+ * @param label Text label displayed next to the box.
+ * @param is_checked Current boolean state.
+ * @return New boolean state toggled on click.
+ * Usage: Used for toggling boolean flags or settings in manual layouts.
+ */
 static inline bool vira_gui_checkbox(int32_t x, int32_t y, int32_t width, int32_t height,
                                      vira_string label, bool checked) {
     int box_size = 18;
@@ -293,12 +407,32 @@ static inline bool vira_gui_checkbox(int32_t x, int32_t y, int32_t width, int32_
     return checked;
 }
 
+/**
+ * Renders static text at explicit coordinates with default text styling.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Bounding width.
+ * @param height Bounding height.
+ * @param text Text string to display.
+ * Usage: Used for displaying informational text or captions.
+ */
 static inline void vira_gui_label(int32_t x, int32_t y, int32_t width, int32_t height, vira_string text) {
     (void)width;
     (void)height;
     vira_gui_draw_text(text, x, y, 16, 0xCDD6F4);
 }
 
+/**
+ * Renders an immediate-mode single-line text input field supporting focus, caret, typing, backspace, selection, and clipboard.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Field width in pixels.
+ * @param height Field height in pixels.
+ * @param placeholder Hint text displayed when empty and unfocused.
+ * @param text Current text content of the input field.
+ * @return Updated `vira_string` containing the edited text.
+ * Usage: Used for single-line user input fields, search bars, and forms.
+ */
 static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t width, int32_t height,
                                               vira_string placeholder, vira_string text) {
     if (_vira_input_counter >= VIRA_MAX_TEXT_INPUTS) {
@@ -400,6 +534,15 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
     return (vira_string){ .data = (const uint8_t*)state->buffer, .len = state->len, .is_lit = true };
 }
 
+/**
+ * Renders a horizontal progress bar showing completion percentage.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Progress bar width.
+ * @param height Progress bar height.
+ * @param percent Completion fraction between 0.0f and 1.0f.
+ * Usage: Displays loading states, generation progress, or download status.
+ */
 static inline void vira_gui_progress_bar(int32_t x, int32_t y, int32_t width, int32_t height, float percent) {
     if (width <= 0 || height <= 0) return;
     if (percent > 1.0f) percent = percent / 100.0f;
@@ -425,6 +568,15 @@ static inline void vira_gui_progress_bar(int32_t x, int32_t y, int32_t width, in
     }
 }
 
+/**
+ * Renders an interactive radio button option with circular indicator.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param label Option text label.
+ * @param is_selected Current selection state.
+ * @return True if the radio button was selected by user click.
+ * Usage: Used for mutually exclusive option groups.
+ */
 static inline bool vira_gui_radio_button(int32_t x, int32_t y, vira_string label, bool is_selected) {
     int radius = 9;
     int cy = y + 12;
@@ -454,6 +606,15 @@ static inline bool vira_gui_radio_button(int32_t x, int32_t y, vira_string label
     return is_selected;
 }
 
+/**
+ * Renders a styled rounded badge/pill with custom background and foreground colors.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param text Badge label text.
+ * @param hex_bg 24-bit RGB background color.
+ * @param hex_fg 24-bit RGB text color.
+ * Usage: Used for status indicators, tag labels, counts, or categorization tags.
+ */
 static inline void vira_gui_draw_badge(int32_t x, int32_t y, vira_string text, int32_t hex_bg, int32_t hex_fg) {
     int32_t tw = _vira_measure_text_w(text);
     int32_t bw = tw + 16;
@@ -464,6 +625,14 @@ static inline void vira_gui_draw_badge(int32_t x, int32_t y, vira_string text, i
     vira_gui_draw_text(text, x + 8, y + 3, 13, hex_fg);
 }
 
+/**
+ * Begins a vertical declarative layout stack container (VStack).
+ * @param x Origin X coordinate.
+ * @param y Origin Y coordinate.
+ * @param width Total container width.
+ * @param spacing Vertical gap in pixels between child widgets.
+ * Usage: Encloses vertical auto-layout widget sequences; closed with `vira_gui_stack_end()`.
+ */
 static inline void vira_gui_vstack_begin(int32_t x, int32_t y, int32_t width, int32_t spacing) {
     if (_vira_layout_depth >= VIRA_MAX_LAYOUT_DEPTH) return;
     vira_layout_node_t* parent = _vira_gui_cur_layout();
@@ -485,6 +654,12 @@ static inline void vira_gui_vstack_begin(int32_t x, int32_t y, int32_t width, in
     node->is_card = 0;
 }
 
+/**
+ * Begins a horizontal declarative layout stack container (HStack) within the current parent layout.
+ * @param height Uniform height of widgets inside the horizontal row.
+ * @param spacing Horizontal gap in pixels between child widgets.
+ * Usage: Encloses horizontal auto-layout widget rows; closed with `vira_gui_stack_end()`.
+ */
 static inline void vira_gui_hstack_begin(int32_t height, int32_t spacing) {
     if (_vira_layout_depth >= VIRA_MAX_LAYOUT_DEPTH) return;
     vira_layout_node_t* parent = _vira_gui_cur_layout();
@@ -505,6 +680,10 @@ static inline void vira_gui_hstack_begin(int32_t height, int32_t spacing) {
     node->is_card = 0;
 }
 
+/**
+ * Closes the most recently opened declarative layout stack (VStack, HStack, or Scroll container).
+ * Usage: Must match every preceding `_begin` call in the declarative layout hierarchy.
+ */
 static inline void vira_gui_stack_end(void) {
     if (_vira_layout_depth <= 0) return;
     vira_layout_node_t closed = _vira_layout_stack[--_vira_layout_depth];
@@ -528,6 +707,12 @@ static inline void vira_gui_stack_end(void) {
     }
 }
 
+/**
+ * Begins a scrollable container with automatic clipping, mouse-wheel scrolling, and vertical scrollbar.
+ * @param width Visible viewport width in pixels.
+ * @param height Visible viewport height in pixels.
+ * Usage: Wraps scrollable lists, logs, or chat histories; closed with `vira_gui_scroll_end()`.
+ */
 static inline void vira_gui_scroll_begin(int32_t width, int32_t height) {
     vira_layout_node_t* parent = _vira_gui_cur_layout();
     int32_t x = parent ? parent->cur_x : 0;
@@ -617,6 +802,10 @@ static inline void vira_gui_scroll_begin(int32_t width, int32_t height) {
     }
 }
 
+/**
+ * Ends a scrollable container, restores clipping, and draws the interactive scrollbar track and thumb.
+ * Usage: Must be called to conclude a scroll container opened with `vira_gui_scroll_begin()`.
+ */
 static inline void vira_gui_scroll_end(void) {
     if (_vira_layout_depth <= 0) return;
     vira_layout_node_t closed = _vira_layout_stack[--_vira_layout_depth];
@@ -661,6 +850,11 @@ static inline void vira_gui_scroll_end(void) {
     }
 }
 
+/**
+ * Inserts blank spacing along the active layout axis (vertical or horizontal).
+ * @param px Number of pixels to advance the layout cursor.
+ * Usage: Adds margins, separators, or whitespace between widgets in auto-layout stacks.
+ */
 static inline void vira_gui_spacing(int32_t px) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return;
@@ -671,6 +865,12 @@ static inline void vira_gui_spacing(int32_t px) {
     }
 }
 
+/**
+ * Begins a visually distinct styled card container with an optional header title.
+ * @param title Card header text.
+ * @param width Total card width in pixels.
+ * Usage: Groups related widgets into an elevated surface; closed with `vira_gui_card_end()`.
+ */
 static inline void vira_gui_card_begin(vira_string title, int32_t width) {
     vira_layout_node_t* parent = _vira_gui_cur_layout();
     int32_t x = parent ? parent->cur_x : 40;
@@ -690,6 +890,10 @@ static inline void vira_gui_card_begin(vira_string title, int32_t width) {
     _vira_layout_stack[_vira_layout_depth - 1].is_card = 1;
 }
 
+/**
+ * Concludes a card container, drawing its background panel, border, and shadows.
+ * Usage: Must be called after children of `vira_gui_card_begin()` have been declared.
+ */
 static inline void vira_gui_card_end(void) {
     if (_vira_layout_depth <= 0) return;
     vira_layout_node_t closed = _vira_layout_stack[_vira_layout_depth - 1];
@@ -701,6 +905,12 @@ static inline void vira_gui_card_end(void) {
     vira_gui_stack_end();
 }
 
+/**
+ * Auto-layout button widget placed automatically at the current cursor within a VStack or HStack.
+ * @param label Text string displayed on the button.
+ * @return True if clicked during the current frame.
+ * Usage: Primary concise button API in declarative Vira GUI code (`gui::btn("OK")`).
+ */
 static inline bool vira_gui_btn(vira_string label) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return false;
@@ -722,6 +932,12 @@ static inline bool vira_gui_btn(vira_string label) {
     }
 }
 
+/**
+ * Auto-layout danger button widget placed at the current cursor within a VStack or HStack.
+ * @param label Text string displayed on the danger button.
+ * @return True if clicked during the current frame.
+ * Usage: Primary concise danger button API in declarative Vira GUI code (`gui::btn_danger("Delete")`).
+ */
 static inline bool vira_gui_btn_danger(vira_string label) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return false;
@@ -743,6 +959,13 @@ static inline bool vira_gui_btn_danger(vira_string label) {
     }
 }
 
+/**
+ * Auto-layout checkbox widget placed at the current layout cursor.
+ * @param label Checkbox text label.
+ * @param checked Current boolean checked state.
+ * @return New boolean checked state.
+ * Usage: Primary concise checkbox API (`gui::check("Dark Mode", is_dark)`).
+ */
 static inline bool vira_gui_check(vira_string label, bool checked) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return checked;
@@ -759,6 +982,16 @@ static inline bool vira_gui_check(vira_string label, bool checked) {
     return result;
 }
 
+/**
+ * Auto-layout horizontal slider widget placed at the current layout cursor.
+ * @param text_left Label displayed on the left side of the slider.
+ * @param text_right Label or formatted value displayed on the right side.
+ * @param val Current float value.
+ * @param min_val Minimum range bound.
+ * @param max_val Maximum range bound.
+ * @return Updated float value after interaction.
+ * Usage: Primary concise slider API (`gui::slide("Temp", "0.7", temp, 0.0, 1.0)`).
+ */
 static inline float vira_gui_slide(vira_string text_left, vira_string text_right, float val, float min_val, float max_val) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return val;
@@ -776,6 +1009,11 @@ static inline float vira_gui_slide(vira_string text_left, vira_string text_right
     return result;
 }
 
+/**
+ * Auto-layout text label widget placed at the current layout cursor.
+ * @param text String content to render.
+ * Usage: Primary concise label API (`gui::lbl("Hello, world!")`).
+ */
 static inline void vira_gui_lbl(vira_string text) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return;
@@ -790,6 +1028,13 @@ static inline void vira_gui_lbl(vira_string text) {
     }
 }
 
+/**
+ * Auto-layout image display widget placed at the current layout cursor.
+ * @param id Valid image handle ID returned from `vira_gui_load_image`.
+ * @param w Desired display width (0 to use native width).
+ * @param h Desired display height (0 to use native height).
+ * Usage: Primary concise image display API (`gui::image(img_id, 200, 150)`).
+ */
 static inline void vira_gui_image(int32_t id, int32_t w, int32_t h) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     int32_t draw_w = (w > 0) ? w : _vira_gui_images[id].width;
@@ -810,6 +1055,13 @@ static inline void vira_gui_image(int32_t id, int32_t w, int32_t h) {
     }
 }
 
+/**
+ * Auto-layout single-line text input field placed at the current layout cursor.
+ * @param placeholder Hint text shown when input is empty.
+ * @param text Current string value.
+ * @return Updated string value.
+ * Usage: Primary concise text input API (`text = gui::input("Prompt...", text)`).
+ */
 static inline vira_string vira_gui_input(vira_string placeholder, vira_string text) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return text;
@@ -828,6 +1080,11 @@ static inline vira_string vira_gui_input(vira_string placeholder, vira_string te
     return result;
 }
 
+/**
+ * Auto-layout progress bar widget placed at the current layout cursor.
+ * @param percent Fraction between 0.0f and 1.0f.
+ * Usage: Primary concise progress bar API (`gui::progress(pct)`).
+ */
 static inline void vira_gui_progress(float percent) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return;
@@ -845,6 +1102,13 @@ static inline void vira_gui_progress(float percent) {
     }
 }
 
+/**
+ * Auto-layout radio button widget placed at the current layout cursor.
+ * @param label Radio option text label.
+ * @param is_selected True if currently selected.
+ * @return True if clicked and selected this frame.
+ * Usage: Primary concise radio button API (`gui::radio("Option A", sel == 0)`).
+ */
 static inline bool vira_gui_radio(vira_string label, bool is_selected) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return is_selected;
@@ -863,6 +1127,10 @@ static inline bool vira_gui_radio(vira_string label, bool is_selected) {
     return result;
 }
 
+/**
+ * Auto-layout subtle horizontal divider line spanning the width of the parent container.
+ * Usage: Visual grouping and division between sections in a layout (`gui::separator()`).
+ */
 static inline void vira_gui_separator(void) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return;
@@ -877,6 +1145,13 @@ static inline void vira_gui_separator(void) {
     }
 }
 
+/**
+ * Auto-layout pill badge widget placed at the current layout cursor.
+ * @param text Badge label text.
+ * @param hex_bg Background hex color.
+ * @param hex_fg Foreground text hex color.
+ * Usage: Primary concise badge API (`gui::badge("Ready", 0x223322, 0x44EE44)`).
+ */
 static inline void vira_gui_badge(vira_string text, int32_t hex_bg, int32_t hex_fg) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return;
@@ -894,6 +1169,13 @@ static inline void vira_gui_badge(vira_string text, int32_t hex_bg, int32_t hex_
     }
 }
 
+/**
+ * Auto-layout tab item header button for tabbed navigation bars.
+ * @param label Tab display name.
+ * @param is_active True if this tab is currently the active selected tab.
+ * @return True if user clicked to select this tab.
+ * Usage: Used in horizontal stacks to build tab switchers (`gui::tab_item("Chat", active_tab == 0)`).
+ */
 static inline bool vira_gui_tab_item(vira_string label, bool is_active) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return is_active;
@@ -925,6 +1207,13 @@ static inline bool vira_gui_tab_item(vira_string label, bool is_active) {
     return clicked;
 }
 
+/**
+ * Begins an overlay modal dialog centered on the screen, dimming background content and trapping input focus.
+ * @param title Modal window title text.
+ * @param width Modal dialog width in pixels.
+ * @param height Modal dialog height in pixels.
+ * Usage: Opens modal confirmation or settings dialogs; closed with `vira_gui_modal_end()`.
+ */
 static inline void vira_gui_modal_begin(vira_string title, int32_t width, int32_t height) {
     if (!_vira_modal_open_prev_frame) {
         _vira_modal_just_opened = true;
@@ -955,6 +1244,10 @@ static inline void vira_gui_modal_begin(vira_string title, int32_t width, int32_
     _vira_layout_stack[_vira_layout_depth - 1].is_card = 0;
 }
 
+/**
+ * Ends a modal dialog, restoring layout state and consuming background clicks.
+ * Usage: Concludes a modal block opened with `vira_gui_modal_begin()`.
+ */
 static inline void vira_gui_modal_end(void) {
     vira_gui_stack_end();
     _vira_click_consumed = true;
@@ -964,6 +1257,10 @@ static inline void vira_gui_modal_end(void) {
 // 3B. DROPDOWN SELECT & INTERACTIVE DATA TABLE COMPONENTS
 // ------------------------------------------------------------------------------
 
+/**
+ * Internal helper to render dropdown popup lists on top of all other widgets at the end of the frame.
+ * Usage: Invoked by `vira_gui_end()` to ensure dropdown menus render without z-order clipping.
+ */
 static inline void _vira_gui_draw_deferred_popups(void) {
     if (!_vira_current_dropdown_popup.active) return;
 
@@ -1002,6 +1299,17 @@ static inline void _vira_gui_draw_deferred_popups(void) {
     _vira_current_dropdown_popup.active = false;
 }
 
+/**
+ * Renders an interactive dropdown selection box with popup menu at explicit coordinates.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Box width in pixels.
+ * @param height Box height in pixels.
+ * @param items Slice of string items to choose from.
+ * @param selected_idx Index of currently selected item (-1 for none).
+ * @return Updated selected index after user selection.
+ * Usage: Used for dropdown selection in manual layouts.
+ */
 static inline int32_t vira_gui_dropdown(int32_t x, int32_t y, int32_t width, int32_t height,
                                        vira_slice_string items, int32_t selected_idx) {
     int32_t id = _vira_dropdown_counter++;
@@ -1075,6 +1383,13 @@ static inline int32_t vira_gui_dropdown(int32_t x, int32_t y, int32_t width, int
     return selected_idx;
 }
 
+/**
+ * Auto-layout dropdown selection box placed at the current layout cursor.
+ * @param items Slice of string items to choose from.
+ * @param selected_idx Currently selected item index.
+ * @return Updated selected item index.
+ * Usage: Primary concise dropdown select API (`choice = gui::select(models, choice)`).
+ */
 static inline int32_t vira_gui_select(vira_slice_string items, int32_t selected_idx) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
     if (!node) return selected_idx;
@@ -1093,6 +1408,13 @@ static inline int32_t vira_gui_select(vira_slice_string items, int32_t selected_
     return res;
 }
 
+/**
+ * Internal case-insensitive substring search helper for table row filtering.
+ * @param haystack String to search within.
+ * @param needle Substring to look for.
+ * @return True if needle is found inside haystack (ignoring case).
+ * Usage: Powers table search filtering.
+ */
 static inline bool _vira_table_str_contains_ci(vira_string haystack, vira_string needle) {
     if (needle.len == 0 || !needle.data) return true;
     if (haystack.len < needle.len || !haystack.data) return false;
@@ -1110,6 +1432,13 @@ static inline bool _vira_table_str_contains_ci(vira_string haystack, vira_string
     return false;
 }
 
+/**
+ * Internal helper to test if a string represents a numeric value (e.g. integer, float, currency).
+ * @param s String to inspect.
+ * @param out_val Pointer to receive parsed double value if numeric.
+ * @return True if string is numeric, false otherwise.
+ * Usage: Enables automatic numeric sorting of table columns.
+ */
 static inline bool _vira_is_numeric_str(vira_string s, double* out_val) {
     if (s.len <= 0 || !s.data) return false;
     int i = 0;
@@ -1129,6 +1458,13 @@ static inline bool _vira_is_numeric_str(vira_string s, double* out_val) {
     return false;
 }
 
+/**
+ * Internal cell comparison function that performs natural numeric or case-insensitive alphabetical comparison.
+ * @param a Left string cell value.
+ * @param b Right string cell value.
+ * @return Negative if a < b, positive if a > b, 0 if equal.
+ * Usage: Used during table column sorting.
+ */
 static inline int _vira_table_compare_cells(vira_string a, vira_string b) {
     double na = 0.0, nb = 0.0;
     if (_vira_is_numeric_str(a, &na) && _vira_is_numeric_str(b, &nb)) {
@@ -1145,6 +1481,16 @@ static inline int _vira_table_compare_cells(vira_string a, vira_string b) {
     return a.len - b.len;
 }
 
+/**
+ * Internal helper that truncates and ellipses text ("...") if it exceeds available pixel width.
+ * @param text String to draw.
+ * @param x Left coordinate in pixels.
+ * @param y Top coordinate in pixels.
+ * @param size Font size in points.
+ * @param color Text RGB hex color.
+ * @param max_w Maximum allowed pixel width.
+ * Usage: Prevents table cells or narrow labels from overflowing column boundaries.
+ */
 static inline void _vira_gui_draw_clipped_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t color, int32_t max_w) {
     if (text.len <= 0 || !text.data || max_w <= 10) return;
     int tw = _vira_measure_text_w(text);
@@ -1168,6 +1514,19 @@ static inline void _vira_gui_draw_clipped_text(vira_string text, int32_t x, int3
     }
 }
 
+/**
+ * Renders a full-featured data table with searchable filter, sortable columns, pagination, and row selection at explicit coordinates.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Table width in pixels.
+ * @param height Table height in pixels.
+ * @param headers Slice of column header strings.
+ * @param rows 2D slice of row and cell strings.
+ * @param search_query Filter string to filter visible rows.
+ * @param selected_row Index of currently selected row (-1 for none).
+ * @return Index of selected row after user interaction.
+ * Usage: Used for manual placement of interactive data tables.
+ */
 static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_t height,
                                     vira_slice_string headers, vira_slice_vira_slice_string rows,
                                     vira_string search_query, int32_t selected_row) {
@@ -1396,6 +1755,15 @@ static inline int32_t vira_gui_table(int32_t x, int32_t y, int32_t width, int32_
     return state->selected_row;
 }
 
+/**
+ * Auto-layout interactive data table placed at the current layout cursor.
+ * @param headers Column header strings.
+ * @param rows 2D slice of cell data strings.
+ * @param search_query Real-time search query for row filtering.
+ * @param selected_row Currently selected row index.
+ * @return Updated selected row index.
+ * Usage: Primary concise table API (`row = gui::tbl(headers, rows, query, row)`).
+ */
 static inline int32_t vira_gui_tbl(vira_slice_string headers, vira_slice_vira_slice_string rows,
                                    vira_string search_query, int32_t selected_row) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
@@ -1416,14 +1784,30 @@ static inline int32_t vira_gui_tbl(vira_slice_string headers, vira_slice_vira_sl
     return res;
 }
 
+/**
+ * Retrieves the zero-based column index currently used for sorting the most recent table.
+ * @return Column index.
+ * Usage: Query active table sort column state.
+ */
 static inline int32_t vira_gui_table_sort_col(void) {
     return _vira_last_table_sort_col;
 }
 
+/**
+ * Retrieves the sort direction of the most recent table.
+ * @return True for ascending sort, false for descending sort.
+ * Usage: Query active table sort direction.
+ */
 static inline bool vira_gui_table_sort_asc(void) {
     return _vira_last_table_sort_asc;
 }
 
+/**
+ * Programmatically overrides the active sort column and direction for data tables.
+ * @param col Column index to sort by.
+ * @param asc True for ascending order, false for descending.
+ * Usage: Controls table sorting from external buttons or commands.
+ */
 static inline void vira_gui_table_set_sort(int32_t col, bool asc) {
     _vira_last_table_sort_col = col;
     _vira_last_table_sort_asc = asc;
@@ -1437,49 +1821,115 @@ static inline void vira_gui_table_set_sort(int32_t col, bool asc) {
 // 4. AUTOMATIC TEMPORARY STRING FREE WRAPPERS (ZERO LEAK GUARANTEE)
 // ==============================================================================
 
+/**
+ * Temporary string variant of `vira_gui_lbl` that automatically frees dynamic string allocations.
+ * @param text Allocated string to display and free.
+ * Usage: Used by compiler code generation for string expressions with guaranteed zero leaks.
+ */
 static inline void vira_gui_lbl_temp(vira_string text) {
     vira_gui_lbl(text);
     vira_str_free(&text);
 }
 
+/**
+ * Temporary string variant of `vira_gui_draw_text` that automatically frees dynamic string allocations.
+ * @param text Allocated string to display and free.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param size Font size.
+ * @param hex_color Text color.
+ * Usage: Used by compiler code generation for temporary formatted strings.
+ */
 static inline void vira_gui_draw_text_temp(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
     vira_gui_draw_text(text, x, y, size, hex_color);
     vira_str_free(&text);
 }
 
+/**
+ * Temporary string variant of `vira_gui_card_begin` that automatically frees dynamic string allocations.
+ * @param title Allocated string card title to display and free.
+ * @param width Card width in pixels.
+ * Usage: Used by compiler code generation for dynamically formatted card titles.
+ */
 static inline void vira_gui_card_begin_temp(vira_string title, int32_t width) {
     vira_gui_card_begin(title, width);
     vira_str_free(&title);
 }
 
+/**
+ * Temporary string variant of `vira_gui_badge` that automatically frees dynamic string allocations.
+ * @param text Allocated string badge text to display and free.
+ * @param hex_bg Background hex color.
+ * @param hex_fg Foreground hex color.
+ * Usage: Used by compiler code generation for dynamic badge text.
+ */
 static inline void vira_gui_badge_temp(vira_string text, int32_t hex_bg, int32_t hex_fg) {
     vira_gui_badge(text, hex_bg, hex_fg);
     vira_str_free(&text);
 }
 
+/**
+ * Temporary string variant of `vira_gui_btn` that automatically frees dynamic string allocations.
+ * @param label Allocated string button label to display and free.
+ * @return True if clicked.
+ * Usage: Used by compiler code generation for dynamically formatted button labels.
+ */
 static inline bool vira_gui_btn_temp(vira_string label) {
     bool res = vira_gui_btn(label);
     vira_str_free(&label);
     return res;
 }
 
+/**
+ * Temporary string variant of `vira_gui_btn_danger` that automatically frees dynamic string allocations.
+ * @param label Allocated string label to display and free.
+ * @return True if clicked.
+ * Usage: Used by compiler code generation for dynamic danger button labels.
+ */
 static inline bool vira_gui_btn_danger_temp(vira_string label) {
     bool res = vira_gui_btn_danger(label);
     vira_str_free(&label);
     return res;
 }
 
+/**
+ * Temporary string variant of `vira_gui_tab_item` that automatically frees dynamic string allocations.
+ * @param label Allocated string tab name to display and free.
+ * @param is_active Whether active.
+ * @return True if clicked.
+ * Usage: Used by compiler code generation for dynamically named tabs.
+ */
 static inline bool vira_gui_tab_item_temp(vira_string label, bool is_active) {
     bool res = vira_gui_tab_item(label, is_active);
     vira_str_free(&label);
     return res;
 }
 
+/**
+ * Temporary string variant of `vira_gui_modal_begin` that automatically frees dynamic string allocations.
+ * @param title Allocated string modal title to display and free.
+ * @param width Modal width.
+ * @param height Modal height.
+ * Usage: Used by compiler code generation for dynamically formatted modal titles.
+ */
 static inline void vira_gui_modal_begin_temp(vira_string title, int32_t width, int32_t height) {
     vira_gui_modal_begin(title, width, height);
     vira_str_free(&title);
 }
 
+/**
+ * Temporary string variant of `vira_gui_table` that automatically frees dynamic search query strings.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Table width.
+ * @param height Table height.
+ * @param headers Column header strings.
+ * @param rows 2D row/cell strings.
+ * @param search_query Filter string to free after rendering.
+ * @param selected_row Selected row index.
+ * @return Selected row index.
+ * Usage: Used by compiler code generation for dynamic search queries.
+ */
 static inline int32_t vira_gui_table_temp(int32_t x, int32_t y, int32_t width, int32_t height,
                                          vira_slice_string headers, vira_slice_vira_slice_string rows,
                                          vira_string search_query, int32_t selected_row) {
@@ -1488,6 +1938,15 @@ static inline int32_t vira_gui_table_temp(int32_t x, int32_t y, int32_t width, i
     return res;
 }
 
+/**
+ * Temporary string variant of `vira_gui_tbl` that automatically frees dynamic search query strings.
+ * @param headers Column header strings.
+ * @param rows 2D row/cell strings.
+ * @param search_query Filter string to free after rendering.
+ * @param selected_row Selected row index.
+ * @return Selected row index.
+ * Usage: Used by compiler code generation for auto-layout tables with dynamic queries.
+ */
 static inline int32_t vira_gui_tbl_temp(vira_slice_string headers, vira_slice_vira_slice_string rows,
                                        vira_string search_query, int32_t selected_row) {
     int32_t res = vira_gui_tbl(headers, rows, search_query, selected_row);
@@ -1495,6 +1954,12 @@ static inline int32_t vira_gui_tbl_temp(vira_slice_string headers, vira_slice_vi
     return res;
 }
 
+/**
+ * Temporary string variant of `vira_gui_load_image` that automatically frees dynamic file path strings.
+ * @param path File path string to load and free.
+ * @return Image handle ID, or -1 on error.
+ * Usage: Used by compiler code generation when image paths are computed dynamically.
+ */
 static inline int32_t vira_gui_load_image_temp(vira_string path) {
     int32_t res = vira_gui_load_image(path);
     vira_str_free(&path);

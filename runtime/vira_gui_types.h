@@ -34,6 +34,11 @@ typedef struct {
 static vira_layout_node_t _vira_layout_stack[VIRA_MAX_LAYOUT_DEPTH];
 static int32_t            _vira_layout_depth = 0;
 
+/**
+ * Retrieves the currently active declarative layout frame from the top of the layout stack.
+ * @return Pointer to current `vira_layout_node_t`, or NULL if no layout stack (vstack/hstack/card) is open.
+ * Usage: Used internally by `gui_btn`, `gui_lbl`, `gui_slide`, and other auto-layout widgets to query positioning and advance layout cursors.
+ */
 static inline vira_layout_node_t* _vira_gui_cur_layout(void) {
     if (_vira_layout_depth > 0) {
         return &_vira_layout_stack[_vira_layout_depth - 1];
@@ -136,6 +141,17 @@ typedef struct {
 
 static vira_gui_image_t _vira_gui_images[VIRA_MAX_GUI_IMAGES] = {0};
 
+/**
+ * Standalone zero-dependency parser for 24-bit and 32-bit uncompressed Windows BMP image files.
+ * Reads the BMP header, performs stride alignment unpacking, vertically flips rows if needed,
+ * and produces a 32-bit ARGB/RGBA linear pixel buffer.
+ * @param filepath Path to the .bmp image file on disk.
+ * @param out_w Pointer to receive the decoded image width in pixels.
+ * @param out_h Pointer to receive the decoded image height in pixels.
+ * @param out_pixels Pointer to receive the allocated heap buffer of 32-bit packed pixels (caller frees).
+ * @return True if parsing succeeded and valid pixels were produced; false otherwise.
+ * Usage: Used as the universal cross-platform image loader across native Win32, X11, and Cocoa backends.
+ */
 static inline bool _vira_load_bmp_file(const char* filepath, int32_t* out_w, int32_t* out_h, uint32_t** out_pixels) {
     if (!filepath || !out_w || !out_h || !out_pixels) return false;
     FILE* f = fopen(filepath, "rb");

@@ -37,6 +37,14 @@ typedef struct {
 
 static vira_x11_t _vira_x11 = {0};
 
+/**
+ * Initializes the X11 connection, creates the top-level window, sets window manager protocols,
+ * creates the offscreen double-buffering Pixmap, initializes system fonts, and starts the monotonic timer.
+ * @param width Window client width in pixels.
+ * @param height Window client height in pixels.
+ * @param title Window title string.
+ * Usage: Called by `gui_init(w, h, title)` on Linux/Unix desktop environments.
+ */
 static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
     if (_vira_x11.dpy != NULL) return;
     _vira_x11.dpy = XOpenDisplay(NULL);
@@ -110,12 +118,45 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
     _vira_layout_depth = 0;
 }
 
+/**
+ * Checks whether the X11 window received a WM_DELETE_WINDOW client message from the window manager.
+ * @return True if user requested to close the window; false otherwise.
+ * Usage: Called by `for !gui_should_close() { ... }`.
+ */
 static inline bool vira_gui_should_close(void) { return _vira_x11.should_close; }
+
+/**
+ * Cancels a pending close request, preventing the window from closing.
+ * Usage: Called by `gui_cancel_close()` when user denies confirmation.
+ */
 static inline void vira_gui_cancel_close(void) { _vira_x11.should_close = false; }
+
+/**
+ * Sets the target frame rate for the nanosleep frame limiter.
+ * @param fps Target FPS (e.g. 60).
+ * Usage: Called by `gui_set_target_fps(fps)`.
+ */
 static inline void vira_gui_set_target_fps(int32_t fps) { if (fps > 0) _vira_x11.target_fps = fps; }
+
+/**
+ * Returns the current logical width of the X11 window client area in pixels.
+ * @return Window client width.
+ * Usage: Called by `gui_window_width()`.
+ */
 static inline int32_t vira_gui_window_width(void) { return _vira_x11.width; }
+
+/**
+ * Returns the current logical height of the X11 window client area in pixels.
+ * @return Window client height.
+ * Usage: Called by `gui_window_height()`.
+ */
 static inline int32_t vira_gui_window_height(void) { return _vira_x11.height; }
 
+/**
+ * Begins a new frame by draining all pending X11 events via XPending/XNextEvent,
+ * tracking mouse movement, button clicks, scrolling (buttons 4/5), and keyboard events.
+ * Usage: Invoked internally by `gui_begin()` at the beginning of each frame.
+ */
 static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
@@ -190,6 +231,11 @@ static inline void _vira_backend_gui_begin(void) {
     }
 }
 
+/**
+ * Concludes the current frame: performs an atomic XCopyArea blit from backbuffer Pixmap to the visible Window,
+ * flushes the X11 server queue, and sleeps via nanosleep to maintain target FPS.
+ * Usage: Invoked internally by `gui_end()` at the end of each frame.
+ */
 static inline void _vira_backend_gui_end(void) {
     if (!_vira_x11.dpy) return;
     XCopyArea(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.win, _vira_x11.gc,
@@ -210,6 +256,10 @@ static inline void _vira_backend_gui_end(void) {
     _vira_x11.frame_start = now;
 }
 
+/**
+ * Destroys the X11 window, releases the backbuffer Pixmap, frees graphic contexts, and closes the X display connection.
+ * Usage: Called by `gui_close()` at application teardown.
+ */
 static inline void vira_gui_close(void) {
     for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
         if (_vira_gui_images[i].is_valid) {
@@ -230,12 +280,32 @@ static inline void vira_gui_close(void) {
     _vira_x11.dpy = NULL;
 }
 
+/**
+ * Draws a filled rectangle onto the offscreen X11 backbuffer Pixmap.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param hex_color 24-bit RGB fill color.
+ * Usage: Called by `gui_draw_rect(x, y, w, h, color)`.
+ */
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
     if (!_vira_x11.dpy || width <= 0 || height <= 0) return;
     XSetForeground(_vira_x11.dpy, _vira_x11.gc, (unsigned long)(hex_color & 0xFFFFFF));
     XFillRectangle(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x, y, (unsigned int)width, (unsigned int)height);
 }
 
+/**
+ * Draws a rounded rectangle onto the X11 backbuffer with background fill and border outline.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param radius Corner radius in pixels.
+ * @param bg_hex 24-bit RGB fill color (-1 to omit fill).
+ * @param border_hex 24-bit RGB border outline color (-1 to omit border).
+ * Usage: Called by `gui_draw_rounded_rect(...)` for styling cards, buttons, and inputs.
+ */
 static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
     (void)radius;
     if (!_vira_x11.dpy || width <= 0 || height <= 0) return;
@@ -249,10 +319,24 @@ static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t widt
     }
 }
 
+/**
+ * Clears the entire X11 backbuffer Pixmap with a solid color.
+ * @param hex_color 24-bit RGB background clear color.
+ * Usage: Called by `gui_clear(color)` at the start of each frame.
+ */
 static inline void vira_gui_clear(int32_t hex_color) {
     vira_gui_draw_rect(0, 0, _vira_x11.width, _vira_x11.height, hex_color);
 }
 
+/**
+ * Renders text onto the X11 backbuffer using the active X11 system font.
+ * @param text Vira string to render.
+ * @param x Baseline X origin.
+ * @param y Top baseline Y coordinate.
+ * @param size Font size hint in points.
+ * @param hex_color 24-bit RGB text color.
+ * Usage: Called by `gui_draw_text(text, x, y, size, color)`.
+ */
 static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
     (void)size;
     if (!_vira_x11.dpy || text.len <= 0) return;
@@ -260,6 +344,14 @@ static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, in
     XDrawString(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x, y + 13, (const char*)text.data, text.len);
 }
 
+/**
+ * Draws a filled anti-aliased circle onto the X11 backbuffer using XFillArc.
+ * @param cx Center X coordinate.
+ * @param cy Center Y coordinate.
+ * @param radius Radius in pixels.
+ * @param hex_color 24-bit RGB color.
+ * Usage: Called by `gui_draw_circle(cx, cy, radius, color)`.
+ */
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
     if (!_vira_x11.dpy || radius <= 0.0f) return;
     int r = (int)radius;
@@ -267,24 +359,82 @@ static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, in
     XFillArc(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, cx - r, cy - r, (unsigned int)(r * 2), (unsigned int)(r * 2), 0, 360 * 64);
 }
 
+/**
+ * Draws a vector line between two points on the X11 backbuffer using XDrawLine.
+ * @param x1 Start X coordinate.
+ * @param y1 Start Y coordinate.
+ * @param x2 End X coordinate.
+ * @param y2 End Y coordinate.
+ * @param hex_color 24-bit RGB line color.
+ * Usage: Called by `gui_draw_line(x1, y1, x2, y2, color)`.
+ */
 static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
     if (!_vira_x11.dpy) return;
     XSetForeground(_vira_x11.dpy, _vira_x11.gc, (unsigned long)(hex_color & 0xFFFFFF));
     XDrawLine(_vira_x11.dpy, _vira_x11.backbuf, _vira_x11.gc, x1, y1, x2, y2);
 }
 
+/**
+ * Measures the pixel width of a string using XTextWidth.
+ * @param text Vira string to measure.
+ * @return Computed pixel width.
+ * Usage: Used by auto-layout and widgets to size buttons, labels, and table cells.
+ */
 static inline int32_t _vira_measure_text_w(vira_string text) {
     if (_vira_x11.font && text.len > 0) return XTextWidth(_vira_x11.font, (const char*)text.data, text.len);
     return text.len * 8;
 }
 
+/**
+ * Returns the current mouse cursor X coordinate in X11 window coordinates.
+ * @return Mouse cursor X coordinate.
+ * Usage: Called by `gui_mouse_x()`.
+ */
 static inline int32_t vira_gui_mouse_x(void) { return _vira_x11.mouse_x; }
+
+/**
+ * Returns the current mouse cursor Y coordinate in X11 window coordinates.
+ * @return Mouse cursor Y coordinate.
+ * Usage: Called by `gui_mouse_y()`.
+ */
 static inline int32_t vira_gui_mouse_y(void) { return _vira_x11.mouse_y; }
+
+/**
+ * Checks whether a mouse button is currently held down (0 = Left, 1 = Right, 2 = Middle).
+ * @param b Mouse button index.
+ * @return True if held; false otherwise.
+ * Usage: Called by `gui_is_mouse_down(button)`.
+ */
 static inline bool vira_gui_is_mouse_down(int32_t b) { return (b >= 0 && b < 3) ? _vira_x11.mouse_down[b] : false; }
+
+/**
+ * Checks whether the left mouse button transitioned from up to down on this frame.
+ * @return True if clicked on this frame; false otherwise.
+ * Usage: Used internally by immediate-mode widgets for click events.
+ */
 static inline bool _vira_backend_mouse_clicked_left(void) { return _vira_x11.mouse_clicked[0]; }
+
+/**
+ * Checks whether a specific key was pressed down on this frame.
+ * @param k Key code.
+ * @return True if pressed; false otherwise.
+ * Usage: Called by `gui_is_key_pressed(key)`.
+ */
 static inline bool vira_gui_is_key_pressed(int32_t k) { return (k >= 0 && k < 256) ? _vira_x11.keys_pressed[k] : false; }
+
+/**
+ * Returns the elapsed delta time of the previous frame in seconds.
+ * @return Delta time in seconds.
+ * Usage: Called by `gui_frame_time()`.
+ */
 static inline float vira_gui_frame_time(void) { return _vira_x11.delta_time; }
 
+/**
+ * Loads a BMP image file into an image slot for X11 rendering.
+ * @param filepath Path to the image file.
+ * @return Image slot index, or -1 on failure.
+ * Usage: Called by `gui_load_image(path)`.
+ */
 static inline int32_t _vira_x11_load_image(const char* filepath) {
     int32_t w = 0, h = 0;
     uint32_t* pixels = NULL;
@@ -304,6 +454,15 @@ static inline int32_t _vira_x11_load_image(const char* filepath) {
     return -1;
 }
 
+/**
+ * Renders an image onto the X11 backbuffer Pixmap by creating an XImage, bilinearly sampling pixels, and calling XPutImage.
+ * @param id Image handle index.
+ * @param x Top-left X destination coordinate.
+ * @param y Top-left Y destination coordinate.
+ * @param w Scaled destination width.
+ * @param h Scaled destination height.
+ * Usage: Called by `gui_draw_image(id, x, y, w, h)`.
+ */
 static inline void _vira_x11_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     if (!_vira_x11.dpy || !_vira_x11.backbuf || !_vira_gui_images[id].pixels || w <= 0 || h <= 0) return;
@@ -337,6 +496,11 @@ static inline void _vira_x11_draw_image(int32_t id, int32_t x, int32_t y, int32_
     XDestroyImage(img);
 }
 
+/**
+ * Frees pixel memory associated with an X11 image handle slot.
+ * @param id Image handle index.
+ * Usage: Called by `gui_free_image(id)`.
+ */
 static inline void _vira_x11_free_image(int32_t id) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     if (_vira_gui_images[id].pixels) {
@@ -348,6 +512,14 @@ static inline void _vira_x11_free_image(int32_t id) {
     _vira_gui_images[id].height = 0;
 }
 
+/**
+ * Sets a rectangular scissor clipping box on the X11 GC using XSetClipRectangles.
+ * @param x Left coordinate of scissor rectangle.
+ * @param y Top coordinate of scissor rectangle.
+ * @param w Width of scissor rectangle.
+ * @param h Height of scissor rectangle.
+ * Usage: Called by scroll views and modals to constrain rendering.
+ */
 static inline void _vira_x11_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (!_vira_x11.dpy || !_vira_x11.gc) return;
     if (w <= 0 || h <= 0) {
@@ -359,6 +531,10 @@ static inline void _vira_x11_set_clip(int32_t x, int32_t y, int32_t w, int32_t h
     }
 }
 
+/**
+ * Resets the X11 GC clipping mask to None, restoring unclipped rendering.
+ * Usage: Called at the end of scroll containers and modal dialogs.
+ */
 static inline void _vira_x11_reset_clip(void) {
     if (_vira_x11.dpy && _vira_x11.gc) {
         XSetClipMask(_vira_x11.dpy, _vira_x11.gc, None);

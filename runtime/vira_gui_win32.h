@@ -36,6 +36,12 @@ typedef struct {
 
 static vira_gui_ctx_t _vira_gui = {0};
 
+/**
+ * Converts a standard 24-bit RGB hex color (0xRRGGBB) to a native Win32 GDI COLORREF (0x00BBGGRR).
+ * @param hex 24-bit RGB hex color value.
+ * @return Win32 COLORREF format color.
+ * Usage: Used internally whenever passing colors to Win32 GDI drawing APIs like CreateSolidBrush, CreatePen, and SetTextColor.
+ */
 static inline COLORREF _vira_color_to_colorref(int32_t hex) {
     BYTE r = (BYTE)((hex >> 16) & 0xFF);
     BYTE g = (BYTE)((hex >> 8) & 0xFF);
@@ -43,6 +49,16 @@ static inline COLORREF _vira_color_to_colorref(int32_t hex) {
     return RGB(r, g, b);
 }
 
+/**
+ * Native Win32 window message procedure callback.
+ * Processes OS window messages: mouse movement, clicks, wheel scrolling, character typing, key down/up, and window close requests.
+ * @param hwnd Window handle.
+ * @param msg Window message identifier.
+ * @param wParam Message parameter (keys, mouse buttons, etc.).
+ * @param lParam Message parameter (cursor coordinates, etc.).
+ * @return Message result code.
+ * Usage: Registered with WNDCLASSEXA and called by Windows OS event dispatch loop.
+ */
 static LRESULT CALLBACK _vira_gui_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CLOSE:
@@ -108,6 +124,13 @@ static LRESULT CALLBACK _vira_gui_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LP
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+/**
+ * Initializes the Win32 window, message class, double-buffered GDI device contexts, and timers.
+ * @param width Window client width in pixels.
+ * @param height Window client height in pixels.
+ * @param title Window title text string.
+ * Usage: Called by `gui_init(w, h, title)` to create and display the native Win32 window.
+ */
 static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
     if (_vira_gui.hwnd != NULL) return;
 
@@ -159,12 +182,44 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
     _vira_layout_depth = 0;
 }
 
+/**
+ * Checks whether the user has closed the window or sent WM_CLOSE.
+ * @return True if window close was requested; false otherwise.
+ * Usage: Called as the condition in `for !gui_should_close() { ... }`.
+ */
 static inline bool vira_gui_should_close(void) { return _vira_gui.should_close; }
+
+/**
+ * Cancels a pending close request, allowing the application to prompt for confirmation.
+ * Usage: Called by `gui_cancel_close()` when intercepting close events.
+ */
 static inline void vira_gui_cancel_close(void) { _vira_gui.should_close = false; }
+
+/**
+ * Configures the target frame rate for frame pacing.
+ * @param fps Target FPS (e.g. 60 or 120).
+ * Usage: Called by `gui_set_target_fps(fps)`.
+ */
 static inline void vira_gui_set_target_fps(int32_t fps) { if (fps > 0) _vira_gui.target_fps = fps; }
+
+/**
+ * Returns the current window client area width in pixels.
+ * @return Window client width.
+ * Usage: Called by `gui_window_width()` to compute responsive layout coordinates.
+ */
 static inline int32_t vira_gui_window_width(void) { return _vira_gui.width; }
+
+/**
+ * Returns the current window client area height in pixels.
+ * @return Window client height.
+ * Usage: Called by `gui_window_height()` to compute responsive layout coordinates.
+ */
 static inline int32_t vira_gui_window_height(void) { return _vira_gui.height; }
 
+/**
+ * Begins a new frame by pumping the Win32 message queue and updating mouse/keyboard transitions.
+ * Usage: Invoked internally by `gui_begin()` at the start of each frame.
+ */
 static inline void _vira_backend_gui_begin(void) {
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
@@ -190,6 +245,10 @@ static inline void _vira_backend_gui_begin(void) {
     }
 }
 
+/**
+ * Concludes the current frame: performs an atomic BitBlt from backbuffer to screen and sleeps remaining time to pace target FPS.
+ * Usage: Invoked internally by `gui_end()` at the end of each frame.
+ */
 static inline void _vira_backend_gui_end(void) {
     if (!_vira_gui.hdc_screen || !_vira_gui.hdc_mem) return;
     BitBlt(_vira_gui.hdc_screen, 0, 0, _vira_gui.width, _vira_gui.height, _vira_gui.hdc_mem, 0, 0, SRCCOPY);
@@ -208,6 +267,10 @@ static inline void _vira_backend_gui_end(void) {
     _vira_gui.frame_start = frame_end;
 }
 
+/**
+ * Destroys the native Win32 window, releases device contexts, frees fonts, and frees cached images.
+ * Usage: Called by `gui_close()` at application teardown.
+ */
 static inline void vira_gui_close(void) {
     for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
         if (_vira_gui_images[i].is_valid) {
@@ -231,6 +294,15 @@ static inline void vira_gui_close(void) {
     if (_vira_gui.hwnd) DestroyWindow(_vira_gui.hwnd);
 }
 
+/**
+ * Draws a solid filled rectangle onto the offscreen GDI backbuffer.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param hex_color 24-bit RGB fill color.
+ * Usage: Called by `gui_draw_rect(x, y, w, h, color)`.
+ */
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
     if (!_vira_gui.hdc_mem || width <= 0 || height <= 0) return;
     HBRUSH br = CreateSolidBrush(_vira_color_to_colorref(hex_color));
@@ -239,6 +311,17 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
     DeleteObject(br);
 }
 
+/**
+ * Draws a rounded rectangle with background fill and border outline onto the GDI backbuffer.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param radius Corner radius in pixels.
+ * @param bg_hex 24-bit RGB background color (-1 to omit fill).
+ * @param border_hex 24-bit RGB border outline color (-1 to omit border).
+ * Usage: Called by `gui_draw_rounded_rect(...)` for styling buttons, cards, and input controls.
+ */
 static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
     if (!_vira_gui.hdc_mem || width <= 0 || height <= 0) return;
     HBRUSH br = (bg_hex >= 0) ? CreateSolidBrush(_vira_color_to_colorref(bg_hex)) : (HBRUSH)GetStockObject(NULL_BRUSH);
@@ -255,10 +338,24 @@ static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t widt
     if (border_hex >= 0) DeleteObject(pen);
 }
 
+/**
+ * Clears the full window backbuffer to a solid hex color.
+ * @param hex_color 24-bit RGB background clear color.
+ * Usage: Called by `gui_clear(color)` at the beginning of each frame.
+ */
 static inline void vira_gui_clear(int32_t hex_color) {
     vira_gui_draw_rect(0, 0, _vira_gui.width, _vira_gui.height, hex_color);
 }
 
+/**
+ * Draws antialiased ClearType text onto the GDI backbuffer.
+ * @param text Vira string to render.
+ * @param x X origin coordinate.
+ * @param y Y origin coordinate.
+ * @param size Font size hint in points.
+ * @param hex_color 24-bit RGB text color.
+ * Usage: Called by `gui_draw_text(text, x, y, size, color)`.
+ */
 static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
     (void)size;
     if (!_vira_gui.hdc_mem || text.len <= 0) return;
@@ -266,6 +363,14 @@ static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, in
     TextOutA(_vira_gui.hdc_mem, x, y, (const char*)text.data, text.len);
 }
 
+/**
+ * Draws a filled anti-aliased circle onto the GDI backbuffer.
+ * @param cx Center X coordinate.
+ * @param cy Center Y coordinate.
+ * @param radius Circle radius in pixels.
+ * @param hex_color 24-bit RGB circle color.
+ * Usage: Called by `gui_draw_circle(cx, cy, radius, color)`.
+ */
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
     if (!_vira_gui.hdc_mem) return;
     COLORREF cr = _vira_color_to_colorref(hex_color);
@@ -281,6 +386,15 @@ static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, in
     DeleteObject(pen);
 }
 
+/**
+ * Draws a 2-pixel vector line between two points on the GDI backbuffer.
+ * @param x1 Start X coordinate.
+ * @param y1 Start Y coordinate.
+ * @param x2 End X coordinate.
+ * @param y2 End Y coordinate.
+ * @param hex_color 24-bit RGB line color.
+ * Usage: Called by `gui_draw_line(x1, y1, x2, y2, color)`.
+ */
 static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
     if (!_vira_gui.hdc_mem) return;
     HPEN pen = CreatePen(PS_SOLID, 2, _vira_color_to_colorref(hex_color));
@@ -291,6 +405,12 @@ static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_
     DeleteObject(pen);
 }
 
+/**
+ * Computes exact text advance width using native GDI GetTextExtentPoint32A.
+ * @param text Text string to measure.
+ * @return Width in pixels.
+ * Usage: Used by auto-layout and widgets to size buttons, labels, and table cells precisely.
+ */
 static inline int32_t _vira_measure_text_w(vira_string text) {
     if (!_vira_gui.hdc_mem || text.len <= 0) return 0;
     SIZE sz;
@@ -298,13 +418,56 @@ static inline int32_t _vira_measure_text_w(vira_string text) {
     return (int32_t)sz.cx;
 }
 
+/**
+ * Returns the current mouse cursor X coordinate in window client space.
+ * @return Mouse cursor X coordinate.
+ * Usage: Called by `gui_mouse_x()`.
+ */
 static inline int32_t vira_gui_mouse_x(void) { return _vira_gui.mouse_x; }
+
+/**
+ * Returns the current mouse cursor Y coordinate in window client space.
+ * @return Mouse cursor Y coordinate.
+ * Usage: Called by `gui_mouse_y()`.
+ */
 static inline int32_t vira_gui_mouse_y(void) { return _vira_gui.mouse_y; }
+
+/**
+ * Checks whether a mouse button is held down (0 = Left, 1 = Right, 2 = Middle).
+ * @param b Mouse button index.
+ * @return True if held; false otherwise.
+ * Usage: Called by `gui_is_mouse_down(button)`.
+ */
 static inline bool vira_gui_is_mouse_down(int32_t b) { return (b >= 0 && b < 3) ? _vira_gui.mouse_down[b] : false; }
+
+/**
+ * Checks whether the left mouse button transitioned from up to down on this frame.
+ * @return True if clicked this frame; false otherwise.
+ * Usage: Used internally by immediate-mode widgets for single-click triggers.
+ */
 static inline bool _vira_backend_mouse_clicked_left(void) { return _vira_gui.mouse_clicked[0]; }
+
+/**
+ * Checks whether a specific key was pressed down on this frame.
+ * @param k Key code.
+ * @return True if key was pressed; false otherwise.
+ * Usage: Called by `gui_is_key_pressed(key)`.
+ */
 static inline bool vira_gui_is_key_pressed(int32_t k) { return (k >= 0 && k < 256) ? _vira_gui.keys_pressed[k] : false; }
+
+/**
+ * Returns the elapsed delta time of the previous frame in seconds.
+ * @return Delta time in seconds.
+ * Usage: Called by `gui_frame_time()`.
+ */
 static inline float vira_gui_frame_time(void) { return _vira_gui.delta_time; }
 
+/**
+ * Loads a BMP image file into a free image handle slot for Win32 GDI rendering.
+ * @param filepath Path to the image file.
+ * @return Image slot index, or -1 on failure.
+ * Usage: Called by `gui_load_image(path)`.
+ */
 static inline int32_t _vira_win32_load_image(const char* filepath) {
     int32_t w = 0, h = 0;
     uint32_t* pixels = NULL;
@@ -324,6 +487,15 @@ static inline int32_t _vira_win32_load_image(const char* filepath) {
     return -1;
 }
 
+/**
+ * Renders a loaded image onto the GDI backbuffer with scaling via StretchDIBits.
+ * @param id Image handle index.
+ * @param x Top-left X destination coordinate.
+ * @param y Top-left Y destination coordinate.
+ * @param w Destination width.
+ * @param h Destination height.
+ * Usage: Called by `gui_draw_image(id, x, y, w, h)`.
+ */
 static inline void _vira_win32_draw_image(int32_t id, int32_t x, int32_t y, int32_t w, int32_t h) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     if (!_vira_gui.hdc_mem || !_vira_gui_images[id].pixels) return;
@@ -342,6 +514,11 @@ static inline void _vira_win32_draw_image(int32_t id, int32_t x, int32_t y, int3
                   _vira_gui_images[id].pixels, &bmi, DIB_RGB_COLORS, SRCCOPY);
 }
 
+/**
+ * Frees pixel memory associated with a Win32 image handle slot.
+ * @param id Image handle index.
+ * Usage: Called by `gui_free_image(id)`.
+ */
 static inline void _vira_win32_free_image(int32_t id) {
     if (id < 0 || id >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[id].is_valid) return;
     if (_vira_gui_images[id].pixels) {
@@ -353,6 +530,14 @@ static inline void _vira_win32_free_image(int32_t id) {
     _vira_gui_images[id].height = 0;
 }
 
+/**
+ * Sets a rectangular GDI scissor clipping region on the memory DC.
+ * @param x Left coordinate of clipping box.
+ * @param y Top coordinate of clipping box.
+ * @param w Width of clipping box.
+ * @param h Height of clipping box.
+ * Usage: Called by scroll views and modals to clip child widgets.
+ */
 static inline void _vira_win32_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (!_vira_gui.hdc_mem) return;
     HRGN rgn = CreateRectRgn(x, y, x + (w > 0 ? w : 0), y + (h > 0 ? h : 0));
@@ -360,6 +545,10 @@ static inline void _vira_win32_set_clip(int32_t x, int32_t y, int32_t w, int32_t
     DeleteObject(rgn);
 }
 
+/**
+ * Clears the GDI scissor clipping region, restoring drawing across the entire window viewport.
+ * Usage: Called at the end of scroll containers and modals.
+ */
 static inline void _vira_win32_reset_clip(void) {
     if (_vira_gui.hdc_mem) SelectClipRgn(_vira_gui.hdc_mem, NULL);
 }

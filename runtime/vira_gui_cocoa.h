@@ -131,6 +131,14 @@ static vira_cocoa_t _vira_cocoa = {0};
 }
 @end
 
+/**
+ * Initializes the native macOS Cocoa window (NSWindow), custom content view (NSView),
+ * tracking areas for mouse motion, offscreen CGBitmapContext backing store, and frame timers.
+ * @param width Window content width in points.
+ * @param height Window content height in points.
+ * @param title Window title text.
+ * Usage: Called by `gui_init(w, h, title)` when compiling on macOS.
+ */
 static inline void vira_gui_init(int32_t width, int32_t height, vira_string title) {
     if (_vira_cocoa.window) return;
     @autoreleasepool {
@@ -184,26 +192,54 @@ static inline void vira_gui_init(int32_t width, int32_t height, vira_string titl
     }
 }
 
+/**
+ * Checks whether the NSWindow delegate flagged that the window should close.
+ * @return True if close requested; false otherwise.
+ * Usage: Main loop condition `for !gui_should_close() { ... }`.
+ */
 static inline bool vira_gui_should_close(void) {
     return _vira_cocoa.should_close;
 }
 
+/**
+ * Cancels a pending window close request on macOS.
+ * Usage: Called by `gui_cancel_close()`.
+ */
 static inline void vira_gui_cancel_close(void) {
     _vira_cocoa.should_close = false;
 }
 
+/**
+ * Sets the target frame rate on macOS.
+ * @param fps Target FPS (e.g. 60).
+ * Usage: Called by `gui_set_target_fps(fps)`.
+ */
 static inline void vira_gui_set_target_fps(int32_t fps) {
     if (fps > 0) _vira_cocoa.target_fps = fps;
 }
 
+/**
+ * Returns the logical window width in points.
+ * @return Content width.
+ * Usage: Called by `gui_window_width()`.
+ */
 static inline int32_t vira_gui_window_width(void) {
     return _vira_cocoa.width;
 }
 
+/**
+ * Returns the logical window height in points.
+ * @return Content height.
+ * Usage: Called by `gui_window_height()`.
+ */
 static inline int32_t vira_gui_window_height(void) {
     return _vira_cocoa.height;
 }
 
+/**
+ * Begins a new frame by draining pending Cocoa NSEvents from the application event queue.
+ * Usage: Invoked internally by `gui_begin()` at the start of each frame.
+ */
 static inline void _vira_backend_gui_begin(void) {
     if (!_vira_cocoa.window) return;
     _vira_char_queue_count = 0;
@@ -237,6 +273,11 @@ static inline void _vira_backend_gui_begin(void) {
     }
 }
 
+/**
+ * Concludes the current frame: marks the NSView as needing display, forces redraw,
+ * and sleeps via usleep to maintain the target frame rate.
+ * Usage: Invoked internally by `gui_end()` at the end of each frame.
+ */
 static inline void _vira_backend_gui_end(void) {
     if (!_vira_cocoa.window || !_vira_cocoa.view) return;
     [_vira_cocoa.view setNeedsDisplay:YES];
@@ -260,6 +301,10 @@ static inline void _vira_backend_gui_end(void) {
 
 static inline void _vira_cocoa_free_image(int32_t slot);
 
+/**
+ * Closes the NSWindow, releases CGBitmapContext, frees the backing pixel buffer, and unloads images.
+ * Usage: Called by `gui_close()` at application teardown.
+ */
 static inline void vira_gui_close(void) {
     for (int i = 0; i < VIRA_MAX_GUI_IMAGES; i++) {
         if (_vira_gui_images[i].is_valid) {
@@ -285,6 +330,15 @@ static inline void vira_gui_close(void) {
     }
 }
 
+/**
+ * Draws a solid filled rectangle onto the CoreGraphics bitmap context.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param hex_color 24-bit RGB fill color.
+ * Usage: Called by `gui_draw_rect(x, y, w, h, color)`.
+ */
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
     if (!_vira_cocoa.bitmap_ctx || width <= 0 || height <= 0) return;
     float r = ((hex_color >> 16) & 0xFF) / 255.0f;
@@ -294,6 +348,17 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
     CGContextFillRect(_vira_cocoa.bitmap_ctx, CGRectMake(x, y, width, height));
 }
 
+/**
+ * Draws a rounded rectangle onto the CoreGraphics bitmap context with background fill and border outline.
+ * @param x Top-left X coordinate.
+ * @param y Top-left Y coordinate.
+ * @param width Rectangle width in pixels.
+ * @param height Rectangle height in pixels.
+ * @param radius Corner radius in pixels.
+ * @param bg_hex 24-bit RGB fill color (-1 to omit fill).
+ * @param border_hex 24-bit RGB border outline color (-1 to omit border).
+ * Usage: Called by `gui_draw_rounded_rect(...)` for styling buttons, cards, and input controls.
+ */
 static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
     if (!_vira_cocoa.bitmap_ctx || width <= 0 || height <= 0) return;
     CGRect rect = CGRectMake((CGFloat)x, (CGFloat)y, (CGFloat)width, (CGFloat)height);
@@ -318,10 +383,23 @@ static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t widt
     CGPathRelease(path);
 }
 
+/**
+ * Clears the full CoreGraphics bitmap context to a solid hex color.
+ * @param hex_color 24-bit RGB clear color.
+ * Usage: Called by `gui_clear(color)` at the start of each frame.
+ */
 static inline void vira_gui_clear(int32_t hex_color) {
     vira_gui_draw_rect(0, 0, _vira_cocoa.width, _vira_cocoa.height, hex_color);
 }
 
+/**
+ * Draws an anti-aliased ellipse/circle onto the CoreGraphics context.
+ * @param cx Center X coordinate.
+ * @param cy Center Y coordinate.
+ * @param radius Radius in pixels.
+ * @param hex_color 24-bit RGB circle color.
+ * Usage: Called by `gui_draw_circle(cx, cy, radius, color)`.
+ */
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
     if (!_vira_cocoa.bitmap_ctx || radius <= 0.0f) return;
     float r = ((hex_color >> 16) & 0xFF) / 255.0f;
@@ -331,6 +409,15 @@ static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, in
     CGContextFillEllipseInRect(_vira_cocoa.bitmap_ctx, CGRectMake(cx - radius, cy - radius, radius * 2, radius * 2));
 }
 
+/**
+ * Draws a 1-point vector line between two coordinates on the CoreGraphics context.
+ * @param x1 Start X coordinate.
+ * @param y1 Start Y coordinate.
+ * @param x2 End X coordinate.
+ * @param y2 End Y coordinate.
+ * @param hex_color 24-bit RGB line color.
+ * Usage: Called by `gui_draw_line(x1, y1, x2, y2, color)`.
+ */
 static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
     if (!_vira_cocoa.bitmap_ctx) return;
     float r = ((hex_color >> 16) & 0xFF) / 255.0f;
@@ -344,6 +431,15 @@ static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_
     CGContextStrokePath(_vira_cocoa.bitmap_ctx);
 }
 
+/**
+ * Draws antialiased system font text using Cocoa NSString drawing attributes on the CoreGraphics context.
+ * @param text Vira string to render.
+ * @param x X origin coordinate.
+ * @param y Y origin coordinate.
+ * @param size Font size in points.
+ * @param hex_color 24-bit RGB text color.
+ * Usage: Called by `gui_draw_text(text, x, y, size, color)`.
+ */
 static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
     if (!_vira_cocoa.bitmap_ctx || text.len <= 0 || !text.data) return;
     @autoreleasepool {
@@ -364,6 +460,12 @@ static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, in
     }
 }
 
+/**
+ * Measures the rendered pixel width of a string using Cocoa NSString sizeWithAttributes.
+ * @param text Vira string to measure.
+ * @return Width in points/pixels.
+ * Usage: Used by auto-layout and widgets for element sizing.
+ */
 static inline int32_t _vira_measure_text_w(vira_string text) {
     if (text.len <= 0 || !text.data) return 0;
     @autoreleasepool {
@@ -375,23 +477,66 @@ static inline int32_t _vira_measure_text_w(vira_string text) {
     }
 }
 
+/**
+ * Returns current mouse cursor X coordinate in macOS window coordinates.
+ * @return Mouse cursor X coordinate.
+ * Usage: Called by `gui_mouse_x()`.
+ */
 static inline int32_t vira_gui_mouse_x(void) { return _vira_cocoa.mouse_x; }
+
+/**
+ * Returns current mouse cursor Y coordinate in macOS window coordinates.
+ * @return Mouse cursor Y coordinate.
+ * Usage: Called by `gui_mouse_y()`.
+ */
 static inline int32_t vira_gui_mouse_y(void) { return _vira_cocoa.mouse_y; }
+
+/**
+ * Checks whether a mouse button is held down (0 = Left, 1 = Right, 2 = Middle).
+ * @param button Mouse button index.
+ * @return True if button is held; false otherwise.
+ * Usage: Called by `gui_is_mouse_down(button)`.
+ */
 static inline bool vira_gui_is_mouse_down(int32_t button) {
     if (button >= 0 && button < 3) return _vira_cocoa.mouse_down[button];
     return false;
 }
+
+/**
+ * Checks whether the left mouse button transitioned from up to down on this frame.
+ * @return True if clicked this frame; false otherwise.
+ * Usage: Used internally by immediate-mode widgets for click events.
+ */
 static inline bool _vira_backend_mouse_clicked_left(void) {
     return _vira_cocoa.mouse_clicked[0];
 }
+
+/**
+ * Checks whether a key was pressed down on this frame.
+ * @param key Key code.
+ * @return True if pressed; false otherwise.
+ * Usage: Called by `gui_is_key_pressed(key)`.
+ */
 static inline bool vira_gui_is_key_pressed(int32_t key) {
     if (key >= 0 && key < 256) return _vira_cocoa.keys_pressed[key];
     return false;
 }
+
+/**
+ * Returns elapsed delta time of the previous frame in seconds.
+ * @return Delta time in seconds.
+ * Usage: Called by `gui_frame_time()`.
+ */
 static inline float vira_gui_frame_time(void) {
     return _vira_cocoa.delta_time;
 }
 
+/**
+ * Loads an image from disk or application bundle resources into a native NSImage handle.
+ * @param cpath File path or relative bundle path.
+ * @return Image slot index, or -1 on failure.
+ * Usage: Called by `gui_load_image(path)`.
+ */
 static inline int32_t _vira_cocoa_load_image(const char* cpath) {
     if (!cpath || cpath[0] == '\0') return -1;
     @autoreleasepool {
@@ -433,6 +578,15 @@ static inline int32_t _vira_cocoa_load_image(const char* cpath) {
     }
 }
 
+/**
+ * Renders a loaded NSImage into the CoreGraphics bitmap context scaled to the destination rect.
+ * @param slot Image handle slot.
+ * @param x Top-left X destination coordinate.
+ * @param y Top-left Y destination coordinate.
+ * @param w Scaled destination width.
+ * @param h Scaled destination height.
+ * Usage: Called by `gui_draw_image(id, x, y, w, h)`.
+ */
 static inline void _vira_cocoa_draw_image(int32_t slot, int32_t x, int32_t y, int32_t w, int32_t h) {
     if (slot < 0 || slot >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[slot].is_valid) return;
     if (!_vira_cocoa.bitmap_ctx) return;
@@ -457,6 +611,11 @@ static inline void _vira_cocoa_draw_image(int32_t slot, int32_t x, int32_t y, in
     }
 }
 
+/**
+ * Releases the native NSImage handle and frees the image slot.
+ * @param slot Image handle slot.
+ * Usage: Called by `gui_free_image(id)`.
+ */
 static inline void _vira_cocoa_free_image(int32_t slot) {
     if (slot < 0 || slot >= VIRA_MAX_GUI_IMAGES || !_vira_gui_images[slot].is_valid) return;
     if (_vira_gui_images[slot].native_handle) {
@@ -472,10 +631,22 @@ static inline void _vira_cocoa_free_image(int32_t slot) {
     _vira_gui_images[slot].height = 0;
 }
 
+/**
+ * Sets rectangular scissor clipping region for Cocoa (reserved stub).
+ * @param x Left coordinate.
+ * @param y Top coordinate.
+ * @param w Width.
+ * @param h Height.
+ * Usage: Called by scroll views and modals.
+ */
 static inline void _vira_cocoa_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
     (void)x; (void)y; (void)w; (void)h;
 }
 
+/**
+ * Resets scissor clipping region for Cocoa.
+ * Usage: Called at the end of scroll views and modals.
+ */
 static inline void _vira_cocoa_reset_clip(void) {}
 
 #endif // VIRA_GUI_COCOA_H

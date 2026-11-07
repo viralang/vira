@@ -573,11 +573,24 @@ static const char *_vira_opencl_kernel_names[VIRA_GPU_NUM_KERNELS] = {
     "vira_cl_rope_f32",         "vira_cl_silu_f32",
 };
 
+/**
+ * Checks whether the `VIRA_GPU_DEBUG` environment variable is set to a truthy value.
+ * @return True if GPU debug logging is enabled, false otherwise.
+ * Usage: Controls verbose OpenCL build log output and debug diagnostics.
+ */
 static inline bool _vira_gpu_debug(void) {
   const char *e = getenv("VIRA_GPU_DEBUG");
   return e != NULL && e[0] != '\0' && e[0] != '0';
 }
 
+/**
+ * Dynamically resolves an OpenCL symbol from the loaded shared library or DLL.
+ * @param lib Handle to the loaded OpenCL dynamic library.
+ * @param name C-string identifier of the API symbol (e.g. "clCreateBuffer").
+ * @param fn_out Pointer to function pointer storage receiving the resolved address.
+ * @return True if symbol was found and assigned, false otherwise.
+ * Usage: Internal helper during dynamic OpenCL dispatch table binding.
+ */
 static inline bool _vira_gpu_load_sym(void *lib, const char *name,
                                       void *fn_out) {
 #ifdef _WIN32
@@ -592,6 +605,12 @@ static inline bool _vira_gpu_load_sym(void *lib, const char *name,
   return true;
 }
 
+/**
+ * Converts a 32-bit IEEE 754 single-precision float bit pattern to IEEE 754 half-precision float (FP16).
+ * @param x 32-bit unsigned integer containing the raw bits of an f32.
+ * @return 16-bit unsigned integer encoding the converted half-precision float.
+ * Usage: Used to convert model weights to FP16 before uploading to GPU VRAM for 2x memory reduction and accelerated compute.
+ */
 static inline uint16_t _vira_f32_bits_to_f16(uint32_t x) {
   const uint32_t sign = (x >> 16) & 0x8000u;
   const uint32_t exp = (x >> 23) & 0xFFu;
@@ -625,6 +644,14 @@ static inline uint16_t _vira_f32_bits_to_f16(uint32_t x) {
   return (uint16_t)(sign | h);
 }
 
+/**
+ * Batch converts an array of single-precision f32 values to half-precision FP16.
+ * @param src Pointer to input array of 32-bit floats.
+ * @param dst Pointer to destination buffer for 16-bit half floats.
+ * @param n Number of elements to convert.
+ * @return True if all values converted cleanly within range, false on non-finite overflow.
+ * Usage: Quantizes float arrays in chunks during weight upload.
+ */
 static inline bool _vira_f32_to_f16_block(const vira_f32 *src, uint16_t *dst,
                                           size_t n) {
   for (size_t i = 0; i < n; ++i) {
@@ -639,6 +666,16 @@ static inline bool _vira_f32_to_f16_block(const vira_f32 *src, uint16_t *dst,
   return true;
 }
 
+/**
+ * Ensures a GPU scratch memory buffer has sufficient capacity, allocating or resizing as necessary.
+ * @param buf_ptr Pointer to the `vira_cl_mem` handle to update.
+ * @param cap_ptr Pointer to tracking capacity variable in bytes.
+ * @param needed_bytes Minimum byte size required.
+ * @param flags OpenCL memory flags (`CL_MEM_READ_WRITE`, etc.).
+ * @param out_err Pointer to receive OpenCL error code.
+ * @return Valid OpenCL buffer handle or NULL on failure.
+ * Usage: Manages reusable GPU scratch memory for matrix inputs, intermediate activations, and outputs.
+ */
 static inline vira_cl_mem _vira_gpu_ensure_scratch_locked(
     vira_cl_mem *buf_ptr, size_t *cap_ptr, size_t needed_bytes,
     vira_cl_bitfield flags, vira_cl_int *out_err) {
@@ -671,6 +708,18 @@ static inline vira_cl_mem _vira_gpu_ensure_scratch_locked(
   return new_buf;
 }
 
+/**
+ * Helper to bind standard matrix multiplication arguments to an OpenCL GEMM kernel.
+ * @param k OpenCL kernel object.
+ * @param a Pointer to matrix A GPU buffer.
+ * @param b Pointer to matrix B GPU buffer.
+ * @param c Pointer to matrix C GPU buffer.
+ * @param d0 First dimension parameter (e.g. M).
+ * @param d1 Second dimension parameter (e.g. K).
+ * @param d2 Third dimension parameter (e.g. N).
+ * @return OpenCL status code (0 on success).
+ * Usage: Sets kernel arguments 0 through 5 for linear and matmul dispatch.
+ */
 static inline vira_cl_int _vira_gpu_set_gemm_args(vira_cl_kernel k,
                                                   vira_cl_mem *a,
                                                   vira_cl_mem *b,
@@ -686,6 +735,12 @@ static inline vira_cl_int _vira_gpu_set_gemm_args(vira_cl_kernel k,
   return e;
 }
 
+/**
+ * Retrieves and prints the OpenCL C program compilation log when build errors occur.
+ * @param prog OpenCL program object that failed compilation.
+ * @param dev Target OpenCL device ID.
+ * Usage: Diagnostic logging when custom kernels or OpenCL drivers report syntax errors.
+ */
 static inline void _vira_gpu_dump_build_log(vira_cl_program prog,
                                             vira_cl_device_id dev) {
   if (!_vira_gpu_debug() || _vira_gpu.clGetProgramBuildInfo == NULL) {
@@ -699,6 +754,12 @@ static inline void _vira_gpu_dump_build_log(vira_cl_program prog,
   }
 }
 
+/**
+ * Dynamically resolves all OpenCL entry points, queries devices, creates contexts, command queues, and compiles embedded GEMV/GEMM kernels.
+ * @param lib Dynamic library handle for OpenCL.
+ * @return True if OpenCL hardware acceleration initialized successfully, false on error.
+ * Usage: Invoked by `vira_gpu_init` when OpenCL library is located.
+ */
 static inline bool _vira_gpu_init_opencl_locked(void *lib) {
   _vira_gpu_state *g = &_vira_gpu;
   bool ok = true;
@@ -884,6 +945,10 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
   return true;
 }
 
+/**
+ * Thread-safe lazy initializer for the Vira GPU acceleration engine.
+ * Usage: Probes system for discrete/integrated GPUs (NVIDIA, AMD, Apple Silicon, Intel) and initializes compute pipelines. Safe to call multiple times.
+ */
 static inline void vira_gpu_init(void) {
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) == 2) {
     return;
@@ -919,6 +984,11 @@ static inline void vira_gpu_init(void) {
   pthread_mutex_unlock(&_vira_gpu.lock);
 }
 
+/**
+ * Resets a weight cache entry to its initial empty state.
+ * @param e Pointer to cache entry struct.
+ * Usage: Cleans up cached tensor metadata when evicted from VRAM.
+ */
 static inline void _vira_gpu_cache_entry_reset(_vira_gpu_cache_entry *e) {
   e->host_ptr = NULL;
   e->elems = 0;
@@ -929,6 +999,11 @@ static inline void _vira_gpu_cache_entry_reset(_vira_gpu_cache_entry *e) {
   e->uncacheable = false;
 }
 
+/**
+ * Evicts a specific tensor host pointer from the GPU VRAM cache while holding the GPU mutex.
+ * @param host_ptr Memory address of the CPU tensor data to release.
+ * Usage: Called when a tensor is deallocated or modified to invalidate its GPU VRAM copy.
+ */
 static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr) {
   if (!_vira_gpu.available || host_ptr == NULL) {
     return;
@@ -954,6 +1029,11 @@ static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr) {
   }
 }
 
+/**
+ * Thread-safe wrapper to evict a specific host tensor from the GPU weight cache.
+ * @param host_ptr Memory address of the CPU tensor.
+ * Usage: Invoked by tensor destructor `vira_tensor_f32_free()` to maintain GPU cache consistency.
+ */
 static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr) {
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
       !_vira_gpu.available || host_ptr == NULL) {
@@ -964,6 +1044,10 @@ static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr) {
   pthread_mutex_unlock(&_vira_gpu.lock);
 }
 
+/**
+ * Releases all cached weights and scratch buffers from GPU VRAM while holding the GPU mutex.
+ * Usage: Used during emergency OOM recovery or system shutdown to reclaim all device memory.
+ */
 static inline void _vira_gpu_evict_all_locked(void) {
   if (!_vira_gpu.available) {
     return;
@@ -997,6 +1081,15 @@ static inline void _vira_gpu_evict_all_locked(void) {
 
 // Called directly by `vira_gguf_load_tensor` in `vira_rt.h` to upload raw Q4_0 / Q8_0
 // blocks into VRAM immediately upon model load (7.1x smaller than FP32!).
+/**
+ * Directly registers and uploads raw quantized weight blocks (Q4_0 or Q8_0) to GPU VRAM during model loading.
+ * @param host_ptr CPU tensor data pointer serving as cache key.
+ * @param gguf_dtype Quantization type from GGUF header (2 for Q4_0, 8/7 for Q8_0).
+ * @param raw_blocks Pointer to raw quantized weight blocks.
+ * @param raw_bytes Size in bytes of quantized weight data.
+ * @param elems Total number of logical tensor elements.
+ * Usage: Invoked by `vira_gguf_load_tensor` to stream quantized weights directly into VRAM for ultra-fast GPU GEMV inference.
+ */
 static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
                                             uint32_t gguf_dtype,
                                             const void *raw_blocks,
@@ -1061,6 +1154,14 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
   pthread_mutex_unlock(&_vira_gpu.lock);
 }
 
+/**
+ * Converts an array of single-precision floats to half-precision (FP16) and uploads them to a read-only OpenCL buffer.
+ * @param src Pointer to CPU float data.
+ * @param elems Number of float elements.
+ * @param out_err Pointer to receive error code.
+ * @return OpenCL memory buffer handle, or NULL on error.
+ * Usage: Used by `_vira_gpu_get_or_upload_weight_locked` to stage FP16 weights in VRAM.
+ */
 static inline vira_cl_mem _vira_gpu_upload_half_locked(const vira_f32 *src,
                                                        size_t elems,
                                                        vira_cl_int *out_err) {
@@ -1104,6 +1205,16 @@ static inline vira_cl_mem _vira_gpu_upload_half_locked(const vira_f32 *src,
   return buf;
 }
 
+/**
+ * Looks up a tensor in the GPU weight cache, or uploads and caches it if not already present.
+ * @param host_ptr Host data pointer as cache key.
+ * @param elems Number of elements in the tensor.
+ * @param prefer_half If true, attempts to upload as FP16 to save VRAM.
+ * @param out_fmt Pointer to receive resulting weight format (FP16, Q4_0, etc.).
+ * @param out_err Pointer to receive error code.
+ * @return OpenCL device memory buffer, or NULL on failure.
+ * Usage: Central lookup mechanism ensuring zero redundant PCIe transfers during repetitive LLM inference layers.
+ */
 static inline vira_cl_mem _vira_gpu_get_or_upload_weight_locked(
     const vira_f32 *host_ptr, size_t elems, bool prefer_half,
     _vira_gpu_wfmt *out_fmt, vira_cl_int *out_err) {
@@ -1186,6 +1297,10 @@ static inline vira_cl_mem _vira_gpu_get_or_upload_weight_locked(
   return buf;
 }
 
+/**
+ * Releases all GPU resources, programs, kernels, command queues, and OpenCL contexts.
+ * Usage: Optional clean teardown of the GPU subsystem upon application termination.
+ */
 static inline void vira_gpu_shutdown(void) {
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2) {
     return;
@@ -1215,53 +1330,102 @@ static inline void vira_gpu_shutdown(void) {
   pthread_mutex_unlock(&_vira_gpu.lock);
 }
 
+/**
+ * Checks if a GPU compute device is detected and operational.
+ * @return True if GPU hardware acceleration is active, false if running in CPU SIMD fallback mode.
+ * Usage: Used by user programs and benchmarks to inspect hardware capabilities.
+ */
 static inline bool vira_gpu_is_available(void) {
   vira_gpu_init();
   return _vira_gpu.available;
 }
 
+/**
+ * Returns the human-readable brand name of the active compute device (e.g., "NVIDIA GeForce RTX 4090" or "Apple M3 Pro").
+ * @return Vira string containing device name.
+ * Usage: Telemetry and system diagnostics (`gpu::device_name()`).
+ */
 static inline vira_string vira_gpu_device_name(void) {
   vira_gpu_init();
   return vira_str_lit(_vira_gpu.device_name,
                       (int32_t)strlen(_vira_gpu.device_name));
 }
 
+/**
+ * Returns the active compute backend identifier (e.g., "OpenCL" or "CPU-SIMD").
+ * @return Vira string with backend name.
+ * Usage: Telemetry and runtime queries (`gpu::backend()`).
+ */
 static inline vira_string vira_gpu_backend_name(void) {
   vira_gpu_init();
   return vira_str_lit(_vira_gpu.backend_name,
                       (int32_t)strlen(_vira_gpu.backend_name));
 }
 
+/**
+ * Returns the total capacity of GPU video memory in bytes.
+ * @return Total VRAM in bytes, or 0 if GPU is unavailable.
+ * Usage: Memory budgeting and system diagnostics.
+ */
 static inline int64_t vira_gpu_vram_bytes(void) {
   vira_gpu_init();
   return _vira_gpu.vram_bytes;
 }
 
+/**
+ * Returns the current amount of GPU VRAM allocated by cached weights and scratch buffers in bytes.
+ * @return Allocated VRAM in bytes.
+ * Usage: Used to monitor memory usage and prevent out-of-memory faults.
+ */
 static inline int64_t vira_gpu_allocated_bytes(void) {
   vira_gpu_init();
   return __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
 }
 
+/**
+ * Returns the cumulative count of operations that fell back to CPU execution due to VRAM exhaustion.
+ * @return Number of fallback events.
+ * Usage: Telemetry and profiling to verify model fit in GPU memory.
+ */
 static inline int64_t vira_gpu_oom_fallbacks(void) {
   vira_gpu_init();
   return __atomic_load_n(&_vira_gpu.oom_fallbacks, __ATOMIC_RELAXED);
 }
 
+/**
+ * Enables or disables GPU compute acceleration dynamically at runtime.
+ * @param enabled True to enable GPU dispatch, false to force CPU fallback.
+ * Usage: Allows benchmarking CPU vs GPU or running under low-power modes (`gpu::set_enabled(false)`).
+ */
 static inline void vira_gpu_set_enabled(bool enabled) {
   vira_gpu_init();
   _vira_gpu.enabled = enabled;
 }
 
+/**
+ * Queries whether GPU compute acceleration is currently enabled.
+ * @return True if enabled, false otherwise.
+ * Usage: Conditional execution logic based on GPU settings.
+ */
 static inline bool vira_gpu_is_enabled(void) {
   vira_gpu_init();
   return _vira_gpu.enabled;
 }
 
+/**
+ * Testing hook to force simulated out-of-memory conditions and verify graceful CPU fallback.
+ * @param enable True to simulate OOM, false for normal execution.
+ * Usage: Automated unit testing of fallback resilience.
+ */
 static inline void vira_gpu_simulate_oom(bool enable) {
   vira_gpu_init();
   _vira_gpu.simulate_oom = enable;
 }
 
+/**
+ * Blocks host execution until all queued GPU compute tasks have finished.
+ * Usage: Benchmarking, profiling, and synchronization points.
+ */
 static inline void vira_gpu_sync(void) {
   vira_gpu_init();
   if (_vira_gpu.available && _vira_gpu.queue != NULL) {
@@ -1274,6 +1438,14 @@ static inline void vira_gpu_sync(void) {
 // ============================================================================
 // GPU LINEAR PROJECTION: `y = x @ w^T` (Q4_0 / Q8_0 / FP16 + WARP GEMV)
 // ============================================================================
+/**
+ * Executes hardware-accelerated linear layer projection `y = x @ w^T` using specialized Warp GEMV kernels (Q4_0, Q8_0, FP16) or 2D tiled GEMM.
+ * @param opt_arena Optional memory arena for output allocation (or NULL for heap).
+ * @param x Input activation tensor of shape (M, K).
+ * @param w Weight matrix tensor of shape (N, K).
+ * @return Output tensor of shape (M, N).
+ * Usage: Core building block for Transformer attention projections and MLP feed-forward layers.
+ */
 static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
                                               vira_tensor_f32 x,
                                               vira_tensor_f32 w) {
@@ -1430,6 +1602,14 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
 // ============================================================================
 // GPU MATRIX MULTIPLICATION: `c = a @ b` (FP32, 16x16 tiled)
 // ============================================================================
+/**
+ * Executes hardware-accelerated matrix multiplication `c = a @ b` using high-performance 2D tiled OpenCL kernels.
+ * @param opt_arena Optional memory arena for output allocation (or NULL for heap).
+ * @param a Left input tensor (M, K).
+ * @param b Right input tensor (K, N).
+ * @return Result tensor (M, N).
+ * Usage: General matrix multiplication operator for neural networks and scientific computing.
+ */
 static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
                                               vira_tensor_f32 a,
                                               vira_tensor_f32 b) {
@@ -1534,21 +1714,49 @@ static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
   return out;
 }
 
+/**
+ * Computes Root Mean Square Normalization with GPU dispatch or SIMD fallback.
+ * @param x Input tensor.
+ * @param weight Scaling weights tensor.
+ * @param eps Epsilon value for numerical stability.
+ * @return Normalized tensor.
+ * Usage: Pre- and post-attention layer normalization in modern LLMs (Llama, Qwen, Mistral).
+ */
 static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_tensor_f32 x,
                                                vira_tensor_f32 weight,
                                                float eps) {
   return vira_tensor_rmsnorm(x, weight, eps);
 }
 
+/**
+ * Computes Rotary Position Embeddings (RoPE) for attention query and key tensors.
+ * @param q Query or key tensor.
+ * @param pos Sequence token position offset.
+ * @param freq_base Frequency base (e.g. 10000.0f or 1000000.0f).
+ * @return Rotated tensor.
+ * Usage: Rotary positional encoding in modern LLM self-attention layers.
+ */
 static inline vira_tensor_f32 vira_gpu_rope(vira_tensor_f32 q, int64_t pos,
                                             float freq_base) {
   return vira_tensor_rope(q, pos, freq_base);
 }
 
+/**
+ * Computes numerically stable Softmax probability distribution across rows.
+ * @param logits Input logits tensor.
+ * @return Softmax probabilities tensor.
+ * Usage: Self-attention score normalization and next-token probability distribution.
+ */
 static inline vira_tensor_f32 vira_gpu_softmax(vira_tensor_f32 logits) {
   return vira_tensor_softmax(logits);
 }
 
+/**
+ * Computes the SiLU (Swish) non-linear activation function `f(x) = x * sigmoid(x)`.
+ * @param x Input tensor.
+ * @return Activated tensor.
+ * Usage: Feed-forward network gate activation in Transformer blocks.
+ */
 static inline vira_tensor_f32 vira_gpu_silu(vira_tensor_f32 x) {
   return vira_tensor_silu(x);
 }
