@@ -1819,6 +1819,32 @@ static void _vira_matmul_job_fn(void *raw) {
 
 #define VIRA_MATMUL_MT_THRESHOLD (128LL * 128LL * 128LL)
 
+// --- GPU AUTO-DISPATCH FORWARD DECLARATIONS ---
+static inline bool vira_gpu_is_available(void);
+static inline bool vira_gpu_is_enabled(void);
+static inline vira_string vira_gpu_device_name(void);
+static inline vira_string vira_gpu_backend_name(void);
+static inline int64_t vira_gpu_vram_bytes(void);
+static inline int64_t vira_gpu_allocated_bytes(void);
+static inline int64_t vira_gpu_oom_fallbacks(void);
+static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
+                                              vira_tensor_f32 x,
+                                              vira_tensor_f32 w);
+static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
+                                              vira_tensor_f32 a,
+                                              vira_tensor_f32 b);
+static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_tensor_f32 x,
+                                               vira_tensor_f32 weight,
+                                               float eps);
+static inline vira_tensor_f32 vira_gpu_rope(vira_tensor_f32 q, int64_t pos,
+                                            float freq_base);
+static inline vira_tensor_f32 vira_gpu_silu(vira_tensor_f32 x);
+static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
+                                            uint32_t gguf_dtype,
+                                            const void *raw_blocks,
+                                            size_t raw_bytes, size_t elems);
+static __thread bool _vira_tls_gpu_fallback = false;
+
 // Hardware-accelerated 2D/3D/4D Batched + Multi-Threaded `@` Matrix Multiplication
 static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
                                                      vira_tensor_f32 a,
@@ -1838,6 +1864,15 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
             "vira tensor error: matmul '@' inner dimension mismatch (%d vs %d)\n",
             K_a, K_b);
     exit(1);
+  }
+
+  if (!_vira_tls_gpu_fallback && a_nd <= 2 && b_nd <= 2 &&
+      (int64_t)M * (int64_t)K_a * (int64_t)N >= 65536LL &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_matmul(opt_arena, a, b);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
   }
 
   int32_t a_batch_nd = (a_nd > 2) ? (a_nd - 2) : 0;
@@ -2065,12 +2100,21 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
             M, K, N, w.cols);
     exit(1);
   }
+
+  int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
+  if (!_vira_tls_gpu_fallback && total_ops >= 65536LL &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_linear(opt_arena, x, w);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+
   int32_t out_dims[2] = {M, N};
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
                 : vira_tensor_f32_alloc_nd(2, out_dims);
 
-  int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
   if (total_ops >= 262144LL && N >= 32 && !_vira_in_active_actor()) {
     vira_scheduler_ensure_init();
     int32_t nw = vira_scheduler_num_workers();
@@ -5118,6 +5162,7 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
           dst[j] = scale * (float)qs[j];
         }
       }
+      _vira_gpu_register_quant(t.data, 8, raw_q, blocks * 34, total);
       free(raw_q);
     }
   } else if (matched_type == 2) {
@@ -5140,6 +5185,7 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
           dst[j + 16] = scale * (float)v1;
         }
       }
+      _vira_gpu_register_quant(t.data, 2, raw_q, blocks * 18, total);
       free(raw_q);
     }
   } else {
@@ -6551,18 +6597,32 @@ static inline Result_int vira_sys_proc_wait(int32_t pid) {
 
 static inline void vira_report_mem_stats(void) {
   _vira_flush_tls_mem_stats();
+#if defined(VIRA_QUIET_RT)
   vira_gpu_shutdown();
   vira_scheduler_shutdown();
-#if defined(VIRA_QUIET_RT)
   return;
 #else
   if (_vira_quiet_rt) {
+    vira_gpu_shutdown();
+    vira_scheduler_shutdown();
     return;
   }
   const char *env_stats = getenv("VIRA_RT_STATS");
   if (env_stats != NULL && strcmp(env_stats, "0") == 0) {
+    vira_gpu_shutdown();
+    vira_scheduler_shutdown();
     return;
   }
+  if (vira_gpu_is_available()) {
+    printf("[vira_rt] gpu=%s (%s) | vram_used=%lld MiB / %lld MiB | oom_fallbacks=%lld\n",
+           (const char *)vira_gpu_device_name().data,
+           (const char *)vira_gpu_backend_name().data,
+           (long long)(vira_gpu_allocated_bytes() >> 20),
+           (long long)(vira_gpu_vram_bytes() >> 20),
+           (long long)vira_gpu_oom_fallbacks());
+  }
+  vira_gpu_shutdown();
+  vira_scheduler_shutdown();
   printf("[vira_rt] simd=%s\n", vira_simd_backend_name());
   printf(
       "[vira_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",
@@ -6577,7 +6637,7 @@ static inline void vira_report_mem_stats(void) {
 #endif
 }
 
-#include "vira_gpu.h"
+  #include "vira_gpu.h"
 #include "vira_gui.h"
 
 #endif // VIRA_RT_H
