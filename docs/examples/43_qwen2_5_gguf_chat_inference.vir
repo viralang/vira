@@ -27,6 +27,7 @@ import io
 import time
 import math
 import exec
+import gpu
 
 struct Qwen2Metadata {
 mut:
@@ -430,9 +431,9 @@ fn qwen2_forward_step(
             xn := tensor_rmsnorm(x, l_an[l], meta.rms_eps)
 
             // Qwen 2.5 QKV linear projections + QKV biases
-            q_lin := xn.linear(l_wq[l]) + l_bq[l]
-            k_lin := xn.linear(l_wk[l]) + l_bk[l]
-            v := xn.linear(l_wv[l]) + l_bv[l]
+            q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+            k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+            v := xn.gpu_linear(l_wv[l]) + l_bv[l]
 
             // Reshape into heads BEFORE applying per-head NeoX split-half RoPE
             q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
@@ -482,15 +483,15 @@ fn qwen2_forward_step(
             }
 
             attn_flat := attn_out.reshape_2d(1, meta.dim)
-            attn_proj := attn_flat.linear(l_wo[l])
+            attn_proj := attn_flat.gpu_linear(l_wo[l])
             x2 := x + attn_proj
 
             // Post-attention RMSNorm + SwiGLU FFN
             x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
-            gate := tensor_silu(x2n.linear(l_w_gate[l]))
-            up := x2n.linear(l_w_up[l])
+            gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
+            up := x2n.gpu_linear(l_w_up[l])
             ffn_hidden := tensor_elemwise_mul(gate, up)
-            down := ffn_hidden.linear(l_w_down[l])
+            down := ffn_hidden.gpu_linear(l_w_down[l])
             x_next := x2 + down
             x.copy_row(0, x_next)
         }
@@ -629,9 +630,9 @@ fn generate_reply(
     }
     tok_per_sec := (gen_steps * 1000) / int(safe_gen_ms)
     mut compute_tag := 'CPU (AVX2/NEON)'
-    if gpu_is_enabled() && gpu_is_available() {
-        cached_kb := gpu_allocated_bytes() / 1024
-        compute_tag = 'GPU (${gpu_backend_name()}, cached=${cached_kb}KB)'
+    if gpu.is_enabled() && gpu.is_available() {
+        cached_kb := gpu.allocated_kb()
+        compute_tag = 'GPU (${gpu.backend_name()}, cached=${cached_kb}KB)'
     }
     println('')
     println('           [arch=${meta.arch} | compute=${compute_tag} | prefill=${prefill_ms}ms | gen=${gen_steps} tok (~${tok_per_sec} tok/s) | kv_pos=${kv_pos}]')
@@ -731,9 +732,9 @@ fn main() {
     kv_dim := meta.n_kv_heads * head_dim
     rope_int := int(meta.rope_base)
 
-    gpu_set_enabled(use_gpu)
-    gpu_dev := gpu_device_name()
-    gpu_back := gpu_backend_name()
+    gpu.set_enabled(use_gpu)
+    gpu_dev := gpu.device_name()
+    gpu_back := gpu.backend_name()
     kv_cache_kb := (2 * meta.n_layers * max_context * kv_dim * 4) / 1024
 
     println('Model File      : ${model_path}')

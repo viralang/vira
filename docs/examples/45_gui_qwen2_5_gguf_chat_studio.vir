@@ -23,6 +23,7 @@ import os
 import time
 import math
 import exec
+import gpu
 
 struct Qwen2Metadata {
 mut:
@@ -478,6 +479,7 @@ fn main() {
 	mut max_tokens_f := 64.0f32
 	max_context := 512
 	mut use_gpu := true
+	gpu.set_enabled(use_gpu)
 
 	// Engine State Machine:
 	//   0 = Unloaded (Idle)
@@ -733,10 +735,11 @@ fn main() {
 			gui_draw_badge(620, 16, 'UNLOADED', 0x313244, 0x6C7086)
 		}
 
-		if use_gpu && gpu_is_available() {
-			gui_draw_badge(860, 16, 'GPU ACCEL', 0x2D4A3E, 0xA6E3A1)
+		if use_gpu && gpu.is_available() {
+			cached_mb := gpu.allocated_kb() / 1024
+			gui_draw_badge(840, 16, 'GPU (${cached_mb}MB)', 0x2D4A3E, 0xA6E3A1)
 		} else {
-			gui_draw_badge(860, 16, 'CPU SIMD', 0x313244, 0x89B4FA)
+			gui_draw_badge(840, 16, 'CPU SIMD', 0x313244, 0x89B4FA)
 		}
 
 		// ====================================================================
@@ -755,7 +758,7 @@ fn main() {
 		prev_gpu := use_gpu
 		use_gpu = gui_check('Enable GPU Compute Offload (Vulkan / Metal / CUDA)', use_gpu)
 		if use_gpu != prev_gpu {
-			gpu_set_enabled(use_gpu)
+			gpu.set_enabled(use_gpu)
 		}
 
 		gui_spacing(4)
@@ -863,7 +866,7 @@ fn main() {
 		gui_lbl('Attention: ${meta.n_heads} Q Heads / ${meta.n_kv_heads} KV Heads (GQA 7:1, RoPE=1,000,000)')
 		gui_lbl('KV Cache Position: ${kv_pos} / ${max_context} tokens')
 		gui_lbl('Last Prefill Latency: ${last_prefill_ms} ms | Throughput: ~${last_tok_per_sec} tok/s')
-		gui_lbl('Compute Backend: ${gpu_device_name()} (${gpu_backend_name()})')
+		gui_lbl('Compute Backend: ${gpu.device_name()} (${gpu.backend_name()})')
 		gui_card_end()
 		gui_stack_end()
 

@@ -1127,6 +1127,47 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 				fmt.Fprintln(os.Stderr, "  = help (macOS Brew)   : brew install mingw-w64")
 				os.Exit(1)
 			}
+		} else if targetOS == "darwin" && goRuntime.GOOS != "darwin" {
+			// Cross-compiling to macOS from Linux or Windows requires an OSXCross toolchain or Clang with Apple SDK
+			for _, cand := range []string{
+				"o64-clang",
+				"x86_64-apple-darwin-clang",
+				"x86_64-apple-darwin22-clang",
+				"x86_64-apple-darwin21-clang",
+				"x86_64-apple-darwin20-clang",
+				"x86_64-apple-darwin19-clang",
+				"aarch64-apple-darwin-clang",
+				"aarch64-apple-darwin22-clang",
+				"aarch64-apple-darwin21-clang",
+				"arm64-apple-darwin-clang",
+			} {
+				if _, err := exec.LookPath(cand); err == nil {
+					compiler = cand
+					break
+				}
+			}
+			if compiler == "" {
+				sdkRoot := os.Getenv("MACOS_SDK_PATH")
+				if sdkRoot == "" {
+					sdkRoot = os.Getenv("SDKROOT")
+				}
+				if sdkRoot != "" {
+					if _, err := exec.LookPath("clang"); err == nil {
+						compiler = "clang"
+					}
+				}
+			}
+			if compiler == "" {
+				fmt.Fprintf(os.Stderr, "error: cross-compiling to macOS (darwin) from %s requires an Apple Darwin cross-toolchain (such as OSXCross)\n", goRuntime.GOOS)
+				fmt.Fprintln(os.Stderr, "  = searched: o64-clang, x86_64-apple-darwin-clang, aarch64-apple-darwin-clang")
+				fmt.Fprintln(os.Stderr, "  = reason: macOS binaries (Mach-O) and Cocoa frameworks (-framework Cocoa) cannot be compiled by host Linux/Windows GCC.")
+				fmt.Fprintln(os.Stderr, "  = solution 1: Install OSXCross (https://github.com/tpoechtrager/osxcross) and add its bin/ directory to PATH, or specify -cc <compiler>.")
+				fmt.Fprintln(os.Stderr, "  = solution 2: Run 'vira bundle -target mac -gui' natively on a Mac.")
+				fmt.Fprintln(os.Stderr, "  = solution 3: Emit standalone C99 source code and compile natively on macOS:")
+				fmt.Fprintln(os.Stderr, "                vira cgen src/main.vir -o app.c")
+				fmt.Fprintln(os.Stderr, "                clang -O3 app.c -o app -framework Cocoa -framework CoreGraphics")
+				os.Exit(1)
+			}
 		} else {
 			candidates := []string{"gcc", "clang", "cc", "tcc"}
 			if goRuntime.GOOS == "darwin" {
@@ -1213,6 +1254,15 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 
 	baseIncludes := append([]string{"-I" + runtimeDir}, incFlags...)
 	baseIncludes = append(baseIncludes, libFlags...)
+	if targetOS == "darwin" && goRuntime.GOOS != "darwin" && (compiler == "clang" || filepath.Base(compiler) == "clang") {
+		sdkRoot := os.Getenv("MACOS_SDK_PATH")
+		if sdkRoot == "" {
+			sdkRoot = os.Getenv("SDKROOT")
+		}
+		if sdkRoot != "" {
+			baseIncludes = append(baseIncludes, "-target", "x86_64-apple-darwin", "-fuse-ld=lld", "-isysroot", sdkRoot)
+		}
+	}
 	if targetOS == "windows" {
 		baseIncludes = append(baseIncludes, "-D_WIN32_WINNT=0x0601")
 	}

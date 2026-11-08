@@ -1719,6 +1719,8 @@ static inline bool vira_arena_contains(const vira_arena *a, const void *ptr) {
   return false;
 }
 
+static inline void _vira_gpu_invalidate_activations(void);
+
 /**
  * Resets an arena's allocation offset back to zero, reusing allocated memory without system frees.
  * @param a Pointer to arena.
@@ -1727,6 +1729,7 @@ static inline bool vira_arena_contains(const vira_arena *a, const void *ptr) {
 static inline void vira_arena_reset(vira_arena *a) {
   if (!a)
     return;
+  _vira_gpu_invalidate_activations();
   vira_arena_slab *cur = a->overflow_slabs;
   while (cur != NULL) {
     vira_arena_slab *next = cur->next;
@@ -2290,6 +2293,8 @@ static inline vira_f32 vira_tensor_f32_get(vira_tensor_f32 t, int32_t row,
   return t.data[(size_t)row * (size_t)t.cols + (size_t)col];
 }
 
+static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr);
+
 /**
  * Sets a scalar float element in a 2D tensor with bounds checking.
  * @param t 2D tensor.
@@ -2308,6 +2313,7 @@ static inline void vira_tensor_f32_set(vira_tensor_f32 t, int32_t row,
     exit(1);
   }
   t.data[(size_t)row * (size_t)t.cols + (size_t)col] = val;
+  _vira_gpu_evict_ptr(t.data);
 }
 
 /**
@@ -2336,6 +2342,7 @@ static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
   }
   memcpy(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
          (size_t)dst.cols * sizeof(vira_f32));
+  _vira_gpu_evict_ptr(dst.data);
 }
 
 /**
@@ -2501,6 +2508,7 @@ static void _vira_matmul_job_fn(void *raw) {
 // --- GPU AUTO-DISPATCH FORWARD DECLARATIONS ---
 static inline bool vira_gpu_is_available(void);
 static inline bool vira_gpu_is_enabled(void);
+static inline bool vira_gpu_is_unified_memory(void);
 static inline vira_string vira_gpu_device_name(void);
 static inline vira_string vira_gpu_backend_name(void);
 static inline int64_t vira_gpu_vram_bytes(void);
@@ -2517,6 +2525,7 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_tensor_f32 x,
                                                float eps);
 static inline vira_tensor_f32 vira_gpu_rope(vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
+static inline vira_tensor_f32 vira_gpu_softmax(vira_tensor_f32 logits);
 static inline vira_tensor_f32 vira_gpu_silu(vira_tensor_f32 x);
 static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
                                             uint32_t gguf_dtype,
@@ -6213,6 +6222,7 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
   for (; i < total; ++i) {
     param->data[i] -= lr * grad.data[i];
   }
+  _vira_gpu_evict_ptr(param->data);
 }
 
 // ============================================================================
@@ -6345,11 +6355,31 @@ static struct {
 } _vira_gguf_dir_cache = {"", 0, NULL};
 
 /**
+ * Decodes a 6-bit sub-block scale and min pair from a 12-byte GGUF K-quant (`Q4_K` / `Q5_K`) scale table.
+ * @param sub Sub-block index in `[0, 7]`.
+ * @param scales Pointer to the 12-byte packed GGUF scale array.
+ * @param out_sc Output pointer receiving the 6-bit unsigned scale factor.
+ * @param out_m Output pointer receiving the 6-bit unsigned minimum offset.
+ * Usage: Internal helper used by `vira_gguf_load_tensor` for `Q4_K` and `Q5_K` super-block dequantization.
+ */
+static inline void _vira_gguf_k4_scale_min(int32_t sub, const uint8_t *scales,
+                                           uint8_t *out_sc, uint8_t *out_m) {
+  if (sub < 4) {
+    *out_sc = (uint8_t)(scales[sub] & 63u);
+    *out_m = (uint8_t)(scales[sub + 4] & 63u);
+  } else {
+    *out_sc = (uint8_t)((scales[sub + 4] & 0x0Fu) |
+                        ((scales[sub - 4] >> 6) << 4));
+    *out_m = (uint8_t)((scales[sub + 4] >> 4) | ((scales[sub] >> 6) << 4));
+  }
+}
+
+/**
  * Parses a GGUF v2/v3 binary file, locates the requested tensor, and streams it to GPU VRAM or dequantizes to CPU SIMD.
  * @param path Path to `.gguf` model file.
  * @param tensor_name Name of the tensor in the GGUF directory (e.g. "blk.0.attn_q.weight").
  * @return Result containing loaded tensor or error message.
- * Usage: High-speed streaming LLM model loading with automatic Q4_0/Q8_0 GPU acceleration (`gguf::load_tensor(...)`).
+ * Usage: High-speed streaming LLM model loading with automatic Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K GPU acceleration (`gguf_load_tensor(...)`).
  */
 static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
                                                       vira_string tensor_name) {
@@ -6554,9 +6584,118 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       }
       free(hbuf);
     }
-  } else if (matched_type == 7 || matched_type == 8) {
+  } else if (matched_type == 2 && (total & 31u) == 0) {
     size_t blocks = total / 32;
-    uint8_t *raw_q = (uint8_t *)malloc(blocks * 34);
+    size_t raw_bytes = blocks * 18;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 18, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 18;
+        uint16_t scale_h = 0;
+        memcpy(&scale_h, blk, 2);
+        float scale = _vira_fp16_to_fp32(scale_h);
+        const uint8_t *nibbles = blk + 2;
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 16; ++j) {
+          uint8_t byte = nibbles[j];
+          int8_t v0 = (int8_t)(byte & 0x0Fu) - 8;
+          int8_t v1 = (int8_t)(byte >> 4) - 8;
+          dst[j] = scale * (float)v0;
+          dst[j + 16] = scale * (float)v1;
+        }
+      }
+      _vira_gpu_register_quant(t.data, 2, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 3 && (total & 31u) == 0) {
+    size_t blocks = total / 32;
+    size_t raw_bytes = blocks * 20;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 20, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 20;
+        uint16_t d_h = 0, m_h = 0;
+        memcpy(&d_h, blk, 2);
+        memcpy(&m_h, blk + 2, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        float m = _vira_fp16_to_fp32(m_h);
+        const uint8_t *qs = blk + 4;
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 16; ++j) {
+          uint8_t byte = qs[j];
+          dst[j] = d * (float)(byte & 0x0Fu) + m;
+          dst[j + 16] = d * (float)(byte >> 4) + m;
+        }
+      }
+      _vira_gpu_register_quant(t.data, 3, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 6 && (total & 31u) == 0) {
+    size_t blocks = total / 32;
+    size_t raw_bytes = blocks * 22;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 22, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 22;
+        uint16_t d_h = 0;
+        memcpy(&d_h, blk, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8) |
+                      ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+        const uint8_t *qs = blk + 6;
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 16; ++j) {
+          uint8_t byte = qs[j];
+          int32_t v0 =
+              (int32_t)((uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4)) -
+              16;
+          int32_t v1 =
+              (int32_t)((uint32_t)(byte >> 4) |
+                        (((qh >> (j + 16)) & 1u) << 4)) -
+              16;
+          dst[j] = d * (float)v0;
+          dst[j + 16] = d * (float)v1;
+        }
+      }
+      _vira_gpu_register_quant(t.data, 6, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 7 && (total & 31u) == 0) {
+    size_t blocks = total / 32;
+    size_t raw_bytes = blocks * 24;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 24, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 24;
+        uint16_t d_h = 0, m_h = 0;
+        memcpy(&d_h, blk, 2);
+        memcpy(&m_h, blk + 2, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        float m = _vira_fp16_to_fp32(m_h);
+        uint32_t qh = (uint32_t)blk[4] | ((uint32_t)blk[5] << 8) |
+                      ((uint32_t)blk[6] << 16) | ((uint32_t)blk[7] << 24);
+        const uint8_t *qs = blk + 8;
+        float *dst = t.data + b * 32;
+        for (int32_t j = 0; j < 16; ++j) {
+          uint8_t byte = qs[j];
+          uint32_t v0 = (uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4);
+          uint32_t v1 =
+              (uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4);
+          dst[j] = d * (float)v0 + m;
+          dst[j + 16] = d * (float)v1 + m;
+        }
+      }
+      _vira_gpu_register_quant(t.data, 7, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 8 && (total & 31u) == 0) {
+    size_t blocks = total / 32;
+    size_t raw_bytes = blocks * 34;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
     if (raw_q) {
       _nr = fread(raw_q, 34, blocks, f);
       for (size_t b = 0; b < blocks; ++b) {
@@ -6570,34 +6709,126 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
           dst[j] = scale * (float)qs[j];
         }
       }
-      _vira_gpu_register_quant(t.data, 8, raw_q, blocks * 34, total);
+      _vira_gpu_register_quant(t.data, 8, raw_q, raw_bytes, total);
       free(raw_q);
     }
-  } else if (matched_type == 2) {
-    size_t blocks = total / 32;
-    uint8_t *raw_q = (uint8_t *)malloc(blocks * 18);
+  } else if (matched_type == 12 && (total & 255u) == 0) {
+    size_t blocks = total / 256;
+    size_t raw_bytes = blocks * 144;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
     if (raw_q) {
-      _nr = fread(raw_q, 18, blocks, f);
+      _nr = fread(raw_q, 144, blocks, f);
       for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 18;
-        uint16_t scale_h = 0;
-        memcpy(&scale_h, blk, 2);
-        float scale = _vira_fp16_to_fp32(scale_h);
-        const uint8_t *nibbles = blk + 2;
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 16; ++j) {
-          uint8_t byte = nibbles[j];
-          int8_t v0 = (int8_t)(byte & 0x0F) - 8;
-          int8_t v1 = (int8_t)(byte >> 4) - 8;
-          dst[j] = scale * (float)v0;
-          dst[j + 16] = scale * (float)v1;
+        const uint8_t *blk = raw_q + b * 144;
+        uint16_t d_h = 0, dmin_h = 0;
+        memcpy(&d_h, blk, 2);
+        memcpy(&dmin_h, blk + 2, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        float dmin = _vira_fp16_to_fp32(dmin_h);
+        const uint8_t *scales = blk + 4;
+        const uint8_t *qs = blk + 16;
+        float *dst = t.data + b * 256;
+        for (int32_t ib = 0; ib < 8; ++ib) {
+          uint8_t sc = 0, m_sc = 0;
+          _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+          float d_sub = d * (float)sc;
+          float min_sub = dmin * (float)m_sc;
+          const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+          int32_t shift = (ib & 1) * 4;
+          float *dst_sub = dst + ib * 32;
+          for (int32_t l = 0; l < 32; ++l) {
+            dst_sub[l] =
+                d_sub * (float)((qs_sub[l] >> shift) & 0x0Fu) - min_sub;
+          }
         }
       }
-      _vira_gpu_register_quant(t.data, 2, raw_q, blocks * 18, total);
+      _vira_gpu_register_quant(t.data, 12, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 13 && (total & 255u) == 0) {
+    size_t blocks = total / 256;
+    size_t raw_bytes = blocks * 176;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 176, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 176;
+        uint16_t d_h = 0, dmin_h = 0;
+        memcpy(&d_h, blk, 2);
+        memcpy(&dmin_h, blk + 2, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        float dmin = _vira_fp16_to_fp32(dmin_h);
+        const uint8_t *scales = blk + 4;
+        const uint8_t *qh = blk + 16;
+        const uint8_t *qs = blk + 48;
+        float *dst = t.data + b * 256;
+        for (int32_t ib = 0; ib < 8; ++ib) {
+          uint8_t sc = 0, m_sc = 0;
+          _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+          float d_sub = d * (float)sc;
+          float min_sub = dmin * (float)m_sc;
+          const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+          int32_t shift = (ib & 1) * 4;
+          uint8_t u_mask = (uint8_t)(1u << ib);
+          float *dst_sub = dst + ib * 32;
+          for (int32_t l = 0; l < 32; ++l) {
+            uint32_t q = (uint32_t)((qs_sub[l] >> shift) & 0x0Fu) |
+                         ((qh[l] & u_mask) ? 16u : 0u);
+            dst_sub[l] = d_sub * (float)q - min_sub;
+          }
+        }
+      }
+      _vira_gpu_register_quant(t.data, 13, raw_q, raw_bytes, total);
+      free(raw_q);
+    }
+  } else if (matched_type == 14 && (total & 255u) == 0) {
+    size_t blocks = total / 256;
+    size_t raw_bytes = blocks * 210;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
+    if (raw_q) {
+      _nr = fread(raw_q, 210, blocks, f);
+      for (size_t b = 0; b < blocks; ++b) {
+        const uint8_t *blk = raw_q + b * 210;
+        uint16_t d_h = 0;
+        memcpy(&d_h, blk + 208, 2);
+        float d = _vira_fp16_to_fp32(d_h);
+        for (int32_t h = 0; h < 2; ++h) {
+          const uint8_t *ql_h = blk + h * 64;
+          const uint8_t *qh_h = blk + 128 + h * 32;
+          const int8_t *sc_h = (const int8_t *)(blk + 192) + h * 8;
+          float *dst_h = t.data + b * 256 + h * 128;
+          for (int32_t l = 0; l < 32; ++l) {
+            int32_t is = l >> 4;
+            int32_t q1 =
+                (int32_t)((ql_h[l + 0] & 0x0Fu) | (((qh_h[l] >> 0) & 3u) << 4)) -
+                32;
+            int32_t q2 = (int32_t)((ql_h[l + 32] & 0x0Fu) |
+                                   (((qh_h[l] >> 2) & 3u) << 4)) -
+                         32;
+            int32_t q3 =
+                (int32_t)((ql_h[l + 0] >> 4) | (((qh_h[l] >> 4) & 3u) << 4)) -
+                32;
+            int32_t q4 =
+                (int32_t)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3u) << 4)) -
+                32;
+            dst_h[l + 0] = d * (float)sc_h[is + 0] * (float)q1;
+            dst_h[l + 32] = d * (float)sc_h[is + 2] * (float)q2;
+            dst_h[l + 64] = d * (float)sc_h[is + 4] * (float)q3;
+            dst_h[l + 96] = d * (float)sc_h[is + 6] * (float)q4;
+          }
+        }
+      }
+      _vira_gpu_register_quant(t.data, 14, raw_q, raw_bytes, total);
       free(raw_q);
     }
   } else {
-    _nr = fread(t.data, sizeof(float), total, f);
+    fclose(f);
+    vira_tensor_f32_free(&t);
+    vira_string err = vira_str_format(
+        "unsupported GGUF quantization dtype %u (total=%zu)", matched_type,
+        total);
+    return (Result_tensor_f32){
+        .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
   (void)_nr;
 
@@ -6621,6 +6852,15 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 static inline vira_tensor_f32
 vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
   _vira_tensor_norm_shape(&x);
+  _vira_tensor_norm_shape(&weight);
+  if (!_vira_tls_gpu_fallback &&
+      (int64_t)x.rows * (int64_t)x.cols >= 16384LL &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_rmsnorm(x, weight, eps);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t r = 0; r < x.rows; ++r) {
     float *x_row = &x.data[r * x.cols];
@@ -6683,6 +6923,14 @@ vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
 static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
                                                float freq_base) {
   _vira_tensor_norm_shape(&q);
+  if (!_vira_tls_gpu_fallback && (q.cols & 1) == 0 &&
+      (int64_t)q.rows * (int64_t)q.cols >= 16384LL &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_rope(q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
   int32_t half_dim = q.cols / 2;
   float cos_stack[256];
@@ -6728,8 +6976,15 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
  */
 static inline vira_tensor_f32 vira_tensor_silu(vira_tensor_f32 x) {
   _vira_tensor_norm_shape(&x);
-  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   int32_t total = x.rows * x.cols;
+  if (!_vira_tls_gpu_fallback && total >= 16384 &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_silu(x);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t i = 0; i < total; ++i) {
     float v = x.data[i];
     out.data[i] = v / (1.0f + expf(-v));
@@ -6819,6 +7074,14 @@ static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
  */
 static inline vira_tensor_f32 vira_tensor_softmax(vira_tensor_f32 logits) {
   _vira_tensor_norm_shape(&logits);
+  if (!_vira_tls_gpu_fallback &&
+      (int64_t)logits.rows * (int64_t)logits.cols >= 16384LL &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_softmax(logits);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(logits.n_dims, logits.dims);
   for (int32_t r = 0; r < logits.rows; ++r) {
     float *in_row = &logits.data[r * logits.cols];

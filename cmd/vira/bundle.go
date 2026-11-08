@@ -27,6 +27,7 @@ func bundleCmd(args []string) {
 	prodFlag := fs.Bool("prod", true, "Compile with full production optimizations")
 	guiFlag := fs.Bool("gui", false, "Force GUI subsystem (suppresses console window on Windows)")
 	cliFlag := fs.Bool("cli", false, "Force Console/CLI subsystem (keeps terminal window visible)")
+	ccFlag := fs.String("cc", "", "C compiler for compilation/cross-compilation (e.g. o64-clang, x86_64-w64-mingw32-gcc)")
 	_ = fs.Parse(args)
 
 	start := time.Now()
@@ -168,6 +169,7 @@ func bundleCmd(args []string) {
 		guiApp:   isGUI,
 		quietRT:  true,
 		cFlags:   cFlags,
+		cc:       *ccFlag,
 	}
 
 	compiler, modeDesc := invokeCBackend(cFile, tempBin, opts)

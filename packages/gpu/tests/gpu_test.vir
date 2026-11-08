@@ -1,6 +1,7 @@
 module main
 
 import gpu
+import math
 
 fn test_gpu_telemetry_and_linear() {
 	dev := gpu.info()
@@ -21,14 +22,58 @@ fn test_gpu_telemetry_and_linear() {
 	println('✓ test_gpu_telemetry_and_linear passed')
 }
 
+fn test_gpu_transformer_operators() {
+	x := tensor_fill(16, 64, 0.5)
+	weight := tensor_fill(1, 64, 1.0)
+	norm := gpu.rmsnorm(x, weight, 0.00001)
+	if norm.rows != 16 || norm.cols != 64 {
+		panic('unexpected gpu.rmsnorm output shape')
+	}
+
+	rotated := gpu.rope(norm, 4, 10000.0)
+	if rotated.rows != 16 || rotated.cols != 64 {
+		panic('unexpected gpu.rope output shape')
+	}
+
+	logits := tensor_fill(16, 64, 1.0)
+	probs := gpu.softmax(logits)
+	if probs.rows != 16 || probs.cols != 64 {
+		panic('unexpected gpu.softmax output shape')
+	}
+
+	activated := gpu.silu(x)
+	if activated.rows != 16 || activated.cols != 64 {
+		panic('unexpected gpu.silu output shape')
+	}
+
+	w2 := tensor_fill(64, 64, 0.125)
+	c := gpu.matmul(probs, w2)
+	if c.rows != 16 || c.cols != 64 {
+		panic('unexpected gpu.matmul output shape')
+	}
+
+	gpu.sync()
+	println('✓ test_gpu_transformer_operators passed')
+}
+
 fn test_gpu_oom_fallback() {
 	gpu.simulate_oom(true)
 	a := tensor_fill(64, 64, 1.0)
 	b := tensor_fill(64, 64, 2.0)
 	c := gpu.matmul(a, b)
+
+	norm := gpu.rmsnorm(a, b, 0.0001)
+	r := gpu.rope(a, 1, 10000.0)
+	s := gpu.softmax(a)
+	si := gpu.silu(a)
+	lin := gpu.linear(a, b)
+
 	gpu.simulate_oom(false)
-	if c.rows != 64 || gpu.oom_fallbacks() < 1 {
-		panic('expected gpu OOM fallback to recover on CPU SIMD')
+	if c.rows != 64 || norm.rows != 64 || r.rows != 64 || s.rows != 64 || si.rows != 64 || lin.rows != 64 {
+		panic('expected all gpu ops to produce correct shape during OOM fallback')
+	}
+	if gpu.oom_fallbacks() < 1 {
+		panic('expected gpu OOM fallback count to increment')
 	}
 	println('✓ test_gpu_oom_fallback passed')
 }
