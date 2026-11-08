@@ -77,3 +77,50 @@ fn test_gpu_oom_fallback() {
 	}
 	println('✓ test_gpu_oom_fallback passed')
 }
+
+fn test_gpu_flexible_backend_switching() {
+	// 1. Force CPU-SIMD fallback backend
+	gpu.set_backend(gpu.backend_cpu)
+	cpu_be := gpu.backend_name()
+	if cpu_be != "CPU-SIMD" {
+		panic('expected CPU-SIMD backend when set to cpu')
+	}
+	if gpu.is_available() {
+		panic('expected is_available() == false for CPU-SIMD backend')
+	}
+
+	// Verify math works under explicit CPU backend
+	a := tensor_fill(32, 32, 0.5)
+	b := tensor_fill(32, 32, 0.25)
+	c := gpu.matmul(a, b)
+	if c.rows != 32 || c.cols != 32 {
+		panic('unexpected shape on CPU backend')
+	}
+
+	// 2. Switch back to auto discovery
+	gpu.set_backend(gpu.backend_auto)
+	auto_be := gpu.backend_name()
+	if auto_be.len == 0 {
+		panic('expected valid backend name after auto reset')
+	}
+	println('✓ test_gpu_flexible_backend_switching passed')
+}
+
+fn test_gpu_device_filtering() {
+	// Query current device
+	dev_before := gpu.device_name()
+	if dev_before.len == 0 {
+		panic('expected non-empty initial device name')
+	}
+
+	// Set device index filter "0"
+	gpu.set_device("0")
+	dev_idx := gpu.device_name()
+	if dev_idx.len == 0 {
+		panic('expected non-empty device name for index 0')
+	}
+
+	// Reset device filter
+	gpu.set_device("")
+	println('✓ test_gpu_device_filtering passed')
+}

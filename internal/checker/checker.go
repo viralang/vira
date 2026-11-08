@@ -632,6 +632,18 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeBool,
 	}
+	c.functions["gpu_set_backend"] = &FnSig{
+		Name:       "gpu_set_backend",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "backend", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gpu_set_device"] = &FnSig{
+		Name:       "gpu_set_device",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "device", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
 	c.functions["gpu_sync"] = &FnSig{
 		Name:       "gpu_sync",
 		IsPub:      true,

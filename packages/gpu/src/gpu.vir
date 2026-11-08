@@ -51,6 +51,21 @@ pub fn is_enabled() bool {
 	return gpu_is_enabled()
 }
 
+pub const (
+	backend_auto = "auto"
+	backend_cuda = "cuda"
+	backend_opencl = "opencl"
+	backend_cpu = "cpu"
+)
+
+pub fn set_backend(backend string) {
+	gpu_set_backend(backend)
+}
+
+pub fn set_device(device string) {
+	gpu_set_device(device)
+}
+
 pub fn sync() {
 	gpu_sync()
 }

@@ -2763,6 +2763,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vira_gpu_set_enabled(%s)", strings.Join(argStrs, ", "))
 		case "gpu_is_enabled":
 			return "vira_gpu_is_enabled()"
+		case "gpu_set_backend":
+			return fmt.Sprintf("vira_gpu_set_backend(%s)", strings.Join(argStrs, ", "))
+		case "gpu_set_device":
+			return fmt.Sprintf("vira_gpu_set_device(%s)", strings.Join(argStrs, ", "))
 		case "gpu_sync":
 			return "vira_gpu_sync()"
 		case "gpu_simulate_oom":

@@ -2514,6 +2514,8 @@ static inline vira_string vira_gpu_backend_name(void);
 static inline int64_t vira_gpu_vram_bytes(void);
 static inline int64_t vira_gpu_allocated_bytes(void);
 static inline int64_t vira_gpu_oom_fallbacks(void);
+static inline void vira_gpu_set_backend(vira_string backend);
+static inline void vira_gpu_set_device(vira_string device);
 static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
                                               vira_tensor_f32 x,
                                               vira_tensor_f32 w);
@@ -8987,12 +8989,16 @@ static inline void vira_report_mem_stats(void) {
     return;
   }
   if (vira_gpu_is_available()) {
-    printf("[vira_rt] gpu=%s (%s) | vram_used=%lld MiB / %lld MiB | oom_fallbacks=%lld\n",
-           (const char *)vira_gpu_device_name().data,
-           (const char *)vira_gpu_backend_name().data,
+    vira_string _dev_n = vira_gpu_device_name();
+    vira_string _be_n = vira_gpu_backend_name();
+    printf("[vira_rt] gpu=%.*s (%.*s) | vram_used=%lld MiB / %lld MiB | oom_fallbacks=%lld\n",
+           _dev_n.len, (const char *)_dev_n.data,
+           _be_n.len, (const char *)_be_n.data,
            (long long)(vira_gpu_allocated_bytes() >> 20),
            (long long)(vira_gpu_vram_bytes() >> 20),
            (long long)vira_gpu_oom_fallbacks());
+    vira_str_free(&_dev_n);
+    vira_str_free(&_be_n);
   }
   vira_gpu_shutdown();
   vira_scheduler_shutdown();

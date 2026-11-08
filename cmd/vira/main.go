@@ -145,7 +145,16 @@ func runCmd(args []string) {
 	ccFlag := fs.String("cc", "", "C compiler to use (auto-detects tcc, cc, gcc, or clang)")
 	prodFlag := fs.Bool("prod", false, "Run with -O3 -march=native optimizations")
 	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
+	gpuBackend := fs.String("gpu-backend", "", "GPU compute backend (cuda, opencl, cpu, auto)")
+	gpuDevice := fs.String("gpu-device", "", "GPU device index or name filter")
 	_ = fs.Parse(args)
+
+	if *gpuBackend != "" {
+		_ = os.Setenv("VIRA_GPU_BACKEND", *gpuBackend)
+	}
+	if *gpuDevice != "" {
+		_ = os.Setenv("VIRA_GPU_DEVICE", *gpuDevice)
+	}
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: vira run [-prod] [-quiet-rt] [-cc compiler] <file.vir | directory>")
@@ -337,7 +346,16 @@ func checkCmd(args []string) {
 
 func testCmd(args []string) {
 	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	gpuBackend := fs.String("gpu-backend", "", "GPU compute backend (cuda, opencl, cpu, auto)")
+	gpuDevice := fs.String("gpu-device", "", "GPU device index or name filter")
 	_ = fs.Parse(args)
+
+	if *gpuBackend != "" {
+		_ = os.Setenv("VIRA_GPU_BACKEND", *gpuBackend)
+	}
+	if *gpuDevice != "" {
+		_ = os.Setenv("VIRA_GPU_DEVICE", *gpuDevice)
+	}
 
 	target := "."
 	if fs.NArg() > 0 {
