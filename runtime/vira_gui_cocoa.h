@@ -640,13 +640,19 @@ static inline void _vira_cocoa_free_image(int32_t slot) {
  * Usage: Called by scroll views and modals.
  */
 static inline void _vira_cocoa_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
-    (void)x; (void)y; (void)w; (void)h;
+    if (!_vira_cocoa.bitmap_ctx || w <= 0 || h <= 0) return;
+    CGContextSaveGState(_vira_cocoa.bitmap_ctx);
+    CGContextClipToRect(_vira_cocoa.bitmap_ctx, CGRectMake(x, y, w, h));
 }
 
 /**
  * Resets scissor clipping region for Cocoa.
  * Usage: Called at the end of scroll views and modals.
  */
-static inline void _vira_cocoa_reset_clip(void) {}
+static inline void _vira_cocoa_reset_clip(void) {
+    if (_vira_cocoa.bitmap_ctx) {
+        CGContextRestoreGState(_vira_cocoa.bitmap_ctx);
+    }
+}
 
 #endif // VIRA_GUI_COCOA_H

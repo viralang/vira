@@ -656,7 +656,24 @@ fn main() {
     mut a_idx := 1
     for a_idx < cli_args.len {
         arg := cli_args[a_idx]
-        if arg == '-i' || arg == '--repl' || arg == '--interactive' {
+        if arg == '-h' || arg == '--help' {
+            println('Usage: vira run docs/examples/43_qwen2_5_gguf_chat_inference.vir [options]')
+            println('')
+            println('Options:')
+            println('  -i, --interactive, --repl    Launch multi-turn interactive ChatML REPL')
+            println('  -p, --prompt <text>          Single prompt for one-shot completion')
+            println('  --system <text>              Custom system prompt (ChatML <|im_start|>system)')
+            println('  -m, --model <path>           Path to GGUF v3 model file (default: models/qwen2.5-0.5b-instruct-q4_0.gguf)')
+            println('  --gpu                        Enable hardware GPU compute acceleration')
+            println('  --cpu                        Force CPU SIMD compute engine')
+            println('  --gpu-backend <backend>      Force backend: "cuda", "opencl", "cpu", or "auto"')
+            println('  --gpu-device <filter>        Select GPU device by index ("0") or name filter ("RTX")')
+            println('  -t, --temp <float>           Sampling temperature (0.0 = greedy argmax)')
+            println('  -n, --max-tokens <int>       Maximum new tokens to generate (default: 96)')
+            println('  -c, --ctx <int>              Maximum context window length (default: 512)')
+            println('  -h, --help                   Display this help message and exit')
+            return
+        } else if arg == '-i' || arg == '--repl' || arg == '--interactive' {
             interactive = true
         } else if arg == '--gpu' {
             use_gpu = true
@@ -744,13 +761,20 @@ fn main() {
     gpu.set_enabled(use_gpu)
     gpu_dev := gpu.device_name()
     gpu_back := gpu.backend_name()
+    has_tc := gpu.has_tensor_cores()
+    mut tc_info := ''
+    if has_tc {
+        tc_info = ' + Tensor Cores (WMMA)'
+    }
+    vram_alloc := gpu.allocated_kb() / 1024
+    vram_tot := gpu.vram_mb()
     kv_cache_kb := (2 * meta.n_layers * max_context * kv_dim * 4) / 1024
 
     println('Model File      : ${model_path}')
     println('Architecture    : ${meta.arch} (${meta.name}, GGUF v${meta.version}, ${meta.n_tensors} tensors)')
     println('Hyperparameters : layers=${meta.n_layers}, dim=${meta.dim}, ffn_dim=${meta.ffn_dim}, head_dim=${head_dim}')
     println('GQA & RoPE      : ${meta.n_heads} Q heads / ${meta.n_kv_heads} KV heads, RoPE=${rope_int}')
-    println('Compute Engine  : ${gpu_dev} (backend=${gpu_back}, gpu_offload=${use_gpu})')
+    println('Compute Engine  : ${gpu_dev} (${gpu_back}${tc_info}, VRAM: ${vram_alloc} MB / ${vram_tot} MB, offload=${use_gpu})')
     println('Context Window  : max_context=${max_context} tokens (KV cache: ${kv_cache_kb} KB across ${meta.n_layers} layers)')
     println('ChatML Vocab    : ${vocab.len} tokens indexed in ${hdr_ms} ms (<|im_start|>=${meta.im_start_id}, <|im_end|>=${meta.im_end_id})')
 

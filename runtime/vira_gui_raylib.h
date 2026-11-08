@@ -146,6 +146,7 @@ static inline int32_t vira_gui_window_height(void) {
  * Usage: Invoked internally at the start of `gui_begin()`.
  */
 static inline void _vira_backend_gui_begin(void) {
+    if (!IsWindowReady()) return;
     _vira_char_queue_count = 0;
     _vira_backspace_pressed = false;
     _vira_cursor_blink_counter++;
@@ -173,7 +174,9 @@ static inline void _vira_backend_gui_begin(void) {
  * Usage: Invoked internally at the end of `gui_end()`.
  */
 static inline void _vira_backend_gui_end(void) {
-    EndDrawing();
+    if (IsWindowReady()) {
+        EndDrawing();
+    }
 }
 
 /**
@@ -211,6 +214,7 @@ static inline void vira_gui_close(void) {
  * Usage: Called by `gui_clear(color)`.
  */
 static inline void vira_gui_clear(int32_t hex_color) {
+    if (!IsWindowReady()) return;
     ClearBackground(_vira_rl_color(hex_color));
 }
 
@@ -224,7 +228,7 @@ static inline void vira_gui_clear(int32_t hex_color) {
  * Usage: Called by `gui_draw_rect(x, y, w, h, color)`.
  */
 static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t hex_color) {
-    if (width <= 0 || height <= 0) return;
+    if (!IsWindowReady() || width <= 0 || height <= 0) return;
     DrawRectangle(x, y, width, height, _vira_rl_color(hex_color));
 }
 
@@ -240,7 +244,7 @@ static inline void vira_gui_draw_rect(int32_t x, int32_t y, int32_t width, int32
  * Usage: Called by `gui_draw_rounded_rect(...)` for styling buttons, cards, and text inputs.
  */
 static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t width, int32_t height, float radius, int32_t bg_hex, int32_t border_hex) {
-    if (width <= 0 || height <= 0) return;
+    if (!IsWindowReady() || width <= 0 || height <= 0) return;
     int32_t min_dim = width < height ? width : height;
     float roundness = (float)radius / ((float)min_dim * 0.5f);
     if (roundness > 1.0f) roundness = 1.0f;
@@ -263,7 +267,7 @@ static inline void vira_gui_draw_rounded_rect(int32_t x, int32_t y, int32_t widt
  * Usage: Called by `gui_draw_circle(cx, cy, radius, color)`.
  */
 static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, int32_t hex_color) {
-    if (radius <= 0.0f) return;
+    if (!IsWindowReady() || radius <= 0.0f) return;
     DrawCircle(cx, cy, radius, _vira_rl_color(hex_color));
 }
 
@@ -277,6 +281,7 @@ static inline void vira_gui_draw_circle(int32_t cx, int32_t cy, float radius, in
  * Usage: Called by `gui_draw_line(x1, y1, x2, y2, color)`.
  */
 static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32_t hex_color) {
+    if (!IsWindowReady()) return;
     DrawLine(x1, y1, x2, y2, _vira_rl_color(hex_color));
 }
 
@@ -290,7 +295,7 @@ static inline void vira_gui_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_
  * Usage: Called by `gui_draw_text(text, x, y, size, color)`.
  */
 static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
-    if (text.len <= 0 || !text.data) return;
+    if (!IsWindowReady() || text.len <= 0 || !text.data) return;
     char stack_buf[512];
     char *buf = stack_buf;
     if (text.len >= 512) {
@@ -316,6 +321,7 @@ static inline void vira_gui_draw_text(vira_string text, int32_t x, int32_t y, in
  */
 static inline int32_t _vira_measure_text_w(vira_string text) {
     if (text.len <= 0 || !text.data) return 0;
+    if (!IsWindowReady()) return text.len * 8;
     char stack_buf[256];
     char *buf = stack_buf;
     if (text.len >= 256) {
@@ -471,7 +477,7 @@ static inline void _vira_raylib_free_image(int32_t id) {
  * Usage: Called by scroll views and modals.
  */
 static inline void _vira_raylib_set_clip(int32_t x, int32_t y, int32_t w, int32_t h) {
-    if (w > 0 && h > 0) BeginScissorMode(x, y, w, h);
+    if (IsWindowReady() && w > 0 && h > 0) BeginScissorMode(x, y, w, h);
 }
 
 /**
@@ -479,7 +485,7 @@ static inline void _vira_raylib_set_clip(int32_t x, int32_t y, int32_t w, int32_
  * Usage: Restores full viewport rendering after scroll views and modals.
  */
 static inline void _vira_raylib_reset_clip(void) {
-    EndScissorMode();
+    if (IsWindowReady()) EndScissorMode();
 }
 
 #endif // VIRA_GUI_RAYLIB_H

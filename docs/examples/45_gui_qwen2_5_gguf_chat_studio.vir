@@ -467,9 +467,6 @@ fn qwen2_forward_step(
 
 fn main() {
 	os.set_quiet_rt(true)
-	gui_init(1040, 740, 'Vira AI Studio - Qwen 2.5 (0.5B-Instruct) GGUF v3 Live Chat')
-	gui_set_target_fps(60)
-
 	// Model & Prompt Configuration
 	mut hf_url := 'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_0.gguf'
 	mut model_path := 'models/qwen2.5-0.5b-instruct-q4_0.gguf'
@@ -479,7 +476,46 @@ fn main() {
 	mut max_tokens_f := 64.0f32
 	max_context := 512
 	mut use_gpu := true
+
+	cli_args := os.args()
+	mut a_idx := 1
+	for a_idx < cli_args.len {
+		arg := cli_args[a_idx]
+		if arg == '-h' || arg == '--help' {
+			println('Usage: vira run docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir [options]')
+			println('')
+			println('Options:')
+			println('  -m, --model <path>       Custom path to GGUF v3 model file')
+			println('  --gpu                    Enable hardware GPU compute acceleration')
+			println('  --cpu                    Force CPU SIMD compute engine')
+			println('  --gpu-backend <backend>  Force backend: "cuda", "opencl", "cpu", or "auto"')
+			println('  --gpu-device <filter>    Select GPU device by index ("0") or name filter ("RTX")')
+			println('  -h, --help               Display this help message and exit')
+			return
+		} else if arg == '--gpu' {
+			use_gpu = true
+		} else if arg == '--cpu' {
+			use_gpu = false
+		} else if arg == '--gpu-backend' && a_idx + 1 < cli_args.len {
+			gpu_be := cli_args[a_idx + 1]
+			gpu.set_backend(gpu_be)
+			use_gpu = (gpu_be != 'cpu')
+			a_idx += 1
+		} else if arg == '--gpu-device' && a_idx + 1 < cli_args.len {
+			gpu_dev_arg := cli_args[a_idx + 1]
+			gpu.set_device(gpu_dev_arg)
+			a_idx += 1
+		} else if (arg == '-m' || arg == '--model') && a_idx + 1 < cli_args.len {
+			model_path = cli_args[a_idx + 1]
+			a_idx += 1
+		}
+		a_idx += 1
+	}
+
 	gpu.set_enabled(use_gpu)
+
+	gui_init(1040, 740, 'Vira AI Studio - Qwen 2.5 (0.5B-Instruct) GGUF v3 Live Chat')
+	gui_set_target_fps(60)
 
 	// Engine State Machine:
 	//   0 = Unloaded (Idle)
@@ -737,16 +773,24 @@ fn main() {
 
 		if use_gpu && gpu.is_available() {
 			cached_mb := gpu.allocated_kb() / 1024
-			gui_draw_badge(840, 16, 'GPU (${cached_mb}MB)', 0x2D4A3E, 0xA6E3A1)
+			be_name := gpu.backend_name()
+			gui_draw_badge(720, 16, '${be_name} (${cached_mb}MB)', 0x2D4A3E, 0xA6E3A1)
+			if gpu.has_tensor_cores() {
+				gui_draw_badge(880, 16, 'WMMA CORES', 0x1E3A4A, 0x89DCEB)
+			}
 		} else {
 			gui_draw_badge(840, 16, 'CPU SIMD', 0x313244, 0x89B4FA)
 		}
 
+		scroll_h := gui_window_height() - 88
+
 		// ====================================================================
-		// LEFT COLUMN: Model Loader, Sampling Controls & Prompt Input
+		// LEFT COLUMN: Model Loader, Sampling Controls & Prompt Input (Scrollable)
 		// ====================================================================
-		gui_vstack_begin(24, 72, 460, 12)
-		gui_card_begin('GGUF v3 Model & Compute Configuration', 460)
+		left_w := 460
+		gui_vstack_begin(24, 72, left_w, 12)
+		gui_scroll_begin(left_w, scroll_h)
+		gui_card_begin('GGUF v3 Model & Compute Configuration', left_w - 12)
 		gui_lbl('Local GGUF Model Path:')
 		model_path = gui_input('Model Path', model_path)
 		gui_spacing(4)
@@ -756,7 +800,7 @@ fn main() {
 		gui_spacing(6)
 
 		prev_gpu := use_gpu
-		use_gpu = gui_check('Enable GPU Compute Offload (Vulkan / Metal / CUDA)', use_gpu)
+		use_gpu = gui_check('Enable Hardware GPU Offload (CUDA / OpenCL)', use_gpu)
 		if use_gpu != prev_gpu {
 			gpu.set_enabled(use_gpu)
 		}
@@ -766,7 +810,9 @@ fn main() {
 		max_tokens_f = gui_slide('Max New Tokens: ', ' tok', max_tokens_f, 16.0f32, 160.0f32)
 		gui_card_end()
 
-		gui_card_begin('Interactive Prompt & Quick Presets', 460)
+		gui_spacing(8)
+
+		gui_card_begin('Interactive Prompt & Quick Presets', left_w - 12)
 		gui_lbl('User Message (ChatML <|im_start|>user):')
 		user_prompt = gui_input('Enter your prompt...', user_prompt)
 		gui_spacing(4)
@@ -836,13 +882,16 @@ fn main() {
 		}
 		gui_stack_end()
 		gui_card_end()
+		gui_scroll_end()
 		gui_stack_end()
 
 		// ====================================================================
-		// RIGHT COLUMN: Live Streaming Chat Transcript & Engine Telemetry
+		// RIGHT COLUMN: Live Streaming Chat Transcript & Engine Telemetry (Scrollable)
 		// ====================================================================
-		gui_vstack_begin(504, 72, 512, 12)
-		gui_card_begin('Live Streaming ChatML Transcript', 512)
+		right_w := 512
+		gui_vstack_begin(504, 72, right_w, 12)
+		gui_scroll_begin(right_w, scroll_h)
+		gui_card_begin('Live Streaming ChatML Transcript', right_w - 12)
 		gui_badge('TURN #1', 0x313244, 0x89B4FA)
 		gui_lbl('User: ${chat_user_1}')
 		gui_lbl('Qwen2.5: ${chat_reply_1}')
@@ -857,7 +906,9 @@ fn main() {
 		}
 		gui_card_end()
 
-		gui_card_begin('Transformer & KV-Cache Diagnostic Telemetry', 512)
+		gui_spacing(8)
+
+		gui_card_begin('Transformer & KV-Cache Diagnostic Telemetry', right_w - 12)
 		gui_lbl('Status: ${status_msg}')
 		gui_spacing(4)
 		gui_progress(progress_pct)
@@ -866,8 +917,16 @@ fn main() {
 		gui_lbl('Attention: ${meta.n_heads} Q Heads / ${meta.n_kv_heads} KV Heads (GQA 7:1, RoPE=1,000,000)')
 		gui_lbl('KV Cache Position: ${kv_pos} / ${max_context} tokens')
 		gui_lbl('Last Prefill Latency: ${last_prefill_ms} ms | Throughput: ~${last_tok_per_sec} tok/s')
-		gui_lbl('Compute Backend: ${gpu.device_name()} (${gpu.backend_name()})')
+		mut tc_tag := ''
+		if gpu.has_tensor_cores() {
+			tc_tag = ' [Tensor Cores: Active]'
+		}
+		vram_tot := gpu.vram_mb()
+		cached_mb := gpu.allocated_kb() / 1024
+		gui_lbl('Compute Engine: ${gpu.device_name()} (${gpu.backend_name()}${tc_tag})')
+		gui_lbl('VRAM Allocated: ${cached_mb} MB / ${vram_tot} MB (OOM Fallbacks: ${gpu.oom_fallbacks()})')
 		gui_card_end()
+		gui_scroll_end()
 		gui_stack_end()
 
 		gui_end()

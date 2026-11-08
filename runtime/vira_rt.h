@@ -2509,6 +2509,7 @@ static void _vira_matmul_job_fn(void *raw) {
 static inline bool vira_gpu_is_available(void);
 static inline bool vira_gpu_is_enabled(void);
 static inline bool vira_gpu_is_unified_memory(void);
+static inline bool vira_gpu_has_tensor_cores(void);
 static inline vira_string vira_gpu_device_name(void);
 static inline vira_string vira_gpu_backend_name(void);
 static inline int64_t vira_gpu_vram_bytes(void);

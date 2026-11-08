@@ -95,12 +95,25 @@ fn test_scroll_view_widgets() {
 	println("✓ test_scroll_view_widgets passed")
 }
 
+fn test_text_wrapping() {
+	gui_begin()
+	gui_vstack_begin(20, 20, 300, 10)
+	gui_card_begin("Wrapping Card Test", 300)
+	w.Text("This is a long sentence inside a 300px card container that automatically wraps across lines.")
+	w.TextWrap("Another paragraph with explicit wrap boundary.", 260)
+	gui_card_end()
+	gui_stack_end()
+	gui_end()
+	println("✓ test_text_wrapping passed")
+}
+
 fn main() {
 	test_theme_and_colors()
 	test_edge_insets()
 	test_text_styles()
 	test_app_and_responsive()
 	test_scroll_view_widgets()
+	test_text_wrapping()
 	println("All widget unit tests passed successfully!")
 }
 

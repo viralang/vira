@@ -9,6 +9,7 @@ pub:
 	vram_bytes i64
 	allocated_bytes i64
 	oom_fallbacks i64
+	has_tensor_cores bool
 }
 
 pub fn is_available() bool {
@@ -51,6 +52,10 @@ pub fn is_enabled() bool {
 	return gpu_is_enabled()
 }
 
+pub fn has_tensor_cores() bool {
+	return gpu_has_tensor_cores()
+}
+
 pub const (
 	backend_auto = "auto"
 	backend_cuda = "cuda"
@@ -82,7 +87,8 @@ pub fn info() DeviceInfo {
 		backend_name: gpu_backend_name(),
 		vram_bytes: gpu_vram_bytes(),
 		allocated_bytes: gpu_allocated_bytes(),
-		oom_fallbacks: gpu_oom_fallbacks()
+		oom_fallbacks: gpu_oom_fallbacks(),
+		has_tensor_cores: gpu_has_tensor_cores()
 	}
 }
 

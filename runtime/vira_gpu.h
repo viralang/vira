@@ -142,6 +142,8 @@ typedef void *vira_cu_stream;
 #define VIRA_CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK 1
 #define VIRA_CU_DEVICE_ATTRIBUTE_WARP_SIZE 10
 #define VIRA_CU_DEVICE_ATTRIBUTE_INTEGRATED 18
+#define VIRA_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR 75
+#define VIRA_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR 76
 
 typedef vira_cu_result(VIRA_CL_API *pfn_cuInit)(unsigned int);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuDriverGetVersion)(int *);
@@ -217,6 +219,9 @@ typedef struct {
   bool available;
   bool enabled;
   bool unified_mem;
+  bool has_tensor_cores;
+  int compute_capability_major;
+  int compute_capability_minor;
   bool vram_saturated;
   volatile bool simulate_oom;
   _vira_gpu_backend_type active_backend;
@@ -324,6 +329,7 @@ typedef struct {
   vira_cu_context cu_context;
   vira_cu_stream cu_stream;
   vira_cu_module cu_module;
+  vira_cu_module cu_wmma_module;
 
   // CUDA Compute kernels
   vira_cu_function cu_k_gemv_q4_0;
@@ -339,7 +345,9 @@ typedef struct {
   vira_cu_function cu_k_gemv_scalar;
   vira_cu_function cu_k_linear_tiled_h;
   vira_cu_function cu_k_linear_tiled_f32;
+  vira_cu_function cu_k_wmma_linear_h;
   vira_cu_function cu_k_matmul_tiled;
+  vira_cu_function cu_k_wmma_matmul;
   vira_cu_function cu_k_rmsnorm;
   vira_cu_function cu_k_rope;
   vira_cu_function cu_k_softmax;
@@ -357,6 +365,9 @@ static _vira_gpu_state _vira_gpu = {
     .available = false,
     .enabled = true,
     .unified_mem = false,
+    .has_tensor_cores = false,
+    .compute_capability_major = 0,
+    .compute_capability_minor = 0,
     .vram_saturated = false,
     .simulate_oom = false,
     .active_backend = VIRA_GPU_BACKEND_CPU,
@@ -2061,6 +2072,10 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
     g->cuDeviceGetAttribute(&sm_count, VIRA_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, d);
     int integrated = 0;
     g->cuDeviceGetAttribute(&integrated, VIRA_CU_DEVICE_ATTRIBUTE_INTEGRATED, d);
+    int cc_major = 0;
+    g->cuDeviceGetAttribute(&cc_major, VIRA_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, d);
+    int cc_minor = 0;
+    g->cuDeviceGetAttribute(&cc_minor, VIRA_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, d);
 
     int64_t score = (int64_t)(vram >> 20) * (integrated == 0 ? 4LL : 1LL) + (int64_t)sm_count * 64LL;
     if (score > best_score) {
@@ -2070,6 +2085,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       best_vram = vram;
       best_sm = sm_count;
       best_integrated = integrated;
+      g->compute_capability_major = cc_major;
+      g->compute_capability_minor = cc_minor;
     }
   }
 
@@ -2148,6 +2165,20 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_softmax = ks[16];
   g->cu_k_silu = ks[17];
 
+  g->has_tensor_cores = (g->compute_capability_major >= 7);
+  g->cu_wmma_module = NULL;
+  g->cu_k_wmma_linear_h = NULL;
+  g->cu_k_wmma_matmul = NULL;
+
+  if (g->has_tensor_cores && g->cuModuleLoadData) {
+    vira_cu_module wmma_mod = NULL;
+    if (g->cuModuleLoadData(&wmma_mod, _vira_cuda_wmma_kernel_ptx) == VIRA_CUDA_SUCCESS && wmma_mod != NULL) {
+      g->cu_wmma_module = wmma_mod;
+      (void)g->cuModuleGetFunction(&g->cu_k_wmma_linear_h, wmma_mod, "vira_cu_wmma_linear_h");
+      (void)g->cuModuleGetFunction(&g->cu_k_wmma_matmul, wmma_mod, "vira_cu_wmma_matmul_f32");
+    }
+  }
+
   g->active_backend = VIRA_GPU_BACKEND_CUDA;
   g->available = true;
   snprintf(g->backend_name, sizeof(g->backend_name), "CUDA");
@@ -2170,11 +2201,14 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
 
   if (_vira_gpu_debug()) {
     fprintf(stderr,
-            "vira gpu: [CUDA Driver API] %s | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16\n",
-            g->device_name, (long long)(g->vram_bytes >> 20),
+            "vira gpu: [CUDA Driver API] %s (sm_%d%d%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s\n",
+            g->device_name, g->compute_capability_major, g->compute_capability_minor,
+            g->has_tensor_cores ? " + Tensor Cores" : "",
+            (long long)(g->vram_bytes >> 20),
             (long long)(g->vram_budget_bytes >> 20), g->compute_units,
-            g->warp_size, g->wg_size, g->tile_dim);
+            g->warp_size, g->wg_size, g->tile_dim,
+            g->has_tensor_cores ? " / WMMA" : "");
   }
 
   return true;
@@ -2605,6 +2639,13 @@ static inline void vira_gpu_shutdown(void) {
 
     if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
       if (_vira_gpu.cuCtxSynchronize) _vira_gpu.cuCtxSynchronize();
+      if (_vira_gpu.cu_wmma_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_wmma_module);
+        _vira_gpu.cu_wmma_module = NULL;
+      }
+      _vira_gpu.cu_k_wmma_linear_h = NULL;
+      _vira_gpu.cu_k_wmma_matmul = NULL;
+      _vira_gpu.has_tensor_cores = false;
       if (_vira_gpu.cu_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_module);
         _vira_gpu.cu_module = NULL;
@@ -2677,6 +2718,11 @@ static inline bool vira_gpu_is_available(void) {
 static inline bool vira_gpu_is_unified_memory(void) {
   vira_gpu_init();
   return _vira_gpu.unified_mem;
+}
+
+static inline bool vira_gpu_has_tensor_cores(void) {
+  vira_gpu_init();
+  return _vira_gpu.has_tensor_cores;
 }
 
 static inline vira_string vira_gpu_device_name(void) {
@@ -2786,7 +2832,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
   }
 
   pthread_mutex_lock(&_vira_gpu.lock);
-  bool prefer_half = (M <= 4) && (K >= 32);
+  bool prefer_half = ((M <= 4) && (K >= 32)) || (_vira_gpu.has_tensor_cores && (M >= 16) && ((K & 15) == 0));
   _vira_gpu_wfmt wfmt = VIRA_WFMT_F32;
   vira_cl_int err = 0;
 
@@ -2906,6 +2952,14 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
       unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
       unsigned int gy = (unsigned int)M;
       err = (_vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
+                                      0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    } else if (_vira_gpu.has_tensor_cores && _vira_gpu.cu_k_wmma_linear_h != NULL && M >= 16 && ((K & 15) == 0)) {
+      void *args[] = {&x_buf, &w_buf, &y_buf, &M, &K, &N};
+      unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
+      unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_wmma_linear_h, gx, gy, 1,
+                                      32, 1, 1,
                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
                 ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
     } else {
@@ -3095,13 +3149,23 @@ static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
   }
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
-    void *args[] = {&a_slot->cu_buf, &b_slot->cu_buf, &c_slot->cu_buf, &M, &K, &N};
-    unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.tile_dim - 1) / _vira_gpu.tile_dim);
-    unsigned int gy = (unsigned int)(((size_t)M + _vira_gpu.tile_dim - 1) / _vira_gpu.tile_dim);
-    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_matmul_tiled, gx, gy, 1,
-                                    _vira_gpu.tile_dim, _vira_gpu.tile_dim, 1,
-                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    if (_vira_gpu.has_tensor_cores && _vira_gpu.cu_k_wmma_matmul != NULL &&
+        M >= 16 && ((K & 15) == 0)) {
+      void *args[] = {&a_slot->cu_buf, &b_slot->cu_buf, &c_slot->cu_buf, &M, &K, &N};
+      unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
+      unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_wmma_matmul, gx, gy, 1,
+                                      32, 1, 1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    } else {
+      void *args[] = {&a_slot->cu_buf, &b_slot->cu_buf, &c_slot->cu_buf, &M, &K, &N};
+      unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.tile_dim - 1) / _vira_gpu.tile_dim);
+      unsigned int gy = (unsigned int)(((size_t)M + _vira_gpu.tile_dim - 1) / _vira_gpu.tile_dim);
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_matmul_tiled, gx, gy, 1,
+                                      _vira_gpu.tile_dim, _vira_gpu.tile_dim, 1,
+                                      0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    }
   } else {
     err = _vira_gpu_set_gemm_args(_vira_gpu.kernel_matmul_tiled, &a_slot->dev_buf,
                                   &b_slot->dev_buf, &c_slot->dev_buf, M, K, N);

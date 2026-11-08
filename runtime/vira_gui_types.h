@@ -76,7 +76,8 @@ static int32_t                 _vira_modal_last_input = -1;
 static int32_t                 _vira_prev_modal_first_input = -1;
 static int32_t                 _vira_prev_modal_last_input = -1;
 
-static int32_t                 _vira_card_heights[16] = {0};
+#define VIRA_MAX_CARDS 256
+static int32_t                 _vira_card_heights[VIRA_MAX_CARDS] = {0};
 static int32_t                 _vira_card_counter = 0;
 static int32_t                 _vira_card_end_counter = 0;
 

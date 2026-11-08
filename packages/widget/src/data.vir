@@ -36,6 +36,15 @@ pub fn caption(content string) {
 	gui_lbl(content)
 }
 
+// Explicitly bounded wrapping text label (Flutter Text with max width)
+pub fn TextWrap(content string, max_width int) {
+	gui_lbl_wrap(content, max_width)
+}
+
+pub fn text_wrap(content string, max_width int) {
+	gui_lbl_wrap(content, max_width)
+}
+
 // Pill-shaped status badge with custom background and text color (Flutter Chip / Badge)
 pub fn Badge(label string, bg_hex int, fg_hex int) {
 	gui_badge(label, bg_hex, fg_hex)

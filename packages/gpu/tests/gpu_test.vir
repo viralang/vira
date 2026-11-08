@@ -11,6 +11,10 @@ fn test_gpu_telemetry_and_linear() {
 	if dev.device_name.len == 0 {
 		panic('expected non-empty gpu device_name')
 	}
+	tc := dev.has_tensor_cores
+	if tc && !gpu.has_tensor_cores() {
+		panic('inconsistent tensor cores flag')
+	}
 
 	x := tensor_fill(64, 64, 0.5)
 	w := tensor_fill(64, 64, 0.25)

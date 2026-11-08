@@ -407,19 +407,251 @@ static inline bool vira_gui_checkbox(int32_t x, int32_t y, int32_t width, int32_
     return checked;
 }
 
+static inline bool _vira_str_has_newline(vira_string s) {
+    if (!s.data || s.len <= 0) return false;
+    for (int32_t i = 0; i < s.len; i++) {
+        if (s.data[i] == '\n' || s.data[i] == '\r') return true;
+    }
+    return false;
+}
+
+static inline int32_t _vira_measure_text_size_w(vira_string text, int32_t size) {
+    if (size <= 0) size = 15;
+    if (text.len <= 0 || !text.data) return 0;
+#if defined(VIRA_USE_RAYLIB)
+    char stack_buf[256];
+    char *buf = stack_buf;
+    if (text.len >= 256) {
+        buf = (char *)malloc((size_t)text.len + 1);
+        if (!buf) return text.len * (size * 8 / 15);
+    }
+    memcpy(buf, text.data, (size_t)text.len);
+    buf[text.len] = '\0';
+    int32_t w = 0;
+    if (_vira_rl_font_loaded && _vira_rl_font.texture.id > 0) {
+        Vector2 sz = MeasureTextEx(_vira_rl_font, buf, (float)size, 1.0f);
+        w = (int32_t)ceilf(sz.x);
+    } else {
+        w = MeasureText(buf, size);
+    }
+    if (buf != stack_buf) free(buf);
+    return w;
+#else
+    int32_t base_w = _vira_measure_text_w(text);
+    if (size == 15) return base_w;
+    return (base_w * size + 7) / 15;
+#endif
+}
+
 /**
- * Renders static text at explicit coordinates with default text styling.
+ * Internal helper that truncates and ellipses text ("...") if it exceeds available pixel width.
+ * @param text String to draw.
+ * @param x Left coordinate in pixels.
+ * @param y Top coordinate in pixels.
+ * @param size Font size in points.
+ * @param color Text RGB hex color.
+ * @param max_w Maximum allowed pixel width.
+ * Usage: Prevents titles, table cells, or narrow labels from overflowing column boundaries.
+ */
+static inline void _vira_gui_draw_clipped_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t color, int32_t max_w) {
+    if (text.len <= 0 || !text.data || max_w <= 10) return;
+    int tw = _vira_measure_text_size_w(text, size);
+    if (tw <= max_w) {
+        vira_gui_draw_text(text, x, y, size, color);
+        return;
+    }
+    char buf[128];
+    int copy_len = text.len < 120 ? text.len : 120;
+    while (copy_len > 0) {
+        memcpy(buf, text.data, (size_t)copy_len);
+        buf[copy_len] = '.';
+        buf[copy_len + 1] = '.';
+        buf[copy_len + 2] = '\0';
+        vira_string s = (vira_string){ .data = (const uint8_t*)buf, .len = copy_len + 2, .is_lit = true };
+        if (_vira_measure_text_size_w(s, size) <= max_w) {
+            vira_gui_draw_text(s, x, y, size, color);
+            return;
+        }
+        copy_len--;
+    }
+}
+
+/**
+ * Internal word-wrapping and multi-line text layout engine.
+ * Breaks text into lines respecting existing newlines (\n, \r\n), wrapping long lines at word
+ * boundaries or character boundaries if words exceed max_w, and enforcing window boundaries.
+ * @param text String to render.
  * @param x Screen X coordinate.
  * @param y Screen Y coordinate.
- * @param width Bounding width.
- * @param height Bounding height.
+ * @param max_w Available width before wrapping.
+ * @param size Font size in points (e.g. 15 or 16).
+ * @param hex_color Text color in 24-bit RGB.
+ * @return Total height in pixels consumed by all rendered lines.
+ */
+static inline int32_t _vira_gui_draw_text_wrapped(vira_string text, int32_t x, int32_t y, int32_t max_w, int32_t size, int32_t hex_color) {
+    if (text.len <= 0 || !text.data) return 0;
+
+    int32_t fsize = size > 0 ? size : 15;
+    int32_t line_h = fsize + 6;
+    if (max_w <= 30) {
+        vira_gui_draw_text(text, x, y, fsize, hex_color);
+        return line_h;
+    }
+
+    // Fast path: single-line without newline that fits within max_w
+    if (!_vira_str_has_newline(text) && _vira_measure_text_size_w(text, fsize) <= max_w) {
+        vira_gui_draw_text(text, x, y, fsize, hex_color);
+        return line_h;
+    }
+
+    int32_t cur_y = y;
+    int32_t len = text.len;
+    const uint8_t* data = text.data;
+    int32_t pos = 0;
+
+    while (pos < len) {
+        // Find paragraph boundary (newline)
+        int32_t para_end = pos;
+        while (para_end < len && data[para_end] != '\n' && data[para_end] != '\r') {
+            para_end++;
+        }
+
+        if (para_end == pos) {
+            // Empty line (\n\n)
+            cur_y += line_h;
+        } else {
+            int32_t p = pos;
+            while (p < para_end) {
+                // Skip leading whitespace at line start
+                while (p < para_end && (data[p] == ' ' || data[p] == '\t')) {
+                    p++;
+                }
+                if (p >= para_end) break;
+
+                int32_t line_start = p;
+                int32_t last_fit_end = p;
+                int32_t scan = p;
+
+                while (scan < para_end) {
+                    // Find next word end
+                    int32_t word_start = scan;
+                    while (scan < para_end && data[scan] != ' ' && data[scan] != '\t') {
+                        scan++;
+                    }
+                    int32_t word_end = scan;
+                    while (scan < para_end && (data[scan] == ' ' || data[scan] == '\t')) {
+                        scan++;
+                    }
+
+                    // Candidate line from line_start to word_end
+                    vira_string cand = (vira_string){
+                        .data = &data[line_start],
+                        .len = word_end - line_start,
+                        .is_lit = true
+                    };
+                    int32_t cw = _vira_measure_text_size_w(cand, fsize);
+
+                    if (cw <= max_w) {
+                        last_fit_end = word_end;
+                        p = scan;
+                    } else {
+                        // Word makes line exceed max_w
+                        if (last_fit_end > line_start) {
+                            // Break at last fitting word
+                            break;
+                        } else {
+                            // First word on this line exceeds max_w on its own! Break character-by-character
+                            int32_t char_end = word_start + 1;
+                            while (char_end <= word_end) {
+                                vira_string sub = (vira_string){
+                                    .data = &data[line_start],
+                                    .len = char_end - line_start,
+                                    .is_lit = true
+                                };
+                                if (_vira_measure_text_size_w(sub, fsize) > max_w) {
+                                    break;
+                                }
+                                char_end++;
+                            }
+                            char_end--;
+                            if (char_end <= line_start) char_end = line_start + 1;
+                            last_fit_end = char_end;
+                            p = char_end;
+                            break;
+                        }
+                    }
+                }
+
+                if (last_fit_end > line_start) {
+                    vira_string emit_line = (vira_string){
+                        .data = &data[line_start],
+                        .len = last_fit_end - line_start,
+                        .is_lit = true
+                    };
+                    vira_gui_draw_text(emit_line, x, cur_y, fsize, hex_color);
+                    cur_y += line_h;
+                } else {
+                    // Safety guard: ensure forward progress
+                    p++;
+                }
+            }
+        }
+
+        // Advance past newline characters
+        pos = para_end;
+        if (pos < len && data[pos] == '\r') pos++;
+        if (pos < len && data[pos] == '\n') pos++;
+    }
+
+    int32_t total_h = cur_y - y;
+    return total_h > 0 ? total_h : line_h;
+}
+
+/**
+ * Draws wrapped multi-line text with an explicit maximum bounding width, font size, and color.
+ * Automatically constrains rendering within window and container boundaries.
  * @param text Text string to display.
- * Usage: Used for displaying informational text or captions.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param max_width Maximum bounding width before wrapping (or <= 0 for auto window bounds).
+ * @param size Font size in points.
+ * @param hex_color 24-bit RGB text color.
+ * Usage: Called by `gui_draw_text_wrapped(text, x, y, max_width, size, color)`.
+ */
+static inline void vira_gui_draw_text_wrapped(vira_string text, int32_t x, int32_t y, int32_t max_width, int32_t size, int32_t hex_color) {
+    int32_t win_w = vira_gui_window_width();
+    int32_t max_w = max_width > 0 ? max_width : (win_w > x + 30 ? win_w - x - 20 : 400);
+    if (win_w > 0 && x + max_w > win_w - 15) {
+        max_w = win_w - x - 15;
+    }
+    if (max_w < 50) max_w = 50;
+    _vira_gui_draw_text_wrapped(text, x, y, max_w, size > 0 ? size : 16, hex_color);
+}
+
+/**
+ * Renders static text at explicit coordinates with automatic wrapping within bounding width.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param width Bounding width (or <= 0 for window bounds).
+ * @param height Bounding height (or <= 0 for unconstrained height).
+ * @param text Text string to display.
+ * Usage: Used for displaying informational text, paragraphs, or captions with guaranteed wrapping.
  */
 static inline void vira_gui_label(int32_t x, int32_t y, int32_t width, int32_t height, vira_string text) {
-    (void)width;
-    (void)height;
-    vira_gui_draw_text(text, x, y, 16, 0xCDD6F4);
+    int32_t win_w = vira_gui_window_width();
+    int32_t max_w = width > 0 ? width : (win_w > x + 30 ? win_w - x - 20 : 400);
+    if (win_w > 0 && x + max_w > win_w - 15) {
+        max_w = win_w - x - 15;
+    }
+    if (max_w < 50) max_w = 50;
+
+    if (height > 0) {
+        vira_gui_set_clip(x, y, max_w, height);
+    }
+    _vira_gui_draw_text_wrapped(text, x, y, max_w, 16, 0xCDD6F4);
+    if (height > 0) {
+        vira_gui_reset_clip();
+    }
 }
 
 /**
@@ -513,14 +745,21 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
 
     int text_y = y + (height - 16) / 2;
     int pad_x = 10;
+    int max_text_w = width - pad_x - 10;
+    if (max_text_w < 10) max_text_w = 10;
+
+    vira_gui_set_clip(x + 4, y + 2, width - 8, height - 4);
 
     if (state->len > 0) {
         vira_string s_val = (vira_string){ .data = (const uint8_t*)state->buffer, .len = state->len, .is_lit = true };
-        vira_gui_draw_text(s_val, x + pad_x, text_y, 15, 0xCDD6F4);
+        int tw = _vira_measure_text_w(s_val);
+        int offset_x = (is_focused && tw > max_text_w) ? (max_text_w - tw) : 0;
+
+        vira_gui_draw_text(s_val, x + pad_x + offset_x, text_y, 15, 0xCDD6F4);
 
         if (is_focused && ((_vira_cursor_blink_counter / 30) % 2 == 0)) {
-            int tw = _vira_measure_text_w(s_val);
-            vira_gui_draw_line(x + pad_x + tw + 2, text_y, x + pad_x + tw + 2, text_y + 16, 0x89B4FA);
+            int cx = x + pad_x + offset_x + tw + 2;
+            vira_gui_draw_line(cx, text_y, cx, text_y + 16, 0x89B4FA);
         }
     } else {
         if (placeholder.len > 0) {
@@ -530,6 +769,8 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
             vira_gui_draw_line(x + pad_x, text_y, x + pad_x, text_y + 16, 0x89B4FA);
         }
     }
+
+    vira_gui_reset_clip();
 
     return (vira_string){ .data = (const uint8_t*)state->buffer, .len = state->len, .is_lit = true };
 }
@@ -878,12 +1119,12 @@ static inline void vira_gui_card_begin(vira_string title, int32_t width) {
     int32_t w = width > 0 ? width : (parent ? parent->width : 340);
 
     int32_t c_idx = _vira_card_counter++;
-    int32_t card_h = (c_idx < 16 && _vira_card_heights[c_idx] > 0) ? _vira_card_heights[c_idx] : 220;
+    int32_t card_h = (c_idx < VIRA_MAX_CARDS && _vira_card_heights[c_idx] > 0) ? _vira_card_heights[c_idx] : 140;
 
     vira_gui_draw_rounded_rect(x, y, w, card_h, 8.0f, 0x1E1E2E, 0x313244);
 
     if (title.len > 0) {
-        vira_gui_draw_text(title, x + 15, y + 12, 16, 0x89B4FA);
+        _vira_gui_draw_clipped_text(title, x + 15, y + 12, 16, 0x89B4FA, w - 30);
     }
 
     vira_gui_vstack_begin(x + 15, y + 42, w - 30, 10);
@@ -899,8 +1140,8 @@ static inline void vira_gui_card_end(void) {
     vira_layout_node_t closed = _vira_layout_stack[_vira_layout_depth - 1];
     int32_t c_idx = _vira_card_end_counter++;
     int32_t h = (closed.cur_y - closed.start_y) + 42 + 15;
-    if (c_idx < 16) {
-        _vira_card_heights[c_idx] = (h > 180) ? h : 180;
+    if (c_idx < VIRA_MAX_CARDS) {
+        _vira_card_heights[c_idx] = (h > 60) ? h : 60;
     }
     vira_gui_stack_end();
 }
@@ -1011,20 +1252,73 @@ static inline float vira_gui_slide(vira_string text_left, vira_string text_right
 
 /**
  * Auto-layout text label widget placed at the current layout cursor.
+ * Automatically wraps to container width (VStack / Card / Column) and respects window boundaries.
  * @param text String content to render.
- * Usage: Primary concise label API (`gui::lbl("Hello, world!")`).
+ * Usage: Primary concise label API (`gui_lbl("Hello, world!")`).
  */
 static inline void vira_gui_lbl(vira_string text) {
     vira_layout_node_t* node = _vira_gui_cur_layout();
-    if (!node) return;
+    if (!node) {
+        int32_t win_w = vira_gui_window_width();
+        int32_t max_w = (win_w > 60) ? (win_w - 40) : 400;
+        _vira_gui_draw_text_wrapped(text, 20, 20, max_w, 16, 0xCDD6F4);
+        return;
+    }
     int32_t x = node->cur_x;
     int32_t y = node->cur_y;
-    int32_t h = 22;
-    vira_gui_draw_text(text, x, y, 16, 0xCDD6F4);
+    int32_t win_w = vira_gui_window_width();
+
     if (node->type == VIRA_LAYOUT_HORIZONTAL) {
-        node->cur_x += _vira_measure_text_w(text) + node->spacing;
+        int32_t max_w = (win_w > x + 30) ? (win_w - x - 20) : 400;
+        if (_vira_measure_text_size_w(text, 16) <= max_w && !_vira_str_has_newline(text)) {
+            int32_t tw = _vira_measure_text_size_w(text, 16);
+            vira_gui_draw_text(text, x, y, 16, 0xCDD6F4);
+            node->cur_x += tw + node->spacing;
+        } else {
+            int32_t drawn_h = _vira_gui_draw_text_wrapped(text, x, y, max_w, 16, 0xCDD6F4);
+            node->cur_x += max_w + node->spacing;
+            if (drawn_h > node->height) node->height = drawn_h;
+        }
     } else {
-        node->cur_y += h + node->spacing;
+        int32_t max_w = node->width > 0 ? node->width : 340;
+        if (win_w > 0 && x + max_w > win_w - 15) {
+            max_w = win_w - x - 15;
+        }
+        if (max_w < 50) max_w = 50;
+
+        int32_t drawn_h = _vira_gui_draw_text_wrapped(text, x, y, max_w, 16, 0xCDD6F4);
+        node->cur_y += drawn_h + node->spacing;
+    }
+}
+
+/**
+ * Auto-layout text label widget with an explicit maximum wrapping width.
+ * @param text String content to render.
+ * @param max_width Maximum allowed width before wrapping to subsequent lines.
+ * Usage: Primary API for bounded auto-wrapping labels (`gui_lbl_wrap(text, 400)`).
+ */
+static inline void vira_gui_lbl_wrap(vira_string text, int32_t max_width) {
+    vira_layout_node_t* node = _vira_gui_cur_layout();
+    if (!node) {
+        int32_t mw = max_width > 0 ? max_width : 400;
+        _vira_gui_draw_text_wrapped(text, 20, 20, mw, 16, 0xCDD6F4);
+        return;
+    }
+    int32_t x = node->cur_x;
+    int32_t y = node->cur_y;
+    int32_t win_w = vira_gui_window_width();
+    int32_t max_w = max_width > 0 ? max_width : (node->width > 0 ? node->width : 340);
+    if (win_w > 0 && x + max_w > win_w - 15) {
+        max_w = win_w - x - 15;
+    }
+    if (max_w < 50) max_w = 50;
+
+    int32_t drawn_h = _vira_gui_draw_text_wrapped(text, x, y, max_w, 16, 0xCDD6F4);
+    if (node->type == VIRA_LAYOUT_HORIZONTAL) {
+        node->cur_x += max_w + node->spacing;
+        if (drawn_h > node->height) node->height = drawn_h;
+    } else {
+        node->cur_y += drawn_h + node->spacing;
     }
 }
 
@@ -1481,38 +1775,6 @@ static inline int _vira_table_compare_cells(vira_string a, vira_string b) {
     return a.len - b.len;
 }
 
-/**
- * Internal helper that truncates and ellipses text ("...") if it exceeds available pixel width.
- * @param text String to draw.
- * @param x Left coordinate in pixels.
- * @param y Top coordinate in pixels.
- * @param size Font size in points.
- * @param color Text RGB hex color.
- * @param max_w Maximum allowed pixel width.
- * Usage: Prevents table cells or narrow labels from overflowing column boundaries.
- */
-static inline void _vira_gui_draw_clipped_text(vira_string text, int32_t x, int32_t y, int32_t size, int32_t color, int32_t max_w) {
-    if (text.len <= 0 || !text.data || max_w <= 10) return;
-    int tw = _vira_measure_text_w(text);
-    if (tw <= max_w) {
-        vira_gui_draw_text(text, x, y, size, color);
-        return;
-    }
-    char buf[128];
-    int copy_len = text.len < 120 ? text.len : 120;
-    while (copy_len > 0) {
-        memcpy(buf, text.data, (size_t)copy_len);
-        buf[copy_len] = '.';
-        buf[copy_len + 1] = '.';
-        buf[copy_len + 2] = '\0';
-        vira_string s = (vira_string){ .data = (const uint8_t*)buf, .len = copy_len + 2, .is_lit = true };
-        if (_vira_measure_text_w(s) <= max_w) {
-            vira_gui_draw_text(s, x, y, size, color);
-            return;
-        }
-        copy_len--;
-    }
-}
 
 /**
  * Renders a full-featured data table with searchable filter, sortable columns, pagination, and row selection at explicit coordinates.
@@ -1832,6 +2094,17 @@ static inline void vira_gui_lbl_temp(vira_string text) {
 }
 
 /**
+ * Temporary string variant of `vira_gui_lbl_wrap` that automatically frees dynamic string allocations.
+ * @param text Allocated string to display and free.
+ * @param max_width Maximum allowed width before wrapping.
+ * Usage: Used by compiler code generation for string expressions with guaranteed zero leaks.
+ */
+static inline void vira_gui_lbl_wrap_temp(vira_string text, int32_t max_width) {
+    vira_gui_lbl_wrap(text, max_width);
+    vira_str_free(&text);
+}
+
+/**
  * Temporary string variant of `vira_gui_draw_text` that automatically frees dynamic string allocations.
  * @param text Allocated string to display and free.
  * @param x Screen X coordinate.
@@ -1842,6 +2115,21 @@ static inline void vira_gui_lbl_temp(vira_string text) {
  */
 static inline void vira_gui_draw_text_temp(vira_string text, int32_t x, int32_t y, int32_t size, int32_t hex_color) {
     vira_gui_draw_text(text, x, y, size, hex_color);
+    vira_str_free(&text);
+}
+
+/**
+ * Temporary string variant of `vira_gui_draw_text_wrapped` that automatically frees dynamic string allocations.
+ * @param text Allocated string to display and free.
+ * @param x Screen X coordinate.
+ * @param y Screen Y coordinate.
+ * @param max_width Maximum bounding width before wrapping.
+ * @param size Font size.
+ * @param hex_color Text color.
+ * Usage: Used by compiler code generation for dynamically formatted wrapped strings.
+ */
+static inline void vira_gui_draw_text_wrapped_temp(vira_string text, int32_t x, int32_t y, int32_t max_width, int32_t size, int32_t hex_color) {
+    vira_gui_draw_text_wrapped(text, x, y, max_width, size, hex_color);
     vira_str_free(&text);
 }
 

@@ -2763,6 +2763,8 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("vira_gpu_set_enabled(%s)", strings.Join(argStrs, ", "))
 		case "gpu_is_enabled":
 			return "vira_gpu_is_enabled()"
+		case "gpu_has_tensor_cores":
+			return "vira_gpu_has_tensor_cores()"
 		case "gpu_set_backend":
 			return fmt.Sprintf("vira_gpu_set_backend(%s)", strings.Join(argStrs, ", "))
 		case "gpu_set_device":
@@ -2810,6 +2812,14 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			if len(call.Args) > 0 {
 				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
 					fnName = "vira_gui_draw_text_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_draw_text_wrapped":
+			fnName := "vira_gui_draw_text_wrapped"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_draw_text_wrapped_temp"
 				}
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
@@ -2894,6 +2904,14 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			if len(call.Args) > 0 {
 				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
 					fnName = "vira_gui_lbl_temp"
+				}
+			}
+			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))
+		case "gui_lbl_wrap":
+			fnName := "vira_gui_lbl_wrap"
+			if len(call.Args) > 0 {
+				if _, ok := call.Args[0].Expr.(*ast.IdentExpr); !ok {
+					fnName = "vira_gui_lbl_wrap_temp"
 				}
 			}
 			return fmt.Sprintf("%s(%s)", fnName, strings.Join(argStrs, ", "))

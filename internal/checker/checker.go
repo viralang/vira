@@ -632,6 +632,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeBool,
 	}
+	c.functions["gpu_has_tensor_cores"] = &FnSig{
+		Name:       "gpu_has_tensor_cores",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeBool,
+	}
 	c.functions["gpu_set_backend"] = &FnSig{
 		Name:       "gpu_set_backend",
 		IsPub:      true,
@@ -743,6 +749,19 @@ func (c *Checker) registerBuiltins() {
 			{Name: "text", Type: TypeString},
 			{Name: "x", Type: TypeInt},
 			{Name: "y", Type: TypeInt},
+			{Name: "size", Type: TypeInt},
+			{Name: "hex_color", Type: TypeInt},
+		},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_draw_text_wrapped"] = &FnSig{
+		Name:  "gui_draw_text_wrapped",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "text", Type: TypeString},
+			{Name: "x", Type: TypeInt},
+			{Name: "y", Type: TypeInt},
+			{Name: "max_width", Type: TypeInt},
 			{Name: "size", Type: TypeInt},
 			{Name: "hex_color", Type: TypeInt},
 		},
@@ -998,6 +1017,12 @@ func (c *Checker) registerBuiltins() {
 		Name:       "gui_lbl",
 		IsPub:      true,
 		Params:     []ParamInfo{{Name: "text", Type: TypeString}},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gui_lbl_wrap"] = &FnSig{
+		Name:       "gui_lbl_wrap",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "text", Type: TypeString}, {Name: "max_width", Type: TypeInt}},
 		ReturnType: TypeVoid,
 	}
 	c.functions["gui_input"] = &FnSig{
