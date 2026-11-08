@@ -17,7 +17,13 @@ pub fn SseWriter.start(mut stream net.TcpStream) !SseWriter {
 		return error('failed to write SSE headers')
 	}
 	return SseWriter{
-		stream: stream,
+		stream: net.TcpStream{
+			fd: stream.fd,
+			is_open: stream.is_open,
+			rx_buf: []u8{},
+			rx_pos: 0,
+			rx_len: 0,
+		},
 		is_open: true,
 	}
 }

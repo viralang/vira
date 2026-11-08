@@ -1067,6 +1067,8 @@ Vira has completed **v0.7 (Native C & Python FFI and Shared Library Export)**. S
 
 Contributions are welcome! Please open an issue or submit a pull request on GitHub at [github.com/viralang/vira](https://github.com/viralang/vira).
 
+For language maintainers, compiler contributors, and runtime engineers, see the comprehensive [**Vira Maintainer's Architecture & Engineering Guide**](docs/MAINTAINER_GUIDE.md).
+
 ---
 
 ## 10. License

@@ -38,7 +38,6 @@ pub fn (mut c RequestContext) sse() !SseWriter {
 	writer := SseWriter.start(mut c.stream) or {
 		return error(err)
 	}
-	c.stream.rx_buf = []u8{}
 	return writer
 }
 

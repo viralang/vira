@@ -53,7 +53,8 @@ fn test_request_parse_and_server() {
 		panic('failed to get server addr')
 	}
 
-	mut client := net.TcpStream.connect(server_addr.to_string()) or {
+	server_addr_str := server_addr.to_string()
+	mut client := net.TcpStream.connect(server_addr_str) or {
 		panic('failed client connect')
 	}
 
@@ -96,7 +97,8 @@ fn test_request_parse_and_server() {
 			break
 		}
 		if l.starts_with('Content-Length:') {
-			val_str := l.substr(15, l.len).trim()
+			val_sub := l.substr(15, l.len)
+			val_str := val_sub.trim()
 			resp_cl = val_str.to_int() or { 0 }
 		}
 	}
@@ -124,7 +126,8 @@ fn test_sse_streaming() {
 		panic('failed to get server addr')
 	}
 
-	mut client := net.TcpStream.connect(server_addr.to_string()) or {
+	sse_addr_str := server_addr.to_string()
+	mut client := net.TcpStream.connect(sse_addr_str) or {
 		panic('failed client connect for SSE')
 	}
 
