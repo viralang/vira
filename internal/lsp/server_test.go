@@ -557,12 +557,12 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 		}, nil)
 	}
 
-	// Hover on `.linear` in Example 43 (line 390, `q_lin := xn.linear(l_wq[l]) + l_bq[l]`)
+	// Hover on `.linear` in Example 43 (line 468, `scores := tensor_scale(q_group.linear(k_head), scale)`)
 	ex43Abs, _ := filepath.Abs(examples[2])
 	ex43URI := "file:///" + strings.Replace(filepath.ToSlash(ex43Abs), ":", "%3A", 1)
 	sendRPC(&in, "textDocument/hover", map[string]interface{}{
 		"textDocument": map[string]interface{}{"uri": ex43URI},
-		"position":     map[string]interface{}{"line": 432, "character": 25},
+		"position":     map[string]interface{}{"line": 467, "character": 48},
 	}, 2)
 
 	sendRPC(&in, "shutdown", map[string]interface{}{}, 3)

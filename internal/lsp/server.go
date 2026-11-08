@@ -765,7 +765,7 @@ func (s *Server) validateDocument(uri string, text string) {
 }
 
 func (s *Server) computeHover(uri string, text string, pos Position) string {
-	word := getWordAt(text, pos)
+	word, prefix := getWordAndPrefixAt(text, pos)
 	if word == "" {
 		return ""
 	}
@@ -774,7 +774,7 @@ func (s *Server) computeHover(uri string, text string, pos Position) string {
 	astFile := p.ParseFile()
 
 	// 1. Check local declarations
-	if h := formatDeclHover(astFile, word, ""); h != "" {
+	if h := formatDeclHover(astFile, word, prefix, ""); h != "" {
 		return h
 	}
 
@@ -782,7 +782,7 @@ func (s *Server) computeHover(uri string, text string, pos Position) string {
 	imported := s.resolveImports(uri, astFile)
 	for _, impDoc := range imported {
 		originName := filepath.Base(impDoc.Path)
-		if h := formatDeclHover(impDoc.AST, word, originName); h != "" {
+		if h := formatDeclHover(impDoc.AST, word, prefix, originName); h != "" {
 			return h
 		}
 	}
@@ -849,7 +849,7 @@ func getEmbedInfo(emb ast.TypeExpr) (string, token.Span) {
 	return "", token.Span{}
 }
 
-func formatDeclHover(astFile *ast.File, word string, originFile string) string {
+func formatDeclHover(astFile *ast.File, word string, prefix string, originFile string) string {
 	if astFile == nil {
 		return ""
 	}
@@ -889,6 +889,20 @@ func formatDeclHover(astFile *ast.File, word string, originFile string) string {
 
 		case *ast.FnDecl:
 			if d.Name.Name == word {
+				if d.Receiver == nil && prefix != "" {
+					modName := ""
+					if astFile.Module.Name != "" {
+						modName = astFile.Module.Name
+					} else if originFile != "" {
+						modName = strings.TrimSuffix(originFile, ".vir")
+					}
+					if prefix != modName {
+						continue
+					}
+				}
+				if originFile != "" && d.Receiver == nil && prefix == "" {
+					continue
+				}
 				var sb strings.Builder
 				receiverStr := ""
 				if d.Receiver != nil {
@@ -1802,13 +1816,18 @@ func makeLocation(uri string, f *source.File, span token.Span) Location {
 }
 
 func getWordAt(text string, pos Position) string {
+	w, _ := getWordAndPrefixAt(text, pos)
+	return w
+}
+
+func getWordAndPrefixAt(text string, pos Position) (string, string) {
 	lines := strings.Split(text, "\n")
 	if pos.Line < 0 || pos.Line >= len(lines) {
-		return ""
+		return "", ""
 	}
 	line := lines[pos.Line]
 	if pos.Character < 0 || pos.Character > len(line) {
-		return ""
+		return "", ""
 	}
 
 	start := pos.Character
@@ -1820,9 +1839,21 @@ func getWordAt(text string, pos Position) string {
 		end++
 	}
 	if start >= end {
-		return ""
+		return "", ""
 	}
-	return line[start:end]
+	word := line[start:end]
+	prefix := ""
+	if start > 0 && line[start-1] == '.' {
+		pEnd := start - 1
+		pStart := pEnd
+		for pStart > 0 && isIdentChar(line[pStart-1]) {
+			pStart--
+		}
+		if pStart < pEnd {
+			prefix = line[pStart:pEnd]
+		}
+	}
+	return word, prefix
 }
 
 func isIdentChar(b byte) bool {
