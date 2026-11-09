@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/scripts/install.sh | bash
 #    or: ./scripts/install.sh
 
-DEFAULT_VERSION="v0.7.4"
+DEFAULT_VERSION="v0.7.5"
 VIRA_VERSION="${1:-${VIRA_VERSION:-$DEFAULT_VERSION}}"
 if [[ "$VIRA_VERSION" != v* ]]; then
     VIRA_VERSION="v$VIRA_VERSION"
