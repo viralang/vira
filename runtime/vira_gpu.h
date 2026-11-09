@@ -2165,17 +2165,26 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_softmax = ks[16];
   g->cu_k_silu = ks[17];
 
-  g->has_tensor_cores = (g->compute_capability_major >= 7);
+  g->has_tensor_cores = false;
   g->cu_wmma_module = NULL;
   g->cu_k_wmma_linear_h = NULL;
   g->cu_k_wmma_matmul = NULL;
 
-  if (g->has_tensor_cores && g->cuModuleLoadData) {
+  if (g->compute_capability_major >= 7 && g->cuModuleLoadData) {
     vira_cu_module wmma_mod = NULL;
     if (g->cuModuleLoadData(&wmma_mod, _vira_cuda_wmma_kernel_ptx) == VIRA_CUDA_SUCCESS && wmma_mod != NULL) {
-      g->cu_wmma_module = wmma_mod;
-      (void)g->cuModuleGetFunction(&g->cu_k_wmma_linear_h, wmma_mod, "vira_cu_wmma_linear_h");
-      (void)g->cuModuleGetFunction(&g->cu_k_wmma_matmul, wmma_mod, "vira_cu_wmma_matmul_f32");
+      vira_cu_function k_lin = NULL;
+      vira_cu_function k_mm = NULL;
+      if (g->cuModuleGetFunction(&k_lin, wmma_mod, "vira_cu_wmma_linear_h") == VIRA_CUDA_SUCCESS &&
+          g->cuModuleGetFunction(&k_mm, wmma_mod, "vira_cu_wmma_matmul_f32") == VIRA_CUDA_SUCCESS &&
+          k_lin != NULL && k_mm != NULL) {
+        g->cu_wmma_module = wmma_mod;
+        g->cu_k_wmma_linear_h = k_lin;
+        g->cu_k_wmma_matmul = k_mm;
+        g->has_tensor_cores = true;
+      } else if (g->cuModuleUnload) {
+        g->cuModuleUnload(wmma_mod);
+      }
     }
   }
 
@@ -2475,6 +2484,7 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
 
   g->active_backend = VIRA_GPU_BACKEND_OPENCL;
   g->available = true;
+  g->has_tensor_cores = false;
   snprintf(g->backend_name, sizeof(g->backend_name), "OpenCL");
 
   char dname[256] = {0};
@@ -2531,6 +2541,7 @@ static inline void vira_gpu_init(void) {
   _vira_gpu.active_backend = VIRA_GPU_BACKEND_CPU;
   _vira_gpu.available = false;
   _vira_gpu.enabled = true;
+  _vira_gpu.has_tensor_cores = false;
 
   const char *req_b = _vira_gpu.requested_backend[0] ? _vira_gpu.requested_backend : getenv("VIRA_GPU_BACKEND");
   bool allow_cuda = true;
@@ -2621,6 +2632,7 @@ static inline void vira_gpu_init(void) {
   _vira_gpu.active_backend = VIRA_GPU_BACKEND_CPU;
   _vira_gpu.available = false;
   _vira_gpu.enabled = true;
+  _vira_gpu.has_tensor_cores = false;
   snprintf(_vira_gpu.device_name, sizeof(_vira_gpu.device_name),
            "Multi-Threaded CPU SIMD (%s)", vira_simd_backend_name());
   snprintf(_vira_gpu.backend_name, sizeof(_vira_gpu.backend_name), "CPU-SIMD");
@@ -2832,7 +2844,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
   }
 
   pthread_mutex_lock(&_vira_gpu.lock);
-  bool prefer_half = ((M <= 4) && (K >= 32)) || (_vira_gpu.has_tensor_cores && (M >= 16) && ((K & 15) == 0));
+  bool prefer_half = ((M <= 4) && (K >= 32)) || (_vira_gpu.has_tensor_cores && (M >= 16) && (N >= 16) && ((K & 15) == 0));
   _vira_gpu_wfmt wfmt = VIRA_WFMT_F32;
   vira_cl_int err = 0;
 
@@ -2954,7 +2966,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
       err = (_vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
                 ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
-    } else if (_vira_gpu.has_tensor_cores && _vira_gpu.cu_k_wmma_linear_h != NULL && M >= 16 && ((K & 15) == 0)) {
+    } else if (_vira_gpu.has_tensor_cores && _vira_gpu.cu_k_wmma_linear_h != NULL && M >= 16 && N >= 16 && ((K & 15) == 0)) {
       void *args[] = {&x_buf, &w_buf, &y_buf, &M, &K, &N};
       unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
       unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);
@@ -3150,7 +3162,7 @@ static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
     if (_vira_gpu.has_tensor_cores && _vira_gpu.cu_k_wmma_matmul != NULL &&
-        M >= 16 && ((K & 15) == 0)) {
+        M >= 16 && N >= 16 && ((K & 15) == 0)) {
       void *args[] = {&a_slot->cu_buf, &b_slot->cu_buf, &c_slot->cu_buf, &M, &K, &N};
       unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
       unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);

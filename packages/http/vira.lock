@@ -4,12 +4,12 @@
     {
       "path": "io",
       "version": "0.1.0",
-      "checksum": "sha256:a8e1eb5ede232e17055ffb1c8ec6ca9e5045341a7c0f5bc09576f21ea9336bf0"
+      "checksum": "sha256:bb139e3ec55a11fe9debc48784014425621f0244dd7b78f7102d13ae877510be"
     },
     {
       "path": "net",
       "version": "0.1.0",
-      "checksum": "sha256:15386b70d22184f8d0ba8fd6399180fda040b64220a63c978a8d68ffe609cc3e"
+      "checksum": "sha256:1e56c8218cb4b566582d9baec7a680c63a1871327a71b29ecb3eb2409e805b87"
     }
   ]
 }

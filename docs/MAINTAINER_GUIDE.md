@@ -85,7 +85,7 @@ flowchart TD
 
 | Path | Responsibility | Primary Technology |
 | :--- | :--- | :--- |
-| **`cmd/vira/`** | CLI entry point (`main.go`, `build.go`, `run.go`, `test.go`, `fmt.go`, `bundle.go`, `init.go`). | Go |
+| **`cmd/vira/`** | CLI entry point and subcommands (`main.go`, `bundle.go`, `init_gui.go`). | Go |
 | **`internal/token/`** | Token definitions, operators, keywords, literal constants. | Go |
 | **`internal/lexer/`** | Unicode-aware lexical scanner, string interpolation `${...}` tokenizer. | Go |
 | **`internal/ast/`** | AST node interfaces, declarations, statements, expressions, 4-quadrant structs. | Go |
@@ -101,7 +101,7 @@ flowchart TD
 | **`runtime/vira_cuda_ptx.h`**| Embedded PTX assembly kernels (FP32 Linear, GEMM, sm_70+ WMMA Tensor Cores). | PTX ISA |
 | **`runtime/vira_gui*.h`** | Cross-platform immediate-mode GUI backends (Raylib, Win32 GDI, X11, Cocoa). | C99 / Obj-C |
 | **`runtime/vira_gui_widgets.h`**| Auto-layout stacks, auto-wrapping text, cards, tables, inputs, scroll containers. | C99 |
-| **`packages/`** | 15 standard library packages (`os`, `exec`, `syscall`, `flag`, `log`, `strings`, `math`, `time`, `ctype`, `io`, `net`, `http`, `json`, `viraserve`, `widget`, `gpu`). | Pure `.vir` |
+| **`packages/`** | 16 standard library packages (`os`, `exec`, `syscall`, `flag`, `log`, `strings`, `math`, `time`, `ctype`, `io`, `net`, `http`, `json`, `viraserve`, `widget`, `gpu`). | Pure `.vir` |
 | **`docs/examples/`** | 45 runnable production examples covering CLI, HTTP, Tensors, GGUF LLMs, GUI. | Pure `.vir` |
 | **`docs/tutorials/`** | 41 step-by-step masterclass tutorials. | Markdown |
 
@@ -117,7 +117,7 @@ All nodes implement the `Node` interface:
 
 ### Symbol Resolution & Type Checking (`internal/checker`)
 The typechecker verifies types before code generation:
-1. **Builtins Registry (`c.functions`):** Every global function (`println`, `gui_lbl`, `gpu_is_available`, etc.) is registered in `c.initBuiltins()`.
+1. **Builtins Registry (`c.functions`):** Every global function (`println`, `gui_lbl`, `gpu_is_available`, etc.) is registered in `c.registerBuiltins()`.
 2. **Result Monad (`!T`):** When a function signature returns `!T`, the checker enforces that call sites either unwrap via `or { ... }` or re-bubble with `return error(...)`.
 3. **4-Quadrant Struct Encapsulation:** Enforces field access rules:
    - `default`: private immutable
@@ -143,7 +143,7 @@ flowchart LR
 
 ### The Autofree Invariant
 - **Rule:** If memory is allocated locally and does not escape, `cgen` **must** insert the matching destructor before every return path and at the end of the enclosing block.
-- **Verification:** The runtime tracks all allocations when compiled without `-prod` via `_vira_autofree_tracker`. At process exit or test teardown, `vira_mem_active_leaks()` must return `0`.
+- **Verification:** The runtime tracks all allocations when compiled without `-prod` via `_vira_active_heap_allocs` and prints diagnostics via `vira_report_mem_stats()`. At process exit or test teardown, `_vira_active_heap_allocs` (`active_leaks`) must be `0`.
 
 ---
 
@@ -226,7 +226,7 @@ flowchart TD
 
 ## 10. Standard Library Packages Architecture (`packages/`)
 
-Vira ships with 15 self-contained packages under `packages/`:
+Vira ships with 16 self-contained packages under `packages/`:
 
 | Package | Purpose | Core Files |
 | :--- | :--- | :--- |

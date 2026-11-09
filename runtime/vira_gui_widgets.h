@@ -419,11 +419,12 @@ static inline int32_t _vira_measure_text_size_w(vira_string text, int32_t size) 
     if (size <= 0) size = 15;
     if (text.len <= 0 || !text.data) return 0;
 #if defined(VIRA_USE_RAYLIB)
+    if (!IsWindowReady()) return (text.len * size * 8 + 7) / 15;
     char stack_buf[256];
     char *buf = stack_buf;
     if (text.len >= 256) {
         buf = (char *)malloc((size_t)text.len + 1);
-        if (!buf) return text.len * (size * 8 / 15);
+        if (!buf) return (text.len * size * 8 + 7) / 15;
     }
     memcpy(buf, text.data, (size_t)text.len);
     buf[text.len] = '\0';
