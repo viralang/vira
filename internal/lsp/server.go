@@ -1048,6 +1048,8 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`gpu_softmax(logits: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU/SIMD numerically stable row-wise Softmax."
 	case "gpu_silu":
 		return "**`gpu_silu(x: tensor[f32]) -> tensor[f32]`**\n\nApplies GPU/SIMD Sigmoid Linear Unit (`SiLU`) activation."
+	case "gpu_gqa_attention":
+		return "**`gpu_gqa_attention(q_heads: tensor[f32], k_cache: tensor[f32], v_cache: tensor[f32], kv_pos: i64, scale: f32) -> tensor[f32]`**\n\nComputes GPU-accelerated Grouped-Query Attention (FlashDecoding) over persistent VRAM KV caches `[max_seq, kv_dim]`."
 	case "copy_row":
 		return "**`tensor.copy_row(dst_row: int, src: tensor[f32])`**\n\nCopies a `1 × D` vector `src` into row `dst_row` of a `MaxSeq × D` tensor (e.g., updating a Transformer KV cache)."
 	case "slice_rows":
@@ -1630,6 +1632,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		"tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_silu", "tensor_softmax", "tensor_embedding", "tensor_transpose",
 		"tensor_load_bin", "tensor_save_bin", "safetensors_load", "gguf_load", "gguf_load_tensor", "gguf_tensor_dequant",
 		"tensor_rmsnorm", "tensor_rope", "rmsnorm", "rope", "swiglu", "causal_self_attention", "sample_token", "sample_argmax", "sample_top_p",
+		"gpu_rmsnorm", "gpu_rope", "gpu_softmax", "gpu_silu", "gpu_gqa_attention",
 		"gui_init", "gui_should_close", "gui_cancel_close", "gui_set_target_fps", "gui_window_width", "gui_window_height", "gui_begin", "gui_end", "gui_close", "gui_clear", "gui_frame_time", "gui_poll",
 		"gui_vstack_begin", "gui_hstack_begin", "gui_stack_end", "gui_spacing", "gui_card_begin", "gui_card_end", "gui_scroll_begin", "gui_scroll_end", "gui_mouse_wheel", "gui_separator", "gui_badge",
 		"gui_btn", "gui_btn_danger", "gui_check", "gui_slide", "gui_lbl", "gui_input", "gui_progress", "gui_radio",

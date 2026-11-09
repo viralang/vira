@@ -1432,7 +1432,7 @@ int main(void) {
     q.data[2] = 3.0f;
     q.data[3] = 4.0f;
     // With pos = 0, angle is 0, cos = 1, sin = 0, out equals q
-    vira_tensor_f32 r0 = vira_tensor_rope(q, 0, 10000.0f);
+    vira_tensor_f32 r0 = vira_tensor_rope(NULL, q, 0, 10000.0f);
     assert(fabsf(r0.data[0] - 1.0f) < 1e-4);
     assert(fabsf(r0.data[1] - 2.0f) < 1e-4);
     assert(fabsf(r0.data[2] - 3.0f) < 1e-4);

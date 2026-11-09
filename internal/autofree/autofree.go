@@ -686,7 +686,9 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 		if call, ok := rhs.(*ast.CallExpr); ok {
 			if ident, ok := call.Callee.(*ast.IdentExpr); ok {
 				switch ident.Ident.Name {
-				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin", "gpu_linear", "gpu_matmul":
+				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin",
+					"tensor_rmsnorm", "tensor_rope", "tensor_silu", "tensor_elemwise_mul", "tensor_softmax", "tensor_embedding",
+					"gpu_linear", "gpu_matmul", "gpu_rmsnorm", "gpu_rope", "gpu_softmax", "gpu_silu", "gpu_gqa_attention":
 					return true
 				}
 			}

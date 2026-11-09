@@ -128,3 +128,180 @@ fn test_gpu_device_filtering() {
 	gpu.set_device("")
 	println('✓ test_gpu_device_filtering passed')
 }
+
+fn test_gpu_gqa_attention_parity() {
+	gpu.set_backend(gpu.backend_auto)
+	n_heads := 14
+	n_kv_heads := 2
+	head_dim := 64
+	kv_dim := n_kv_heads * head_dim
+	max_ctx := 12
+	kv_pos := 5
+	scale := f32(1.0 / math.sqrt(f64(head_dim)))
+
+	q := tensor_fill(n_heads, head_dim, 0.0)
+	k_cache := tensor_fill(max_ctx, kv_dim, 0.0)
+	v_cache := tensor_fill(max_ctx, kv_dim, 0.0)
+
+	mut h := 0
+	for h < n_heads {
+		mut d := 0
+		for d < head_dim {
+			q.set(h, d, f32(((h * 17 + d * 13) % 29) - 14) * f32(0.05))
+			d += 1
+		}
+		h += 1
+	}
+	mut t := 0
+	for t <= kv_pos {
+		mut c := 0
+		for c < kv_dim {
+			k_cache.set(t, c, f32(((t * 19 + c * 7) % 31) - 15) * f32(0.04))
+			v_cache.set(t, c, f32(((t * 11 + c * 23) % 27) - 13) * f32(0.06))
+			c += 1
+		}
+		t += 1
+	}
+
+	out_gpu := gpu_gqa_attention(q, k_cache, v_cache, i64(kv_pos), scale)
+	out_mod := gpu.gqa_attention(q, k_cache, v_cache, i64(kv_pos), scale)
+
+	gpu.set_backend(gpu.backend_cpu)
+	out_cpu := gpu_gqa_attention(q, k_cache, v_cache, i64(kv_pos), scale)
+	gpu.set_backend(gpu.backend_auto)
+
+	if out_gpu.rows != n_heads || out_gpu.cols != head_dim {
+		panic('unexpected gpu_gqa_attention output shape')
+	}
+
+	mut r := 0
+	for r < n_heads {
+		mut c := 0
+		for c < head_dim {
+			dg := math.abs(f64(out_gpu.get(r, c) - out_cpu.get(r, c)))
+			dm := math.abs(f64(out_mod.get(r, c) - out_cpu.get(r, c)))
+			if dg > 0.002 || dm > 0.002 {
+				panic('gpu_gqa_attention mismatch at (${r}, ${c})')
+			}
+			c += 1
+		}
+		r += 1
+	}
+
+	// Simulate OOM fallback on gpu.gqa_attention
+	before_fb := gpu.oom_fallbacks()
+	gpu.simulate_oom(true)
+	out_oom := gpu.gqa_attention(q, k_cache, v_cache, i64(kv_pos), scale)
+	gpu.simulate_oom(false)
+	if gpu.oom_fallbacks() <= before_fb {
+		panic('expected oom_fallbacks increment on gpu.gqa_attention OOM')
+	}
+	if out_oom.rows != n_heads || out_oom.cols != head_dim {
+		panic('unexpected shape from OOM fallback gqa_attention')
+	}
+	println('✓ test_gpu_gqa_attention_parity passed')
+}
+
+fn test_gpu_lazy_chain_and_sync() {
+	gpu.set_backend(gpu.backend_auto)
+	dim := 128
+	w1 := tensor_fill(dim, dim, f32(0.02))
+	w2 := tensor_fill(dim, dim, f32(0.015))
+	norm_w := tensor_fill(1, dim, f32(1.0))
+	bias := tensor_fill(1, dim, f32(0.1))
+
+	// Persistent heap tensors updated across arena boundaries
+	k_cache := tensor_fill(8, dim, f32(0.0))
+	mut x_gpu := tensor_fill(1, dim, f32(0.5))
+
+	mut step := 0
+	for step < 4 {
+		arena {
+			xn := tensor_rmsnorm(x_gpu, norm_w, f32(0.00001))
+			proj := xn.gpu_linear(w1) + bias
+			rot := tensor_rope(proj.reshape_2d(2, 64), i64(step), f32(10000.0))
+			k_flat := rot.reshape_2d(1, dim)
+			k_cache.copy_row(step, k_flat)
+
+			gate := tensor_silu(xn.gpu_linear(w2))
+			up := xn.gpu_linear(w1)
+			prod := tensor_elemwise_mul(gate, up)
+			scaled := tensor_scale(prod, f32(0.5))
+			x_next := x_gpu + scaled
+			x_gpu.copy_row(0, x_next)
+		}
+		step += 1
+	}
+
+	// Host readers on dev_dirty tensors must implicitly sync accurately
+	sum_gpu := x_gpu.sum()
+	cloned := x_gpu.clone()
+	diff := x_gpu - cloned
+	tr := x_gpu.transpose()
+	if cloned.rows != 1 || cloned.cols != dim || tr.rows != dim || tr.cols != 1 {
+		panic('unexpected clone/transpose shape after lazy GPU chain')
+	}
+	if math.abs(f64(diff.sum())) > 0.001 {
+		panic('expected cloned sub diff near 0.0')
+	}
+	if math.abs(f64(sum_gpu - cloned.sum())) > 0.001 {
+		panic('expected clone sum parity')
+	}
+	k_elem := k_cache.get(3, 5)
+	if math.is_nan(f64(k_elem)) || math.is_inf(f64(k_elem), 0) {
+		panic('invalid element synced from persistent KV cache')
+	}
+
+	// Compare end-to-end chain output against forced CPU backend
+	gpu.set_backend(gpu.backend_cpu)
+	mut x_cpu := tensor_fill(1, dim, f32(0.5))
+	k_cache_cpu := tensor_fill(8, dim, f32(0.0))
+	mut c_step := 0
+	for c_step < 4 {
+		arena {
+			xn := tensor_rmsnorm(x_cpu, norm_w, f32(0.00001))
+			proj := xn.gpu_linear(w1) + bias
+			rot := tensor_rope(proj.reshape_2d(2, 64), i64(c_step), f32(10000.0))
+			k_flat := rot.reshape_2d(1, dim)
+			k_cache_cpu.copy_row(c_step, k_flat)
+
+			gate := tensor_silu(xn.gpu_linear(w2))
+			up := xn.gpu_linear(w1)
+			prod := tensor_elemwise_mul(gate, up)
+			scaled := tensor_scale(prod, f32(0.5))
+			x_next := x_cpu + scaled
+			x_cpu.copy_row(0, x_next)
+		}
+		c_step += 1
+	}
+	gpu.set_backend(gpu.backend_auto)
+
+	if math.abs(f64(sum_gpu - x_cpu.sum())) > 0.01 {
+		panic('lazy GPU chain diverged from CPU reference: gpu=${sum_gpu} cpu=${x_cpu.sum()}')
+	}
+	if math.abs(f64(k_elem - k_cache_cpu.get(3, 5))) > 0.01 {
+		panic('KV cache D2D diverged from CPU reference')
+	}
+	println('✓ test_gpu_lazy_chain_and_sync passed')
+}
+
+fn test_gpu_argmax_and_sampling() {
+	gpu.set_backend(gpu.backend_auto)
+	vocab := 4096
+	logits := tensor_fill(1, vocab, f32(-1.0))
+	logits.set(0, 3137, f32(12.5))
+	logits.set(0, 128, f32(8.0))
+
+	// Greedy path uses GPU parallel partial argmax reduction
+	greedy := sample_token(logits, f32(0.0))
+	if greedy != 3137 {
+		panic('expected greedy sample_token 3137, got ${greedy}')
+	}
+
+	// Non-greedy temperature path scales & softmaxes on GPU then samples cleanly
+	sampled := sample_token(logits, f32(0.7))
+	if sampled < 0 || sampled >= i64(vocab) {
+		panic('sampled token out of range: ${sampled}')
+	}
+	println('✓ test_gpu_argmax_and_sampling passed')
+}

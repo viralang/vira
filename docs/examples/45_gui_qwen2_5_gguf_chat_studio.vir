@@ -383,9 +383,7 @@ fn qwen2_forward_step(
 ) tensor[f32] {
 	head_dim := meta.dim / meta.n_heads
 	kv_dim := meta.n_kv_heads * head_dim
-	kv_mul := meta.n_heads / meta.n_kv_heads
 	scale := f32(1.0 / math.sqrt(f64(head_dim)))
-	seq_len := pos + 1
 
 	mut x := tensor_embedding(tok_emb, token_id)
 
@@ -405,41 +403,7 @@ fn qwen2_forward_step(
 			k_caches[l].copy_row(pos, k_flat)
 			v_caches[l].copy_row(pos, v)
 
-			attn_out := tensor_fill(meta.n_heads, head_dim, 0.0)
-			mut kv_h := 0
-			for kv_h < meta.n_kv_heads {
-				q_group := q_heads.slice_rows(kv_h * kv_mul, (kv_h + 1) * kv_mul)
-
-				k_head := tensor_fill(seq_len, head_dim, 0.0)
-				v_head := tensor_fill(seq_len, head_dim, 0.0)
-				kv_col_base := kv_h * head_dim
-				mut t := 0
-				for t < seq_len {
-					mut d := 0
-					for d < head_dim {
-						k_head.set(t, d, k_caches[l].get(t, kv_col_base + d))
-						v_head.set(t, d, v_caches[l].get(t, kv_col_base + d))
-						d += 1
-					}
-					t += 1
-				}
-
-				scores := tensor_scale(q_group.linear(k_head), scale)
-				probs := tensor_softmax(scores)
-				group_ctx := probs @ v_head
-
-				mut gh := 0
-				for gh < kv_mul {
-					q_h := (kv_h * kv_mul) + gh
-					mut d := 0
-					for d < head_dim {
-						attn_out.set(q_h, d, group_ctx.get(gh, d))
-						d += 1
-					}
-					gh += 1
-				}
-				kv_h += 1
-			}
+			attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
 
 			attn_flat := attn_out.reshape_2d(1, meta.dim)
 			attn_proj := attn_flat.gpu_linear(l_wo[l])

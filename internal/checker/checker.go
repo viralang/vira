@@ -698,6 +698,18 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["gpu_gqa_attention"] = &FnSig{
+		Name:  "gpu_gqa_attention",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "q_heads", Type: &TensorType{DType: TypeF32}},
+			{Name: "k_cache", Type: &TensorType{DType: TypeF32}},
+			{Name: "v_cache", Type: &TensorType{DType: TypeF32}},
+			{Name: "kv_pos", Type: TypeI64},
+			{Name: "scale", Type: TypeF32},
+		},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 
 	// Native Hardware GUI Engine Builtins
 	c.functions["gui_init"] = &FnSig{

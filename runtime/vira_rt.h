@@ -1719,7 +1719,7 @@ static inline bool vira_arena_contains(const vira_arena *a, const void *ptr) {
   return false;
 }
 
-static inline void _vira_gpu_invalidate_activations(void);
+static inline void _vira_gpu_invalidate_activations(const void *arena_ptr);
 
 /**
  * Resets an arena's allocation offset back to zero, reusing allocated memory without system frees.
@@ -1729,7 +1729,7 @@ static inline void _vira_gpu_invalidate_activations(void);
 static inline void vira_arena_reset(vira_arena *a) {
   if (!a)
     return;
-  _vira_gpu_invalidate_activations();
+  _vira_gpu_invalidate_activations(a);
   vira_arena_slab *cur = a->overflow_slabs;
   while (cur != NULL) {
     vira_arena_slab *next = cur->next;
@@ -1996,6 +1996,45 @@ vira_tensor_f32_arena_alloc_nd(vira_arena *a, int32_t n_dims,
 }
 
 /**
+ * Uninitialized N-D heap tensor allocation for GPU output wrappers where kernel populates elements.
+ */
+static inline vira_tensor_f32 _vira_tensor_f32_alloc_uninit_nd(int32_t n_dims,
+                                                               const int32_t *dims) {
+  vira_tensor_f32 t = {0};
+  _vira_tensor_init_shape(&t, n_dims, dims);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  void *raw = malloc(bytes + 64);
+  if (!raw) {
+    fprintf(stderr, "vira panic: tensor allocation failed (%zu bytes)\n",
+            bytes);
+    exit(1);
+  }
+  uintptr_t aligned = ((uintptr_t)raw + 63) & ~(uintptr_t)63;
+  t.data = (vira_f32 *)aligned;
+  t.raw_alloc = raw;
+  t.is_arena = false;
+  t.is_view = false;
+  _vira_record_alloc();
+  return t;
+}
+
+/**
+ * Uninitialized N-D arena tensor allocation for GPU output wrappers where kernel populates elements.
+ */
+static inline vira_tensor_f32
+_vira_tensor_f32_arena_alloc_uninit_nd(vira_arena *a, int32_t n_dims,
+                                       const int32_t *dims) {
+  vira_tensor_f32 t = {0};
+  _vira_tensor_init_shape(&t, n_dims, dims);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  t.data = (vira_f32 *)vira_arena_alloc(a, bytes);
+  t.raw_alloc = NULL;
+  t.is_arena = true;
+  t.is_view = false;
+  return t;
+}
+
+/**
  * Allocates a 2D float tensor (matrix) on the heap with 64-byte aligned storage.
  * @param rows Number of rows.
  * @param cols Number of columns.
@@ -2150,6 +2189,16 @@ static inline vira_tensor_f32 vira_tensor_view_nd(vira_tensor_f32 t,
   return v;
 }
 
+static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr);
+static inline bool _vira_gpu_is_ptr_dirty(const vira_f32 *ptr);
+static inline void _vira_gpu_sync_host(const vira_f32 *ptr);
+static inline void _vira_gpu_clone_quant(const vira_f32 *dst_ptr,
+                                         const vira_f32 *src_ptr);
+static inline void vira_gpu_shutdown(void);
+static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
+                                      vira_tensor_f32 src);
+static __thread bool _vira_tls_gpu_fallback = false;
+
 /**
  * Reshapes a tensor safely, returning a view if non-arena or reallocating in arena if required.
  * @param opt_arena Optional arena pointer.
@@ -2175,6 +2224,7 @@ _vira_tensor_reshape_safe(vira_arena *opt_arena, vira_tensor_f32 t,
             t.rows * t.cols, out.rows * out.cols);
     exit(1);
   }
+  _vira_gpu_sync_host(t.data);
   memcpy(out.data, t.data, (size_t)out.rows * (size_t)out.cols * sizeof(vira_f32));
   return out;
 }
@@ -2243,6 +2293,7 @@ static inline vira_tensor_f32 vira_tensor_reshape_4d(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_tensor_transpose_nd(vira_arena *opt_arena,
                                                        vira_tensor_f32 a) {
   _vira_tensor_norm_shape(&a);
+  _vira_gpu_sync_host(a.data);
   if (a.n_dims == 1) {
     int32_t dims[2] = {a.dims[0], 1};
     vira_tensor_f32 out =
@@ -2290,10 +2341,9 @@ static inline vira_f32 vira_tensor_f32_get(vira_tensor_f32 t, int32_t row,
             row, col, t.rows, t.cols);
     exit(1);
   }
+  _vira_gpu_sync_host(t.data);
   return t.data[(size_t)row * (size_t)t.cols + (size_t)col];
 }
-
-static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr);
 
 /**
  * Sets a scalar float element in a 2D tensor with bounds checking.
@@ -2312,6 +2362,7 @@ static inline void vira_tensor_f32_set(vira_tensor_f32 t, int32_t row,
             row, col, t.rows, t.cols);
     exit(1);
   }
+  _vira_gpu_sync_host(t.data);
   t.data[(size_t)row * (size_t)t.cols + (size_t)col] = val;
   _vira_gpu_evict_ptr(t.data);
 }
@@ -2340,8 +2391,18 @@ static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
             dst.rows, dst.cols, src.rows, src.cols);
     exit(1);
   }
-  memcpy(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
-         (size_t)dst.cols * sizeof(vira_f32));
+  if (!_vira_tls_gpu_fallback && _vira_gpu_copy_row(dst, dst_row, src)) {
+    return;
+  }
+  _vira_gpu_sync_host(dst.data);
+  _vira_gpu_sync_host(src.data);
+  if (dst.data == src.data) {
+    memmove(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
+            (size_t)dst.cols * sizeof(vira_f32));
+  } else {
+    memcpy(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
+           (size_t)dst.cols * sizeof(vira_f32));
+  }
   _vira_gpu_evict_ptr(dst.data);
 }
 
@@ -2365,6 +2426,7 @@ static inline vira_tensor_f32 vira_tensor_slice_rows(vira_arena *opt_arena,
             start_row, end_row, t.rows);
     exit(1);
   }
+  _vira_gpu_sync_host(t.data);
   int32_t n_rows = end_row - start_row;
   int32_t dims[2] = {n_rows, t.cols};
   vira_tensor_f32 out =
@@ -2523,18 +2585,34 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
                                               vira_tensor_f32 a,
                                               vira_tensor_f32 b);
-static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_tensor_f32 x,
+static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
+                                               vira_tensor_f32 x,
                                                vira_tensor_f32 weight,
                                                float eps);
-static inline vira_tensor_f32 vira_gpu_rope(vira_tensor_f32 q, int64_t pos,
+static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
+                                            vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
-static inline vira_tensor_f32 vira_gpu_softmax(vira_tensor_f32 logits);
-static inline vira_tensor_f32 vira_gpu_silu(vira_tensor_f32 x);
+static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
+                                               vira_tensor_f32 logits);
+static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
+                                            vira_tensor_f32 x);
+static inline vira_tensor_f32 vira_gpu_add(vira_arena *opt_arena,
+                                           vira_tensor_f32 a,
+                                           vira_tensor_f32 b);
+static inline vira_tensor_f32 vira_gpu_elemwise_mul(vira_arena *opt_arena,
+                                                    vira_tensor_f32 a,
+                                                    vira_tensor_f32 b);
+static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
+                                             vira_tensor_f32 t,
+                                             vira_f32 scale);
+static inline vira_tensor_f32 vira_gpu_gqa_attention(
+    vira_arena *opt_arena, vira_tensor_f32 q_heads, vira_tensor_f32 k_cache,
+    vira_tensor_f32 v_cache, int64_t kv_pos, float scale);
+static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits);
 static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
                                             uint32_t gguf_dtype,
                                             const void *raw_blocks,
                                             size_t raw_bytes, size_t elems);
-static __thread bool _vira_tls_gpu_fallback = false;
 
 // Hardware-accelerated 2D/3D/4D Batched + Multi-Threaded `@` Matrix Multiplication
 /**
@@ -2566,13 +2644,17 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
   }
 
   if (!_vira_tls_gpu_fallback && a_nd <= 2 && b_nd <= 2 &&
-      (int64_t)M * (int64_t)K_a * (int64_t)N >= 65536LL &&
+      ((int64_t)M * (int64_t)K_a * (int64_t)N >= 65536LL ||
+       _vira_gpu_is_ptr_dirty(a.data) || _vira_gpu_is_ptr_dirty(b.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_matmul(opt_arena, a, b);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
+
+  _vira_gpu_sync_host(a.data);
+  _vira_gpu_sync_host(b.data);
 
   int32_t a_batch_nd = (a_nd > 2) ? (a_nd - 2) : 0;
   int32_t b_batch_nd = (b_nd > 2) ? (b_nd - 2) : 0;
@@ -2814,13 +2896,18 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
   }
 
   int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
-  if (!_vira_tls_gpu_fallback && total_ops >= 65536LL &&
+  if (!_vira_tls_gpu_fallback &&
+      (total_ops >= 65536LL || _vira_gpu_is_ptr_dirty(x.data) ||
+       _vira_gpu_is_ptr_dirty(w.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_linear(opt_arena, x, w);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
+
+  _vira_gpu_sync_host(x.data);
+  _vira_gpu_sync_host(w.data);
 
   int32_t out_dims[2] = {M, N};
   vira_tensor_f32 out =
@@ -2888,6 +2975,7 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
  */
 static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
   _vira_tensor_norm_shape(&t);
+  _vira_gpu_sync_host(t.data);
   int32_t total = t.rows * t.cols;
   int32_t i = 0;
   vira_f32 sum = 0.0f;
@@ -2927,6 +3015,7 @@ static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
 static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
                                                vira_tensor_f32 t) {
   _vira_tensor_norm_shape(&t);
+  _vira_gpu_sync_host(t.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
@@ -3044,6 +3133,20 @@ static inline vira_tensor_f32
 vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   _vira_tensor_norm_shape(&a);
   _vira_tensor_norm_shape(&b);
+  size_t a_elems = (size_t)a.rows * (size_t)a.cols;
+  size_t b_elems = (size_t)b.rows * (size_t)b.cols;
+  int64_t max_elems = (int64_t)(a_elems > b_elems ? a_elems : b_elems);
+  if (!_vira_tls_gpu_fallback &&
+      (max_elems >= 16384LL || _vira_gpu_is_ptr_dirty(a.data) ||
+       _vira_gpu_is_ptr_dirty(b.data)) &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_add(opt_arena, a, b);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+  _vira_gpu_sync_host(a.data);
+  _vira_gpu_sync_host(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
     vira_tensor_f32 out =
@@ -3090,6 +3193,8 @@ static inline vira_tensor_f32
 vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   _vira_tensor_norm_shape(&a);
   _vira_tensor_norm_shape(&b);
+  _vira_gpu_sync_host(a.data);
+  _vira_gpu_sync_host(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
     vira_tensor_f32 out =
@@ -3135,10 +3240,19 @@ vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
 static inline vira_tensor_f32
 vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   _vira_tensor_norm_shape(&t);
+  int32_t total = t.rows * t.cols;
+  if (!_vira_tls_gpu_fallback &&
+      (total >= 16384 || _vira_gpu_is_ptr_dirty(t.data)) &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_scale(opt_arena, t, scale);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+  _vira_gpu_sync_host(t.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
-  int32_t total = t.rows * t.cols;
   int32_t i = 0;
 
 #if defined(__AVX2__)
@@ -3166,9 +3280,6 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   return out;
 }
 
-static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr);
-static inline void vira_gpu_shutdown(void);
-
 /**
  * Releases tensor backing memory and evicts its address from the GPU weight cache.
  * @param t Pointer to tensor struct.
@@ -3195,9 +3306,11 @@ static inline vira_tensor_f32 vira_tensor_f32_clone(vira_tensor_f32 t) {
     return (vira_tensor_f32){0};
   }
   _vira_tensor_norm_shape(&t);
+  _vira_gpu_sync_host(t.data);
   vira_tensor_f32 copy = vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
   size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
   memcpy(copy.data, t.data, bytes);
+  _vira_gpu_clone_quant(copy.data, t.data);
   return copy;
 }
 
@@ -4837,6 +4950,7 @@ static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t,
     return (Result_bool){.is_err = true, .err = err, .val = false};
   }
 
+  _vira_gpu_sync_host(t.data);
   size_t total = (size_t)t.rows * (size_t)t.cols;
   size_t written = fwrite(t.data, sizeof(vira_f32), total, f);
   fclose(f);
@@ -6176,6 +6290,8 @@ vira_tensor_matmul_grad_b(vira_tensor_f32 a, vira_tensor_f32 grad_out) {
 static inline vira_tensor_f32
 vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
   _vira_tensor_norm_shape(&input);
+  _vira_gpu_sync_host(input.data);
+  _vira_gpu_sync_host(grad_out.data);
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(input.n_dims, input.dims);
   int total = input.rows * input.cols;
   int i = 0;
@@ -6208,6 +6324,8 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
                                         vira_tensor_f32 grad, float lr) {
   if (!param || !param->data || !grad.data)
     return;
+  _vira_gpu_sync_host(param->data);
+  _vira_gpu_sync_host(grad.data);
   int total = param->rows * param->cols;
   int i = 0;
 
@@ -6853,18 +6971,24 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
  * Usage: Pre- and post-attention layer normalization in modern LLMs (Llama, Qwen, Mistral).
  */
 static inline vira_tensor_f32
-vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
+vira_tensor_rmsnorm(vira_arena *opt_arena, vira_tensor_f32 x,
+                    vira_tensor_f32 weight, float eps) {
   _vira_tensor_norm_shape(&x);
   _vira_tensor_norm_shape(&weight);
   if (!_vira_tls_gpu_fallback &&
-      (int64_t)x.rows * (int64_t)x.cols >= 16384LL &&
+      ((int64_t)x.rows * (int64_t)x.cols >= 16384LL ||
+       _vira_gpu_is_ptr_dirty(x.data) || _vira_gpu_is_ptr_dirty(weight.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
-    vira_tensor_f32 gpu_out = vira_gpu_rmsnorm(x, weight, eps);
+    vira_tensor_f32 gpu_out = vira_gpu_rmsnorm(opt_arena, x, weight, eps);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
+  _vira_gpu_sync_host(x.data);
+  _vira_gpu_sync_host(weight.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
+                : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t r = 0; r < x.rows; ++r) {
     float *x_row = &x.data[r * x.cols];
     float *out_row = &out.data[r * x.cols];
@@ -6923,18 +7047,23 @@ vira_tensor_rmsnorm(vira_tensor_f32 x, vira_tensor_f32 weight, float eps) {
  * @return Rotated tensor with position encodings applied.
  * Usage: Position encoding in modern Transformer self-attention blocks.
  */
-static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
+static inline vira_tensor_f32 vira_tensor_rope(vira_arena *opt_arena,
+                                               vira_tensor_f32 q, int64_t pos,
                                                float freq_base) {
   _vira_tensor_norm_shape(&q);
   if (!_vira_tls_gpu_fallback && (q.cols & 1) == 0 &&
-      (int64_t)q.rows * (int64_t)q.cols >= 16384LL &&
+      ((int64_t)q.rows * (int64_t)q.cols >= 16384LL ||
+       _vira_gpu_is_ptr_dirty(q.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
-    vira_tensor_f32 gpu_out = vira_gpu_rope(q, pos, freq_base);
+    vira_tensor_f32 gpu_out = vira_gpu_rope(opt_arena, q, pos, freq_base);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
+  _vira_gpu_sync_host(q.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, q.n_dims, q.dims)
+                : vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
   int32_t half_dim = q.cols / 2;
   float cos_stack[256];
   float sin_stack[256];
@@ -6977,17 +7106,22 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_tensor_f32 q, int64_t pos,
  * @return Activated tensor.
  * Usage: MLP feed-forward gate activation in Llama/Qwen architectures.
  */
-static inline vira_tensor_f32 vira_tensor_silu(vira_tensor_f32 x) {
+static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
+                                               vira_tensor_f32 x) {
   _vira_tensor_norm_shape(&x);
   int32_t total = x.rows * x.cols;
-  if (!_vira_tls_gpu_fallback && total >= 16384 &&
+  if (!_vira_tls_gpu_fallback &&
+      (total >= 16384 || _vira_gpu_is_ptr_dirty(x.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
-    vira_tensor_f32 gpu_out = vira_gpu_silu(x);
+    vira_tensor_f32 gpu_out = vira_gpu_silu(opt_arena, x);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
+  _vira_gpu_sync_host(x.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
+                : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t i = 0; i < total; ++i) {
     float v = x.data[i];
     out.data[i] = v / (1.0f + expf(-v));
@@ -7037,18 +7171,37 @@ static inline void _vira_vec_mul_f32(vira_f32 *dst, const vira_f32 *pa,
  * @return Elementwise product tensor.
  * Usage: Fused gate-up projection multiplication in SwiGLU MLP blocks.
  */
-static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
-                                                       vira_tensor_f32 b) {
+static inline vira_tensor_f32
+vira_tensor_elemwise_mul(vira_arena *opt_arena, vira_tensor_f32 a,
+                         vira_tensor_f32 b) {
   _vira_tensor_norm_shape(&a);
   _vira_tensor_norm_shape(&b);
+  int64_t elems_a = (int64_t)a.rows * (int64_t)a.cols;
+  int64_t elems_b = (int64_t)b.rows * (int64_t)b.cols;
+  int64_t max_elems = (elems_a > elems_b) ? elems_a : elems_b;
+  if (!_vira_tls_gpu_fallback &&
+      (max_elems >= 16384LL || _vira_gpu_is_ptr_dirty(a.data) ||
+       _vira_gpu_is_ptr_dirty(b.data)) &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_elemwise_mul(opt_arena, a, b);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+  _vira_gpu_sync_host(a.data);
+  _vira_gpu_sync_host(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
-    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
+                  : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
     _vira_vec_mul_f32(out.data, a.data, b.data, a.rows * a.cols);
     return out;
   }
   if (b.rows == 1 && b.cols == a.cols) {
-    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(a.n_dims, a.dims);
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, a.n_dims, a.dims)
+                  : vira_tensor_f32_alloc_nd(a.n_dims, a.dims);
     for (int32_t r = 0; r < a.rows; r++) {
       _vira_vec_mul_f32(&out.data[(size_t)r * (size_t)a.cols],
                         &a.data[(size_t)r * (size_t)a.cols], b.data, a.cols);
@@ -7056,7 +7209,9 @@ static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
     return out;
   }
   if (a.rows == 1 && a.cols == b.cols) {
-    vira_tensor_f32 out = vira_tensor_f32_alloc_nd(b.n_dims, b.dims);
+    vira_tensor_f32 out =
+        opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, b.n_dims, b.dims)
+                  : vira_tensor_f32_alloc_nd(b.n_dims, b.dims);
     for (int32_t r = 0; r < b.rows; r++) {
       _vira_vec_mul_f32(&out.data[(size_t)r * (size_t)b.cols], a.data,
                         &b.data[(size_t)r * (size_t)b.cols], b.cols);
@@ -7075,17 +7230,23 @@ static inline vira_tensor_f32 vira_tensor_elemwise_mul(vira_tensor_f32 a,
  * @return Softmax probability distribution tensor summing to 1.0 along the trailing dimension.
  * Usage: Attention score normalization and next-token generation probability calculation.
  */
-static inline vira_tensor_f32 vira_tensor_softmax(vira_tensor_f32 logits) {
+static inline vira_tensor_f32 vira_tensor_softmax(vira_arena *opt_arena,
+                                                  vira_tensor_f32 logits) {
   _vira_tensor_norm_shape(&logits);
   if (!_vira_tls_gpu_fallback &&
-      (int64_t)logits.rows * (int64_t)logits.cols >= 16384LL &&
+      ((int64_t)logits.rows * (int64_t)logits.cols >= 16384LL ||
+       _vira_gpu_is_ptr_dirty(logits.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
     _vira_tls_gpu_fallback = true;
-    vira_tensor_f32 gpu_out = vira_gpu_softmax(logits);
+    vira_tensor_f32 gpu_out = vira_gpu_softmax(opt_arena, logits);
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  vira_tensor_f32 out = vira_tensor_f32_alloc_nd(logits.n_dims, logits.dims);
+  _vira_gpu_sync_host(logits.data);
+  vira_tensor_f32 out =
+      opt_arena
+          ? vira_tensor_f32_arena_alloc_nd(opt_arena, logits.n_dims, logits.dims)
+          : vira_tensor_f32_alloc_nd(logits.n_dims, logits.dims);
   for (int32_t r = 0; r < logits.rows; ++r) {
     float *in_row = &logits.data[r * logits.cols];
     float *out_row = &out.data[r * logits.cols];
@@ -7119,11 +7280,17 @@ static inline vira_tensor_f32 vira_tensor_softmax(vira_tensor_f32 logits) {
  */
 static inline int64_t vira_sample_token(vira_tensor_f32 logits,
                                         float temperature) {
+  _vira_tensor_norm_shape(&logits);
   int32_t total = logits.rows * logits.cols;
   if (total == 0)
     return 0;
 
   if (temperature <= 0.05f) {
+    int64_t gpu_idx = _vira_gpu_argmax_f32(logits);
+    if (gpu_idx >= 0) {
+      return gpu_idx;
+    }
+    _vira_gpu_sync_host(logits.data);
     int64_t best_idx = 0;
     float best_val = logits.data[0];
     for (int32_t i = 1; i < total; ++i) {
@@ -7135,12 +7302,10 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
     return best_idx;
   }
 
-  vira_tensor_f32 scaled = vira_tensor_f32_alloc(logits.rows, logits.cols);
-  for (int32_t i = 0; i < total; ++i) {
-    scaled.data[i] = logits.data[i] / temperature;
-  }
-  vira_tensor_f32 probs = vira_tensor_softmax(scaled);
+  vira_tensor_f32 scaled = vira_tensor_scale(NULL, logits, 1.0f / temperature);
+  vira_tensor_f32 probs = vira_tensor_softmax(NULL, scaled);
   vira_tensor_f32_free(&scaled);
+  _vira_gpu_sync_host(probs.data);
 
   float r = (float)rand() / (float)RAND_MAX;
   float cdf = 0.0f;
@@ -7158,20 +7323,26 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
 
 /**
  * Retrieves a token embedding row vector from an embedding weight table matrix.
+ * @param opt_arena Optional memory arena for output allocation.
  * @param table Embedding table tensor of shape (vocab_size, hidden_dim).
  * @param token_id Integer token vocabulary identifier.
  * @return 1D row tensor containing token embedding.
  * Usage: Initial token embedding lookup in language model inference.
  */
-static inline vira_tensor_f32 vira_tensor_embedding(vira_tensor_f32 table,
+static inline vira_tensor_f32 vira_tensor_embedding(vira_arena *opt_arena,
+                                                    vira_tensor_f32 table,
                                                     int64_t token_id) {
+  _vira_tensor_norm_shape(&table);
   if (token_id < 0 || token_id >= table.rows) {
     fprintf(stderr,
             "vira tensor error: embedding index %lld out of range [0, %d)\n",
             (long long)token_id, table.rows);
     exit(1);
   }
-  vira_tensor_f32 out = vira_tensor_f32_alloc(1, table.cols);
+  _vira_gpu_sync_host(table.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, 1, table.cols)
+                : vira_tensor_f32_alloc(1, table.cols);
   memcpy(out.data, &table.data[token_id * table.cols],
          (size_t)table.cols * sizeof(float));
   return out;

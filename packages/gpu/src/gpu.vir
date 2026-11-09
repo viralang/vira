@@ -116,3 +116,7 @@ pub fn silu(x tensor[f32]) tensor[f32] {
 	return gpu_silu(x)
 }
 
+pub fn gqa_attention(q_heads tensor[f32], k_cache tensor[f32], v_cache tensor[f32], kv_pos i64, scale f32) tensor[f32] {
+	return gpu_gqa_attention(q_heads, k_cache, v_cache, kv_pos, scale)
+}
+
