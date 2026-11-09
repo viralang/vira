@@ -52,8 +52,9 @@
 6. [Complete End-to-End Production Program](#6-complete-end-to-end-production-program)
 7. [VS Code Extension & LSP Integration](#7-vs-code-extension--lsp-integration)
 8. [Cross-Platform Release Packager](#8-cross-platform-release-packager)
-9. [Roadmap & Contributing](#9-roadmap--contributing)
-10. [License](#10-license)
+9. [Troubleshooting (Linux, Google Colab & GPU Setup)](#9-troubleshooting-linux-google-colab--gpu-setup)
+10. [Roadmap & Contributing](#10-roadmap--contributing)
+11. [License](#11-license)
 
 ---
 
@@ -175,6 +176,8 @@ vira <command> [flags] [arguments]
 - `-keep-c`: Preserves intermediate generated `.c` files in `build/` for auditing.
 - `-o <filename>`: Specifies the destination path for the compiled binary (passing `-o app.exe` or `-o lib.dll` automatically infers `-target windows`).
 - `-cc <compiler>`: Overrides the backend C compiler (`gcc`, `clang`, `cc`, `tcc`, `x86_64-w64-mingw32-gcc`).
+- `-gpu-backend <backend>` (`--gpu-backend`): Selects the GPU compute backend for `run` and `test` (`cuda`, `opencl`, `cpu`, `auto`; overrides `VIRA_GPU_BACKEND`).
+- `-gpu-device <filter>` (`--gpu-device`): Selects a GPU by zero-based index (`0`, `1`) or case-insensitive name substring (`T4`, `RTX`, `Intel`; overrides `VIRA_GPU_DEVICE`).
 
 ### Cross-Compiling to Windows from Linux or macOS
 
@@ -1058,7 +1061,104 @@ Generates compressed artifacts in `dist/`:
 
 ---
 
-## 9. Roadmap & Contributing
+## 9. Troubleshooting (Linux, Google Colab & GPU Setup)
+
+### GPU & Build Environment Variables
+
+| Variable | Values / Example | Purpose |
+| :--- | :--- | :--- |
+| `VIRA_GPU_BACKEND` | `auto` (default), `cuda`, `opencl`, `cpu` | Forces or prioritizes the compute backend (`CUDA -> OpenCL -> CPU-SIMD` when `auto`). |
+| `VIRA_GPU_DEVICE` | `"0"`, `"T4"`, `"RTX"`, `"Intel"` | Filters available GPUs by zero-based index or case-insensitive device name substring. |
+| `VIRA_CUDA_LIB` | `/usr/lib64-nvidia/libcuda.so.1` | Explicit shared-library path for `nvcuda.dll` / `libcuda.so.1` if outside the default loader path. |
+| `VIRA_OPENCL_LIB` | `/usr/lib/x86_64-linux-gnu/libOpenCL.so.1` | Explicit shared-library path for `OpenCL.dll` / `libOpenCL.so.1`. |
+| `VIRA_GPU_DEBUG` | `1` | Prints backend discovery, architecture (`sm_XX` / Tensor Cores), VRAM budget, and warp/tile telemetry to `stderr`. |
+| `VIRA_NO_RAYLIB` | `1` | Skips linking `libraylib.a` and `-lGL` when compiling CLI or GPU compute programs on headless Linux servers. |
+
+---
+
+### 1. Linker Error on Linux / Google Colab: `cannot find -lGL` (or `-lX11`)
+
+```text
+/usr/bin/ld: cannot find -lGL: No such file or directory
+collect2: error: ld returned 1 exit status
+C backend (gcc) failed: exit status 1
+```
+
+**Why it happens:** [`install.sh`](scripts/install.sh) installs Raylib (`~/.vir/lib/libraylib.a`), and skips running `apt-get install libx11-dev libgl1-mesa-dev` if `gcc` is already present on the machine. On headless Linux images (including Google Colab), Vira passes `-lX11` and `-lGL` when `libraylib.a` is found.
+
+- **Instant fix for CLI & GPU programs** (no `apt-get` needed when X11 dev libs are already present):
+  ```bash
+  VIRA_NO_RAYLIB=1 VIRA_GPU_DEBUG=1 ~/.vir/bin/vira run --gpu-backend cuda 44_gpu.vir
+  ```
+- **Permanent fix** (enables both CLI/GPU programs and Raylib GUI builds):
+  ```bash
+  sudo apt-get update -qq && sudo apt-get install -y libx11-dev libgl1-mesa-dev
+  # On root-only containers such as Google Colab, omit `sudo`:
+  apt-get update -qq && apt-get install -y libx11-dev libgl1-mesa-dev
+  ```
+
+---
+
+### 2. Running CUDA & Tensor Core Examples in Google Colab
+
+Select a **GPU runtime** (e.g., **T4**, **L4**, or **A100**) in Colab, then run:
+
+```bash
+# 1. Install Vira (v0.7.5+) and OpenGL/X11 headers
+curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/scripts/install.sh | bash
+apt-get update -qq && apt-get install -y libx11-dev libgl1-mesa-dev
+
+# 2. Verify toolchain version and NVIDIA GPU visibility
+~/.vir/bin/vira version
+nvidia-smi
+
+# 3. Download raw examples/tests cleanly (avoids broken line-1 comments from copy/paste)
+curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/docs/examples/44_gpu_compute_acceleration.vir -o 44_gpu.vir
+curl -fsSL https://raw.githubusercontent.com/viralang/vira/main/packages/gpu/tests/gpu_test.vir -o gpu_test.vir
+
+# 4. Execute against the CUDA Driver API backend with telemetry enabled
+VIRA_GPU_DEBUG=1 ~/.vir/bin/vira run --gpu-backend cuda 44_gpu.vir
+VIRA_GPU_DEBUG=1 ~/.vir/bin/vira test --gpu-backend cuda gpu_test.vir
+```
+
+> [!NOTE]
+> If copying `.vir` snippets manually gives `error[SYNTAX]: unexpected top-level token ==` on line 1 (`====...`), the leading `//` comment slashes were stripped from the banner header. Download the file directly with `curl -fsSL` or restore `//` on lines 1–10.
+
+---
+
+### 3. `--gpu-backend cuda` Falls Back to `CPU-SIMD` Even Though `nvidia-smi` Works
+
+Because Vira dynamically loads the CUDA Driver API at runtime (`dlopen("libcuda.so.1")` on Linux, `LoadLibraryA("nvcuda.dll")` on Windows) without requiring the CUDA SDK at compile time, some container setups (including certain Colab images) place `libcuda.so.1` in `/usr/lib64-nvidia` outside the default dynamic linker search path.
+
+Locate `libcuda.so.1` and point `VIRA_CUDA_LIB` directly to it:
+
+```bash
+find /usr -name "libcuda.so.1" 2>/dev/null
+# Example using Colab's driver location:
+VIRA_CUDA_LIB=/usr/lib64-nvidia/libcuda.so.1 VIRA_GPU_DEBUG=1 ~/.vir/bin/vira run --gpu-backend cuda 44_gpu.vir
+```
+
+When initialized cleanly on a Turing+ GPU (such as a Tesla T4), `VIRA_GPU_DEBUG=1` prints:
+
+```text
+vira gpu: [CUDA Driver API] Tesla T4 (sm_75 + Tensor Cores) | ...
+```
+
+---
+
+### 4. Testing Without a Physical NVIDIA GPU (CUDA Toolkit Only)
+
+Installing the NVIDIA **CUDA Toolkit** (`nvcc`, `ptxas`, `cuobjdump`) without an NVIDIA GPU/display driver does **not** install `nvcuda.dll` / `libcuda.so.1` and does **not** include a CPU software CUDA emulator (NVIDIA removed `-deviceemu` in CUDA 3.x).
+
+- **Runtime fallback:** On systems without NVIDIA hardware (e.g., Intel/AMD OpenCL GPUs or CPU-only machines), Vira gracefully falls back along `CUDA -> OpenCL -> CPU-SIMD` in default `auto` mode, or falls back safely to `CPU-SIMD` (AVX2+FMA / NEON) with `active_leaks=0` when `--gpu-backend cuda` is explicitly requested.
+- **What you CAN verify locally with the CUDA Toolkit alone:**
+  - Verify algorithm & cache/OOM behavior locally via OpenCL + CPU-SIMD (`vira test packages/gpu/tests/gpu_test.vir`).
+  - Extract and compile the embedded PTX kernels in [`runtime/vira_cuda_ptx.h`](runtime/vira_cuda_ptx.h) using NVIDIA's `ptxas` (`ptxas -v -arch=sm_75` through `sm_120`) and inspect generated Tensor Core `HMMA` instructions and zero register spilling with `cuobjdump -sass`.
+- **Live kernel execution:** Use a cloud GPU environment (e.g., Google Colab T4 as shown above) to verify live `nvcuda.dll` / `libcuda.so.1` kernel launches and Tensor Core (`HMMA`) telemetry end-to-end.
+
+---
+
+## 10. Roadmap & Contributing
 
 Vira has completed **v0.7 (Native C & Python FFI and Shared Library Export)**. See [`ROADMAP.md`](ROADMAP.md) for full milestone details and future frontiers:
 - **v0.8 (Next Milestone):** Cross-Platform GPU Compute Acceleration (Vulkan / Direct3D 12 / Metal compute kernels, unified DMA, supervisor-managed GPU OOM fallback)
@@ -1071,6 +1171,6 @@ For language maintainers, compiler contributors, and runtime engineers, see the 
 
 ---
 
-## 10. License
+## 11. License
 
 The Vira Programming Language compiler, runtime, and documentation are licensed under the **MIT License**. See [`LICENSE`](LICENSE.txt) for details.
