@@ -413,6 +413,7 @@ fn qwen2_forward_step(
     l_w_down []tensor[f32],
     out_norm tensor[f32],
     out_weight tensor[f32],
+    has_tied_out bool,
     mut k_caches []tensor[f32],
     mut v_caches []tensor[f32],
     compute_logits bool
@@ -423,42 +424,50 @@ fn qwen2_forward_step(
 
     mut x := tensor_embedding(tok_emb, token_id)
 
-    mut l := 0
-    for l < meta.n_layers {
+    mut l_base := 0
+    for l_base < meta.n_layers {
         arena {
-            xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+            mut l_end := l_base + 6
+            if l_end > meta.n_layers {
+                l_end = meta.n_layers
+            }
+            mut l := l_base
+            for l < l_end {
+                xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
 
-            // Qwen 2.5 QKV linear projections + QKV biases
-            q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
-            k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
-            v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+                // Qwen 2.5 QKV linear projections + QKV biases
+                q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+                k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+                v := xn.gpu_linear(l_wv[l]) + l_bv[l]
 
-            // Reshape into heads BEFORE applying per-head NeoX split-half RoPE
-            q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
-            k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
-            k_flat := k_heads.reshape_2d(1, kv_dim)
+                // Reshape into heads BEFORE applying per-head NeoX split-half RoPE
+                q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
+                k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
+                k_flat := k_heads.reshape_2d(1, kv_dim)
 
-            // Store K and V in persistent layer KV cache at row `pos` (GPU D2D when dirty)
-            k_caches[l].copy_row(pos, k_flat)
-            v_caches[l].copy_row(pos, v)
+                // Store K and V in persistent layer KV cache at row `pos` (GPU D2D when dirty)
+                k_caches[l].copy_row(pos, k_flat)
+                v_caches[l].copy_row(pos, v)
 
-            // Fused GPU FlashDecoding Grouped-Query Attention (stays resident in VRAM!)
-            attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
+                // Fused GPU FlashDecoding Grouped-Query Attention (stays resident in VRAM!)
+                attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
 
-            attn_flat := attn_out.reshape_2d(1, meta.dim)
-            attn_proj := attn_flat.gpu_linear(l_wo[l])
-            x2 := x + attn_proj
+                attn_flat := attn_out.reshape_2d(1, meta.dim)
+                attn_proj := attn_flat.gpu_linear(l_wo[l])
+                x2 := x + attn_proj
 
-            // Post-attention RMSNorm + SwiGLU FFN
-            x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
-            gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
-            up := x2n.gpu_linear(l_w_up[l])
-            ffn_hidden := tensor_elemwise_mul(gate, up)
-            down := ffn_hidden.gpu_linear(l_w_down[l])
-            x_next := x2 + down
-            x.copy_row(0, x_next)
+                // Post-attention RMSNorm + SwiGLU FFN
+                x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
+                gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
+                up := x2n.gpu_linear(l_w_up[l])
+                ffn_hidden := tensor_elemwise_mul(gate, up)
+                down := ffn_hidden.gpu_linear(l_w_down[l])
+                x_next := x2 + down
+                x.copy_row(0, x_next)
+                l += 1
+            }
         }
-        l += 1
+        l_base += 6
     }
 
     if !compute_logits {
@@ -466,8 +475,119 @@ fn qwen2_forward_step(
     }
 
     xf := tensor_rmsnorm(x, out_norm, meta.rms_eps)
+    if has_tied_out {
+        return xf.gpu_linear(tok_emb)
+    }
     logits := xf.gpu_linear(out_weight)
     return logits
+}
+
+// ============================================================================
+// Batched Qwen 2.5 (`qwen2`) Prompt Prefill Forward Pass (Chunked at 512 Tokens)
+// ============================================================================
+// Processes `tokens` `[M, dim]` in a single batched pipeline per chunk using
+// Quantized WMMA / Tiled GEMM, batched NeoX RoPE (`gpu_rope_seq`), async D2D
+// KV-cache scatter (`copy_rows`), and causal GQA FlashAttention (`gpu_gqa_prefill`),
+// running the 151,936-vocab LM head only once on the final prompt row.
+fn qwen2_forward_prefill(
+    tokens []int,
+    start_pos int,
+    meta Qwen2Metadata,
+    tok_emb tensor[f32],
+    l_an []tensor[f32],
+    l_wq []tensor[f32],
+    l_bq []tensor[f32],
+    l_wk []tensor[f32],
+    l_bk []tensor[f32],
+    l_wv []tensor[f32],
+    l_bv []tensor[f32],
+    l_wo []tensor[f32],
+    l_fn []tensor[f32],
+    l_w_gate []tensor[f32],
+    l_w_up []tensor[f32],
+    l_w_down []tensor[f32],
+    out_norm tensor[f32],
+    out_weight tensor[f32],
+    has_tied_out bool,
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32],
+    compute_logits bool
+) tensor[f32] {
+    if tokens.len <= 0 {
+        return tensor_fill(1, 1, 0.0)
+    }
+    head_dim := meta.dim / meta.n_heads
+    kv_dim := meta.n_kv_heads * head_dim
+    scale := f32(1.0 / math.sqrt(f64(head_dim)))
+    chunk_limit := 512
+
+    mut c_start := 0
+    for c_start < tokens.len {
+        mut c_end := c_start + chunk_limit
+        if c_end > tokens.len {
+            c_end = tokens.len
+        }
+        chunk_tokens := tokens.slice(c_start, c_end)
+        m := chunk_tokens.len
+        cur_pos := start_pos + c_start
+
+        mut x := tensor_embedding_batch(tok_emb, chunk_tokens)
+
+        mut l_base := 0
+        for l_base < meta.n_layers {
+            arena {
+                mut l_end := l_base + 6
+                if l_end > meta.n_layers {
+                    l_end = meta.n_layers
+                }
+                mut l := l_base
+                for l < l_end {
+                    xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+
+                    q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+                    k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+                    v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+
+                    q_heads := gpu_rope_seq(q_lin.reshape_2d(m * meta.n_heads, head_dim), i64(cur_pos), meta.n_heads, meta.rope_base)
+                    k_heads := gpu_rope_seq(k_lin.reshape_2d(m * meta.n_kv_heads, head_dim), i64(cur_pos), meta.n_kv_heads, meta.rope_base)
+                    k_flat := k_heads.reshape_2d(m, kv_dim)
+
+                    k_caches[l].copy_rows(cur_pos, k_flat)
+                    v_caches[l].copy_rows(cur_pos, v)
+
+                    attn_out := gpu_gqa_prefill(q_heads, k_caches[l], v_caches[l], i64(cur_pos), m, meta.n_heads, scale)
+                    attn_flat := attn_out.reshape_2d(m, meta.dim)
+                    attn_proj := attn_flat.gpu_linear(l_wo[l])
+                    x2 := x + attn_proj
+
+                    x2n := gpu_rmsnorm(x2, l_fn[l], meta.rms_eps)
+                    gate := gpu_silu(x2n.gpu_linear(l_w_gate[l]))
+                    up := x2n.gpu_linear(l_w_up[l])
+                    ffn_hidden := tensor_elemwise_mul(gate, up)
+                    down := ffn_hidden.gpu_linear(l_w_down[l])
+                    x_next := x2 + down
+                    x.copy_rows(0, x_next)
+                    l += 1
+                }
+            }
+            l_base += 6
+        }
+
+        if compute_logits && c_end == tokens.len {
+            x_last := x.slice_rows(m - 1, m)
+            xf := gpu_rmsnorm(x_last, out_norm, meta.rms_eps)
+            if has_tied_out {
+                tied_logits := xf.gpu_linear(tok_emb)
+                return tied_logits
+            }
+            logits := xf.gpu_linear(out_weight)
+            return logits
+        }
+
+        c_start = c_end
+    }
+
+    return tensor_fill(1, 1, 0.0)
 }
 
 fn generate_reply(
@@ -496,6 +616,7 @@ fn generate_reply(
     l_w_down []tensor[f32],
     out_norm tensor[f32],
     out_weight tensor[f32],
+    has_tied_out bool,
     mut k_caches []tensor[f32],
     mut v_caches []tensor[f32]
 ) int {
@@ -520,27 +641,47 @@ fn generate_reply(
 
     print('Qwen2.5  > ')
 
-    // 1. Prefill all ChatML prompt tokens (only compute 151,936-vocab logits on the final prompt token)
-    mut idx := 0
-    for idx < turn_tokens.len {
-        if kv_pos >= max_context - 1 {
-            break
-        }
-        tid := turn_tokens[idx]
-        is_last := idx == (turn_tokens.len - 1)
+    // 1. Batched prefill for all ChatML prompt tokens (only computes 151,936-vocab logits on the final prompt token)
+    mut max_take := (max_context - 1) - kv_pos
+    if max_take < 0 {
+        max_take = 0
+    }
+    mut prefill_n := turn_tokens.len
+    if prefill_n > max_take {
+        prefill_n = max_take
+    }
+    if prefill_n == 1 {
         logits := qwen2_forward_step(
-            tid, kv_pos, meta, tok_emb,
+            turn_tokens[0], kv_pos, meta, tok_emb,
             l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
-            mut k_caches, mut v_caches, is_last
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
         )
-        if is_last {
+        next_token = int(sample_token(logits, temperature))
+        kv_pos += 1
+    } else if prefill_n > 1 {
+        if prefill_n == turn_tokens.len {
+            logits := qwen2_forward_prefill(
+                turn_tokens, kv_pos, meta, tok_emb,
+                l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                mut k_caches, mut v_caches, true
+            )
+            next_token = int(sample_token(logits, temperature))
+        } else {
+            prompt_sub := turn_tokens.slice(0, prefill_n)
+            logits := qwen2_forward_prefill(
+                prompt_sub, kv_pos, meta, tok_emb,
+                l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                mut k_caches, mut v_caches, true
+            )
             next_token = int(sample_token(logits, temperature))
         }
-        kv_pos += 1
-        idx += 1
+        kv_pos += prefill_n
     }
 
+    gpu.sync()
     prefill_ms := time.now_ms() - t0
 
     // 2. Autoregressive token generation loop with real-time streaming output
@@ -560,7 +701,7 @@ fn generate_reply(
         logits := qwen2_forward_step(
             next_token, kv_pos, meta, tok_emb,
             l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
             mut k_caches, mut v_caches, true
         )
         next_token = int(sample_token(logits, temperature))
@@ -568,25 +709,26 @@ fn generate_reply(
         gen_steps += 1
     }
 
+    gpu.sync()
+    gen_ms := time.now_ms() - t_gen0
+
     // Feed the closing `<|im_end|>\n` into the KV cache so multi-turn history stays valid ChatML
     if kv_pos + 2 < max_context {
         _ := qwen2_forward_step(
             meta.im_end_id, kv_pos, meta, tok_emb,
             l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
             mut k_caches, mut v_caches, false
         )
         kv_pos += 1
         _ := qwen2_forward_step(
             meta.newline_id, kv_pos, meta, tok_emb,
             l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
             mut k_caches, mut v_caches, false
         )
         kv_pos += 1
     }
-
-    gen_ms := time.now_ms() - t_gen0
     mut safe_gen_ms := gen_ms
     if safe_gen_ms <= 0 {
         safe_gen_ms = 1
@@ -602,6 +744,113 @@ fn generate_reply(
     return kv_pos
 }
 
+fn run_benchmark(
+    bench_p int,
+    bench_n int,
+    max_context int,
+    meta Qwen2Metadata,
+    vocab_len int,
+    tok_emb tensor[f32],
+    l_an []tensor[f32],
+    l_wq []tensor[f32],
+    l_bq []tensor[f32],
+    l_wk []tensor[f32],
+    l_bk []tensor[f32],
+    l_wv []tensor[f32],
+    l_bv []tensor[f32],
+    l_wo []tensor[f32],
+    l_fn []tensor[f32],
+    l_w_gate []tensor[f32],
+    l_w_up []tensor[f32],
+    l_w_down []tensor[f32],
+    out_norm tensor[f32],
+    out_weight tensor[f32],
+    has_tied_out bool,
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32]
+) {
+    mut p_len := bench_p
+    if p_len <= 0 {
+        p_len = 1
+    }
+    if p_len >= max_context - 1 {
+        p_len = max_context - 2
+    }
+    mut prompt_tokens := []int{}
+    mut mod_vocab := vocab_len
+    if mod_vocab <= 0 {
+        mod_vocab = 1000
+    }
+    mut i := 0
+    for i < p_len {
+        prompt_tokens.push((1000 + i * 7) % mod_vocab)
+        i += 1
+    }
+
+    gpu.sync()
+    t_pp0 := time.now_ms()
+    mut kv_pos := 0
+    mut next_token := meta.bos_id
+    if prompt_tokens.len == 1 {
+        logits := qwen2_forward_step(
+            prompt_tokens[0], kv_pos, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        next_token = int(sample_token(logits, f32(0.0)))
+        kv_pos += 1
+    } else if prompt_tokens.len > 1 {
+        logits := qwen2_forward_prefill(
+            prompt_tokens, kv_pos, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        next_token = int(sample_token(logits, f32(0.0)))
+        kv_pos += prompt_tokens.len
+    }
+    gpu.sync()
+    mut pp_ms := time.now_ms() - t_pp0
+    if pp_ms <= 0 {
+        pp_ms = 1
+    }
+    pp_tps := (i64(prompt_tokens.len) * i64(1000)) / pp_ms
+
+    mut t_tg_steps := 0
+    mut tg_ms := i64(0)
+    if bench_n > 0 {
+        t_tg0 := time.now_ms()
+        for t_tg_steps < bench_n {
+            if kv_pos >= max_context - 1 {
+                break
+            }
+            logits := qwen2_forward_step(
+                next_token, kv_pos, meta, tok_emb,
+                l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                mut k_caches, mut v_caches, true
+            )
+            next_token = int(sample_token(logits, f32(0.0)))
+            kv_pos += 1
+            t_tg_steps += 1
+        }
+        gpu.sync()
+        tg_ms = time.now_ms() - t_tg0
+    }
+    mut safe_tg_ms := tg_ms
+    if safe_tg_ms <= 0 {
+        safe_tg_ms = 1
+    }
+    tg_tps := (i64(t_tg_steps) * i64(1000)) / safe_tg_ms
+    mut compute_tag := 'CPU (SIMD)'
+    if gpu.is_enabled() && gpu.is_available() {
+        cached_kb := gpu.allocated_kb()
+        compute_tag = 'GPU (${gpu.backend_name()}, cached=${cached_kb}KB)'
+    }
+    println('[bench | compute=${compute_tag} | pp${prompt_tokens.len}: ${pp_ms} ms (${pp_tps} tok/s) | tg${t_tg_steps}: ${tg_ms} ms (${tg_tps} tok/s) | kv_pos=${kv_pos}]')
+}
+
 fn main() {
     os.set_quiet_rt(true)
 
@@ -614,6 +863,8 @@ fn main() {
     mut max_context := 512
     mut interactive := false
     mut use_gpu := false
+    mut bench_p := 0
+    mut bench_n := 0
 
     cli_args := os.args()
     mut a_idx := 1
@@ -634,6 +885,8 @@ fn main() {
             println('  -t, --temp <float>           Sampling temperature (0.0 = greedy argmax)')
             println('  -n, --max-tokens <int>       Maximum new tokens to generate (default: 96)')
             println('  -c, --ctx <int>              Maximum context window length (default: 512)')
+            println('  --bench-p <int>              Benchmark prefill length (tokens) without chat formatting')
+            println('  --bench-n <int>              Benchmark generation length (tokens) without stdout jitter')
             println('  -h, --help                   Display this help message and exit')
             return
         } else if arg == '-i' || arg == '--repl' || arg == '--interactive' {
@@ -669,6 +922,12 @@ fn main() {
         } else if (arg == '-n' || arg == '--steps' || arg == '--max-tokens') && a_idx + 1 < cli_args.len {
             max_new_tokens = cli_args[a_idx + 1].to_int() or { 64 }
             a_idx += 1
+        } else if arg == '--bench-p' && a_idx + 1 < cli_args.len {
+            bench_p = cli_args[a_idx + 1].to_int() or { 0 }
+            a_idx += 1
+        } else if arg == '--bench-n' && a_idx + 1 < cli_args.len {
+            bench_n = cli_args[a_idx + 1].to_int() or { 0 }
+            a_idx += 1
         } else if (arg == '-c' || arg == '--ctx' || arg == '--context') && a_idx + 1 < cli_args.len {
             max_context = cli_args[a_idx + 1].to_int() or { 512 }
             if max_context < 64 {
@@ -677,6 +936,9 @@ fn main() {
             a_idx += 1
         }
         a_idx += 1
+    }
+    if (bench_p > 0 || bench_n > 0) && (bench_p + bench_n + 8 > max_context) {
+        max_context = bench_p + bench_n + 8
     }
 
     println('========================================================================')
@@ -747,8 +1009,10 @@ fn main() {
 
     tok_emb := load_gguf_or_die(model_path, 'token_embd.weight')
     out_norm := load_gguf_or_die(model_path, 'output_norm.weight')
+    mut has_tied_out := false
     out_weight := gguf_load_tensor(model_path, 'output.weight') or {
-        tok_emb.clone()
+        has_tied_out = true
+        tensor_fill(1, 1, 0.0)
     }
 
     mut l_an := []tensor[f32]{}
@@ -819,14 +1083,21 @@ fn main() {
 
     mut kv_pos := 0
 
-    if custom_prompt.len > 0 {
+    if bench_p > 0 || bench_n > 0 {
+        run_benchmark(
+            bench_p, bench_n, max_context, meta, vocab.len, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches
+        )
+    } else if custom_prompt.len > 0 {
         println('User     > ${custom_prompt}')
         turn_tokens := encode_qwen2_chatml_turn(sys_prompt, custom_prompt, true, meta, gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket)
         kv_pos = generate_reply(
             turn_tokens, kv_pos, max_context, max_new_tokens, temperature, meta,
             vocab, gpt2_space, gpt2_newline, gpt2_tab, tok_emb,
             l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
             mut k_caches, mut v_caches
         )
     } else if interactive {
@@ -863,7 +1134,7 @@ fn main() {
                 turn_tokens, kv_pos, max_context, max_new_tokens, temperature, meta,
                 vocab, gpt2_space, gpt2_newline, gpt2_tab, tok_emb,
                 l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
                 mut k_caches, mut v_caches
             )
         }
@@ -883,7 +1154,7 @@ fn main() {
                 turn_tokens, kv_pos, max_context, max_new_tokens, temperature, meta,
                 vocab, gpt2_space, gpt2_newline, gpt2_tab, tok_emb,
                 l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
-                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight,
+                l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
                 mut k_caches, mut v_caches
             )
             p_idx += 1

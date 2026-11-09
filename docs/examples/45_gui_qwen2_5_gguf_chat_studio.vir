@@ -314,9 +314,9 @@ fn load_gguf_or_zeros(path string, name string, rows int, cols int) tensor[f32] 
 	return t
 }
 
-fn load_output_weight(path string, tok_emb tensor[f32]) tensor[f32] {
+fn load_output_weight(path string) tensor[f32] {
 	t := gguf_load_tensor(path, 'output.weight') or {
-		return tok_emb.clone()
+		return tensor_fill(1, 1, 0.0)
 	}
 	return t
 }
@@ -387,37 +387,45 @@ fn qwen2_forward_step(
 
 	mut x := tensor_embedding(tok_emb, token_id)
 
-	mut l := 0
-	for l < meta.n_layers {
+	mut l_base := 0
+	for l_base < meta.n_layers {
 		arena {
-			xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+			mut l_end := l_base + 6
+			if l_end > meta.n_layers {
+				l_end = meta.n_layers
+			}
+			mut l := l_base
+			for l < l_end {
+				xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
 
-			q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
-			k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
-			v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+				q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+				k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+				v := xn.gpu_linear(l_wv[l]) + l_bv[l]
 
-			q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
-			k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
-			k_flat := k_heads.reshape_2d(1, kv_dim)
+				q_heads := tensor_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
+				k_heads := tensor_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
+				k_flat := k_heads.reshape_2d(1, kv_dim)
 
-			k_caches[l].copy_row(pos, k_flat)
-			v_caches[l].copy_row(pos, v)
+				k_caches[l].copy_row(pos, k_flat)
+				v_caches[l].copy_row(pos, v)
 
-			attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
+				attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
 
-			attn_flat := attn_out.reshape_2d(1, meta.dim)
-			attn_proj := attn_flat.gpu_linear(l_wo[l])
-			x2 := x + attn_proj
+				attn_flat := attn_out.reshape_2d(1, meta.dim)
+				attn_proj := attn_flat.gpu_linear(l_wo[l])
+				x2 := x + attn_proj
 
-			x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
-			gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
-			up := x2n.gpu_linear(l_w_up[l])
-			ffn_hidden := tensor_elemwise_mul(gate, up)
-			down := ffn_hidden.gpu_linear(l_w_down[l])
-			x_next := x2 + down
-			x.copy_row(0, x_next)
+				x2n := tensor_rmsnorm(x2, l_fn[l], meta.rms_eps)
+				gate := tensor_silu(x2n.gpu_linear(l_w_gate[l]))
+				up := x2n.gpu_linear(l_w_up[l])
+				ffn_hidden := tensor_elemwise_mul(gate, up)
+				down := ffn_hidden.gpu_linear(l_w_down[l])
+				x_next := x2 + down
+				x.copy_row(0, x_next)
+				l += 1
+			}
 		}
-		l += 1
+		l_base += 6
 	}
 
 	if !compute_logits {
@@ -425,8 +433,111 @@ fn qwen2_forward_step(
 	}
 
 	xf := tensor_rmsnorm(x, out_norm, meta.rms_eps)
+	if out_weight.rows == 1 && out_weight.cols == 1 {
+		return xf.gpu_linear(tok_emb)
+	}
 	logits := xf.gpu_linear(out_weight)
 	return logits
+}
+
+fn qwen2_forward_prefill(
+	tokens []int,
+	start_pos int,
+	meta Qwen2Metadata,
+	tok_emb tensor[f32],
+	l_an []tensor[f32],
+	l_wq []tensor[f32],
+	l_bq []tensor[f32],
+	l_wk []tensor[f32],
+	l_bk []tensor[f32],
+	l_wv []tensor[f32],
+	l_bv []tensor[f32],
+	l_wo []tensor[f32],
+	l_fn []tensor[f32],
+	l_w_gate []tensor[f32],
+	l_w_up []tensor[f32],
+	l_w_down []tensor[f32],
+	out_norm tensor[f32],
+	out_weight tensor[f32],
+	mut k_caches []tensor[f32],
+	mut v_caches []tensor[f32],
+	compute_logits bool
+) tensor[f32] {
+	if tokens.len <= 0 {
+		return tensor_fill(1, 1, 0.0)
+	}
+	head_dim := meta.dim / meta.n_heads
+	kv_dim := meta.n_kv_heads * head_dim
+	scale := f32(1.0 / math.sqrt(f64(head_dim)))
+	chunk_limit := 512
+
+	mut c_start := 0
+	for c_start < tokens.len {
+		mut c_end := c_start + chunk_limit
+		if c_end > tokens.len {
+			c_end = tokens.len
+		}
+		chunk_tokens := tokens.slice(c_start, c_end)
+		m := chunk_tokens.len
+		cur_pos := start_pos + c_start
+
+		mut x := tensor_embedding_batch(tok_emb, chunk_tokens)
+
+		mut l_base := 0
+		for l_base < meta.n_layers {
+			arena {
+				mut l_end := l_base + 6
+				if l_end > meta.n_layers {
+					l_end = meta.n_layers
+				}
+				mut l := l_base
+				for l < l_end {
+					xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+
+					q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+					k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+					v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+
+					q_heads := gpu_rope_seq(q_lin.reshape_2d(m * meta.n_heads, head_dim), i64(cur_pos), meta.n_heads, meta.rope_base)
+					k_heads := gpu_rope_seq(k_lin.reshape_2d(m * meta.n_kv_heads, head_dim), i64(cur_pos), meta.n_kv_heads, meta.rope_base)
+					k_flat := k_heads.reshape_2d(m, kv_dim)
+
+					k_caches[l].copy_rows(cur_pos, k_flat)
+					v_caches[l].copy_rows(cur_pos, v)
+
+					attn_out := gpu_gqa_prefill(q_heads, k_caches[l], v_caches[l], i64(cur_pos), m, meta.n_heads, scale)
+					attn_flat := attn_out.reshape_2d(m, meta.dim)
+					attn_proj := attn_flat.gpu_linear(l_wo[l])
+					x2 := x + attn_proj
+
+					x2n := gpu_rmsnorm(x2, l_fn[l], meta.rms_eps)
+					gate := gpu_silu(x2n.gpu_linear(l_w_gate[l]))
+					up := x2n.gpu_linear(l_w_up[l])
+					ffn_hidden := tensor_elemwise_mul(gate, up)
+					down := ffn_hidden.gpu_linear(l_w_down[l])
+					x_next := x2 + down
+					x.copy_rows(0, x_next)
+					l += 1
+				}
+			}
+			l_base += 6
+		}
+
+		if compute_logits && c_end == tokens.len {
+			x_last := x.slice_rows(m - 1, m)
+			xf := gpu_rmsnorm(x_last, out_norm, meta.rms_eps)
+			if out_weight.rows == 1 && out_weight.cols == 1 {
+				tied_logits := xf.gpu_linear(tok_emb)
+				return tied_logits
+			}
+			logits := xf.gpu_linear(out_weight)
+			return logits
+		}
+
+		c_start = c_end
+	}
+
+	return tensor_fill(1, 1, 0.0)
 }
 
 fn main() {
@@ -594,7 +705,7 @@ fn main() {
 				if raw_hdr.len > 24 && parse_qwen2_gguf(raw_hdr, mut meta, mut vocab, mut bucket_head, mut next_in_bucket) {
 					base_weights.push(load_gguf_or_zeros(model_path, 'token_embd.weight', 151936, meta.dim))
 					base_weights.push(load_gguf_or_zeros(model_path, 'output_norm.weight', 1, meta.dim))
-					base_weights.push(load_output_weight(model_path, base_weights[0]))
+					base_weights.push(load_output_weight(model_path))
 					load_layer_idx = 0
 					engine_state = 2
 				} else {
@@ -637,30 +748,52 @@ fn main() {
 				status_msg = 'Model Ready (${meta.n_layers} Layers, ${vocab.len} Vocab Tokens)'
 			}
 		} else if engine_state == 4 {
-			// Prefill 1 prompt token per GUI frame
-			if prefill_idx < turn_tokens.len && kv_pos < max_context - 1 {
-				tid := turn_tokens[prefill_idx]
-				is_last := prefill_idx == (turn_tokens.len - 1)
+			// Batched prompt prefill in a single forward pass (chunked at 512 tokens)
+			mut max_take := (max_context - 1) - kv_pos
+			if max_take < 0 {
+				max_take = 0
+			}
+			mut prefill_n := turn_tokens.len
+			if prefill_n > max_take {
+				prefill_n = max_take
+			}
+			if prefill_n == 1 {
 				logits := qwen2_forward_step(
-					tid, kv_pos, meta, base_weights[0],
+					turn_tokens[0], kv_pos, meta, base_weights[0],
 					l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
 					l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
-					mut k_caches, mut v_caches, is_last
+					mut k_caches, mut v_caches, true
 				)
-				if is_last {
+				next_token = int(sample_token(logits, temperature))
+				kv_pos += 1
+			} else if prefill_n > 1 {
+				if prefill_n == turn_tokens.len {
+					logits := qwen2_forward_prefill(
+						turn_tokens, kv_pos, meta, base_weights[0],
+						l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+						l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+						mut k_caches, mut v_caches, true
+					)
+					next_token = int(sample_token(logits, temperature))
+				} else {
+					prompt_sub := turn_tokens.slice(0, prefill_n)
+					logits := qwen2_forward_prefill(
+						prompt_sub, kv_pos, meta, base_weights[0],
+						l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+						l_fn, l_w_gate, l_w_up, l_w_down, base_weights[1], base_weights[2],
+						mut k_caches, mut v_caches, true
+					)
 					next_token = int(sample_token(logits, temperature))
 				}
-				kv_pos += 1
-				prefill_idx += 1
-				progress_pct = f32(prefill_idx) / f32(turn_tokens.len)
-				status_msg = 'Prefilling ChatML Prompt: ${prefill_idx}/${turn_tokens.len} tokens...'
-			} else {
-				last_prefill_ms = time.now_ms() - prefill_start_ms
-				gen_start_ms = time.now_ms()
-				gen_steps = 0
-				engine_state = 5
-				status_msg = 'Streaming Qwen 2.5 Autoregressive Tokens...'
+				kv_pos += prefill_n
 			}
+			prefill_idx = prefill_n
+			last_prefill_ms = time.now_ms() - prefill_start_ms
+			gen_start_ms = time.now_ms()
+			gen_steps = 0
+			progress_pct = 1.0f32
+			engine_state = 5
+			status_msg = 'Streaming Qwen 2.5 Autoregressive Tokens...'
 		} else if engine_state == 5 {
 			// Generate 1 autoregressive token per GUI frame & stream to screen
 			max_new_tokens := int(max_tokens_f)

@@ -576,6 +576,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "table", Type: &TensorType{DType: TypeF32}}, {Name: "token_id", Type: TypeInt}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["tensor_embedding_batch"] = &FnSig{
+		Name:       "tensor_embedding_batch",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "table", Type: &TensorType{DType: TypeF32}}, {Name: "token_ids", Type: &SliceType{Elem: TypeInt}}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["sample_token"] = &FnSig{
 		Name:       "sample_token",
 		IsPub:      true,
@@ -686,6 +692,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["gpu_rope_seq"] = &FnSig{
+		Name:       "gpu_rope_seq",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "start_pos", Type: TypeI64}, {Name: "n_heads", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["gpu_softmax"] = &FnSig{
 		Name:       "gpu_softmax",
 		IsPub:      true,
@@ -706,6 +718,20 @@ func (c *Checker) registerBuiltins() {
 			{Name: "k_cache", Type: &TensorType{DType: TypeF32}},
 			{Name: "v_cache", Type: &TensorType{DType: TypeF32}},
 			{Name: "kv_pos", Type: TypeI64},
+			{Name: "scale", Type: TypeF32},
+		},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_gqa_prefill"] = &FnSig{
+		Name:  "gpu_gqa_prefill",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "q_seq", Type: &TensorType{DType: TypeF32}},
+			{Name: "k_cache", Type: &TensorType{DType: TypeF32}},
+			{Name: "v_cache", Type: &TensorType{DType: TypeF32}},
+			{Name: "start_pos", Type: TypeI64},
+			{Name: "seq_len", Type: TypeInt},
+			{Name: "n_heads", Type: TypeInt},
 			{Name: "scale", Type: TypeF32},
 		},
 		ReturnType: &TensorType{DType: TypeF32},
@@ -2688,6 +2714,14 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "tensor.copy_row"
+				case "copy_rows":
+					sig = &FnSig{
+						Name:       "copy_rows",
+						Params:     []ParamInfo{{Name: "dst_row_start", Type: TypeInt}, {Name: "src", Type: tt}},
+						ReturnType: TypeVoid,
+						Span:       callee.SelSpan,
+					}
+					callName = "tensor.copy_rows"
 				case "slice_rows":
 					sig = &FnSig{
 						Name:       "slice_rows",

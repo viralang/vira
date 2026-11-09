@@ -119,9 +119,9 @@ typedef vira_cl_int(VIRA_CL_API *pfn_clEnqueueCopyBuffer)(
 
 #define VIRA_GPU_WEIGHT_CACHE_CAP 4096
 #define VIRA_GPU_WEIGHT_PROBE_LEN 64
-#define VIRA_GPU_ACT_RING_CAP 240
-#define VIRA_GPU_ACT_HASH_BUCKETS 512
-#define VIRA_GPU_NUM_KERNELS 23
+#define VIRA_GPU_ACT_RING_CAP 512
+#define VIRA_GPU_ACT_HASH_BUCKETS 1024
+#define VIRA_GPU_NUM_KERNELS 33
 #define VIRA_GPU_NUM_REQUIRED_KERNELS 12
 #define VIRA_GPU_UPLOAD_CHUNK_ELEMS (1u << 22)
 
@@ -217,6 +217,10 @@ typedef struct {
   vira_cl_mem dev_buf;
   vira_cu_deviceptr cu_buf;
   size_t buf_cap;
+  vira_cu_deviceptr cu_q8_buf;
+  size_t q8_buf_cap;
+  size_t q8_bytes;
+  uint64_t q8_epoch;
   uint64_t last_used;
   int16_t hash_next_plus1;
   uint16_t hash_bucket_plus1;
@@ -230,6 +234,7 @@ typedef struct {
   bool enabled;
   bool unified_mem;
   bool has_tensor_cores;
+  bool has_dp4a;
   int compute_capability_major;
   int compute_capability_minor;
   bool vram_saturated;
@@ -315,6 +320,16 @@ typedef struct {
   vira_cl_kernel kernel_scale;
   vira_cl_kernel kernel_gqa_attention;
   vira_cl_kernel kernel_argmax_partial;
+  vira_cl_kernel kernel_gemm_q4_0;
+  vira_cl_kernel kernel_gemm_q4_1;
+  vira_cl_kernel kernel_gemm_q5_0;
+  vira_cl_kernel kernel_gemm_q5_1;
+  vira_cl_kernel kernel_gemm_q8_0;
+  vira_cl_kernel kernel_gemm_q4_k;
+  vira_cl_kernel kernel_gemm_q5_k;
+  vira_cl_kernel kernel_gemm_q6_k;
+  vira_cl_kernel kernel_rope_seq;
+  vira_cl_kernel kernel_gqa_prefill;
 
   // NVIDIA CUDA Driver API & handles
   void *cuda_lib_handle;
@@ -351,6 +366,7 @@ typedef struct {
   vira_cu_stream cu_stream;
   vira_cu_module cu_module;
   vira_cu_module cu_wmma_module;
+  vira_cu_module cu_dp4a_module;
 
   // CUDA Compute kernels
   vira_cu_function cu_k_gemv_q4_0;
@@ -369,6 +385,14 @@ typedef struct {
   vira_cu_function cu_k_wmma_linear_h;
   vira_cu_function cu_k_matmul_tiled;
   vira_cu_function cu_k_wmma_matmul;
+  vira_cu_function cu_k_wmma_gemm_q4_0;
+  vira_cu_function cu_k_wmma_gemm_q4_1;
+  vira_cu_function cu_k_wmma_gemm_q5_0;
+  vira_cu_function cu_k_wmma_gemm_q5_1;
+  vira_cu_function cu_k_wmma_gemm_q8_0;
+  vira_cu_function cu_k_wmma_gemm_q4_k;
+  vira_cu_function cu_k_wmma_gemm_q5_k;
+  vira_cu_function cu_k_wmma_gemm_q6_k;
   vira_cu_function cu_k_rmsnorm;
   vira_cu_function cu_k_rope;
   vira_cu_function cu_k_softmax;
@@ -378,6 +402,25 @@ typedef struct {
   vira_cu_function cu_k_scale;
   vira_cu_function cu_k_gqa_attention;
   vira_cu_function cu_k_argmax_partial;
+  vira_cu_function cu_k_gemm_q4_0;
+  vira_cu_function cu_k_gemm_q4_1;
+  vira_cu_function cu_k_gemm_q5_0;
+  vira_cu_function cu_k_gemm_q5_1;
+  vira_cu_function cu_k_gemm_q8_0;
+  vira_cu_function cu_k_gemm_q4_k;
+  vira_cu_function cu_k_gemm_q5_k;
+  vira_cu_function cu_k_gemm_q6_k;
+  vira_cu_function cu_k_quantize_q8_1;
+  vira_cu_function cu_k_mmvq_q4_0;
+  vira_cu_function cu_k_mmvq_q4_1;
+  vira_cu_function cu_k_mmvq_q5_0;
+  vira_cu_function cu_k_mmvq_q5_1;
+  vira_cu_function cu_k_mmvq_q8_0;
+  vira_cu_function cu_k_mmvq_q4_k;
+  vira_cu_function cu_k_mmvq_q5_k;
+  vira_cu_function cu_k_mmvq_q6_k;
+  vira_cu_function cu_k_rope_seq;
+  vira_cu_function cu_k_gqa_prefill;
 
   // Argmax scratch buffers
   vira_cl_mem cl_argmax_vals;
@@ -405,6 +448,7 @@ static _vira_gpu_state _vira_gpu = {
     .enabled = true,
     .unified_mem = false,
     .has_tensor_cores = false,
+    .has_dp4a = false,
     .compute_capability_major = 0,
     .compute_capability_minor = 0,
     .vram_saturated = false,
@@ -452,6 +496,11 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
                                             vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_seq(vira_arena *opt_arena,
+                                                vira_tensor_f32 q,
+                                                int64_t start_pos,
+                                                int32_t n_heads,
+                                                float freq_base);
 static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
                                                vira_tensor_f32 logits);
 static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
@@ -468,8 +517,19 @@ static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_gqa_attention(
     vira_arena *opt_arena, vira_tensor_f32 q_heads, vira_tensor_f32 k_cache,
     vira_tensor_f32 v_cache, int64_t kv_pos, float scale);
+static inline vira_tensor_f32 vira_gpu_gqa_prefill(
+    vira_arena *opt_arena, vira_tensor_f32 q_seq, vira_tensor_f32 k_cache,
+    vira_tensor_f32 v_cache, int64_t start_pos, int32_t seq_len,
+    int32_t n_heads, float scale);
 static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
                                       vira_tensor_f32 src);
+static inline bool _vira_gpu_copy_rows(vira_tensor_f32 dst,
+                                       int32_t dst_row_start,
+                                       vira_tensor_f32 src);
+static inline bool _vira_gpu_slice_rows(vira_arena *opt_arena,
+                                        vira_tensor_f32 src,
+                                        int32_t start_row, int32_t end_row,
+                                        vira_tensor_f32 *out_tensor);
 static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits);
 static const char *_vira_opencl_kernel_src =
     "#ifndef WARP_SIZE\n"
@@ -485,6 +545,8 @@ static const char *_vira_opencl_kernel_src =
     "#define TILE_DIM 16\n"
     "#endif\n"
     "#define VIRA_GQA_REGS ((256 + WARP_SIZE - 1) / WARP_SIZE)\n"
+    "#define VIRA_PREFILL_H_TILE ((ROWS_PER_WG >= 2) ? 2 : 1)\n"
+    "#define VIRA_PREFILL_Q_TILE (ROWS_PER_WG / VIRA_PREFILL_H_TILE)\n"
     "\n"
     "// 1. Native GGUF Q4_0 Multi-Row Warp GEMV (18 bytes per 32 weights)\n"
     "__kernel void vira_cl_gemv_q4_0(\n"
@@ -1494,6 +1556,688 @@ static const char *_vira_opencl_kernel_src =
     "    out_vals[gid] = s_val[0];\n"
     "    out_idxs[gid] = s_idx[0];\n"
     "  }\n"
+    "}\n"
+    "\n"
+    "// 24. Tiled Batched GEMM Q4_0 (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q4_0(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_blocks_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_grp = tid & 3;\n"
+    "  const int k_off = k_grp * 8;\n"
+    "  const int K = num_blocks_k * 32;\n"
+    "  const int n = bn + loc;\n"
+    "  const int j_off = k_off & 8;\n"
+    "  const int nib_shift = (k_grp >> 1) << 2;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_blocks_k * 18ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      __global const uchar* blk = w_row + (size_t)b * 18ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      __global const uchar* qs = blk + 2 + j_off;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const int q = (int)((qs[i] >> nib_shift) & 0x0Fu) - 8;\n"
+    "        tile_w[loc][k_off + i] = d * (float)q;\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 25. Tiled Batched GEMM Q4_1 (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q4_1(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_blocks_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_grp = tid & 3;\n"
+    "  const int k_off = k_grp * 8;\n"
+    "  const int K = num_blocks_k * 32;\n"
+    "  const int n = bn + loc;\n"
+    "  const int j_off = k_off & 8;\n"
+    "  const int nib_shift = (k_grp >> 1) << 2;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_blocks_k * 20ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      __global const uchar* blk = w_row + (size_t)b * 20ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      const float m_val = vload_half(1, (__global const half*)blk);\n"
+    "      __global const uchar* qs = blk + 4 + j_off;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const uint q = (uint)((qs[i] >> nib_shift) & 0x0Fu);\n"
+    "        tile_w[loc][k_off + i] = fma(d, (float)q, m_val);\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 26. Tiled Batched GEMM Q5_0 (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q5_0(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_blocks_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_grp = tid & 3;\n"
+    "  const int k_off = k_grp * 8;\n"
+    "  const int K = num_blocks_k * 32;\n"
+    "  const int n = bn + loc;\n"
+    "  const int j_off = k_off & 8;\n"
+    "  const int nib_shift = (k_grp >> 1) << 2;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_blocks_k * 22ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      __global const uchar* blk = w_row + (size_t)b * 22ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      const uint qh = (uint)blk[2] | ((uint)blk[3] << 8) | ((uint)blk[4] << 16) | ((uint)blk[5] << 24);\n"
+    "      __global const uchar* qs = blk + 6 + j_off;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const uint lo = (uint)((qs[i] >> nib_shift) & 0x0Fu);\n"
+    "        const uint hi = ((qh >> (k_off + i)) & 1u) << 4;\n"
+    "        const int q = (int)(lo | hi) - 16;\n"
+    "        tile_w[loc][k_off + i] = d * (float)q;\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 27. Tiled Batched GEMM Q5_1 (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q5_1(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_blocks_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_grp = tid & 3;\n"
+    "  const int k_off = k_grp * 8;\n"
+    "  const int K = num_blocks_k * 32;\n"
+    "  const int n = bn + loc;\n"
+    "  const int j_off = k_off & 8;\n"
+    "  const int nib_shift = (k_grp >> 1) << 2;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_blocks_k * 24ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      __global const uchar* blk = w_row + (size_t)b * 24ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      const float m_val = vload_half(1, (__global const half*)blk);\n"
+    "      const uint qh = (uint)blk[4] | ((uint)blk[5] << 8) | ((uint)blk[6] << 16) | ((uint)blk[7] << 24);\n"
+    "      __global const uchar* qs = blk + 8 + j_off;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const uint lo = (uint)((qs[i] >> nib_shift) & 0x0Fu);\n"
+    "        const uint hi = ((qh >> (k_off + i)) & 1u) << 4;\n"
+    "        const uint q = lo | hi;\n"
+    "        tile_w[loc][k_off + i] = fma(d, (float)q, m_val);\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 28. Tiled Batched GEMM Q8_0 (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q8_0(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_blocks_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_off = (tid & 3) * 8;\n"
+    "  const int K = num_blocks_k * 32;\n"
+    "  const int n = bn + loc;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_blocks_k * 34ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      __global const uchar* blk = w_row + (size_t)b * 34ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      __global const char* qs = (__global const char*)(blk + 2 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = d * (float)qs[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 29. Tiled Batched GEMM Q4_K (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q4_k(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_sb_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_off = (tid & 3) * 8;\n"
+    "  const int num_blocks_k = num_sb_k * 8;\n"
+    "  const int K = num_sb_k * 256;\n"
+    "  const int n = bn + loc;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_sb_k * 144ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      const int sb = b >> 3;\n"
+    "      const int ib = b & 7;\n"
+    "      __global const uchar* blk = w_row + (size_t)sb * 144ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      const float dmin = vload_half(1, (__global const half*)blk);\n"
+    "      __global const uchar* scales = blk + 4;\n"
+    "      uchar sc_raw, m_raw;\n"
+    "      if (ib < 4) {\n"
+    "        sc_raw = scales[ib] & 63u;\n"
+    "        m_raw  = scales[ib + 4] & 63u;\n"
+    "      } else {\n"
+    "        sc_raw = (scales[ib + 4] & 0x0Fu) | ((scales[ib - 4] >> 6) << 4);\n"
+    "        m_raw  = (scales[ib + 4] >> 4)    | ((scales[ib]     >> 6) << 4);\n"
+    "      }\n"
+    "      const float d_sub = d * (float)sc_raw;\n"
+    "      const float min_sub = dmin * (float)m_raw;\n"
+    "      __global const uchar* qs_sub = blk + 16 + ((ib >> 1) * 32) + k_off;\n"
+    "      const int shift = (ib & 1) * 4;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        tile_w[loc][k_off + i] = fma(d_sub, (float)((qs_sub[i] >> shift) & 0x0Fu), -min_sub);\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 30. Tiled Batched GEMM Q5_K (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q5_k(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_sb_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_off = (tid & 3) * 8;\n"
+    "  const int num_blocks_k = num_sb_k * 8;\n"
+    "  const int K = num_sb_k * 256;\n"
+    "  const int n = bn + loc;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_sb_k * 176ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      const int sb = b >> 3;\n"
+    "      const int ib = b & 7;\n"
+    "      __global const uchar* blk = w_row + (size_t)sb * 176ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)blk);\n"
+    "      const float dmin = vload_half(1, (__global const half*)blk);\n"
+    "      __global const uchar* scales = blk + 4;\n"
+    "      uchar sc_raw, m_raw;\n"
+    "      if (ib < 4) {\n"
+    "        sc_raw = scales[ib] & 63u;\n"
+    "        m_raw  = scales[ib + 4] & 63u;\n"
+    "      } else {\n"
+    "        sc_raw = (scales[ib + 4] & 0x0Fu) | ((scales[ib - 4] >> 6) << 4);\n"
+    "        m_raw  = (scales[ib + 4] >> 4)    | ((scales[ib]     >> 6) << 4);\n"
+    "      }\n"
+    "      const float d_sub = d * (float)sc_raw;\n"
+    "      const float min_sub = dmin * (float)m_raw;\n"
+    "      __global const uchar* qh_sub = blk + 16 + k_off;\n"
+    "      __global const uchar* qs_sub = blk + 48 + ((ib >> 1) * 32) + k_off;\n"
+    "      const int shift = (ib & 1) * 4;\n"
+    "      const uchar u_mask = (uchar)(1u << ib);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const uint q = (uint)((qs_sub[i] >> shift) & 0x0Fu) | ((qh_sub[i] & u_mask) ? 16u : 0u);\n"
+    "        tile_w[loc][k_off + i] = fma(d_sub, (float)q, -min_sub);\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 31. Tiled Batched GEMM Q6_K (16x16x32)\n"
+    "__kernel void vira_cl_gemm_q6_k(\n"
+    "    __global const float* restrict x,\n"
+    "    __global const uchar* restrict w,\n"
+    "    __global float* restrict y,\n"
+    "    const int M, const int num_sb_k, const int N) {\n"
+    "  const int tx = (int)get_local_id(0);\n"
+    "  const int ty = (int)get_local_id(1);\n"
+    "  const int bm = (int)get_group_id(1) * 16;\n"
+    "  const int bn = (int)get_group_id(0) * 16;\n"
+    "  if (bm >= M || bn >= N) return;\n"
+    "  __local float tile_x[16][32];\n"
+    "  __local float tile_w[16][33];\n"
+    "  const int tid = ty * 16 + tx;\n"
+    "  const int loc = tid >> 2;\n"
+    "  const int k_grp = tid & 3;\n"
+    "  const int k_off = k_grp * 8;\n"
+    "  const int is = k_grp >> 1;\n"
+    "  const int num_blocks_k = num_sb_k * 8;\n"
+    "  const int K = num_sb_k * 256;\n"
+    "  const int n = bn + loc;\n"
+    "  __global const uchar* w_row = w + (size_t)n * (size_t)num_sb_k * 210ULL;\n"
+    "  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;\n"
+    "  for (int b = 0; b < num_blocks_k; ++b) {\n"
+    "    const int xr_idx = bm + loc;\n"
+    "    if (xr_idx < M) {\n"
+    "      __global const float* xr = x + (size_t)xr_idx * (size_t)K + (size_t)(b * 32 + k_off);\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = xr[i];\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_x[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    if (n < N) {\n"
+    "      const int sb = b >> 3;\n"
+    "      const int ib = b & 7;\n"
+    "      const int h = ib >> 2;\n"
+    "      const int ib_h = ib & 3;\n"
+    "      __global const uchar* blk = w_row + (size_t)sb * 210ULL;\n"
+    "      const float d = vload_half(0, (__global const half*)(blk + 208));\n"
+    "      __global const uchar* ql_p = blk + h * 64 + ((ib_h & 1) ? 32 : 0) + k_off;\n"
+    "      __global const uchar* qh_p = blk + 128 + h * 32 + k_off;\n"
+    "      __global const char* sc_p = (__global const char*)(blk + 192 + h * 8 + ib_h * 2);\n"
+    "      const float d_sc = d * (float)sc_p[is];\n"
+    "      const int ql_shift = (ib_h >> 1) * 4;\n"
+    "      const int qh_shift = ib_h * 2;\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) {\n"
+    "        const int q = (int)(((ql_p[i] >> ql_shift) & 0x0Fu) | (((qh_p[i] >> qh_shift) & 3u) << 4)) - 32;\n"
+    "        tile_w[loc][k_off + i] = d_sc * (float)q;\n"
+    "      }\n"
+    "    } else {\n"
+    "      #pragma unroll\n"
+    "      for (int i = 0; i < 8; ++i) tile_w[loc][k_off + i] = 0.0f;\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int k = 0; k < 32; ++k) {\n"
+    "      const float wv = tile_w[tx][k];\n"
+    "      acc0 = fma(tile_x[ty][k],      wv, acc0);\n"
+    "      acc1 = fma(tile_x[ty + 4][k],  wv, acc1);\n"
+    "      acc2 = fma(tile_x[ty + 8][k],  wv, acc2);\n"
+    "      acc3 = fma(tile_x[ty + 12][k], wv, acc3);\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "  }\n"
+    "  const int col = bn + tx;\n"
+    "  if (col < N) {\n"
+    "    if (bm + ty < M)      y[(size_t)(bm + ty)      * (size_t)N + (size_t)col] = acc0;\n"
+    "    if (bm + ty + 4 < M)  y[(size_t)(bm + ty + 4)  * (size_t)N + (size_t)col] = acc1;\n"
+    "    if (bm + ty + 8 < M)  y[(size_t)(bm + ty + 8)  * (size_t)N + (size_t)col] = acc2;\n"
+    "    if (bm + ty + 12 < M) y[(size_t)(bm + ty + 12) * (size_t)N + (size_t)col] = acc3;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "// 32. Batched Sequence NeoX RoPE (start_pos + seq_idx)\n"
+    "__kernel void vira_cl_rope_seq_f32(\n"
+    "    __global const float* restrict q,\n"
+    "    __global float* restrict out,\n"
+    "    const int rows, const int cols, const int half_dim,\n"
+    "    const int n_heads, const long start_pos, const float freq_base) {\n"
+    "  const int i = (int)get_global_id(0);\n"
+    "  const int r = (int)get_global_id(1);\n"
+    "  if (i >= half_dim || r >= rows) return;\n"
+    "  const int seq_idx = r / n_heads;\n"
+    "  const float pos_f = (float)(start_pos + (long)seq_idx);\n"
+    "  const float exponent = -(2.0f * (float)i) / (float)cols;\n"
+    "  const float angle = pos_f * pow(freq_base, exponent);\n"
+    "  const float cos_a = cos(angle);\n"
+    "  const float sin_a = sin(angle);\n"
+    "  __global const float* q_row = q + (size_t)r * (size_t)cols;\n"
+    "  __global float* o_row = out + (size_t)r * (size_t)cols;\n"
+    "  const float q0 = q_row[i];\n"
+    "  const float q1 = q_row[i + half_dim];\n"
+    "  o_row[i]            = fma(q0, cos_a, -q1 * sin_a);\n"
+    "  o_row[i + half_dim] = fma(q0, sin_a,  q1 * cos_a);\n"
+    "}\n"
+    "\n"
+    "// 33. Batched Causal Grouped-Query Attention Prefill (shared K/V tiling)\n"
+    "__kernel void vira_cl_gqa_prefill_f32(\n"
+    "    __global const float* restrict q_seq,\n"
+    "    __global const float* restrict k_cache,\n"
+    "    __global const float* restrict v_cache,\n"
+    "    __global float* restrict out,\n"
+    "    const int seq_len, const int n_heads, const int kv_mul,\n"
+    "    const int head_dim, const int kv_dim, const long start_pos,\n"
+    "    const float scale) {\n"
+    "  __local float smK[ROWS_PER_WG][256];\n"
+    "  __local float smV[ROWS_PER_WG][256];\n"
+    "  __local float red[WG_SIZE];\n"
+    "  const int tid  = (int)get_local_id(0);\n"
+    "  const int sg   = tid / WARP_SIZE;\n"
+    "  const int lane = tid & (WARP_SIZE - 1);\n"
+    "  const int m_loc = sg / VIRA_PREFILL_H_TILE;\n"
+    "  const int h_loc = sg - m_loc * VIRA_PREFILL_H_TILE;\n"
+    "  const int b_x = (int)get_group_id(0);\n"
+    "  const int b_y = (int)get_group_id(1);\n"
+    "  const int h_blk_per_kv = (kv_mul + VIRA_PREFILL_H_TILE - 1) / VIRA_PREFILL_H_TILE;\n"
+    "  const int kv_head = b_x / h_blk_per_kv;\n"
+    "  const int h_blk = b_x - kv_head * h_blk_per_kv;\n"
+    "  const int h_in_kv = h_blk * VIRA_PREFILL_H_TILE + h_loc;\n"
+    "  const int head = kv_head * kv_mul + h_in_kv;\n"
+    "  const int m = b_y * VIRA_PREFILL_Q_TILE + m_loc;\n"
+    "  const int valid_q = (m < seq_len && h_in_kv < kv_mul && head < n_heads) ? 1 : 0;\n"
+    "\n"
+    "  float q_reg[VIRA_GQA_REGS];\n"
+    "  float acc[VIRA_GQA_REGS];\n"
+    "  for (int r = 0; r < VIRA_GQA_REGS; ++r) { q_reg[r] = 0.0f; acc[r] = 0.0f; }\n"
+    "  float m_i = -1e30f;\n"
+    "  float l_i = 0.0f;\n"
+    "  if (valid_q) {\n"
+    "    __global const float* qp = q_seq + ((size_t)m * (size_t)n_heads + (size_t)head) * (size_t)head_dim;\n"
+    "    for (int r = 0; r < VIRA_GQA_REGS; ++r) {\n"
+    "      const int d = lane + r * WARP_SIZE;\n"
+    "      if (d < head_dim) q_reg[r] = qp[d];\n"
+    "    }\n"
+    "  }\n"
+    "  int cta_m_last = b_y * VIRA_PREFILL_Q_TILE + (VIRA_PREFILL_Q_TILE - 1);\n"
+    "  if (cta_m_last >= seq_len) cta_m_last = seq_len - 1;\n"
+    "  const long cta_t_end = start_pos + (long)cta_m_last + 1L;\n"
+    "  const long q_t_max = start_pos + (long)m;\n"
+    "  const size_t kv_off = (size_t)kv_head * (size_t)head_dim;\n"
+    "\n"
+    "  for (long t0 = 0; t0 < cta_t_end; t0 += ROWS_PER_WG) {\n"
+    "    const long t_load = t0 + (long)sg;\n"
+    "    const int t_ok = (t_load < cta_t_end) ? 1 : 0;\n"
+    "    const size_t safe_t = t_ok ? (size_t)t_load : 0ULL;\n"
+    "    __global const float* k_src = k_cache + safe_t * (size_t)kv_dim + kv_off;\n"
+    "    __global const float* v_src = v_cache + safe_t * (size_t)kv_dim + kv_off;\n"
+    "    for (int r = 0; r < VIRA_GQA_REGS; ++r) {\n"
+    "      const int d = lane + r * WARP_SIZE;\n"
+    "      if (d < head_dim) {\n"
+    "        smK[sg][d] = t_ok ? k_src[d] : 0.0f;\n"
+    "        smV[sg][d] = t_ok ? v_src[d] : 0.0f;\n"
+    "      }\n"
+    "    }\n"
+    "    barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    for (int dt = 0; dt < ROWS_PER_WG; ++dt) {\n"
+    "      const long t = t0 + (long)dt;\n"
+    "      if (t >= cta_t_end) break;\n"
+    "      const int active = (valid_q && t <= q_t_max) ? 1 : 0;\n"
+    "      float dot = 0.0f;\n"
+    "      if (active) {\n"
+    "        for (int r = 0; r < VIRA_GQA_REGS; ++r) {\n"
+    "          const int d = lane + r * WARP_SIZE;\n"
+    "          if (d < head_dim) dot = fma(q_reg[r], smK[dt][d], dot);\n"
+    "        }\n"
+    "      }\n"
+    "      red[tid] = dot;\n"
+    "      barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "      for (int off = WARP_SIZE >> 1; off > 0; off >>= 1) {\n"
+    "        if (lane < off) red[tid] += red[tid + off];\n"
+    "        barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "      }\n"
+    "      if (active) {\n"
+    "        const float score = red[sg * WARP_SIZE] * scale;\n"
+    "        const float m_new = (score > m_i) ? score : m_i;\n"
+    "        const float alpha = (l_i > 0.0f) ? exp(m_i - m_new) : 0.0f;\n"
+    "        const float p = exp(score - m_new);\n"
+    "        for (int r = 0; r < VIRA_GQA_REGS; ++r) {\n"
+    "          const int d = lane + r * WARP_SIZE;\n"
+    "          if (d < head_dim) acc[r] = fma(acc[r], alpha, p * smV[dt][d]);\n"
+    "        }\n"
+    "        l_i = l_i * alpha + p;\n"
+    "        m_i = m_new;\n"
+    "      }\n"
+    "      barrier(CLK_LOCAL_MEM_FENCE);\n"
+    "    }\n"
+    "  }\n"
+    "  if (valid_q) {\n"
+    "    const float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;\n"
+    "    __global float* op = out + ((size_t)m * (size_t)n_heads + (size_t)head) * (size_t)head_dim;\n"
+    "    for (int r = 0; r < VIRA_GQA_REGS; ++r) {\n"
+    "      const int d = lane + r * WARP_SIZE;\n"
+    "      if (d < head_dim) op[d] = acc[r] * inv_l;\n"
+    "    }\n"
+    "  }\n"
     "}\n";
 
 static const char *_vira_opencl_kernel_names[VIRA_GPU_NUM_KERNELS] = {
@@ -1509,6 +2253,11 @@ static const char *_vira_opencl_kernel_names[VIRA_GPU_NUM_KERNELS] = {
     "vira_cl_add_f32",          "vira_cl_elemwise_mul_f32",
     "vira_cl_scale_f32",        "vira_cl_gqa_attention_f32",
     "vira_cl_argmax_partial_f32",
+    "vira_cl_gemm_q4_0",        "vira_cl_gemm_q4_1",
+    "vira_cl_gemm_q5_0",        "vira_cl_gemm_q5_1",
+    "vira_cl_gemm_q8_0",        "vira_cl_gemm_q4_k",
+    "vira_cl_gemm_q5_k",        "vira_cl_gemm_q6_k",
+    "vira_cl_rope_seq_f32",     "vira_cl_gqa_prefill_f32",
 };
 
 static inline bool _vira_gpu_debug(void) {
@@ -1622,6 +2371,12 @@ static inline void _vira_gpu_free_act_buffer_locked(_vira_gpu_act_entry *a) {
     _vira_gpu.cuMemFree(a->cu_buf);
     a->cu_buf = 0;
   }
+  if (a->cu_q8_buf != 0 && _vira_gpu.cuMemFree) {
+    _vira_gpu.cuMemFree(a->cu_q8_buf);
+    a->cu_q8_buf = 0;
+  }
+  a->q8_bytes = 0;
+  a->q8_epoch = 0;
 }
 
 static inline void _vira_gpu_cache_entry_reset(_vira_gpu_cache_entry *e) {
@@ -1666,7 +2421,7 @@ static inline int32_t _vira_gpu_weight_slot_start(const vira_f32 *ptr) {
 
 static inline uint32_t _vira_gpu_act_hash(const vira_f32 *ptr) {
   uint64_t h = ((uint64_t)(uintptr_t)ptr >> 6) * 11400714819323198485ULL;
-  return (uint32_t)((h >> 55) & (VIRA_GPU_ACT_HASH_BUCKETS - 1));
+  return (uint32_t)((h >> 54) & (VIRA_GPU_ACT_HASH_BUCKETS - 1));
 }
 
 static inline void _vira_gpu_act_hash_unlink_locked(_vira_gpu_act_entry *e) {
@@ -1722,6 +2477,8 @@ static inline _vira_gpu_act_entry *_vira_gpu_act_hash_find_locked(
 
 static inline void _vira_gpu_mark_act_dirty_locked(_vira_gpu_act_entry *e,
                                                    const vira_f32 *ptr) {
+  e->q8_bytes = 0;
+  e->q8_epoch = 0;
   if (!e->dev_dirty && ptr != NULL) {
     e->dev_dirty = true;
     uint32_t bidx = _vira_gpu_bloom_idx(ptr);
@@ -1763,6 +2520,8 @@ static inline void _vira_gpu_act_entry_reset(_vira_gpu_act_entry *e) {
   e->host_ptr = NULL;
   e->bytes = 0;
   e->epoch = 0;
+  e->q8_bytes = 0;
+  e->q8_epoch = 0;
   e->last_used = 0;
   e->persistent = false;
 }
@@ -1790,6 +2549,8 @@ static inline void _vira_gpu_act_bind_locked(_vira_gpu_act_entry *slot,
   slot->host_ptr = ptr;
   slot->bytes = bytes;
   slot->epoch = ep;
+  slot->q8_bytes = 0;
+  slot->q8_epoch = 0;
   slot->last_used = now;
   slot->persistent = persistent;
   _vira_gpu_act_hash_link_locked(slot, ptr);
@@ -1952,9 +2713,11 @@ static inline void _vira_gpu_evict_lru_bytes_ex_locked(
                          : (e->dev_buf != NULL);
       if (has_buf && (e->host_ptr == NULL || e->epoch != ep)) {
         _vira_gpu_free_act_buffer_locked(e);
-        __atomic_sub_fetch(&_vira_gpu.allocated_bytes, (int64_t)e->buf_cap,
+        __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                           (int64_t)(e->buf_cap + e->q8_buf_cap),
                            __ATOMIC_RELAXED);
         e->buf_cap = 0;
+        e->q8_buf_cap = 0;
         _vira_gpu_act_entry_reset(e);
         evicted = true;
         break;
@@ -2014,9 +2777,11 @@ static inline void _vira_gpu_evict_lru_bytes_ex_locked(
         _vira_gpu_sync_slot_locked(e);
       }
       _vira_gpu_free_act_buffer_locked(e);
-      __atomic_sub_fetch(&_vira_gpu.allocated_bytes, (int64_t)e->buf_cap,
+      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                         (int64_t)(e->buf_cap + e->q8_buf_cap),
                          __ATOMIC_RELAXED);
       e->buf_cap = 0;
+      e->q8_buf_cap = 0;
       _vira_gpu_act_entry_reset(e);
       cur_alloc = __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
       continue;
@@ -2045,9 +2810,11 @@ static inline void _vira_gpu_evict_lru_bytes_ex_locked(
         _vira_gpu_sync_slot_locked(e);
       }
       _vira_gpu_free_act_buffer_locked(e);
-      __atomic_sub_fetch(&_vira_gpu.allocated_bytes, (int64_t)e->buf_cap,
+      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                         (int64_t)(e->buf_cap + e->q8_buf_cap),
                          __ATOMIC_RELAXED);
       e->buf_cap = 0;
+      e->q8_buf_cap = 0;
       _vira_gpu_act_entry_reset(e);
       cur_alloc = __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
       continue;
@@ -2147,9 +2914,11 @@ static inline _vira_gpu_act_entry *_vira_gpu_find_or_alloc_act_slot_locked(
   if (!has_buf || slot->buf_cap < needed_bytes) {
     if (has_buf) {
       _vira_gpu_free_act_buffer_locked(slot);
-      __atomic_sub_fetch(&_vira_gpu.allocated_bytes, (int64_t)slot->buf_cap,
+      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                         (int64_t)(slot->buf_cap + slot->q8_buf_cap),
                          __ATOMIC_RELAXED);
       slot->buf_cap = 0;
+      slot->q8_buf_cap = 0;
     }
     size_t new_cap = (needed_bytes < (1024ULL * 1024ULL))
                          ? (1024ULL * 1024ULL)
@@ -2318,6 +3087,7 @@ static inline void _vira_gpu_evict_all_locked(void) {
   for (int32_t i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
     _vira_gpu_free_act_buffer_locked(&_vira_gpu.act_ring[i]);
     _vira_gpu.act_ring[i].buf_cap = 0;
+    _vira_gpu.act_ring[i].q8_buf_cap = 0;
     _vira_gpu_act_entry_reset(&_vira_gpu.act_ring[i]);
   }
   memset(_vira_gpu.act_buckets, 0, sizeof(_vira_gpu.act_buckets));
@@ -2995,6 +3765,11 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       "vira_cu_add_f32",           "vira_cu_elemwise_mul_f32",
       "vira_cu_scale_f32",         "vira_cu_gqa_attention_f32",
       "vira_cu_argmax_partial_f32",
+      "vira_cu_gemm_q4_0",         "vira_cu_gemm_q4_1",
+      "vira_cu_gemm_q5_0",         "vira_cu_gemm_q5_1",
+      "vira_cu_gemm_q8_0",         "vira_cu_gemm_q4_k",
+      "vira_cu_gemm_q5_k",         "vira_cu_gemm_q6_k",
+      "vira_cu_rope_seq_f32",      "vira_cu_gqa_prefill_f32",
   };
 
   bool required_ok = true;
@@ -3049,6 +3824,16 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_scale = ks[20];
   g->cu_k_gqa_attention = ks[21];
   g->cu_k_argmax_partial = ks[22];
+  g->cu_k_gemm_q4_0 = ks[23];
+  g->cu_k_gemm_q4_1 = ks[24];
+  g->cu_k_gemm_q5_0 = ks[25];
+  g->cu_k_gemm_q5_1 = ks[26];
+  g->cu_k_gemm_q8_0 = ks[27];
+  g->cu_k_gemm_q4_k = ks[28];
+  g->cu_k_gemm_q5_k = ks[29];
+  g->cu_k_gemm_q6_k = ks[30];
+  g->cu_k_rope_seq = ks[31];
+  g->cu_k_gqa_prefill = ks[32];
 
   g->cu_argmax_vals = 0;
   g->cu_argmax_idxs = 0;
@@ -3064,6 +3849,14 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_wmma_module = NULL;
   g->cu_k_wmma_linear_h = NULL;
   g->cu_k_wmma_matmul = NULL;
+  g->cu_k_wmma_gemm_q4_0 = NULL;
+  g->cu_k_wmma_gemm_q4_1 = NULL;
+  g->cu_k_wmma_gemm_q5_0 = NULL;
+  g->cu_k_wmma_gemm_q5_1 = NULL;
+  g->cu_k_wmma_gemm_q8_0 = NULL;
+  g->cu_k_wmma_gemm_q4_k = NULL;
+  g->cu_k_wmma_gemm_q5_k = NULL;
+  g->cu_k_wmma_gemm_q6_k = NULL;
 
   if (g->compute_capability_major >= 7 && g->cuModuleLoadData) {
     vira_cu_module wmma_mod = NULL;
@@ -3076,9 +3869,53 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
         g->cu_wmma_module = wmma_mod;
         g->cu_k_wmma_linear_h = k_lin;
         g->cu_k_wmma_matmul = k_mm;
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q4_0, wmma_mod, "vira_cu_wmma_gemm_q4_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q4_1, wmma_mod, "vira_cu_wmma_gemm_q4_1");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q5_0, wmma_mod, "vira_cu_wmma_gemm_q5_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q5_1, wmma_mod, "vira_cu_wmma_gemm_q5_1");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q8_0, wmma_mod, "vira_cu_wmma_gemm_q8_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q4_k, wmma_mod, "vira_cu_wmma_gemm_q4_k");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q5_k, wmma_mod, "vira_cu_wmma_gemm_q5_k");
+        (void)g->cuModuleGetFunction(&g->cu_k_wmma_gemm_q6_k, wmma_mod, "vira_cu_wmma_gemm_q6_k");
         g->has_tensor_cores = true;
       } else if (g->cuModuleUnload) {
         g->cuModuleUnload(wmma_mod);
+      }
+    }
+  }
+
+  g->has_dp4a = false;
+  g->cu_dp4a_module = NULL;
+  g->cu_k_quantize_q8_1 = NULL;
+  g->cu_k_mmvq_q4_0 = NULL;
+  g->cu_k_mmvq_q4_1 = NULL;
+  g->cu_k_mmvq_q5_0 = NULL;
+  g->cu_k_mmvq_q5_1 = NULL;
+  g->cu_k_mmvq_q8_0 = NULL;
+  g->cu_k_mmvq_q4_k = NULL;
+  g->cu_k_mmvq_q5_k = NULL;
+  g->cu_k_mmvq_q6_k = NULL;
+
+  if ((g->compute_capability_major >= 7 ||
+       (g->compute_capability_major == 6 && g->compute_capability_minor >= 1)) &&
+      g->cuModuleLoadData) {
+    vira_cu_module dp4a_mod = NULL;
+    if (g->cuModuleLoadData(&dp4a_mod, _vira_cuda_dp4a_kernel_ptx) == VIRA_CUDA_SUCCESS && dp4a_mod != NULL) {
+      vira_cu_function k_q8 = NULL;
+      if (g->cuModuleGetFunction(&k_q8, dp4a_mod, "vira_cu_quantize_q8_1") == VIRA_CUDA_SUCCESS && k_q8 != NULL) {
+        g->cu_dp4a_module = dp4a_mod;
+        g->cu_k_quantize_q8_1 = k_q8;
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q4_0, dp4a_mod, "vira_cu_mmvq_q4_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q4_1, dp4a_mod, "vira_cu_mmvq_q4_1");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q5_0, dp4a_mod, "vira_cu_mmvq_q5_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q5_1, dp4a_mod, "vira_cu_mmvq_q5_1");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q8_0, dp4a_mod, "vira_cu_mmvq_q8_0");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q4_k, dp4a_mod, "vira_cu_mmvq_q4_k");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q5_k, dp4a_mod, "vira_cu_mmvq_q5_k");
+        (void)g->cuModuleGetFunction(&g->cu_k_mmvq_q6_k, dp4a_mod, "vira_cu_mmvq_q6_k");
+        g->has_dp4a = true;
+      } else if (g->cuModuleUnload) {
+        g->cuModuleUnload(dp4a_mod);
       }
     }
   }
@@ -3105,14 +3942,16 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
 
   if (_vira_gpu_debug()) {
     fprintf(stderr,
-            "vira gpu: [CUDA Driver API] %s (sm_%d%d%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s\n",
+            "vira gpu: [CUDA Driver API] %s (sm_%d%d%s%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s\n",
             g->device_name, g->compute_capability_major, g->compute_capability_minor,
             g->has_tensor_cores ? " + Tensor Cores" : "",
+            g->has_dp4a ? " + DP4A" : "",
             (long long)(g->vram_bytes >> 20),
             (long long)(g->vram_budget_bytes >> 20), g->compute_units,
             g->warp_size, g->wg_size, g->tile_dim,
-            g->has_tensor_cores ? " / WMMA" : "");
+            g->has_tensor_cores ? " / WMMA" : "",
+            g->has_dp4a ? " / MMVQ-Q8_1" : "");
   }
 
   return true;
@@ -3382,6 +4221,16 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
   g->kernel_scale = ks[20];
   g->kernel_gqa_attention = ks[21];
   g->kernel_argmax_partial = ks[22];
+  g->kernel_gemm_q4_0 = ks[23];
+  g->kernel_gemm_q4_1 = ks[24];
+  g->kernel_gemm_q5_0 = ks[25];
+  g->kernel_gemm_q5_1 = ks[26];
+  g->kernel_gemm_q8_0 = ks[27];
+  g->kernel_gemm_q4_k = ks[28];
+  g->kernel_gemm_q5_k = ks[29];
+  g->kernel_gemm_q6_k = ks[30];
+  g->kernel_rope_seq = ks[31];
+  g->kernel_gqa_prefill = ks[32];
 
   g->cl_argmax_vals = NULL;
   g->cl_argmax_idxs = NULL;
@@ -3544,6 +4393,7 @@ static inline void vira_gpu_init(void) {
   _vira_gpu.available = false;
   _vira_gpu.enabled = true;
   _vira_gpu.has_tensor_cores = false;
+  _vira_gpu.has_dp4a = false;
   snprintf(_vira_gpu.device_name, sizeof(_vira_gpu.device_name),
            "Multi-Threaded CPU SIMD (%s)", vira_simd_backend_name());
   snprintf(_vira_gpu.backend_name, sizeof(_vira_gpu.backend_name), "CPU-SIMD");
@@ -3569,6 +4419,28 @@ static inline void vira_gpu_shutdown(void) {
       }
       _vira_gpu.cu_k_wmma_linear_h = NULL;
       _vira_gpu.cu_k_wmma_matmul = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q4_0 = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q4_1 = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q5_0 = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q5_1 = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q8_0 = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q4_k = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q5_k = NULL;
+      _vira_gpu.cu_k_wmma_gemm_q6_k = NULL;
+      if (_vira_gpu.cu_dp4a_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_dp4a_module);
+        _vira_gpu.cu_dp4a_module = NULL;
+      }
+      _vira_gpu.has_dp4a = false;
+      _vira_gpu.cu_k_quantize_q8_1 = NULL;
+      _vira_gpu.cu_k_mmvq_q4_0 = NULL;
+      _vira_gpu.cu_k_mmvq_q4_1 = NULL;
+      _vira_gpu.cu_k_mmvq_q5_0 = NULL;
+      _vira_gpu.cu_k_mmvq_q5_1 = NULL;
+      _vira_gpu.cu_k_mmvq_q8_0 = NULL;
+      _vira_gpu.cu_k_mmvq_q4_k = NULL;
+      _vira_gpu.cu_k_mmvq_q5_k = NULL;
+      _vira_gpu.cu_k_mmvq_q6_k = NULL;
       _vira_gpu.has_tensor_cores = false;
       _vira_gpu.cu_k_gemv_q4_0 = NULL;
       _vira_gpu.cu_k_gemv_q4_1 = NULL;
@@ -3593,6 +4465,16 @@ static inline void vira_gpu_shutdown(void) {
       _vira_gpu.cu_k_scale = NULL;
       _vira_gpu.cu_k_gqa_attention = NULL;
       _vira_gpu.cu_k_argmax_partial = NULL;
+      _vira_gpu.cu_k_gemm_q4_0 = NULL;
+      _vira_gpu.cu_k_gemm_q4_1 = NULL;
+      _vira_gpu.cu_k_gemm_q5_0 = NULL;
+      _vira_gpu.cu_k_gemm_q5_1 = NULL;
+      _vira_gpu.cu_k_gemm_q8_0 = NULL;
+      _vira_gpu.cu_k_gemm_q4_k = NULL;
+      _vira_gpu.cu_k_gemm_q5_k = NULL;
+      _vira_gpu.cu_k_gemm_q6_k = NULL;
+      _vira_gpu.cu_k_rope_seq = NULL;
+      _vira_gpu.cu_k_gqa_prefill = NULL;
       if (_vira_gpu.cu_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_module);
         _vira_gpu.cu_module = NULL;
@@ -3636,7 +4518,12 @@ static inline void vira_gpu_shutdown(void) {
           _vira_gpu.kernel_softmax,          _vira_gpu.kernel_silu,
           _vira_gpu.kernel_add,              _vira_gpu.kernel_elemwise_mul,
           _vira_gpu.kernel_scale,            _vira_gpu.kernel_gqa_attention,
-          _vira_gpu.kernel_argmax_partial};
+          _vira_gpu.kernel_argmax_partial,
+          _vira_gpu.kernel_gemm_q4_0,        _vira_gpu.kernel_gemm_q4_1,
+          _vira_gpu.kernel_gemm_q5_0,        _vira_gpu.kernel_gemm_q5_1,
+          _vira_gpu.kernel_gemm_q8_0,        _vira_gpu.kernel_gemm_q4_k,
+          _vira_gpu.kernel_gemm_q5_k,        _vira_gpu.kernel_gemm_q6_k,
+          _vira_gpu.kernel_rope_seq,         _vira_gpu.kernel_gqa_prefill};
       for (int i = 0; i < VIRA_GPU_NUM_KERNELS; ++i) {
         if (ks[i]) {
           _vira_gpu.clReleaseKernel(ks[i]);
@@ -3665,6 +4552,16 @@ static inline void vira_gpu_shutdown(void) {
       _vira_gpu.kernel_scale = NULL;
       _vira_gpu.kernel_gqa_attention = NULL;
       _vira_gpu.kernel_argmax_partial = NULL;
+      _vira_gpu.kernel_gemm_q4_0 = NULL;
+      _vira_gpu.kernel_gemm_q4_1 = NULL;
+      _vira_gpu.kernel_gemm_q5_0 = NULL;
+      _vira_gpu.kernel_gemm_q5_1 = NULL;
+      _vira_gpu.kernel_gemm_q8_0 = NULL;
+      _vira_gpu.kernel_gemm_q4_k = NULL;
+      _vira_gpu.kernel_gemm_q5_k = NULL;
+      _vira_gpu.kernel_gemm_q6_k = NULL;
+      _vira_gpu.kernel_rope_seq = NULL;
+      _vira_gpu.kernel_gqa_prefill = NULL;
       if (_vira_gpu.program) {
         _vira_gpu.clReleaseProgram(_vira_gpu.program);
         _vira_gpu.program = NULL;
@@ -3822,6 +4719,68 @@ static inline void vira_gpu_sync(void) {
   }
 }
 
+static inline bool _vira_gpu_ensure_act_q8_locked(
+    _vira_gpu_act_entry *x_slot, int32_t M, int32_t K,
+    _vira_gpu_act_entry *y_slot, vira_cu_deviceptr avoid_w_cu,
+    const void *pin_w, vira_cu_deviceptr *out_q8_buf) {
+  if (_vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA || !_vira_gpu.has_dp4a ||
+      _vira_gpu.cu_k_quantize_q8_1 == NULL || x_slot == NULL ||
+      x_slot->cu_buf == 0 || (K & 31) != 0 || M <= 0 || K <= 0) {
+    return false;
+  }
+  int32_t num_blocks_k = K >> 5;
+  size_t q8_bytes = (size_t)M * (size_t)num_blocks_k * 40ULL;
+  if (x_slot->cu_q8_buf != 0 && x_slot->q8_buf_cap >= q8_bytes &&
+      x_slot->q8_epoch == x_slot->epoch && x_slot->q8_epoch != 0 &&
+      x_slot->q8_bytes == q8_bytes) {
+    *out_q8_buf = x_slot->cu_q8_buf;
+    return true;
+  }
+  if (x_slot->cu_q8_buf == 0 || x_slot->q8_buf_cap < q8_bytes) {
+    if (x_slot->cu_q8_buf != 0 && _vira_gpu.cuMemFree) {
+      _vira_gpu.cuMemFree(x_slot->cu_q8_buf);
+      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                         (int64_t)x_slot->q8_buf_cap, __ATOMIC_RELAXED);
+      x_slot->cu_q8_buf = 0;
+      x_slot->q8_buf_cap = 0;
+      x_slot->q8_bytes = 0;
+      x_slot->q8_epoch = 0;
+    }
+    size_t new_cap = (q8_bytes + 4095ULL) & ~4095ULL;
+    vira_cu_deviceptr y_cu = y_slot ? y_slot->cu_buf : 0;
+    _vira_gpu_evict_lru_bytes_ex_locked(new_cap, pin_w, NULL, NULL, NULL, NULL,
+                                        x_slot->cu_buf, y_cu, avoid_w_cu,
+                                        x_slot);
+    int64_t cur_alloc =
+        __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
+    if (_vira_gpu.vram_budget_bytes > 0 &&
+        cur_alloc + (int64_t)new_cap > _vira_gpu.vram_budget_bytes) {
+      return false;
+    }
+    vira_cu_deviceptr nb = 0;
+    if (_vira_gpu.cuMemAlloc(&nb, new_cap) != VIRA_CUDA_SUCCESS || nb == 0) {
+      return false;
+    }
+    x_slot->cu_q8_buf = nb;
+    x_slot->q8_buf_cap = new_cap;
+    __atomic_add_fetch(&_vira_gpu.allocated_bytes, (int64_t)new_cap,
+                       __ATOMIC_RELAXED);
+  }
+
+  unsigned int qgx = (unsigned int)((num_blocks_k + 3) / 4);
+  unsigned int qgy = (unsigned int)M;
+  void *qargs[] = {&x_slot->cu_buf, &x_slot->cu_q8_buf, &M, &num_blocks_k};
+  if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_quantize_q8_1, qgx, qgy, 1,
+                               32, 4, 1, 0, _vira_gpu.cu_stream, qargs,
+                               NULL) != VIRA_CUDA_SUCCESS) {
+    return false;
+  }
+  x_slot->q8_epoch = x_slot->epoch;
+  x_slot->q8_bytes = q8_bytes;
+  *out_q8_buf = x_slot->cu_q8_buf;
+  return true;
+}
+
 static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
                                               vira_tensor_f32 x,
                                               vira_tensor_f32 w) {
@@ -3923,38 +4882,176 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
     vira_cu_deviceptr w_buf = is_act_w ? w_act_slot->cu_buf : w_slot->cu_buf;
     vira_cu_deviceptr y_buf = y_slot->cu_buf;
 
-    if (wfmt == VIRA_WFMT_Q4_0 || wfmt == VIRA_WFMT_Q4_1 ||
-        wfmt == VIRA_WFMT_Q5_0 || wfmt == VIRA_WFMT_Q5_1 ||
-        wfmt == VIRA_WFMT_Q8_0) {
-      vira_cu_function k;
-      switch (wfmt) {
-      case VIRA_WFMT_Q4_0: k = _vira_gpu.cu_k_gemv_q4_0; break;
-      case VIRA_WFMT_Q4_1: k = _vira_gpu.cu_k_gemv_q4_1; break;
-      case VIRA_WFMT_Q5_0: k = _vira_gpu.cu_k_gemv_q5_0; break;
-      case VIRA_WFMT_Q5_1: k = _vira_gpu.cu_k_gemv_q5_1; break;
-      default:             k = _vira_gpu.cu_k_gemv_q8_0; break;
-      }
+    if ((wfmt == VIRA_WFMT_Q4_0 || wfmt == VIRA_WFMT_Q4_1 ||
+         wfmt == VIRA_WFMT_Q5_0 || wfmt == VIRA_WFMT_Q5_1 ||
+         wfmt == VIRA_WFMT_Q8_0) && ((K & 31) == 0)) {
       int32_t num_blocks_k = K >> 5;
-      void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
-      unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
-      unsigned int gy = (unsigned int)M;
-      err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
-                                                   0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
-    } else if (wfmt == VIRA_WFMT_Q4_K || wfmt == VIRA_WFMT_Q5_K || wfmt == VIRA_WFMT_Q6_K) {
-      vira_cu_function k;
-      switch (wfmt) {
-      case VIRA_WFMT_Q4_K: k = _vira_gpu.cu_k_gemv_q4_k; break;
-      case VIRA_WFMT_Q5_K: k = _vira_gpu.cu_k_gemv_q5_k; break;
-      default:             k = _vira_gpu.cu_k_gemv_q6_k; break;
+      if (M > 4) {
+        vira_cu_function k_wmma = NULL;
+        if (_vira_gpu.has_tensor_cores) {
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_0: k_wmma = _vira_gpu.cu_k_wmma_gemm_q4_0; break;
+          case VIRA_WFMT_Q4_1: k_wmma = _vira_gpu.cu_k_wmma_gemm_q4_1; break;
+          case VIRA_WFMT_Q5_0: k_wmma = _vira_gpu.cu_k_wmma_gemm_q5_0; break;
+          case VIRA_WFMT_Q5_1: k_wmma = _vira_gpu.cu_k_wmma_gemm_q5_1; break;
+          default:             k_wmma = _vira_gpu.cu_k_wmma_gemm_q8_0; break;
+          }
+        }
+        vira_cu_function k_gemm = NULL;
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_0: k_gemm = _vira_gpu.cu_k_gemm_q4_0; break;
+        case VIRA_WFMT_Q4_1: k_gemm = _vira_gpu.cu_k_gemm_q4_1; break;
+        case VIRA_WFMT_Q5_0: k_gemm = _vira_gpu.cu_k_gemm_q5_0; break;
+        case VIRA_WFMT_Q5_1: k_gemm = _vira_gpu.cu_k_gemm_q5_1; break;
+        default:             k_gemm = _vira_gpu.cu_k_gemm_q8_0; break;
+        }
+        void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
+        if (k_wmma != NULL) {
+          unsigned int gx = (unsigned int)(((size_t)N + 31) / 32);
+          unsigned int gy = (unsigned int)(((size_t)M + 31) / 32);
+          err = (_vira_gpu.cuLaunchKernel(k_wmma, gx, gy, 1, 128, 1, 1,
+                                          0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        } else if (k_gemm != NULL) {
+          unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
+          unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);
+          err = (_vira_gpu.cuLaunchKernel(k_gemm, gx, gy, 1, 16, 4, 1,
+                                          0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        } else {
+          vira_cu_function k;
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_0: k = _vira_gpu.cu_k_gemv_q4_0; break;
+          case VIRA_WFMT_Q4_1: k = _vira_gpu.cu_k_gemv_q4_1; break;
+          case VIRA_WFMT_Q5_0: k = _vira_gpu.cu_k_gemv_q5_0; break;
+          case VIRA_WFMT_Q5_1: k = _vira_gpu.cu_k_gemv_q5_1; break;
+          default:             k = _vira_gpu.cu_k_gemv_q8_0; break;
+          }
+          unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
+          unsigned int gy = (unsigned int)M;
+          err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
+                                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        }
+      } else {
+        vira_cu_function k_mmvq = NULL;
+        if (_vira_gpu.has_dp4a) {
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_0: k_mmvq = _vira_gpu.cu_k_mmvq_q4_0; break;
+          case VIRA_WFMT_Q4_1: k_mmvq = _vira_gpu.cu_k_mmvq_q4_1; break;
+          case VIRA_WFMT_Q5_0: k_mmvq = _vira_gpu.cu_k_mmvq_q5_0; break;
+          case VIRA_WFMT_Q5_1: k_mmvq = _vira_gpu.cu_k_mmvq_q5_1; break;
+          default:             k_mmvq = _vira_gpu.cu_k_mmvq_q8_0; break;
+          }
+        }
+        vira_cu_deviceptr q8_buf = 0;
+        if (k_mmvq != NULL &&
+            _vira_gpu_ensure_act_q8_locked(x_slot, M, K, y_slot, avoid_w_cu,
+                                           pin_w, &q8_buf)) {
+          void *args[] = {&q8_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
+          unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
+          unsigned int gy = (unsigned int)M;
+          err = (_vira_gpu.cuLaunchKernel(k_mmvq, gx, gy, 1, 32, 2, 1, 0,
+                                          _vira_gpu.cu_stream, args, NULL) ==
+                 VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS
+                    : VIRA_CL_ERR_NO_ROOM;
+        } else {
+          vira_cu_function k;
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_0: k = _vira_gpu.cu_k_gemv_q4_0; break;
+          case VIRA_WFMT_Q4_1: k = _vira_gpu.cu_k_gemv_q4_1; break;
+          case VIRA_WFMT_Q5_0: k = _vira_gpu.cu_k_gemv_q5_0; break;
+          case VIRA_WFMT_Q5_1: k = _vira_gpu.cu_k_gemv_q5_1; break;
+          default:             k = _vira_gpu.cu_k_gemv_q8_0; break;
+          }
+          void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
+          unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
+          unsigned int gy = (unsigned int)M;
+          err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
+                                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        }
       }
+    } else if ((wfmt == VIRA_WFMT_Q4_K || wfmt == VIRA_WFMT_Q5_K || wfmt == VIRA_WFMT_Q6_K) && ((K & 255) == 0)) {
       int32_t num_sb_k = K >> 8;
-      void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_sb_k, &N};
-      unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
-      unsigned int gy = (unsigned int)M;
-      err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
-                                                   0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+      if (M > 4) {
+        vira_cu_function k_wmma = NULL;
+        if (_vira_gpu.has_tensor_cores) {
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_K: k_wmma = _vira_gpu.cu_k_wmma_gemm_q4_k; break;
+          case VIRA_WFMT_Q5_K: k_wmma = _vira_gpu.cu_k_wmma_gemm_q5_k; break;
+          default:             k_wmma = _vira_gpu.cu_k_wmma_gemm_q6_k; break;
+          }
+        }
+        vira_cu_function k_gemm = NULL;
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_K: k_gemm = _vira_gpu.cu_k_gemm_q4_k; break;
+        case VIRA_WFMT_Q5_K: k_gemm = _vira_gpu.cu_k_gemm_q5_k; break;
+        default:             k_gemm = _vira_gpu.cu_k_gemm_q6_k; break;
+        }
+        void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_sb_k, &N};
+        if (k_wmma != NULL) {
+          unsigned int gx = (unsigned int)(((size_t)N + 31) / 32);
+          unsigned int gy = (unsigned int)(((size_t)M + 31) / 32);
+          err = (_vira_gpu.cuLaunchKernel(k_wmma, gx, gy, 1, 128, 1, 1,
+                                          0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        } else if (k_gemm != NULL) {
+          unsigned int gx = (unsigned int)(((size_t)N + 15) / 16);
+          unsigned int gy = (unsigned int)(((size_t)M + 15) / 16);
+          err = (_vira_gpu.cuLaunchKernel(k_gemm, gx, gy, 1, 16, 4, 1,
+                                          0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        } else {
+          vira_cu_function k;
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_K: k = _vira_gpu.cu_k_gemv_q4_k; break;
+          case VIRA_WFMT_Q5_K: k = _vira_gpu.cu_k_gemv_q5_k; break;
+          default:             k = _vira_gpu.cu_k_gemv_q6_k; break;
+          }
+          unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
+          unsigned int gy = (unsigned int)M;
+          err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
+                                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        }
+      } else {
+        vira_cu_function k_mmvq = NULL;
+        if (_vira_gpu.has_dp4a) {
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_K: k_mmvq = _vira_gpu.cu_k_mmvq_q4_k; break;
+          case VIRA_WFMT_Q5_K: k_mmvq = _vira_gpu.cu_k_mmvq_q5_k; break;
+          default:             k_mmvq = _vira_gpu.cu_k_mmvq_q6_k; break;
+          }
+        }
+        vira_cu_deviceptr q8_buf = 0;
+        if (k_mmvq != NULL &&
+            _vira_gpu_ensure_act_q8_locked(x_slot, M, K, y_slot, avoid_w_cu,
+                                           pin_w, &q8_buf)) {
+          void *args[] = {&q8_buf, &w_buf, &y_buf, &M, &num_sb_k, &N};
+          unsigned int gx = (unsigned int)(((size_t)N + 7) / 8);
+          unsigned int gy = (unsigned int)M;
+          err = (_vira_gpu.cuLaunchKernel(k_mmvq, gx, gy, 1, 32, 2, 1, 0,
+                                          _vira_gpu.cu_stream, args, NULL) ==
+                 VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS
+                    : VIRA_CL_ERR_NO_ROOM;
+        } else {
+          vira_cu_function k;
+          switch (wfmt) {
+          case VIRA_WFMT_Q4_K: k = _vira_gpu.cu_k_gemv_q4_k; break;
+          case VIRA_WFMT_Q5_K: k = _vira_gpu.cu_k_gemv_q5_k; break;
+          default:             k = _vira_gpu.cu_k_gemv_q6_k; break;
+          }
+          void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_sb_k, &N};
+          unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg);
+          unsigned int gy = (unsigned int)M;
+          err = (k != NULL && _vira_gpu.cuLaunchKernel(k, gx, gy, 1, _vira_gpu.warp_size, _vira_gpu.rows_per_wg, 1,
+                                                       0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                    ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+        }
+      }
     } else if (wfmt == VIRA_WFMT_F32) {
       void *args[] = {&x_buf, &w_buf, &y_buf, &M, &K, &N};
       unsigned int gx = (unsigned int)(((size_t)N + _vira_gpu.tile_dim - 1) / _vira_gpu.tile_dim);
@@ -4006,46 +5103,82 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
     vira_cl_mem w_buf = is_act_w ? w_act_slot->dev_buf : w_slot->dev_buf;
     vira_cl_mem y_buf = y_slot->dev_buf;
 
-    if (wfmt == VIRA_WFMT_Q4_0 || wfmt == VIRA_WFMT_Q4_1 ||
-        wfmt == VIRA_WFMT_Q5_0 || wfmt == VIRA_WFMT_Q5_1 ||
-        wfmt == VIRA_WFMT_Q8_0) {
-      vira_cl_kernel k;
-      switch (wfmt) {
-      case VIRA_WFMT_Q4_0: k = _vira_gpu.kernel_gemv_q4_0; break;
-      case VIRA_WFMT_Q4_1: k = _vira_gpu.kernel_gemv_q4_1; break;
-      case VIRA_WFMT_Q5_0: k = _vira_gpu.kernel_gemv_q5_0; break;
-      case VIRA_WFMT_Q5_1: k = _vira_gpu.kernel_gemv_q5_1; break;
-      default:             k = _vira_gpu.kernel_gemv_q8_0; break;
-      }
-      if (k == NULL) {
-        err = VIRA_CL_ERR_NO_ROOM;
-      } else {
-        int32_t num_blocks_k = K >> 5;
-        err = _vira_gpu_set_gemm_args(k, &x_buf, &w_buf, &y_buf, M, num_blocks_k, N);
-        size_t l_work[2] = {(size_t)_vira_gpu.warp_size, (size_t)_vira_gpu.rows_per_wg};
-        size_t num_groups_n = ((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg;
-        size_t g_work[2] = {num_groups_n * _vira_gpu.warp_size, (size_t)M * _vira_gpu.rows_per_wg};
-        if (err == VIRA_CL_SUCCESS) {
-          err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k, 2, NULL, g_work, l_work, 0, NULL, NULL);
+    if ((wfmt == VIRA_WFMT_Q4_0 || wfmt == VIRA_WFMT_Q4_1 ||
+         wfmt == VIRA_WFMT_Q5_0 || wfmt == VIRA_WFMT_Q5_1 ||
+         wfmt == VIRA_WFMT_Q8_0) && ((K & 31) == 0)) {
+      int32_t num_blocks_k = K >> 5;
+      vira_cl_kernel k_gemm = NULL;
+      if (M > 4) {
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_0: k_gemm = _vira_gpu.kernel_gemm_q4_0; break;
+        case VIRA_WFMT_Q4_1: k_gemm = _vira_gpu.kernel_gemm_q4_1; break;
+        case VIRA_WFMT_Q5_0: k_gemm = _vira_gpu.kernel_gemm_q5_0; break;
+        case VIRA_WFMT_Q5_1: k_gemm = _vira_gpu.kernel_gemm_q5_1; break;
+        default:             k_gemm = _vira_gpu.kernel_gemm_q8_0; break;
         }
       }
-    } else if (wfmt == VIRA_WFMT_Q4_K || wfmt == VIRA_WFMT_Q5_K || wfmt == VIRA_WFMT_Q6_K) {
-      vira_cl_kernel k;
-      switch (wfmt) {
-      case VIRA_WFMT_Q4_K: k = _vira_gpu.kernel_gemv_q4_k; break;
-      case VIRA_WFMT_Q5_K: k = _vira_gpu.kernel_gemv_q5_k; break;
-      default:             k = _vira_gpu.kernel_gemv_q6_k; break;
-      }
-      if (k == NULL) {
-        err = VIRA_CL_ERR_NO_ROOM;
-      } else {
-        int32_t num_sb_k = K >> 8;
-        err = _vira_gpu_set_gemm_args(k, &x_buf, &w_buf, &y_buf, M, num_sb_k, N);
-        size_t l_work[2] = {(size_t)_vira_gpu.warp_size, (size_t)_vira_gpu.rows_per_wg};
-        size_t num_groups_n = ((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg;
-        size_t g_work[2] = {num_groups_n * _vira_gpu.warp_size, (size_t)M * _vira_gpu.rows_per_wg};
+      if (k_gemm != NULL) {
+        err = _vira_gpu_set_gemm_args(k_gemm, &x_buf, &w_buf, &y_buf, M, num_blocks_k, N);
+        size_t l_work[2] = {16, 4};
+        size_t g_work[2] = {((size_t)(N + 15) / 16) * 16, ((size_t)(M + 15) / 16) * 4};
         if (err == VIRA_CL_SUCCESS) {
-          err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k, 2, NULL, g_work, l_work, 0, NULL, NULL);
+          err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k_gemm, 2, NULL, g_work, l_work, 0, NULL, NULL);
+        }
+      } else {
+        vira_cl_kernel k;
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_0: k = _vira_gpu.kernel_gemv_q4_0; break;
+        case VIRA_WFMT_Q4_1: k = _vira_gpu.kernel_gemv_q4_1; break;
+        case VIRA_WFMT_Q5_0: k = _vira_gpu.kernel_gemv_q5_0; break;
+        case VIRA_WFMT_Q5_1: k = _vira_gpu.kernel_gemv_q5_1; break;
+        default:             k = _vira_gpu.kernel_gemv_q8_0; break;
+        }
+        if (k == NULL) {
+          err = VIRA_CL_ERR_NO_ROOM;
+        } else {
+          err = _vira_gpu_set_gemm_args(k, &x_buf, &w_buf, &y_buf, M, num_blocks_k, N);
+          size_t l_work[2] = {(size_t)_vira_gpu.warp_size, (size_t)_vira_gpu.rows_per_wg};
+          size_t num_groups_n = ((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg;
+          size_t g_work[2] = {num_groups_n * _vira_gpu.warp_size, (size_t)M * _vira_gpu.rows_per_wg};
+          if (err == VIRA_CL_SUCCESS) {
+            err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k, 2, NULL, g_work, l_work, 0, NULL, NULL);
+          }
+        }
+      }
+    } else if ((wfmt == VIRA_WFMT_Q4_K || wfmt == VIRA_WFMT_Q5_K || wfmt == VIRA_WFMT_Q6_K) && ((K & 255) == 0)) {
+      int32_t num_sb_k = K >> 8;
+      vira_cl_kernel k_gemm = NULL;
+      if (M > 4) {
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_K: k_gemm = _vira_gpu.kernel_gemm_q4_k; break;
+        case VIRA_WFMT_Q5_K: k_gemm = _vira_gpu.kernel_gemm_q5_k; break;
+        default:             k_gemm = _vira_gpu.kernel_gemm_q6_k; break;
+        }
+      }
+      if (k_gemm != NULL) {
+        err = _vira_gpu_set_gemm_args(k_gemm, &x_buf, &w_buf, &y_buf, M, num_sb_k, N);
+        size_t l_work[2] = {16, 4};
+        size_t g_work[2] = {((size_t)(N + 15) / 16) * 16, ((size_t)(M + 15) / 16) * 4};
+        if (err == VIRA_CL_SUCCESS) {
+          err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k_gemm, 2, NULL, g_work, l_work, 0, NULL, NULL);
+        }
+      } else {
+        vira_cl_kernel k;
+        switch (wfmt) {
+        case VIRA_WFMT_Q4_K: k = _vira_gpu.kernel_gemv_q4_k; break;
+        case VIRA_WFMT_Q5_K: k = _vira_gpu.kernel_gemv_q5_k; break;
+        default:             k = _vira_gpu.kernel_gemv_q6_k; break;
+        }
+        if (k == NULL) {
+          err = VIRA_CL_ERR_NO_ROOM;
+        } else {
+          err = _vira_gpu_set_gemm_args(k, &x_buf, &w_buf, &y_buf, M, num_sb_k, N);
+          size_t l_work[2] = {(size_t)_vira_gpu.warp_size, (size_t)_vira_gpu.rows_per_wg};
+          size_t num_groups_n = ((size_t)N + _vira_gpu.rows_per_wg - 1) / _vira_gpu.rows_per_wg;
+          size_t g_work[2] = {num_groups_n * _vira_gpu.warp_size, (size_t)M * _vira_gpu.rows_per_wg};
+          if (err == VIRA_CL_SUCCESS) {
+            err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, k, 2, NULL, g_work, l_work, 0, NULL, NULL);
+          }
         }
       }
     } else if (wfmt == VIRA_WFMT_F32) {
@@ -4491,8 +5624,9 @@ static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
     err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope, 4, sizeof(int32_t), &half_dim);
     err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope, 5, sizeof(float), &pos_f);
     err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope, 6, sizeof(float), &freq_base);
-    size_t l_work[2] = {16, 16};
-    size_t g_work[2] = {((size_t)half_dim + 15) & ~15ULL, ((size_t)rows + 15) & ~15ULL};
+    size_t lw1 = (_vira_gpu.max_wg_size >= 256) ? 16 : ((_vira_gpu.max_wg_size >= 128) ? 8 : 4);
+    size_t l_work[2] = {16, lw1};
+    size_t g_work[2] = {((size_t)half_dim + 15) & ~15ULL, (((size_t)rows + lw1 - 1) / lw1) * lw1};
     if (err == VIRA_CL_SUCCESS) {
       err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, _vira_gpu.kernel_rope, 2,
                                              NULL, g_work, l_work, 0, NULL, NULL);
@@ -4507,6 +5641,177 @@ static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
     vira_tensor_f32 res = vira_tensor_rope(opt_arena, q, pos, freq_base);
     _vira_tls_gpu_fallback = false;
     return res;
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, q.n_dims, q.dims)
+                : _vira_tensor_f32_alloc_uninit_nd(q.n_dims, q.dims);
+  _vira_gpu_act_bind_locked(y_slot, out.data, q_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
+  _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return out;
+}
+
+static inline vira_tensor_f32 _vira_cpu_rope_seq(
+    vira_arena *opt_arena, vira_tensor_f32 q, int64_t start_pos,
+    int32_t n_heads, float freq_base) {
+  _vira_tensor_norm_shape(&q);
+  _vira_gpu_sync_host(q.data);
+  if (q.data == NULL || q.n_dims < 2) {
+    fprintf(stderr, "vira tensor error: rope_seq requires >=2D tensor\n");
+    exit(1);
+  }
+  int32_t cols = q.dims[q.n_dims - 1];
+  int32_t rows = 1;
+  for (int32_t i = 0; i < q.n_dims - 1; ++i) {
+    rows *= q.dims[i];
+  }
+  if (cols <= 0 || rows <= 0 || (cols & 1) != 0 || n_heads <= 0) {
+    fprintf(stderr,
+            "vira tensor error: rope_seq invalid shape (%dx%d) n_heads=%d\n",
+            rows, cols, n_heads);
+    exit(1);
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, q.n_dims, q.dims)
+                : vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
+  int32_t half_dim = cols / 2;
+  float inv_stack[256], cos_stack[256], sin_stack[256];
+  float *inv_tab =
+      (half_dim <= 256) ? inv_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  float *cos_tab =
+      (half_dim <= 256) ? cos_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  float *sin_tab =
+      (half_dim <= 256) ? sin_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  if (!inv_tab || !cos_tab || !sin_tab) {
+    fprintf(stderr, "vira panic: rope_seq scratch allocation failed\n");
+    exit(1);
+  }
+
+  for (int32_t i = 0; i < half_dim; ++i) {
+    float exponent = -(2.0f * (float)i) / (float)cols;
+    inv_tab[i] = powf(freq_base, exponent);
+  }
+
+  int32_t cur_seq = -1;
+  for (int32_t r = 0; r < rows; ++r) {
+    int32_t seq_idx = r / n_heads;
+    if (seq_idx != cur_seq) {
+      cur_seq = seq_idx;
+      float pos_f = (float)(start_pos + (int64_t)seq_idx);
+      for (int32_t i = 0; i < half_dim; ++i) {
+        float angle = pos_f * inv_tab[i];
+        cos_tab[i] = cosf(angle);
+        sin_tab[i] = sinf(angle);
+      }
+    }
+    const float *q_row = &q.data[(size_t)r * (size_t)cols];
+    float *out_row = &out.data[(size_t)r * (size_t)cols];
+    for (int32_t i = 0; i < half_dim; ++i) {
+      float cos_a = cos_tab[i];
+      float sin_a = sin_tab[i];
+      float q0 = q_row[i];
+      float q1 = q_row[i + half_dim];
+      out_row[i] = q0 * cos_a - q1 * sin_a;
+      out_row[i + half_dim] = q0 * sin_a + q1 * cos_a;
+    }
+  }
+
+  if (half_dim > 256) {
+    free(inv_tab);
+    free(cos_tab);
+    free(sin_tab);
+  }
+  return out;
+}
+
+static inline vira_tensor_f32 vira_gpu_rope_seq(
+    vira_arena *opt_arena, vira_tensor_f32 q, int64_t start_pos,
+    int32_t n_heads, float freq_base) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&q);
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      q.data == NULL || q.n_dims < 2) {
+    if (_vira_gpu.simulate_oom) {
+      __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    }
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  int32_t cols = q.dims[q.n_dims - 1];
+  int32_t rows = 1;
+  for (int32_t i = 0; i < q.n_dims - 1; ++i) {
+    rows *= q.dims[i];
+  }
+  if ((cols & 1) != 0 || cols <= 0 || rows <= 0 || n_heads <= 0) {
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  int32_t half_dim = cols / 2;
+  int64_t start_pos_arg = start_pos;
+
+  pthread_mutex_lock(&_vira_gpu.lock);
+  bool has_k = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
+                   ? (_vira_gpu.cu_k_rope_seq != NULL)
+                   : (_vira_gpu.kernel_rope_seq != NULL);
+  if (!has_k || !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+  const size_t q_bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
+
+  vira_cl_int err = 0;
+  bool q_hit = false;
+  _vira_gpu_act_entry *q_slot = _vira_gpu_get_or_upload_activation_locked(
+      q.data, q_bytes, !q.is_arena, &q_hit, NULL, NULL, 0, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || q_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  _vira_gpu_act_entry *y_slot = _vira_gpu_alloc_activation_slot_locked(
+      q_bytes, q_slot->dev_buf, NULL, NULL, q_slot->cu_buf, 0, 0, NULL, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || y_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols,
+                    &half_dim, &n_heads, &start_pos_arg, &freq_base};
+    unsigned int gx = (unsigned int)((half_dim + 15) / 16);
+    unsigned int gy = (unsigned int)((rows + 15) / 16);
+    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_seq, gx, gy, 1, 16, 16, 1,
+                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+  } else {
+    err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 1, sizeof(vira_cl_mem), &y_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 2, sizeof(int32_t), &rows);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 3, sizeof(int32_t), &cols);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 4, sizeof(int32_t), &half_dim);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 5, sizeof(int32_t), &n_heads);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 6, sizeof(int64_t), &start_pos_arg);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq, 7, sizeof(float), &freq_base);
+    size_t lw1 = (_vira_gpu.max_wg_size >= 256) ? 16 : ((_vira_gpu.max_wg_size >= 128) ? 8 : 4);
+    size_t l_work[2] = {16, lw1};
+    size_t g_work[2] = {((size_t)half_dim + 15) & ~15ULL, (((size_t)rows + lw1 - 1) / lw1) * lw1};
+    if (err == VIRA_CL_SUCCESS) {
+      err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, _vira_gpu.kernel_rope_seq, 2,
+                                             NULL, g_work, l_work, 0, NULL, NULL);
+    }
+  }
+
+  if (err != VIRA_CL_SUCCESS) {
+    _vira_gpu_act_entry_reset(y_slot);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
   }
 
   vira_tensor_f32 out =
@@ -5268,6 +6573,254 @@ static inline vira_tensor_f32 vira_gpu_gqa_attention(
   return out;
 }
 
+static inline vira_tensor_f32 _vira_cpu_gqa_prefill(
+    vira_arena *opt_arena, vira_tensor_f32 q_seq, vira_tensor_f32 k_cache,
+    vira_tensor_f32 v_cache, int64_t start_pos, int32_t seq_len,
+    int32_t n_heads, float scale) {
+  _vira_tensor_norm_shape(&q_seq);
+  _vira_tensor_norm_shape(&k_cache);
+  _vira_tensor_norm_shape(&v_cache);
+  _vira_gpu_sync_host(q_seq.data);
+  _vira_gpu_sync_host(k_cache.data);
+  _vira_gpu_sync_host(v_cache.data);
+
+  int32_t head_dim = q_seq.cols;
+  int32_t kv_dim = k_cache.cols;
+  if (q_seq.data == NULL || k_cache.data == NULL || v_cache.data == NULL ||
+      seq_len <= 0 || n_heads <= 0 || head_dim <= 0 || kv_dim <= 0 ||
+      q_seq.rows != seq_len * n_heads || (kv_dim % head_dim) != 0 ||
+      k_cache.cols != v_cache.cols || start_pos < 0 ||
+      start_pos + (int64_t)seq_len > k_cache.rows ||
+      start_pos + (int64_t)seq_len > v_cache.rows) {
+    fprintf(stderr,
+            "vira tensor error: gqa_prefill invalid shape or bounds (start_pos=%lld, seq_len=%d, n_heads=%d, q_rows=%d)\n",
+            (long long)start_pos, seq_len, n_heads, q_seq.rows);
+    exit(1);
+  }
+  int32_t n_kv_heads = kv_dim / head_dim;
+  if (n_kv_heads <= 0 || (n_heads % n_kv_heads) != 0) {
+    fprintf(stderr,
+            "vira tensor error: gqa_prefill head mismatch n_heads=%d n_kv_heads=%d\n",
+            n_heads, n_kv_heads);
+    exit(1);
+  }
+  int32_t kv_mul = n_heads / n_kv_heads;
+  int32_t max_t = (int32_t)(start_pos + (int64_t)seq_len);
+
+  int32_t out_dims[2] = {seq_len * n_heads, head_dim};
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
+                : vira_tensor_f32_alloc_nd(2, out_dims);
+
+  float stack_scores[4096];
+  float *scores = (max_t <= 4096)
+                      ? stack_scores
+                      : (float *)malloc((size_t)max_t * sizeof(float));
+  if (!scores) {
+    fprintf(stderr, "vira panic: gqa_prefill score buffer failed\n");
+    exit(1);
+  }
+
+  for (int32_t m = 0; m < seq_len; ++m) {
+    int32_t t_end = (int32_t)(start_pos + (int64_t)m + 1);
+    for (int32_t h = 0; h < n_heads; ++h) {
+      int32_t kv_h = h / kv_mul;
+      size_t kv_off = (size_t)kv_h * (size_t)head_dim;
+      size_t qh_off = ((size_t)m * (size_t)n_heads + (size_t)h) * (size_t)head_dim;
+      const float *q_row = q_seq.data + qh_off;
+      float *out_row = out.data + qh_off;
+
+      float max_s = -1e30f;
+      for (int32_t t = 0; t < t_end; ++t) {
+        const float *k_row = k_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
+        float dot = 0.0f;
+        for (int32_t d = 0; d < head_dim; ++d) {
+          dot += q_row[d] * k_row[d];
+        }
+        float s = dot * scale;
+        scores[t] = s;
+        if (t == 0 || s > max_s) max_s = s;
+      }
+
+      float sum_e = 0.0f;
+      for (int32_t d = 0; d < head_dim; ++d) out_row[d] = 0.0f;
+      for (int32_t t = 0; t < t_end; ++t) {
+        float p = expf(scores[t] - max_s);
+        sum_e += p;
+        const float *v_row = v_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
+        for (int32_t d = 0; d < head_dim; ++d) {
+          out_row[d] += p * v_row[d];
+        }
+      }
+      if (sum_e > 0.0f) {
+        float inv_e = 1.0f / sum_e;
+        for (int32_t d = 0; d < head_dim; ++d) {
+          out_row[d] *= inv_e;
+        }
+      }
+    }
+  }
+
+  if (scores != stack_scores) free(scores);
+  return out;
+}
+
+static inline vira_tensor_f32 vira_gpu_gqa_prefill(
+    vira_arena *opt_arena, vira_tensor_f32 q_seq, vira_tensor_f32 k_cache,
+    vira_tensor_f32 v_cache, int64_t start_pos, int32_t seq_len,
+    int32_t n_heads, float scale) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&q_seq);
+  _vira_tensor_norm_shape(&k_cache);
+  _vira_tensor_norm_shape(&v_cache);
+
+  int32_t head_dim = q_seq.cols;
+  int32_t kv_dim = k_cache.cols;
+  if (q_seq.data == NULL || k_cache.data == NULL || v_cache.data == NULL ||
+      seq_len <= 0 || n_heads <= 0 || head_dim <= 0 || kv_dim <= 0 ||
+      q_seq.rows != seq_len * n_heads || (kv_dim % head_dim) != 0 ||
+      k_cache.cols != v_cache.cols || start_pos < 0 ||
+      start_pos + (int64_t)seq_len > k_cache.rows ||
+      start_pos + (int64_t)seq_len > v_cache.rows) {
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+  int32_t n_kv_heads = kv_dim / head_dim;
+  if (n_kv_heads <= 0 || (n_heads % n_kv_heads) != 0) {
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      head_dim > 256) {
+    if (_vira_gpu.simulate_oom) {
+      __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    }
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  int32_t kv_mul = n_heads / n_kv_heads;
+  int64_t start_pos_arg = start_pos;
+  const size_t q_bytes =
+      (size_t)seq_len * (size_t)n_heads * (size_t)head_dim * sizeof(vira_f32);
+  const size_t k_bytes =
+      (size_t)k_cache.rows * (size_t)k_cache.cols * sizeof(vira_f32);
+  const size_t v_bytes =
+      (size_t)v_cache.rows * (size_t)v_cache.cols * sizeof(vira_f32);
+
+  pthread_mutex_lock(&_vira_gpu.lock);
+  bool has_k = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
+                   ? (_vira_gpu.cu_k_gqa_prefill != NULL)
+                   : (_vira_gpu.kernel_gqa_prefill != NULL);
+  if (!has_k || !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  vira_cl_int err = 0;
+  bool q_hit = false;
+  _vira_gpu_act_entry *q_slot = _vira_gpu_get_or_upload_activation_locked(
+      q_seq.data, q_bytes, !q_seq.is_arena, &q_hit, NULL, NULL, 0, 0, NULL,
+      &err);
+  if (err != VIRA_CL_SUCCESS || q_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  bool k_hit = false;
+  _vira_gpu_act_entry *k_slot = _vira_gpu_get_or_upload_activation_locked(
+      k_cache.data, k_bytes, !k_cache.is_arena, &k_hit, q_slot->dev_buf, NULL,
+      q_slot->cu_buf, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || k_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  bool v_hit = false;
+  _vira_gpu_act_entry *v_slot = _vira_gpu_get_or_upload_activation_locked(
+      v_cache.data, v_bytes, !v_cache.is_arena, &v_hit, q_slot->dev_buf,
+      k_slot->dev_buf, q_slot->cu_buf, k_slot->cu_buf, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || v_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  _vira_gpu_act_entry *o_slot = _vira_gpu_alloc_activation_slot_locked(
+      q_bytes, q_slot->dev_buf, k_slot->dev_buf, v_slot->dev_buf,
+      q_slot->cu_buf, k_slot->cu_buf, v_slot->cu_buf, NULL, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || o_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    int32_t h_blk_per_kv = (kv_mul + 1) >> 1;
+    unsigned int gx = (unsigned int)(n_kv_heads * h_blk_per_kv);
+    unsigned int gy = (unsigned int)((seq_len + 3) / 4);
+    void *args[] = {&q_slot->cu_buf, &k_slot->cu_buf, &v_slot->cu_buf,
+                    &o_slot->cu_buf, &seq_len,        &n_heads,
+                    &kv_mul,         &head_dim,       &kv_dim,
+                    &start_pos_arg,  &scale};
+    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_gqa_prefill, gx, gy, 1,
+                                    256, 1, 1, 0, _vira_gpu.cu_stream, args,
+                                    NULL) == VIRA_CUDA_SUCCESS)
+              ? VIRA_CL_SUCCESS
+              : VIRA_CL_ERR_NO_ROOM;
+  } else {
+    int32_t prefill_h_tile = (_vira_gpu.rows_per_wg >= 2) ? 2 : 1;
+    int32_t prefill_q_tile = _vira_gpu.rows_per_wg / prefill_h_tile;
+    int32_t h_blk_per_kv = (kv_mul + prefill_h_tile - 1) / prefill_h_tile;
+    err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 1, sizeof(vira_cl_mem), &k_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 2, sizeof(vira_cl_mem), &v_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 3, sizeof(vira_cl_mem), &o_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 4, sizeof(int32_t), &seq_len);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 5, sizeof(int32_t), &n_heads);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 6, sizeof(int32_t), &kv_mul);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 7, sizeof(int32_t), &head_dim);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 8, sizeof(int32_t), &kv_dim);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 9, sizeof(int64_t), &start_pos_arg);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_gqa_prefill, 10, sizeof(float), &scale);
+    size_t l_work[2] = {(size_t)_vira_gpu.wg_size, 1};
+    size_t g_work[2] = {
+        (size_t)(n_kv_heads * h_blk_per_kv) * l_work[0],
+        (size_t)((seq_len + prefill_q_tile - 1) / prefill_q_tile)};
+    if (err == VIRA_CL_SUCCESS) {
+      err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue,
+                                             _vira_gpu.kernel_gqa_prefill, 2,
+                                             NULL, g_work, l_work, 0, NULL, NULL);
+    }
+  }
+
+  if (err != VIRA_CL_SUCCESS) {
+    _vira_gpu_act_entry_reset(o_slot);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
+                                 seq_len, n_heads, scale);
+  }
+
+  int32_t out_dims[2] = {seq_len * n_heads, head_dim};
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
+  _vira_gpu_act_bind_locked(o_slot, out.data, q_bytes, o_slot->epoch,
+                            o_slot->last_used, !out.is_arena);
+  _vira_gpu_mark_act_dirty_locked(o_slot, out.data);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return out;
+}
+
 static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
                                       vira_tensor_f32 src) {
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
@@ -5342,6 +6895,169 @@ static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
   }
   pthread_mutex_unlock(&_vira_gpu.lock);
   return ok;
+}
+
+static inline bool _vira_gpu_copy_rows(vira_tensor_f32 dst,
+                                       int32_t dst_row_start,
+                                       vira_tensor_f32 src) {
+  if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
+      !_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      dst.data == NULL || src.data == NULL || dst.data == src.data ||
+      dst_row_start < 0 || src.rows <= 0 ||
+      dst_row_start + src.rows > dst.rows || src.cols != dst.cols) {
+    return false;
+  }
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (!_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+  bool dst_in = _vira_gpu_is_activation_ptr_locked(dst.data);
+  bool src_in = _vira_gpu_is_activation_ptr_locked(src.data);
+  if (!dst_in && !src_in) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  const size_t src_bytes = (size_t)src.rows * (size_t)src.cols * sizeof(vira_f32);
+  const size_t dst_bytes = (size_t)dst.rows * (size_t)dst.cols * sizeof(vira_f32);
+  const size_t copy_bytes = src_bytes;
+  const size_t dst_off =
+      (size_t)dst_row_start * (size_t)dst.cols * sizeof(vira_f32);
+
+  vira_cl_int err = 0;
+  bool src_hit = false;
+  _vira_gpu_act_entry *src_slot = _vira_gpu_get_or_upload_activation_locked(
+      src.data, src_bytes, !src.is_arena, &src_hit, NULL, NULL, 0, 0, NULL,
+      &err);
+  if (err != VIRA_CL_SUCCESS || src_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  bool dst_hit = false;
+  _vira_gpu_act_entry *dst_slot = _vira_gpu_get_or_upload_activation_locked(
+      dst.data, dst_bytes, !dst.is_arena, &dst_hit, src_slot->dev_buf, NULL,
+      src_slot->cu_buf, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || dst_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  bool ok = false;
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    if (_vira_gpu.cuMemcpyDtoDAsync && _vira_gpu.cu_stream) {
+      ok = (_vira_gpu.cuMemcpyDtoDAsync(dst_slot->cu_buf + dst_off,
+                                        src_slot->cu_buf, copy_bytes,
+                                        _vira_gpu.cu_stream) ==
+            VIRA_CUDA_SUCCESS);
+    } else if (_vira_gpu.cuMemcpyDtoD) {
+      if (_vira_gpu.cuStreamSynchronize && _vira_gpu.cu_stream) {
+        _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
+      }
+      ok = (_vira_gpu.cuMemcpyDtoD(dst_slot->cu_buf + dst_off,
+                                   src_slot->cu_buf, copy_bytes) ==
+            VIRA_CUDA_SUCCESS);
+    }
+  } else {
+    if (_vira_gpu.clEnqueueCopyBuffer) {
+      ok = (_vira_gpu.clEnqueueCopyBuffer(_vira_gpu.queue, src_slot->dev_buf,
+                                          dst_slot->dev_buf, 0, dst_off,
+                                          copy_bytes, 0, NULL, NULL) ==
+            VIRA_CL_SUCCESS);
+    }
+  }
+
+  if (ok) {
+    _vira_gpu_evict_weight_ptr_locked(dst.data);
+    dst_slot->last_used = ++_vira_gpu.access_clock;
+    if (!dst.is_arena) dst_slot->persistent = true;
+    _vira_gpu_mark_act_dirty_locked(dst_slot, dst.data);
+  }
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return ok;
+}
+
+static inline bool _vira_gpu_slice_rows(vira_arena *opt_arena,
+                                        vira_tensor_f32 src,
+                                        int32_t start_row, int32_t end_row,
+                                        vira_tensor_f32 *out_tensor) {
+  if (out_tensor == NULL ||
+      __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
+      !_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      src.data == NULL || start_row < 0 || end_row <= start_row ||
+      end_row > src.rows) {
+    return false;
+  }
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (!_vira_gpu_cuda_ensure_ctx_locked() ||
+      !_vira_gpu_is_activation_ptr_locked(src.data)) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  int32_t n_rows = end_row - start_row;
+  size_t src_bytes = (size_t)src.rows * (size_t)src.cols * sizeof(vira_f32);
+  size_t src_off = (size_t)start_row * (size_t)src.cols * sizeof(vira_f32);
+  size_t copy_bytes = (size_t)n_rows * (size_t)src.cols * sizeof(vira_f32);
+
+  vira_cl_int err = 0;
+  bool src_hit = false;
+  _vira_gpu_act_entry *src_slot = _vira_gpu_get_or_upload_activation_locked(
+      src.data, src_bytes, !src.is_arena, &src_hit, NULL, NULL, 0, 0, NULL,
+      &err);
+  if (err != VIRA_CL_SUCCESS || src_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  _vira_gpu_act_entry *dst_slot = _vira_gpu_alloc_activation_slot_locked(
+      copy_bytes, src_slot->dev_buf, NULL, NULL, src_slot->cu_buf, 0, 0, NULL,
+      NULL, &err);
+  if (err != VIRA_CL_SUCCESS || dst_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  bool ok = false;
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    if (_vira_gpu.cuMemcpyDtoDAsync && _vira_gpu.cu_stream) {
+      ok = (_vira_gpu.cuMemcpyDtoDAsync(dst_slot->cu_buf,
+                                        src_slot->cu_buf + src_off, copy_bytes,
+                                        _vira_gpu.cu_stream) ==
+            VIRA_CUDA_SUCCESS);
+    } else if (_vira_gpu.cuMemcpyDtoD) {
+      if (_vira_gpu.cuStreamSynchronize && _vira_gpu.cu_stream) {
+        _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
+      }
+      ok = (_vira_gpu.cuMemcpyDtoD(dst_slot->cu_buf, src_slot->cu_buf + src_off,
+                                   copy_bytes) == VIRA_CUDA_SUCCESS);
+    }
+  } else {
+    if (_vira_gpu.clEnqueueCopyBuffer) {
+      ok = (_vira_gpu.clEnqueueCopyBuffer(_vira_gpu.queue, src_slot->dev_buf,
+                                          dst_slot->dev_buf, src_off, 0,
+                                          copy_bytes, 0, NULL, NULL) ==
+            VIRA_CL_SUCCESS);
+    }
+  }
+
+  if (!ok) {
+    _vira_gpu_act_entry_reset(dst_slot);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return false;
+  }
+
+  int32_t dims[2] = {n_rows, src.cols};
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, dims);
+  _vira_gpu_act_bind_locked(dst_slot, out.data, copy_bytes, dst_slot->epoch,
+                            dst_slot->last_used, !out.is_arena);
+  _vira_gpu_mark_act_dirty_locked(dst_slot, out.data);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  *out_tensor = out;
+  return true;
 }
 
 static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits) {

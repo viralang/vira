@@ -80,8 +80,8 @@ typedef int vira_socket_t;
 #endif
 
 // --- HARDWARE SIMD INTRINSIC HEADERS ---
-#if defined(__AVX2__) || defined(__SSE2__) || defined(__x86_64__) ||           \
-    defined(_M_X64)
+#if defined(__AVX2__) || defined(__SSSE3__) || defined(__SSE2__) ||           \
+    defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
 
@@ -1819,6 +1819,8 @@ static inline const char *vira_simd_backend_name(void) {
   return "x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle, Multi-Threaded)";
 #elif defined(__ARM_NEON) || defined(__aarch64__)
   return "ARM64 NEON (128-bit 2x-Unrolled / 8x f32 per step, Multi-Threaded)";
+#elif defined(__SSSE3__)
+  return "x86_64 SSSE3 + SSE2 (128-bit Integer/Float SIMD, Multi-Threaded)";
 #elif defined(__SSE2__)
   return "x86_64 SSE2 (128-bit / 4x f32 per cycle, Multi-Threaded)";
 #else
@@ -2197,7 +2199,636 @@ static inline void _vira_gpu_clone_quant(const vira_f32 *dst_ptr,
 static inline void vira_gpu_shutdown(void);
 static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
                                       vira_tensor_f32 src);
+static inline bool _vira_gpu_copy_rows(vira_tensor_f32 dst,
+                                       int32_t dst_row_start,
+                                       vira_tensor_f32 src);
+static inline bool _vira_gpu_slice_rows(vira_arena *opt_arena,
+                                        vira_tensor_f32 src,
+                                        int32_t start_row, int32_t end_row,
+                                        vira_tensor_f32 *out_tensor);
 static __thread bool _vira_tls_gpu_fallback = false;
+
+// ============================================================================
+// 3.5 HOST QUANTIZED WEIGHT REGISTRY & LAZY FP32 MATERIALIZATION (PHASE 4.1)
+// ============================================================================
+
+/**
+ * Converts a 16-bit IEEE 754 half-precision float into a 32-bit single-precision float.
+ * @param h Raw 16-bit half precision float bits.
+ * @return Converted 32-bit float value.
+ * Usage: Dequantization of FP16 model weights during GGUF parsing and lazy CPU fallbacks.
+ */
+static inline float _vira_fp16_to_fp32(uint16_t h) {
+#if defined(__F16C__)
+  return _cvtsh_ss(h);
+#else
+  uint32_t sign = ((uint32_t)h & 0x8000) << 16;
+  uint32_t exp = ((uint32_t)h & 0x7C00) >> 10;
+  uint32_t mant = (uint32_t)h & 0x03FF;
+  if (exp == 0) {
+    if (mant == 0) {
+      float res;
+      uint32_t bits = sign;
+      memcpy(&res, &bits, sizeof(float));
+      return res;
+    }
+    while ((mant & 0x0400) == 0) {
+      mant <<= 1;
+      exp--;
+    }
+    exp++;
+    mant &= ~0x0400;
+  } else if (exp == 31) {
+    exp = 255;
+  } else {
+    exp = exp - 15 + 127;
+  }
+  uint32_t bits = sign | (exp << 23) | (mant << 13);
+  float res;
+  memcpy(&res, &bits, sizeof(float));
+  return res;
+#endif
+}
+
+/**
+ * Decodes a 6-bit sub-block scale and min pair from a 12-byte GGUF K-quant (`Q4_K` / `Q5_K`) scale table.
+ * @param sub Sub-block index in `[0, 7]`.
+ * @param scales Pointer to the 12-byte packed GGUF scale array.
+ * @param out_sc Output pointer receiving the 6-bit unsigned scale factor.
+ * @param out_m Output pointer receiving the 6-bit unsigned minimum offset.
+ * Usage: Internal helper used for `Q4_K` and `Q5_K` super-block dequantization and dot products.
+ */
+static inline void _vira_gguf_k4_scale_min(int32_t sub, const uint8_t *scales,
+                                           uint8_t *out_sc, uint8_t *out_m) {
+  if (sub < 4) {
+    *out_sc = (uint8_t)(scales[sub] & 63u);
+    *out_m = (uint8_t)(scales[sub + 4] & 63u);
+  } else {
+    *out_sc = (uint8_t)((scales[sub + 4] & 0x0Fu) |
+                        ((scales[sub - 4] >> 6) << 4));
+    *out_m = (uint8_t)((scales[sub + 4] >> 4) | ((scales[sub] >> 6) << 4));
+  }
+}
+
+static inline bool _vira_lazy_host_fp32_enabled(void) {
+  const char *env = getenv("VIRA_LAZY_HOST_FP32");
+  return !(env != NULL && strcmp(env, "0") == 0);
+}
+
+static inline size_t _vira_gguf_dtype_qk(uint32_t gguf_dtype) {
+  switch (gguf_dtype) {
+  case 1: return 1;
+  case 2: case 3: case 6: case 7: case 8: return 32;
+  case 12: case 13: case 14: return 256;
+  default: return 0;
+  }
+}
+
+static inline size_t _vira_gguf_dtype_bs(uint32_t gguf_dtype) {
+  switch (gguf_dtype) {
+  case 1: return 2;
+  case 2: return 18;
+  case 3: return 20;
+  case 6: return 22;
+  case 7: return 24;
+  case 8: return 34;
+  case 12: return 144;
+  case 13: return 176;
+  case 14: return 210;
+  default: return 0;
+  }
+}
+
+static inline void _vira_rt_dequant_blocks_to_fp32(uint32_t gguf_dtype,
+                                                   const uint8_t *raw_q,
+                                                   size_t start_block,
+                                                   size_t n_blocks,
+                                                   float *dst_out) {
+  if (!raw_q || !dst_out || n_blocks == 0)
+    return;
+  if (gguf_dtype == 1) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      uint16_t h = 0;
+      memcpy(&h, raw_q + (start_block + b) * 2u, 2);
+      dst_out[b] = _vira_fp16_to_fp32(h);
+    }
+  } else if (gguf_dtype == 2) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 18u;
+      uint16_t scale_h = 0;
+      memcpy(&scale_h, blk, 2);
+      float scale = _vira_fp16_to_fp32(scale_h);
+      const uint8_t *nibbles = blk + 2;
+      float *dst = dst_out + b * 32u;
+      for (int32_t j = 0; j < 16; ++j) {
+        uint8_t byte = nibbles[j];
+        int8_t v0 = (int8_t)(byte & 0x0Fu) - 8;
+        int8_t v1 = (int8_t)(byte >> 4) - 8;
+        dst[j] = scale * (float)v0;
+        dst[j + 16] = scale * (float)v1;
+      }
+    }
+  } else if (gguf_dtype == 3) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 20u;
+      uint16_t d_h = 0, m_h = 0;
+      memcpy(&d_h, blk, 2);
+      memcpy(&m_h, blk + 2, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      float m = _vira_fp16_to_fp32(m_h);
+      const uint8_t *qs = blk + 4;
+      float *dst = dst_out + b * 32u;
+      for (int32_t j = 0; j < 16; ++j) {
+        uint8_t byte = qs[j];
+        dst[j] = d * (float)(byte & 0x0Fu) + m;
+        dst[j + 16] = d * (float)(byte >> 4) + m;
+      }
+    }
+  } else if (gguf_dtype == 6) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 22u;
+      uint16_t d_h = 0;
+      memcpy(&d_h, blk, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8) |
+                    ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+      const uint8_t *qs = blk + 6;
+      float *dst = dst_out + b * 32u;
+      for (int32_t j = 0; j < 16; ++j) {
+        uint8_t byte = qs[j];
+        int32_t v0 =
+            (int32_t)((uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4)) - 16;
+        int32_t v1 =
+            (int32_t)((uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4)) -
+            16;
+        dst[j] = d * (float)v0;
+        dst[j + 16] = d * (float)v1;
+      }
+    }
+  } else if (gguf_dtype == 7) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 24u;
+      uint16_t d_h = 0, m_h = 0;
+      memcpy(&d_h, blk, 2);
+      memcpy(&m_h, blk + 2, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      float m = _vira_fp16_to_fp32(m_h);
+      uint32_t qh = (uint32_t)blk[4] | ((uint32_t)blk[5] << 8) |
+                    ((uint32_t)blk[6] << 16) | ((uint32_t)blk[7] << 24);
+      const uint8_t *qs = blk + 8;
+      float *dst = dst_out + b * 32u;
+      for (int32_t j = 0; j < 16; ++j) {
+        uint8_t byte = qs[j];
+        uint32_t v0 = (uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4);
+        uint32_t v1 = (uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4);
+        dst[j] = d * (float)v0 + m;
+        dst[j + 16] = d * (float)v1 + m;
+      }
+    }
+  } else if (gguf_dtype == 8) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 34u;
+      uint16_t scale_h = 0;
+      memcpy(&scale_h, blk, 2);
+      float scale = _vira_fp16_to_fp32(scale_h);
+      const int8_t *qs = (const int8_t *)(blk + 2);
+      float *dst = dst_out + b * 32u;
+      for (int32_t j = 0; j < 32; ++j) {
+        dst[j] = scale * (float)qs[j];
+      }
+    }
+  } else if (gguf_dtype == 12) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 144u;
+      uint16_t d_h = 0, dmin_h = 0;
+      memcpy(&d_h, blk, 2);
+      memcpy(&dmin_h, blk + 2, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      float dmin = _vira_fp16_to_fp32(dmin_h);
+      const uint8_t *scales = blk + 4;
+      const uint8_t *qs = blk + 16;
+      float *dst = dst_out + b * 256u;
+      for (int32_t ib = 0; ib < 8; ++ib) {
+        uint8_t sc = 0, m_sc = 0;
+        _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+        float d_sub = d * (float)sc;
+        float min_sub = dmin * (float)m_sc;
+        const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+        int32_t shift = (ib & 1) * 4;
+        float *dst_sub = dst + ib * 32;
+        for (int32_t l = 0; l < 32; ++l) {
+          dst_sub[l] =
+              d_sub * (float)((qs_sub[l] >> shift) & 0x0Fu) - min_sub;
+        }
+      }
+    }
+  } else if (gguf_dtype == 13) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 176u;
+      uint16_t d_h = 0, dmin_h = 0;
+      memcpy(&d_h, blk, 2);
+      memcpy(&dmin_h, blk + 2, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      float dmin = _vira_fp16_to_fp32(dmin_h);
+      const uint8_t *scales = blk + 4;
+      const uint8_t *qh = blk + 16;
+      const uint8_t *qs = blk + 48;
+      float *dst = dst_out + b * 256u;
+      for (int32_t ib = 0; ib < 8; ++ib) {
+        uint8_t sc = 0, m_sc = 0;
+        _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+        float d_sub = d * (float)sc;
+        float min_sub = dmin * (float)m_sc;
+        const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+        int32_t shift = (ib & 1) * 4;
+        uint8_t u_mask = (uint8_t)(1u << ib);
+        float *dst_sub = dst + ib * 32;
+        for (int32_t l = 0; l < 32; ++l) {
+          uint32_t q = (uint32_t)((qs_sub[l] >> shift) & 0x0Fu) |
+                       ((qh[l] & u_mask) ? 16u : 0u);
+          dst_sub[l] = d_sub * (float)q - min_sub;
+        }
+      }
+    }
+  } else if (gguf_dtype == 14) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 210u;
+      uint16_t d_h = 0;
+      memcpy(&d_h, blk + 208, 2);
+      float d = _vira_fp16_to_fp32(d_h);
+      for (int32_t h = 0; h < 2; ++h) {
+        const uint8_t *ql_h = blk + h * 64;
+        const uint8_t *qh_h = blk + 128 + h * 32;
+        const int8_t *sc_h = (const int8_t *)(blk + 192) + h * 8;
+        float *dst_h = dst_out + b * 256u + h * 128;
+        for (int32_t l = 0; l < 32; ++l) {
+          int32_t is = l >> 4;
+          int32_t q1 =
+              (int32_t)((ql_h[l + 0] & 0x0Fu) | (((qh_h[l] >> 0) & 3u) << 4)) -
+              32;
+          int32_t q2 = (int32_t)((ql_h[l + 32] & 0x0Fu) |
+                                 (((qh_h[l] >> 2) & 3u) << 4)) -
+                       32;
+          int32_t q3 =
+              (int32_t)((ql_h[l + 0] >> 4) | (((qh_h[l] >> 4) & 3u) << 4)) -
+              32;
+          int32_t q4 =
+              (int32_t)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3u) << 4)) -
+              32;
+          dst_h[l + 0] = d * (float)sc_h[is + 0] * (float)q1;
+          dst_h[l + 32] = d * (float)sc_h[is + 2] * (float)q2;
+          dst_h[l + 64] = d * (float)sc_h[is + 4] * (float)q3;
+          dst_h[l + 96] = d * (float)sc_h[is + 6] * (float)q4;
+        }
+      }
+    }
+  }
+}
+
+typedef struct {
+  const vira_f32 *host_ptr;
+  void *raw_q;
+  size_t raw_bytes;
+  size_t elems;
+  int32_t rows;
+  int32_t cols;
+  uint32_t gguf_dtype;
+  uint8_t fp32_state; // 0 = deferred, 1 = dequantizing, 2 = ready
+  uint8_t occupied;   // 0 = empty, 1 = active, 2 = tombstone
+} _vira_rt_quant_entry;
+
+static pthread_mutex_t _vira_rt_quant_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t _vira_rt_quant_cond = PTHREAD_COND_INITIALIZER;
+static struct {
+  _vira_rt_quant_entry *entries;
+  size_t cap;
+  size_t count;
+  size_t tombstones;
+} _vira_rt_quant_table = {NULL, 0, 0, 0};
+static size_t _vira_rt_quant_active_count = 0;
+static uint8_t _vira_rt_quant_bloom[4096] = {0};
+
+static inline size_t _vira_rt_quant_hash(const vira_f32 *ptr) {
+  uint64_t x = (uint64_t)(uintptr_t)ptr;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return (size_t)(x ^ (x >> 31));
+}
+
+static inline bool _vira_rt_quant_may_exist(const vira_f32 *ptr) {
+  if (!ptr)
+    return false;
+  if (__atomic_load_n(&_vira_rt_quant_active_count, __ATOMIC_ACQUIRE) == 0)
+    return false;
+  size_t h = _vira_rt_quant_hash(ptr);
+  return __atomic_load_n(&_vira_rt_quant_bloom[h & 4095u], __ATOMIC_ACQUIRE) !=
+             0 &&
+         __atomic_load_n(&_vira_rt_quant_bloom[(h >> 12) & 4095u],
+                           __ATOMIC_ACQUIRE) != 0;
+}
+
+static inline void _vira_rt_quant_rehash_locked(size_t new_cap) {
+  _vira_rt_quant_entry *old = _vira_rt_quant_table.entries;
+  size_t old_cap = _vira_rt_quant_table.cap;
+  _vira_rt_quant_entry *nw =
+      (_vira_rt_quant_entry *)calloc(new_cap, sizeof(_vira_rt_quant_entry));
+  if (!nw) {
+    fprintf(stderr, "vira panic: out of memory in _vira_rt_quant_table\n");
+    exit(1);
+  }
+  size_t mask = new_cap - 1u;
+  size_t cnt = 0;
+  if (old != NULL) {
+    for (size_t i = 0; i < old_cap; ++i) {
+      if (old[i].occupied == 1) {
+        size_t idx = _vira_rt_quant_hash(old[i].host_ptr) & mask;
+        while (nw[idx].occupied == 1) {
+          idx = (idx + 1u) & mask;
+        }
+        nw[idx] = old[i];
+        cnt++;
+      }
+    }
+    free(old);
+  }
+  _vira_rt_quant_table.entries = nw;
+  _vira_rt_quant_table.cap = new_cap;
+  _vira_rt_quant_table.count = cnt;
+  _vira_rt_quant_table.tombstones = 0;
+}
+
+static inline _vira_rt_quant_entry *_vira_rt_quant_find_locked(
+    const vira_f32 *ptr) {
+  if (!ptr || !_vira_rt_quant_table.entries || _vira_rt_quant_table.cap == 0)
+    return NULL;
+  size_t mask = _vira_rt_quant_table.cap - 1u;
+  size_t idx = _vira_rt_quant_hash(ptr) & mask;
+  for (size_t probe = 0; probe < _vira_rt_quant_table.cap; ++probe) {
+    _vira_rt_quant_entry *e = &_vira_rt_quant_table.entries[idx];
+    if (e->occupied == 0)
+      return NULL;
+    if (e->occupied == 1 && e->host_ptr == ptr)
+      return e;
+    idx = (idx + 1u) & mask;
+  }
+  return NULL;
+}
+
+// Takes ownership of `raw_q` (previously malloc'd) and records it in `_vira_active_heap_allocs`.
+static inline void _vira_rt_quant_register(const vira_f32 *host_ptr,
+                                           uint32_t gguf_dtype, void *raw_q,
+                                           size_t raw_bytes, size_t elems,
+                                           int32_t rows, int32_t cols,
+                                           bool fp32_ready) {
+  if (!host_ptr || !raw_q || raw_bytes == 0) {
+    free(raw_q);
+    return;
+  }
+  void *old_raw = NULL;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  if (_vira_rt_quant_table.cap == 0) {
+    _vira_rt_quant_rehash_locked(1024);
+  } else if ((_vira_rt_quant_table.count + _vira_rt_quant_table.tombstones + 1u) * 10u >=
+             _vira_rt_quant_table.cap * 7u) {
+    size_t target_cap = (_vira_rt_quant_table.count * 2u >= _vira_rt_quant_table.cap)
+                            ? (_vira_rt_quant_table.cap * 2u)
+                            : _vira_rt_quant_table.cap;
+    _vira_rt_quant_rehash_locked(target_cap);
+  }
+  size_t mask = _vira_rt_quant_table.cap - 1u;
+  size_t idx = _vira_rt_quant_hash(host_ptr) & mask;
+  ssize_t first_tomb = -1;
+  size_t target_idx = idx;
+  bool updated = false;
+  for (size_t probe = 0; probe < _vira_rt_quant_table.cap; ++probe) {
+    _vira_rt_quant_entry *e = &_vira_rt_quant_table.entries[idx];
+    if (e->occupied == 0) {
+      target_idx = (first_tomb >= 0) ? (size_t)first_tomb : idx;
+      break;
+    }
+    if (e->occupied == 2) {
+      if (first_tomb < 0)
+        first_tomb = (ssize_t)idx;
+    } else if (e->host_ptr == host_ptr) {
+      while (e->fp32_state == 1) {
+        pthread_cond_wait(&_vira_rt_quant_cond, &_vira_rt_quant_lock);
+        e = _vira_rt_quant_find_locked(host_ptr);
+        if (!e)
+          break;
+      }
+      if (e) {
+        old_raw = e->raw_q;
+        e->raw_q = raw_q;
+        e->raw_bytes = raw_bytes;
+        e->elems = elems;
+        e->rows = rows;
+        e->cols = cols;
+        e->gguf_dtype = gguf_dtype;
+        e->fp32_state = fp32_ready ? 2 : 0;
+        updated = true;
+      }
+      break;
+    }
+    idx = (idx + 1u) & mask;
+  }
+  if (!updated) {
+    _vira_rt_quant_entry *slot = &_vira_rt_quant_table.entries[target_idx];
+    if (slot->occupied == 2 && _vira_rt_quant_table.tombstones > 0) {
+      _vira_rt_quant_table.tombstones--;
+    }
+    slot->host_ptr = host_ptr;
+    slot->raw_q = raw_q;
+    slot->raw_bytes = raw_bytes;
+    slot->elems = elems;
+    slot->rows = rows;
+    slot->cols = cols;
+    slot->gguf_dtype = gguf_dtype;
+    slot->fp32_state = fp32_ready ? 2 : 0;
+    slot->occupied = 1;
+    _vira_rt_quant_table.count++;
+  }
+  size_t h = _vira_rt_quant_hash(host_ptr);
+  __atomic_store_n(&_vira_rt_quant_bloom[h & 4095u], 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&_vira_rt_quant_bloom[(h >> 12) & 4095u], 1,
+                   __ATOMIC_RELEASE);
+  __atomic_store_n(&_vira_rt_quant_active_count, _vira_rt_quant_table.count,
+                   __ATOMIC_RELEASE);
+  _vira_record_alloc();
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+  if (old_raw) {
+    free(old_raw);
+    _vira_record_free();
+  }
+}
+
+static inline bool _vira_rt_quant_try_get(const vira_f32 *host_ptr,
+                                          uint32_t *out_dtype,
+                                          const void **out_raw_q,
+                                          size_t *out_raw_bytes,
+                                          size_t *out_elems) {
+  if (!_vira_rt_quant_may_exist(host_ptr))
+    return false;
+  bool found = false;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(host_ptr);
+  if (e && e->raw_q != NULL) {
+    if (out_dtype) *out_dtype = e->gguf_dtype;
+    if (out_raw_q) *out_raw_q = e->raw_q;
+    if (out_raw_bytes) *out_raw_bytes = e->raw_bytes;
+    if (out_elems) *out_elems = e->elems;
+    found = true;
+  }
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+  return found;
+}
+
+static inline void _vira_rt_quant_free(const vira_f32 *host_ptr) {
+  if (!_vira_rt_quant_may_exist(host_ptr))
+    return;
+  void *to_free = NULL;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(host_ptr);
+  while (e && e->fp32_state == 1) {
+    pthread_cond_wait(&_vira_rt_quant_cond, &_vira_rt_quant_lock);
+    e = _vira_rt_quant_find_locked(host_ptr);
+  }
+  if (e) {
+    to_free = e->raw_q;
+    memset(e, 0, sizeof(*e));
+    e->occupied = 2;
+    if (_vira_rt_quant_table.count > 0)
+      _vira_rt_quant_table.count--;
+    _vira_rt_quant_table.tombstones++;
+    __atomic_store_n(&_vira_rt_quant_active_count, _vira_rt_quant_table.count,
+                     __ATOMIC_RELEASE);
+  }
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+  if (to_free != NULL) {
+    free(to_free);
+    _vira_record_free();
+  }
+}
+
+static inline void _vira_rt_quant_remove(const vira_f32 *host_ptr) {
+  _vira_rt_quant_free(host_ptr);
+}
+
+static inline void _vira_rt_quant_shutdown(void) {
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  if (_vira_rt_quant_table.count == 0 && _vira_rt_quant_table.entries != NULL) {
+    free(_vira_rt_quant_table.entries);
+    _vira_rt_quant_table.entries = NULL;
+    _vira_rt_quant_table.cap = 0;
+    _vira_rt_quant_table.tombstones = 0;
+    memset(_vira_rt_quant_bloom, 0, sizeof(_vira_rt_quant_bloom));
+    __atomic_store_n(&_vira_rt_quant_active_count, 0, __ATOMIC_RELEASE);
+  }
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+}
+
+static inline void _vira_rt_quant_clone_entry(const vira_f32 *dst_ptr,
+                                              const vira_f32 *src_ptr) {
+  if (!dst_ptr || !src_ptr || dst_ptr == src_ptr ||
+      !_vira_rt_quant_may_exist(src_ptr))
+    return;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(src_ptr);
+  if (!e || !e->raw_q || e->raw_bytes == 0) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return;
+  }
+  uint32_t dtype = e->gguf_dtype;
+  size_t raw_bytes = e->raw_bytes;
+  size_t elems = e->elems;
+  int32_t rows = e->rows;
+  int32_t cols = e->cols;
+  bool ready = (e->fp32_state == 2);
+  void *copy_buf = malloc(raw_bytes);
+  if (!copy_buf) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return;
+  }
+  memcpy(copy_buf, e->raw_q, raw_bytes);
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+  _vira_rt_quant_register(dst_ptr, dtype, copy_buf, raw_bytes, elems, rows, cols,
+                          ready);
+}
+
+static inline bool _vira_rt_quant_try_clone_lazy(vira_tensor_f32 src,
+                                                 vira_tensor_f32 *out_copy) {
+  if (!out_copy || !_vira_rt_quant_may_exist(src.data))
+    return false;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(src.data);
+  if (!e || e->fp32_state != 0 || !e->raw_q || e->raw_bytes == 0) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return false;
+  }
+  uint32_t dtype = e->gguf_dtype;
+  size_t raw_bytes = e->raw_bytes;
+  size_t elems = e->elems;
+  int32_t rows = e->rows;
+  int32_t cols = e->cols;
+  void *copy_buf = malloc(raw_bytes);
+  if (!copy_buf) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return false;
+  }
+  memcpy(copy_buf, e->raw_q, raw_bytes);
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+
+  vira_tensor_f32 copy = _vira_tensor_f32_alloc_uninit_nd(src.n_dims, src.dims);
+  _vira_rt_quant_register(copy.data, dtype, copy_buf, raw_bytes, elems, rows,
+                          cols, false);
+  *out_copy = copy;
+  return true;
+}
+
+static inline void _vira_rt_ensure_fp32_host_ptr(const vira_f32 *ptr) {
+  if (!_vira_rt_quant_may_exist(ptr))
+    return;
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(ptr);
+  if (!e || e->fp32_state == 2) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return;
+  }
+  while (e && e->fp32_state == 1) {
+    pthread_cond_wait(&_vira_rt_quant_cond, &_vira_rt_quant_lock);
+    e = _vira_rt_quant_find_locked(ptr);
+  }
+  if (!e || e->fp32_state == 2) {
+    pthread_mutex_unlock(&_vira_rt_quant_lock);
+    return;
+  }
+  e->fp32_state = 1;
+  uint32_t dtype = e->gguf_dtype;
+  const uint8_t *raw_q = (const uint8_t *)e->raw_q;
+  size_t elems = e->elems;
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+
+  size_t qk = _vira_gguf_dtype_qk(dtype);
+  if (raw_q && qk > 0 && elems > 0 && (elems % qk) == 0) {
+    _vira_rt_dequant_blocks_to_fp32(dtype, raw_q, 0, elems / qk,
+                                    (float *)(uintptr_t)ptr);
+  }
+
+  pthread_mutex_lock(&_vira_rt_quant_lock);
+  e = _vira_rt_quant_find_locked(ptr);
+  if (e) {
+    e->fp32_state = 2;
+  }
+  pthread_cond_broadcast(&_vira_rt_quant_cond);
+  pthread_mutex_unlock(&_vira_rt_quant_lock);
+}
+
+static inline void _vira_tensor_sync_host_f32(const vira_f32 *ptr) {
+  if (!ptr)
+    return;
+  _vira_gpu_sync_host(ptr);
+  _vira_rt_ensure_fp32_host_ptr(ptr);
+}
+
 
 /**
  * Reshapes a tensor safely, returning a view if non-arena or reallocating in arena if required.
@@ -2224,7 +2855,7 @@ _vira_tensor_reshape_safe(vira_arena *opt_arena, vira_tensor_f32 t,
             t.rows * t.cols, out.rows * out.cols);
     exit(1);
   }
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   memcpy(out.data, t.data, (size_t)out.rows * (size_t)out.cols * sizeof(vira_f32));
   return out;
 }
@@ -2293,7 +2924,7 @@ static inline vira_tensor_f32 vira_tensor_reshape_4d(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_tensor_transpose_nd(vira_arena *opt_arena,
                                                        vira_tensor_f32 a) {
   _vira_tensor_norm_shape(&a);
-  _vira_gpu_sync_host(a.data);
+  _vira_tensor_sync_host_f32(a.data);
   if (a.n_dims == 1) {
     int32_t dims[2] = {a.dims[0], 1};
     vira_tensor_f32 out =
@@ -2341,7 +2972,7 @@ static inline vira_f32 vira_tensor_f32_get(vira_tensor_f32 t, int32_t row,
             row, col, t.rows, t.cols);
     exit(1);
   }
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   return t.data[(size_t)row * (size_t)t.cols + (size_t)col];
 }
 
@@ -2362,8 +2993,9 @@ static inline void vira_tensor_f32_set(vira_tensor_f32 t, int32_t row,
             row, col, t.rows, t.cols);
     exit(1);
   }
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   t.data[(size_t)row * (size_t)t.cols + (size_t)col] = val;
+  _vira_rt_quant_remove(t.data);
   _vira_gpu_evict_ptr(t.data);
 }
 
@@ -2394,8 +3026,8 @@ static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
   if (!_vira_tls_gpu_fallback && _vira_gpu_copy_row(dst, dst_row, src)) {
     return;
   }
-  _vira_gpu_sync_host(dst.data);
-  _vira_gpu_sync_host(src.data);
+  _vira_tensor_sync_host_f32(dst.data);
+  _vira_tensor_sync_host_f32(src.data);
   if (dst.data == src.data) {
     memmove(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
             (size_t)dst.cols * sizeof(vira_f32));
@@ -2403,6 +3035,49 @@ static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
     memcpy(&dst.data[(size_t)dst_row * (size_t)dst.cols], src.data,
            (size_t)dst.cols * sizeof(vira_f32));
   }
+  _vira_rt_quant_remove(dst.data);
+  _vira_gpu_evict_ptr(dst.data);
+}
+
+/**
+ * Copies multiple contiguous rows from a 2D source tensor into a target tensor starting at `dst_row_start`.
+ * @param dst Destination 2D tensor.
+ * @param dst_row_start Starting row index in destination.
+ * @param src Source 2D tensor of shape (rows, dst.cols).
+ * Usage: Batched KV-cache row scatter (`k_cache.copy_rows(start_pos, k_seq)`).
+ */
+static inline void vira_tensor_f32_copy_rows(vira_tensor_f32 dst,
+                                             int32_t dst_row_start,
+                                             vira_tensor_f32 src) {
+  _vira_tensor_norm_shape(&dst);
+  _vira_tensor_norm_shape(&src);
+  if (dst_row_start < 0 || src.rows <= 0 ||
+      dst_row_start + src.rows > dst.rows) {
+    fprintf(stderr,
+            "vira tensor error: .copy_rows(%d, %d rows) out of bounds [0, %d)\n",
+            dst_row_start, src.rows, dst.rows);
+    exit(1);
+  }
+  if (src.cols != dst.cols) {
+    fprintf(stderr,
+            "vira tensor error: .copy_rows column mismatch dst=(%dx%d) vs src=(%dx%d)\n",
+            dst.rows, dst.cols, src.rows, src.cols);
+    exit(1);
+  }
+  if (!_vira_tls_gpu_fallback &&
+      _vira_gpu_copy_rows(dst, dst_row_start, src)) {
+    return;
+  }
+  _vira_tensor_sync_host_f32(dst.data);
+  _vira_tensor_sync_host_f32(src.data);
+  size_t copy_bytes = (size_t)src.rows * (size_t)src.cols * sizeof(vira_f32);
+  float *dst_ptr = &dst.data[(size_t)dst_row_start * (size_t)dst.cols];
+  if (dst.data == src.data) {
+    memmove(dst_ptr, src.data, copy_bytes);
+  } else {
+    memcpy(dst_ptr, src.data, copy_bytes);
+  }
+  _vira_rt_quant_remove(dst.data);
   _vira_gpu_evict_ptr(dst.data);
 }
 
@@ -2426,7 +3101,13 @@ static inline vira_tensor_f32 vira_tensor_slice_rows(vira_arena *opt_arena,
             start_row, end_row, t.rows);
     exit(1);
   }
-  _vira_gpu_sync_host(t.data);
+  if (!_vira_tls_gpu_fallback) {
+    vira_tensor_f32 gpu_out = {0};
+    if (_vira_gpu_slice_rows(opt_arena, t, start_row, end_row, &gpu_out)) {
+      return gpu_out;
+    }
+  }
+  _vira_tensor_sync_host_f32(t.data);
   int32_t n_rows = end_row - start_row;
   int32_t dims[2] = {n_rows, t.cols};
   vira_tensor_f32 out =
@@ -2592,6 +3273,11 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
                                             vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_seq(vira_arena *opt_arena,
+                                                vira_tensor_f32 q,
+                                                int64_t start_pos,
+                                                int32_t n_heads,
+                                                float freq_base);
 static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
                                                vira_tensor_f32 logits);
 static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
@@ -2608,11 +3294,41 @@ static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_gqa_attention(
     vira_arena *opt_arena, vira_tensor_f32 q_heads, vira_tensor_f32 k_cache,
     vira_tensor_f32 v_cache, int64_t kv_pos, float scale);
+static inline vira_tensor_f32 vira_gpu_gqa_prefill(
+    vira_arena *opt_arena, vira_tensor_f32 q_seq, vira_tensor_f32 k_cache,
+    vira_tensor_f32 v_cache, int64_t start_pos, int32_t seq_len,
+    int32_t n_heads, float scale);
 static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits);
 static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
                                             uint32_t gguf_dtype,
                                             const void *raw_blocks,
                                             size_t raw_bytes, size_t elems);
+static inline vira_tensor_f32 vira_gpu_add_rmsnorm(vira_arena *opt_arena,
+                                                  vira_tensor_f32 mut_res,
+                                                  vira_tensor_f32 delta,
+                                                  vira_tensor_f32 weight,
+                                                  float eps);
+static inline vira_tensor_f32 vira_gpu_silu_mul(vira_arena *opt_arena,
+                                               vira_tensor_f32 gate,
+                                               vira_tensor_f32 up);
+static inline vira_tensor_f32 vira_gpu_rope_kv_write(
+    vira_arena *opt_arena, vira_tensor_f32 q_lin, vira_tensor_f32 bq,
+    vira_tensor_f32 k_lin, vira_tensor_f32 bk, vira_tensor_f32 v_lin,
+    vira_tensor_f32 bv, vira_tensor_f32 k_cache, vira_tensor_f32 v_cache,
+    int64_t pos, int32_t n_heads, int32_t n_kv_heads, int32_t head_dim,
+    float freq_base);
+static inline vira_tensor_f32 vira_gpu_emb_gather(vira_arena *opt_arena,
+                                                 vira_tensor_f32 table,
+                                                 int64_t token_id);
+static inline int64_t vira_gpu_graph_try_replay(
+    int32_t token_id, int32_t kv_pos, int32_t seq_len, vira_tensor_f32 tok_emb,
+    vira_tensor_f32 k_cache_sample, vira_tensor_f32 v_cache_sample);
+static inline void vira_gpu_graph_begin_capture(
+    int32_t token_id, int32_t kv_pos, int32_t seq_len, vira_tensor_f32 tok_emb,
+    vira_tensor_f32 k_cache_sample, vira_tensor_f32 v_cache_sample);
+static inline int64_t vira_gpu_graph_end_capture_argmax(vira_tensor_f32 logits);
+static inline int64_t vira_gpu_graph_captures(void);
+static inline int64_t vira_gpu_graph_replays(void);
 
 // Hardware-accelerated 2D/3D/4D Batched + Multi-Threaded `@` Matrix Multiplication
 /**
@@ -2653,8 +3369,8 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
     return gpu_out;
   }
 
-  _vira_gpu_sync_host(a.data);
-  _vira_gpu_sync_host(b.data);
+  _vira_tensor_sync_host_f32(a.data);
+  _vira_tensor_sync_host_f32(b.data);
 
   int32_t a_batch_nd = (a_nd > 2) ? (a_nd - 2) : 0;
   int32_t b_batch_nd = (b_nd > 2) ? (b_nd - 2) : 0;
@@ -2869,6 +3585,1332 @@ static void _vira_linear_job_fn(void *raw_env) {
   }
 }
 
+// ============================================================================
+// 3.6 QUANTIZED INTEGER-SIMD CPU LINEAR ENGINE (PHASE 4.2)
+// ============================================================================
+
+typedef struct {
+  float d;
+  float sum_x;
+  int32_t sum_q;
+  int8_t qs[32];
+} _vira_block_q8_0;
+
+typedef struct {
+  float d;
+  int8_t qs[256];
+  int16_t bsums[16];
+} _vira_block_q8_K;
+
+static inline void _vira_quantize_row_q8_0(const float *x, int32_t K,
+                                           _vira_block_q8_0 *y) {
+  int32_t nb = K / 32;
+  for (int32_t b = 0; b < nb; ++b) {
+    const float *xb = x + (size_t)b * 32u;
+    float amax = 0.0f;
+    float sum_x = 0.0f;
+    for (int32_t j = 0; j < 32; ++j) {
+      float v = xb[j];
+      float av = v < 0.0f ? -v : v;
+      if (av > amax)
+        amax = av;
+      sum_x += v;
+    }
+    float d = amax / 127.0f;
+    float id = (amax > 0.0f) ? (127.0f / amax) : 0.0f;
+    int32_t sum_q = 0;
+    for (int32_t j = 0; j < 32; ++j) {
+      float scaled = xb[j] * id;
+      int32_t q = (scaled >= 0.0f) ? (int32_t)(scaled + 0.5f)
+                                   : (int32_t)(scaled - 0.5f);
+      if (q > 127) q = 127;
+      else if (q < -127) q = -127;
+      y[b].qs[j] = (int8_t)q;
+      sum_q += q;
+    }
+    y[b].d = d;
+    y[b].sum_x = sum_x;
+    y[b].sum_q = sum_q;
+  }
+}
+
+static inline void _vira_quantize_row_q8_K(const float *x, int32_t K,
+                                           _vira_block_q8_K *y) {
+  int32_t nb = K / 256;
+  for (int32_t b = 0; b < nb; ++b) {
+    const float *xb = x + (size_t)b * 256u;
+    float amax = 0.0f;
+    for (int32_t j = 0; j < 256; ++j) {
+      float av = xb[j] < 0.0f ? -xb[j] : xb[j];
+      if (av > amax)
+        amax = av;
+    }
+    float d = amax / 127.0f;
+    float id = (amax > 0.0f) ? (127.0f / amax) : 0.0f;
+    y[b].d = d;
+    for (int32_t s = 0; s < 16; ++s) {
+      const float *xs = xb + s * 16;
+      int8_t *qs = y[b].qs + s * 16;
+      int32_t bs = 0;
+      for (int32_t j = 0; j < 16; ++j) {
+        float scaled = xs[j] * id;
+        int32_t q = (scaled >= 0.0f) ? (int32_t)(scaled + 0.5f)
+                                     : (int32_t)(scaled - 0.5f);
+        if (q > 127) q = 127;
+        else if (q < -127) q = -127;
+        qs[j] = (int8_t)q;
+        bs += q;
+      }
+      y[b].bsums[s] = (int16_t)bs;
+    }
+  }
+}
+
+#if defined(__AVX2__)
+static inline int32_t _vira_avx2_hsum_i32(__m256i v) {
+  __m128i lo = _mm256_castsi256_si128(v);
+  __m128i hi = _mm256_extracti128_si256(v, 1);
+  __m128i s = _mm_add_epi32(lo, hi);
+  s = _mm_hadd_epi32(s, s);
+  s = _mm_hadd_epi32(s, s);
+  return _mm_cvtsi128_si32(s);
+}
+#endif
+#if defined(__SSSE3__)
+static inline int32_t _vira_sse_hsum_i32(__m128i v) {
+  v = _mm_hadd_epi32(v, v);
+  v = _mm_hadd_epi32(v, v);
+  return _mm_cvtsi128_si32(v);
+}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static inline int32x4_t _vira_neon_dot_s8(int32x4_t acc, int8x16_t a,
+                                          int8x16_t b) {
+#if defined(__ARM_FEATURE_DOTPROD)
+  return vdotq_s32(acc, a, b);
+#else
+  int16x8_t p = vmull_s8(vget_low_s8(a), vget_low_s8(b));
+  p = vmlal_s8(p, vget_high_s8(a), vget_high_s8(b));
+  return vpadalq_s16(acc, p);
+#endif
+}
+static inline int32_t _vira_neon_hsum_i32(int32x4_t v) {
+#if defined(__aarch64__)
+  return vaddvq_s32(v);
+#else
+  int32x2_t r = vpadd_s32(vget_low_s32(v), vget_high_s32(v));
+  return vget_lane_s32(vpadd_s32(r, r), 0);
+#endif
+}
+#endif
+
+static inline float _vira_cpu_dot_q4_0_q8_0(const uint8_t *w_row,
+                                            const _vira_block_q8_0 *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 18u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t dot = 0;
+#if defined(__AVX2__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m256i wu = _mm256_and_si256(
+        _mm256_inserti128_si256(_mm256_castsi128_si256(wq),
+                                _mm_srli_epi16(wq, 4), 1),
+        m4);
+    __m256i qv = _mm256_loadu_si256((const __m256i *)x[b].qs);
+    dot = _vira_avx2_hsum_i32(
+        _mm256_madd_epi16(_mm256_maddubs_epi16(wu, qv), ones));
+#elif defined(__SSSE3__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m128i u0 = _mm_and_si128(wq, m4);
+    __m128i u1 = _mm_and_si128(_mm_srli_epi16(wq, 4), m4);
+    __m128i p0 = _mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x[b].qs));
+    __m128i p1 =
+        _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x[b].qs + 16)));
+    dot = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(p0, p1), ones));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    uint8x16_t wq = vld1q_u8(blk + 2);
+    int8x16_t u0 = vreinterpretq_s8_u8(vandq_u8(wq, m4));
+    int8x16_t u1 = vreinterpretq_s8_u8(vshrq_n_u8(wq, 4));
+    int32x4_t acc = _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x[b].qs));
+    acc = _vira_neon_dot_s8(acc, u1, vld1q_s8(x[b].qs + 16));
+    dot = _vira_neon_hsum_i32(acc);
+#else
+    for (int32_t j = 0; j < 16; ++j) {
+      uint8_t byte = blk[2 + j];
+      dot += (int32_t)(byte & 0x0Fu) * (int32_t)x[b].qs[j];
+      dot += (int32_t)(byte >> 4) * (int32_t)x[b].qs[j + 16];
+    }
+#endif
+    sumf += d * x[b].d * (float)(dot - 8 * x[b].sum_q);
+  }
+  return sumf;
+}
+
+static inline void _vira_cpu_dot_4rows_q4_0_q8_0(
+    const uint8_t *w_row, const _vira_block_q8_0 *x0,
+    const _vira_block_q8_0 *x1, const _vira_block_q8_0 *x2,
+    const _vira_block_q8_0 *x3, int32_t nb, float *out4) {
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 18u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+#if defined(__AVX2__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m256i wu = _mm256_and_si256(
+        _mm256_inserti128_si256(_mm256_castsi128_si256(wq),
+                                _mm_srli_epi16(wq, 4), 1),
+        m4);
+    d0 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x0[b].qs)),
+        ones));
+    d1 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x1[b].qs)),
+        ones));
+    d2 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x2[b].qs)),
+        ones));
+    d3 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x3[b].qs)),
+        ones));
+#elif defined(__SSSE3__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m128i u0 = _mm_and_si128(wq, m4);
+    __m128i u1 = _mm_and_si128(_mm_srli_epi16(wq, 4), m4);
+    d0 = _vira_sse_hsum_i32(_mm_madd_epi16(
+        _mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x0[b].qs)),
+                      _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x0[b].qs + 16)))),
+        ones));
+    d1 = _vira_sse_hsum_i32(_mm_madd_epi16(
+        _mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x1[b].qs)),
+                      _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x1[b].qs + 16)))),
+        ones));
+    d2 = _vira_sse_hsum_i32(_mm_madd_epi16(
+        _mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x2[b].qs)),
+                      _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x2[b].qs + 16)))),
+        ones));
+    d3 = _vira_sse_hsum_i32(_mm_madd_epi16(
+        _mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x3[b].qs)),
+                      _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x3[b].qs + 16)))),
+        ones));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    uint8x16_t wq = vld1q_u8(blk + 2);
+    int8x16_t u0 = vreinterpretq_s8_u8(vandq_u8(wq, m4));
+    int8x16_t u1 = vreinterpretq_s8_u8(vshrq_n_u8(wq, 4));
+    d0 = _vira_neon_hsum_i32(_vira_neon_dot_s8(
+        _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x0[b].qs)), u1,
+        vld1q_s8(x0[b].qs + 16)));
+    d1 = _vira_neon_hsum_i32(_vira_neon_dot_s8(
+        _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x1[b].qs)), u1,
+        vld1q_s8(x1[b].qs + 16)));
+    d2 = _vira_neon_hsum_i32(_vira_neon_dot_s8(
+        _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x2[b].qs)), u1,
+        vld1q_s8(x2[b].qs + 16)));
+    d3 = _vira_neon_hsum_i32(_vira_neon_dot_s8(
+        _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x3[b].qs)), u1,
+        vld1q_s8(x3[b].qs + 16)));
+#else
+    for (int32_t j = 0; j < 16; ++j) {
+      int32_t v0 = (int32_t)(blk[2 + j] & 0x0Fu);
+      int32_t v1 = (int32_t)(blk[2 + j] >> 4);
+      d0 += v0 * x0[b].qs[j] + v1 * x0[b].qs[j + 16];
+      d1 += v0 * x1[b].qs[j] + v1 * x1[b].qs[j + 16];
+      d2 += v0 * x2[b].qs[j] + v1 * x2[b].qs[j + 16];
+      d3 += v0 * x3[b].qs[j] + v1 * x3[b].qs[j + 16];
+    }
+#endif
+    s0 += d * x0[b].d * (float)(d0 - 8 * x0[b].sum_q);
+    s1 += d * x1[b].d * (float)(d1 - 8 * x1[b].sum_q);
+    s2 += d * x2[b].d * (float)(d2 - 8 * x2[b].sum_q);
+    s3 += d * x3[b].d * (float)(d3 - 8 * x3[b].sum_q);
+  }
+  out4[0] = s0;
+  out4[1] = s1;
+  out4[2] = s2;
+  out4[3] = s3;
+}
+
+static inline float _vira_cpu_dot_q4_1_q8_0(const uint8_t *w_row,
+                                            const _vira_block_q8_0 *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 20u;
+    uint16_t dh = 0, mh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&mh, blk + 2, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    float m = _vira_fp16_to_fp32(mh);
+    int32_t dot = 0;
+#if defined(__AVX2__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 4));
+    __m256i wu = _mm256_and_si256(
+        _mm256_inserti128_si256(_mm256_castsi128_si256(wq),
+                                _mm_srli_epi16(wq, 4), 1),
+        m4);
+    dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x[b].qs)),
+        ones));
+#elif defined(__SSSE3__)
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 4));
+    __m128i u0 = _mm_and_si128(wq, m4);
+    __m128i u1 = _mm_and_si128(_mm_srli_epi16(wq, 4), m4);
+    dot = _vira_sse_hsum_i32(_mm_madd_epi16(
+        _mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x[b].qs)),
+                      _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x[b].qs + 16)))),
+        ones));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    uint8x16_t wq = vld1q_u8(blk + 4);
+    int32x4_t acc = _vira_neon_dot_s8(
+        vdupq_n_s32(0), vreinterpretq_s8_u8(vandq_u8(wq, m4)),
+        vld1q_s8(x[b].qs));
+    acc = _vira_neon_dot_s8(acc, vreinterpretq_s8_u8(vshrq_n_u8(wq, 4)),
+                            vld1q_s8(x[b].qs + 16));
+    dot = _vira_neon_hsum_i32(acc);
+#else
+    for (int32_t j = 0; j < 16; ++j) {
+      uint8_t byte = blk[4 + j];
+      dot += (int32_t)(byte & 0x0Fu) * (int32_t)x[b].qs[j];
+      dot += (int32_t)(byte >> 4) * (int32_t)x[b].qs[j + 16];
+    }
+#endif
+    sumf += d * x[b].d * (float)dot + m * x[b].sum_x;
+  }
+  return sumf;
+}
+
+static inline float _vira_cpu_dot_q5_0_q8_0(const uint8_t *w_row,
+                                            const _vira_block_q8_0 *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i sh0 = _mm_set_epi8(1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+  const __m128i sh1 = _mm_set_epi8(3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2);
+  const __m128i bmask = _mm_set_epi8((char)-128, 64, 32, 16, 8, 4, 2, 1,
+                                     (char)-128, 64, 32, 16, 8, 4, 2, 1);
+  const __m128i hi16 = _mm_set1_epi8(16);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i sh0 = _mm_set_epi8(1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+  const __m128i sh1 = _mm_set_epi8(3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2);
+  const __m128i bmask = _mm_set_epi8((char)-128, 64, 32, 16, 8, 4, 2, 1,
+                                     (char)-128, 64, 32, 16, 8, 4, 2, 1);
+  const __m128i hi16 = _mm_set1_epi8(16);
+  const __m128i ones = _mm_set1_epi16(1);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 22u;
+    uint16_t dh = 0;
+    uint32_t qh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&qh, blk + 2, 4);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t dot = 0;
+#if defined(__AVX2__) || defined(__SSSE3__)
+    __m128i vqh = _mm_set1_epi32((int32_t)qh);
+    __m128i h0 = _mm_and_si128(
+        _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(vqh, sh0), bmask), bmask),
+        hi16);
+    __m128i h1 = _mm_and_si128(
+        _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(vqh, sh1), bmask), bmask),
+        hi16);
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 6));
+    __m128i u0 = _mm_or_si128(_mm_and_si128(wq, m4), h0);
+    __m128i u1 = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(wq, 4), m4), h1);
+#if defined(__AVX2__)
+    __m256i wu = _mm256_inserti128_si256(_mm256_castsi128_si256(u0), u1, 1);
+    dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x[b].qs)),
+        ones));
+#else
+    __m128i p0 = _mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x[b].qs));
+    __m128i p1 =
+        _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x[b].qs + 16)));
+    dot = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(p0, p1), ones));
+#endif
+#else
+    for (int32_t j = 0; j < 16; ++j) {
+      uint8_t byte = blk[6 + j];
+      int32_t v0 = (int32_t)((uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4));
+      int32_t v1 =
+          (int32_t)((uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4));
+      dot += v0 * (int32_t)x[b].qs[j] + v1 * (int32_t)x[b].qs[j + 16];
+    }
+#endif
+    sumf += d * x[b].d * (float)(dot - 16 * x[b].sum_q);
+  }
+  return sumf;
+}
+
+static inline float _vira_cpu_dot_q5_1_q8_0(const uint8_t *w_row,
+                                            const _vira_block_q8_0 *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__) || defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i sh0 = _mm_set_epi8(1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+  const __m128i sh1 = _mm_set_epi8(3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2);
+  const __m128i bmask = _mm_set_epi8((char)-128, 64, 32, 16, 8, 4, 2, 1,
+                                     (char)-128, 64, 32, 16, 8, 4, 2, 1);
+  const __m128i hi16 = _mm_set1_epi8(16);
+#if defined(__AVX2__)
+  const __m256i ones = _mm256_set1_epi16(1);
+#else
+  const __m128i ones = _mm_set1_epi16(1);
+#endif
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 24u;
+    uint16_t dh = 0, mh = 0;
+    uint32_t qh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&mh, blk + 2, 2);
+    memcpy(&qh, blk + 4, 4);
+    float d = _vira_fp16_to_fp32(dh);
+    float m = _vira_fp16_to_fp32(mh);
+    int32_t dot = 0;
+#if defined(__AVX2__) || defined(__SSSE3__)
+    __m128i vqh = _mm_set1_epi32((int32_t)qh);
+    __m128i h0 = _mm_and_si128(
+        _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(vqh, sh0), bmask), bmask),
+        hi16);
+    __m128i h1 = _mm_and_si128(
+        _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(vqh, sh1), bmask), bmask),
+        hi16);
+    __m128i wq = _mm_loadu_si128((const __m128i *)(blk + 8));
+    __m128i u0 = _mm_or_si128(_mm_and_si128(wq, m4), h0);
+    __m128i u1 = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(wq, 4), m4), h1);
+#if defined(__AVX2__)
+    __m256i wu = _mm256_inserti128_si256(_mm256_castsi128_si256(u0), u1, 1);
+    dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)x[b].qs)),
+        ones));
+#else
+    __m128i p0 = _mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)x[b].qs));
+    __m128i p1 =
+        _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x[b].qs + 16)));
+    dot = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(p0, p1), ones));
+#endif
+#else
+    for (int32_t j = 0; j < 16; ++j) {
+      uint8_t byte = blk[8 + j];
+      int32_t v0 = (int32_t)((uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4));
+      int32_t v1 =
+          (int32_t)((uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4));
+      dot += v0 * (int32_t)x[b].qs[j] + v1 * (int32_t)x[b].qs[j + 16];
+    }
+#endif
+    sumf += d * x[b].d * (float)dot + m * x[b].sum_x;
+  }
+  return sumf;
+}
+
+static inline float _vira_cpu_dot_q8_0_q8_0(const uint8_t *w_row,
+                                            const _vira_block_q8_0 *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i ones = _mm_set1_epi16(1);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 34u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t dot = 0;
+#if defined(__AVX2__)
+    __m256i wv = _mm256_loadu_si256((const __m256i *)(blk + 2));
+    __m256i qv = _mm256_loadu_si256((const __m256i *)x[b].qs);
+    __m256i p = _mm256_maddubs_epi16(_mm256_abs_epi8(wv), _mm256_sign_epi8(qv, wv));
+    dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(p, ones));
+#elif defined(__SSSE3__)
+    __m128i w0 = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m128i w1 = _mm_loadu_si128((const __m128i *)(blk + 18));
+    __m128i q0 = _mm_loadu_si128((const __m128i *)x[b].qs);
+    __m128i q1 = _mm_loadu_si128((const __m128i *)(x[b].qs + 16));
+    __m128i p0 = _mm_maddubs_epi16(_mm_abs_epi8(w0), _mm_sign_epi8(q0, w0));
+    __m128i p1 = _mm_maddubs_epi16(_mm_abs_epi8(w1), _mm_sign_epi8(q1, w1));
+    dot = _vira_sse_hsum_i32(
+        _mm_add_epi32(_mm_madd_epi16(p0, ones), _mm_madd_epi16(p1, ones)));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    const int8_t *wqs = (const int8_t *)(blk + 2);
+    int32x4_t acc = _vira_neon_dot_s8(vdupq_n_s32(0), vld1q_s8(wqs), vld1q_s8(x[b].qs));
+    acc = _vira_neon_dot_s8(acc, vld1q_s8(wqs + 16), vld1q_s8(x[b].qs + 16));
+    dot = _vira_neon_hsum_i32(acc);
+#else
+    const int8_t *wqs = (const int8_t *)(blk + 2);
+    for (int32_t j = 0; j < 32; ++j) {
+      dot += (int32_t)wqs[j] * (int32_t)x[b].qs[j];
+    }
+#endif
+    sumf += d * x[b].d * (float)dot;
+  }
+  return sumf;
+}
+
+static inline void _vira_cpu_dot_4rows_q8_0_q8_0(
+    const uint8_t *w_row, const _vira_block_q8_0 *x0,
+    const _vira_block_q8_0 *x1, const _vira_block_q8_0 *x2,
+    const _vira_block_q8_0 *x3, int32_t nb, float *out4) {
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+#if defined(__AVX2__)
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i ones = _mm_set1_epi16(1);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 34u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk, 2);
+    float d = _vira_fp16_to_fp32(dh);
+#if defined(__AVX2__)
+    __m256i wv = _mm256_loadu_si256((const __m256i *)(blk + 2));
+    __m256i aw = _mm256_abs_epi8(wv);
+    int32_t d0 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(aw, _mm256_sign_epi8(_mm256_loadu_si256((const __m256i *)x0[b].qs), wv)), ones));
+    int32_t d1 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(aw, _mm256_sign_epi8(_mm256_loadu_si256((const __m256i *)x1[b].qs), wv)), ones));
+    int32_t d2 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(aw, _mm256_sign_epi8(_mm256_loadu_si256((const __m256i *)x2[b].qs), wv)), ones));
+    int32_t d3 = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+        _mm256_maddubs_epi16(aw, _mm256_sign_epi8(_mm256_loadu_si256((const __m256i *)x3[b].qs), wv)), ones));
+#elif defined(__SSSE3__)
+    __m128i w0 = _mm_loadu_si128((const __m128i *)(blk + 2));
+    __m128i w1 = _mm_loadu_si128((const __m128i *)(blk + 18));
+    __m128i aw0 = _mm_abs_epi8(w0);
+    __m128i aw1 = _mm_abs_epi8(w1);
+    int32_t d0 = _vira_sse_hsum_i32(_mm_add_epi32(
+        _mm_madd_epi16(_mm_maddubs_epi16(aw0, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)x0[b].qs), w0)), ones),
+        _mm_madd_epi16(_mm_maddubs_epi16(aw1, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)(x0[b].qs + 16)), w1)), ones)));
+    int32_t d1 = _vira_sse_hsum_i32(_mm_add_epi32(
+        _mm_madd_epi16(_mm_maddubs_epi16(aw0, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)x1[b].qs), w0)), ones),
+        _mm_madd_epi16(_mm_maddubs_epi16(aw1, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)(x1[b].qs + 16)), w1)), ones)));
+    int32_t d2 = _vira_sse_hsum_i32(_mm_add_epi32(
+        _mm_madd_epi16(_mm_maddubs_epi16(aw0, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)x2[b].qs), w0)), ones),
+        _mm_madd_epi16(_mm_maddubs_epi16(aw1, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)(x2[b].qs + 16)), w1)), ones)));
+    int32_t d3 = _vira_sse_hsum_i32(_mm_add_epi32(
+        _mm_madd_epi16(_mm_maddubs_epi16(aw0, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)x3[b].qs), w0)), ones),
+        _mm_madd_epi16(_mm_maddubs_epi16(aw1, _mm_sign_epi8(_mm_loadu_si128((const __m128i *)(x3[b].qs + 16)), w1)), ones)));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    const int8_t *wqs = (const int8_t *)(blk + 2);
+    int8x16_t w0 = vld1q_s8(wqs), w1 = vld1q_s8(wqs + 16);
+    int32_t d0 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), w0, vld1q_s8(x0[b].qs)), w1, vld1q_s8(x0[b].qs + 16)));
+    int32_t d1 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), w0, vld1q_s8(x1[b].qs)), w1, vld1q_s8(x1[b].qs + 16)));
+    int32_t d2 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), w0, vld1q_s8(x2[b].qs)), w1, vld1q_s8(x2[b].qs + 16)));
+    int32_t d3 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), w0, vld1q_s8(x3[b].qs)), w1, vld1q_s8(x3[b].qs + 16)));
+#else
+    const int8_t *wqs = (const int8_t *)(blk + 2);
+    int32_t d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+    for (int32_t j = 0; j < 32; ++j) {
+      int32_t wv = wqs[j];
+      d0 += wv * x0[b].qs[j];
+      d1 += wv * x1[b].qs[j];
+      d2 += wv * x2[b].qs[j];
+      d3 += wv * x3[b].qs[j];
+    }
+#endif
+    s0 += d * x0[b].d * (float)d0;
+    s1 += d * x1[b].d * (float)d1;
+    s2 += d * x2[b].d * (float)d2;
+    s3 += d * x3[b].d * (float)d3;
+  }
+  out4[0] = s0;
+  out4[1] = s1;
+  out4[2] = s2;
+  out4[3] = s3;
+}
+
+static inline float _vira_cpu_dot_q4_k_q8_K(const uint8_t *w_row,
+                                            const _vira_block_q8_K *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 144u;
+    uint16_t dh = 0, dmh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&dmh, blk + 2, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    float dmin = _vira_fp16_to_fp32(dmh);
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qs = blk + 16;
+    int32_t sumi_d = 0, sumi_m = 0;
+    for (int32_t ib = 0; ib < 8; ++ib) {
+      uint8_t sc = 0, m_sc = 0;
+      _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+      const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+      const int8_t *xq = x[b].qs + ib * 32;
+      int32_t dot = 0;
+#if defined(__AVX2__)
+      __m256i qv = _mm256_loadu_si256((const __m256i *)qs_sub);
+      __m256i wu = _mm256_and_si256((ib & 1) ? _mm256_srli_epi16(qv, 4) : qv, m4);
+      dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+          _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)xq)),
+          ones));
+#elif defined(__SSSE3__)
+      __m128i w0 = _mm_loadu_si128((const __m128i *)qs_sub);
+      __m128i w1 = _mm_loadu_si128((const __m128i *)(qs_sub + 16));
+      __m128i u0 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w0, 4) : w0, m4);
+      __m128i u1 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w1, 4) : w1, m4);
+      __m128i p0 = _mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)xq));
+      __m128i p1 =
+          _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(xq + 16)));
+      dot = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(p0, p1), ones));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+      uint8x16_t w0 = vld1q_u8(qs_sub), w1 = vld1q_u8(qs_sub + 16);
+      int8x16_t u0 = vreinterpretq_s8_u8((ib & 1) ? vshrq_n_u8(w0, 4) : vandq_u8(w0, m4));
+      int8x16_t u1 = vreinterpretq_s8_u8((ib & 1) ? vshrq_n_u8(w1, 4) : vandq_u8(w1, m4));
+      dot = _vira_neon_hsum_i32(_vira_neon_dot_s8(
+          _vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(xq)), u1,
+          vld1q_s8(xq + 16)));
+#else
+      int32_t shift = (ib & 1) * 4;
+      for (int32_t l = 0; l < 32; ++l) {
+        dot += (int32_t)((qs_sub[l] >> shift) & 0x0Fu) * (int32_t)xq[l];
+      }
+#endif
+      sumi_d += (int32_t)sc * dot;
+      sumi_m +=
+          (int32_t)m_sc * ((int32_t)x[b].bsums[2 * ib] + (int32_t)x[b].bsums[2 * ib + 1]);
+    }
+    sumf += x[b].d * (d * (float)sumi_d - dmin * (float)sumi_m);
+  }
+  return sumf;
+}
+
+static inline void _vira_cpu_dot_4rows_q4_k_q8_K(
+    const uint8_t *w_row, const _vira_block_q8_K *x0,
+    const _vira_block_q8_K *x1, const _vira_block_q8_K *x2,
+    const _vira_block_q8_K *x3, int32_t nb, float *out4) {
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 144u;
+    uint16_t dh = 0, dmh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&dmh, blk + 2, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    float dmin = _vira_fp16_to_fp32(dmh);
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qs = blk + 16;
+    int32_t sd0 = 0, sd1 = 0, sd2 = 0, sd3 = 0;
+    int32_t sm0 = 0, sm1 = 0, sm2 = 0, sm3 = 0;
+    for (int32_t ib = 0; ib < 8; ++ib) {
+      uint8_t sc = 0, m_sc = 0;
+      _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+      const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+      int32_t off = ib * 32;
+      int32_t d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+#if defined(__AVX2__)
+      __m256i qv = _mm256_loadu_si256((const __m256i *)qs_sub);
+      __m256i wu = _mm256_and_si256((ib & 1) ? _mm256_srli_epi16(qv, 4) : qv, m4);
+      d0 = _vira_avx2_hsum_i32(_mm256_madd_epi16(_mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(x0[b].qs + off))), ones));
+      d1 = _vira_avx2_hsum_i32(_mm256_madd_epi16(_mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(x1[b].qs + off))), ones));
+      d2 = _vira_avx2_hsum_i32(_mm256_madd_epi16(_mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(x2[b].qs + off))), ones));
+      d3 = _vira_avx2_hsum_i32(_mm256_madd_epi16(_mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(x3[b].qs + off))), ones));
+#elif defined(__SSSE3__)
+      __m128i w0 = _mm_loadu_si128((const __m128i *)qs_sub);
+      __m128i w1 = _mm_loadu_si128((const __m128i *)(qs_sub + 16));
+      __m128i u0 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w0, 4) : w0, m4);
+      __m128i u1 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w1, 4) : w1, m4);
+      d0 = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)(x0[b].qs + off))), _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x0[b].qs + off + 16)))), ones));
+      d1 = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)(x1[b].qs + off))), _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x1[b].qs + off + 16)))), ones));
+      d2 = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)(x2[b].qs + off))), _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x2[b].qs + off + 16)))), ones));
+      d3 = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(_mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)(x3[b].qs + off))), _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(x3[b].qs + off + 16)))), ones));
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+      uint8x16_t w0 = vld1q_u8(qs_sub), w1 = vld1q_u8(qs_sub + 16);
+      int8x16_t u0 = vreinterpretq_s8_u8((ib & 1) ? vshrq_n_u8(w0, 4) : vandq_u8(w0, m4));
+      int8x16_t u1 = vreinterpretq_s8_u8((ib & 1) ? vshrq_n_u8(w1, 4) : vandq_u8(w1, m4));
+      d0 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x0[b].qs + off)), u1, vld1q_s8(x0[b].qs + off + 16)));
+      d1 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x1[b].qs + off)), u1, vld1q_s8(x1[b].qs + off + 16)));
+      d2 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x2[b].qs + off)), u1, vld1q_s8(x2[b].qs + off + 16)));
+      d3 = _vira_neon_hsum_i32(_vira_neon_dot_s8(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(x3[b].qs + off)), u1, vld1q_s8(x3[b].qs + off + 16)));
+#else
+      int32_t shift = (ib & 1) * 4;
+      for (int32_t l = 0; l < 32; ++l) {
+        int32_t wv = (int32_t)((qs_sub[l] >> shift) & 0x0Fu);
+        d0 += wv * x0[b].qs[off + l];
+        d1 += wv * x1[b].qs[off + l];
+        d2 += wv * x2[b].qs[off + l];
+        d3 += wv * x3[b].qs[off + l];
+      }
+#endif
+      sd0 += (int32_t)sc * d0; sd1 += (int32_t)sc * d1;
+      sd2 += (int32_t)sc * d2; sd3 += (int32_t)sc * d3;
+      sm0 += (int32_t)m_sc * ((int32_t)x0[b].bsums[2 * ib] + (int32_t)x0[b].bsums[2 * ib + 1]);
+      sm1 += (int32_t)m_sc * ((int32_t)x1[b].bsums[2 * ib] + (int32_t)x1[b].bsums[2 * ib + 1]);
+      sm2 += (int32_t)m_sc * ((int32_t)x2[b].bsums[2 * ib] + (int32_t)x2[b].bsums[2 * ib + 1]);
+      sm3 += (int32_t)m_sc * ((int32_t)x3[b].bsums[2 * ib] + (int32_t)x3[b].bsums[2 * ib + 1]);
+    }
+    s0 += x0[b].d * (d * (float)sd0 - dmin * (float)sm0);
+    s1 += x1[b].d * (d * (float)sd1 - dmin * (float)sm1);
+    s2 += x2[b].d * (d * (float)sd2 - dmin * (float)sm2);
+    s3 += x3[b].d * (d * (float)sd3 - dmin * (float)sm3);
+  }
+  out4[0] = s0; out4[1] = s1; out4[2] = s2; out4[3] = s3;
+}
+
+static inline float _vira_cpu_dot_q5_k_q8_K(const uint8_t *w_row,
+                                            const _vira_block_q8_K *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i hi16 = _mm256_set1_epi8(16);
+  const __m256i ones = _mm256_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i hi16 = _mm_set1_epi8(16);
+  const __m128i ones = _mm_set1_epi16(1);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 176u;
+    uint16_t dh = 0, dmh = 0;
+    memcpy(&dh, blk, 2);
+    memcpy(&dmh, blk + 2, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    float dmin = _vira_fp16_to_fp32(dmh);
+    const uint8_t *scales = blk + 4;
+    const uint8_t *qh = blk + 16;
+    const uint8_t *qs = blk + 48;
+    int32_t sumi_d = 0, sumi_m = 0;
+    for (int32_t ib = 0; ib < 8; ++ib) {
+      uint8_t sc = 0, m_sc = 0;
+      _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
+      const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
+      const int8_t *xq = x[b].qs + ib * 32;
+      int32_t dot = 0;
+#if defined(__AVX2__)
+      __m256i um = _mm256_set1_epi8((char)(int8_t)(uint8_t)(1u << ib));
+      __m256i qv = _mm256_loadu_si256((const __m256i *)qs_sub);
+      __m256i lo = _mm256_and_si256((ib & 1) ? _mm256_srli_epi16(qv, 4) : qv, m4);
+      __m256i qhv = _mm256_loadu_si256((const __m256i *)qh);
+      __m256i hi = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(qhv, um), um), hi16);
+      __m256i wu = _mm256_or_si256(lo, hi);
+      dot = _vira_avx2_hsum_i32(_mm256_madd_epi16(
+          _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)xq)),
+          ones));
+#elif defined(__SSSE3__)
+      __m128i um = _mm_set1_epi8((char)(int8_t)(uint8_t)(1u << ib));
+      __m128i w0 = _mm_loadu_si128((const __m128i *)qs_sub);
+      __m128i w1 = _mm_loadu_si128((const __m128i *)(qs_sub + 16));
+      __m128i lo0 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w0, 4) : w0, m4);
+      __m128i lo1 = _mm_and_si128((ib & 1) ? _mm_srli_epi16(w1, 4) : w1, m4);
+      __m128i qh0 = _mm_loadu_si128((const __m128i *)qh);
+      __m128i qh1 = _mm_loadu_si128((const __m128i *)(qh + 16));
+      __m128i hi0 = _mm_and_si128(_mm_cmpeq_epi8(_mm_and_si128(qh0, um), um), hi16);
+      __m128i hi1 = _mm_and_si128(_mm_cmpeq_epi8(_mm_and_si128(qh1, um), um), hi16);
+      __m128i p0 = _mm_maddubs_epi16(_mm_or_si128(lo0, hi0), _mm_loadu_si128((const __m128i *)xq));
+      __m128i p1 = _mm_maddubs_epi16(_mm_or_si128(lo1, hi1), _mm_loadu_si128((const __m128i *)(xq + 16)));
+      dot = _vira_sse_hsum_i32(_mm_madd_epi16(_mm_add_epi16(p0, p1), ones));
+#else
+      int32_t shift = (ib & 1) * 4;
+      uint8_t um = (uint8_t)(1u << ib);
+      for (int32_t l = 0; l < 32; ++l) {
+        int32_t q = (int32_t)((qs_sub[l] >> shift) & 0x0Fu) + ((qh[l] & um) ? 16 : 0);
+        dot += q * (int32_t)xq[l];
+      }
+#endif
+      sumi_d += (int32_t)sc * dot;
+      sumi_m += (int32_t)m_sc * ((int32_t)x[b].bsums[2 * ib] + (int32_t)x[b].bsums[2 * ib + 1]);
+    }
+    sumf += x[b].d * (d * (float)sumi_d - dmin * (float)sumi_m);
+  }
+  return sumf;
+}
+
+static inline float _vira_cpu_dot_q6_k_q8_K(const uint8_t *w_row,
+                                            const _vira_block_q8_K *x,
+                                            int32_t nb) {
+  float sumf = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i m3 = _mm256_set1_epi8(0x03);
+  const __m128i ones128 = _mm_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i m3 = _mm_set1_epi8(0x03);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+  const uint8x16_t m3 = vdupq_n_u8(0x03);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 210u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk + 208, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t sumi = 0;
+    for (int32_t h = 0; h < 2; ++h) {
+      const uint8_t *ql_h = blk + h * 64;
+      const uint8_t *qh_h = blk + 128 + h * 32;
+      const int8_t *sc_h = (const int8_t *)(blk + 192) + h * 8;
+      const int8_t *q_h = x[b].qs + h * 128;
+      const int16_t *bs_h = x[b].bsums + h * 8;
+#if defined(__AVX2__)
+      __m256i qh32 = _mm256_loadu_si256((const __m256i *)qh_h);
+      __m256i ql_a = _mm256_loadu_si256((const __m256i *)ql_h);
+      __m256i ql_b = _mm256_loadu_si256((const __m256i *)(ql_h + 32));
+      for (int32_t c = 0; c < 4; ++c) {
+        __m256i ql_use = (c & 1) ? ql_b : ql_a;
+        __m256i lo4 = _mm256_and_si256((c >= 2) ? _mm256_srli_epi16(ql_use, 4) : ql_use, m4);
+        __m256i hi2 = _mm256_slli_epi16(_mm256_and_si256((c == 0) ? qh32 : _mm256_srli_epi16(qh32, c * 2), m3), 4);
+        __m256i wu = _mm256_or_si256(lo4, hi2);
+        __m256i p16 = _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(q_h + c * 32)));
+        __m128i s0 = _mm_madd_epi16(_mm256_castsi256_si128(p16), ones128);
+        __m128i s1 = _mm_madd_epi16(_mm256_extracti128_si256(p16, 1), ones128);
+        __m128i hab = _mm_hadd_epi32(s0, s1);
+        hab = _mm_hadd_epi32(hab, hab);
+        int32_t dot0 = _mm_cvtsi128_si32(hab);
+        int32_t dot1 = _mm_cvtsi128_si32(_mm_srli_si128(hab, 4));
+        sumi += (int32_t)sc_h[2 * c + 0] * (dot0 - 32 * (int32_t)bs_h[2 * c + 0]);
+        sumi += (int32_t)sc_h[2 * c + 1] * (dot1 - 32 * (int32_t)bs_h[2 * c + 1]);
+      }
+#elif defined(__SSSE3__)
+      __m128i qh0 = _mm_loadu_si128((const __m128i *)qh_h);
+      __m128i qh1 = _mm_loadu_si128((const __m128i *)(qh_h + 16));
+      __m128i ql0a = _mm_loadu_si128((const __m128i *)ql_h);
+      __m128i ql1a = _mm_loadu_si128((const __m128i *)(ql_h + 16));
+      __m128i ql0b = _mm_loadu_si128((const __m128i *)(ql_h + 32));
+      __m128i ql1b = _mm_loadu_si128((const __m128i *)(ql_h + 48));
+      for (int32_t c = 0; c < 4; ++c) {
+        __m128i qla = (c & 1) ? ql0b : ql0a;
+        __m128i qlb = (c & 1) ? ql1b : ql1a;
+        __m128i lo0 = _mm_and_si128((c >= 2) ? _mm_srli_epi16(qla, 4) : qla, m4);
+        __m128i lo1 = _mm_and_si128((c >= 2) ? _mm_srli_epi16(qlb, 4) : qlb, m4);
+        __m128i hi0 = _mm_slli_epi16(_mm_and_si128((c == 0) ? qh0 : _mm_srli_epi16(qh0, c * 2), m3), 4);
+        __m128i hi1 = _mm_slli_epi16(_mm_and_si128((c == 0) ? qh1 : _mm_srli_epi16(qh1, c * 2), m3), 4);
+        __m128i p0 = _mm_maddubs_epi16(_mm_or_si128(lo0, hi0), _mm_loadu_si128((const __m128i *)(q_h + c * 32)));
+        __m128i p1 = _mm_maddubs_epi16(_mm_or_si128(lo1, hi1), _mm_loadu_si128((const __m128i *)(q_h + c * 32 + 16)));
+        __m128i hab = _mm_hadd_epi32(_mm_madd_epi16(p0, ones), _mm_madd_epi16(p1, ones));
+        hab = _mm_hadd_epi32(hab, hab);
+        int32_t dot0 = _mm_cvtsi128_si32(hab);
+        int32_t dot1 = _mm_cvtsi128_si32(_mm_srli_si128(hab, 4));
+        sumi += (int32_t)sc_h[2 * c + 0] * (dot0 - 32 * (int32_t)bs_h[2 * c + 0]);
+        sumi += (int32_t)sc_h[2 * c + 1] * (dot1 - 32 * (int32_t)bs_h[2 * c + 1]);
+      }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+      uint8x16_t qh0 = vld1q_u8(qh_h), qh1 = vld1q_u8(qh_h + 16);
+      uint8x16_t ql0a = vld1q_u8(ql_h), ql1a = vld1q_u8(ql_h + 16);
+      uint8x16_t ql0b = vld1q_u8(ql_h + 32), ql1b = vld1q_u8(ql_h + 48);
+      for (int32_t c = 0; c < 4; ++c) {
+        uint8x16_t qla = (c & 1) ? ql0b : ql0a;
+        uint8x16_t qlb = (c & 1) ? ql1b : ql1a;
+        uint8x16_t lo0 = (c >= 2) ? vshrq_n_u8(qla, 4) : vandq_u8(qla, m4);
+        uint8x16_t lo1 = (c >= 2) ? vshrq_n_u8(qlb, 4) : vandq_u8(qlb, m4);
+        uint8x16_t hr0 = (c == 0) ? qh0 : ((c == 1) ? vshrq_n_u8(qh0, 2) : ((c == 2) ? vshrq_n_u8(qh0, 4) : vshrq_n_u8(qh0, 6)));
+        uint8x16_t hr1 = (c == 0) ? qh1 : ((c == 1) ? vshrq_n_u8(qh1, 2) : ((c == 2) ? vshrq_n_u8(qh1, 4) : vshrq_n_u8(qh1, 6)));
+        int8x16_t u0 = vreinterpretq_s8_u8(vorrq_u8(lo0, vshlq_n_u8(vandq_u8(hr0, m3), 4)));
+        int8x16_t u1 = vreinterpretq_s8_u8(vorrq_u8(lo1, vshlq_n_u8(vandq_u8(hr1, m3), 4)));
+        int32_t dot0 = _vira_neon_hsum_i32(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(q_h + c * 32)));
+        int32_t dot1 = _vira_neon_hsum_i32(_vira_neon_dot_s8(vdupq_n_s32(0), u1, vld1q_s8(q_h + c * 32 + 16)));
+        sumi += (int32_t)sc_h[2 * c + 0] * (dot0 - 32 * (int32_t)bs_h[2 * c + 0]);
+        sumi += (int32_t)sc_h[2 * c + 1] * (dot1 - 32 * (int32_t)bs_h[2 * c + 1]);
+      }
+#else
+      for (int32_t l = 0; l < 32; ++l) {
+        int32_t is = l >> 4;
+        int32_t q1 = (int32_t)((ql_h[l + 0] & 0x0Fu) | (((qh_h[l] >> 0) & 3u) << 4)) - 32;
+        int32_t q2 = (int32_t)((ql_h[l + 32] & 0x0Fu) | (((qh_h[l] >> 2) & 3u) << 4)) - 32;
+        int32_t q3 = (int32_t)((ql_h[l + 0] >> 4) | (((qh_h[l] >> 4) & 3u) << 4)) - 32;
+        int32_t q4 = (int32_t)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3u) << 4)) - 32;
+        sumi += (int32_t)sc_h[is + 0] * q1 * (int32_t)q_h[l + 0];
+        sumi += (int32_t)sc_h[is + 2] * q2 * (int32_t)q_h[l + 32];
+        sumi += (int32_t)sc_h[is + 4] * q3 * (int32_t)q_h[l + 64];
+        sumi += (int32_t)sc_h[is + 6] * q4 * (int32_t)q_h[l + 96];
+      }
+      (void)bs_h;
+#endif
+    }
+    sumf += d * x[b].d * (float)sumi;
+  }
+  return sumf;
+}
+
+static inline void _vira_cpu_dot_4rows_q6_k_q8_K(
+    const uint8_t *w_row, const _vira_block_q8_K *x0,
+    const _vira_block_q8_K *x1, const _vira_block_q8_K *x2,
+    const _vira_block_q8_K *x3, int32_t nb, float *out4) {
+  float sf0 = 0.0f, sf1 = 0.0f, sf2 = 0.0f, sf3 = 0.0f;
+#if defined(__AVX2__)
+  const __m256i m4 = _mm256_set1_epi8(0x0F);
+  const __m256i m3 = _mm256_set1_epi8(0x03);
+  const __m128i ones128 = _mm_set1_epi16(1);
+#elif defined(__SSSE3__)
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i m3 = _mm_set1_epi8(0x03);
+  const __m128i ones = _mm_set1_epi16(1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  const uint8x16_t m4 = vdupq_n_u8(0x0F);
+  const uint8x16_t m3 = vdupq_n_u8(0x03);
+#endif
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 210u;
+    uint16_t dh = 0;
+    memcpy(&dh, blk + 208, 2);
+    float d = _vira_fp16_to_fp32(dh);
+    int32_t si0 = 0, si1 = 0, si2 = 0, si3 = 0;
+    for (int32_t h = 0; h < 2; ++h) {
+      const uint8_t *ql_h = blk + h * 64;
+      const uint8_t *qh_h = blk + 128 + h * 32;
+      const int8_t *sc_h = (const int8_t *)(blk + 192) + h * 8;
+      int32_t qoff = h * 128, boff = h * 8;
+#if defined(__AVX2__)
+      __m256i qh32 = _mm256_loadu_si256((const __m256i *)qh_h);
+      __m256i ql_a = _mm256_loadu_si256((const __m256i *)ql_h);
+      __m256i ql_b = _mm256_loadu_si256((const __m256i *)(ql_h + 32));
+      for (int32_t c = 0; c < 4; ++c) {
+        __m256i ql_use = (c & 1) ? ql_b : ql_a;
+        __m256i lo4 = _mm256_and_si256((c >= 2) ? _mm256_srli_epi16(ql_use, 4) : ql_use, m4);
+        __m256i hi2 = _mm256_slli_epi16(_mm256_and_si256((c == 0) ? qh32 : _mm256_srli_epi16(qh32, c * 2), m3), 4);
+        __m256i wu = _mm256_or_si256(lo4, hi2);
+        const _vira_block_q8_K *xs[4] = {&x0[b], &x1[b], &x2[b], &x3[b]};
+        int32_t *sis[4] = {&si0, &si1, &si2, &si3};
+        for (int32_t r = 0; r < 4; ++r) {
+          __m256i p16 = _mm256_maddubs_epi16(wu, _mm256_loadu_si256((const __m256i *)(xs[r]->qs + qoff + c * 32)));
+          __m128i hab = _mm_hadd_epi32(_mm_madd_epi16(_mm256_castsi256_si128(p16), ones128), _mm_madd_epi16(_mm256_extracti128_si256(p16, 1), ones128));
+          hab = _mm_hadd_epi32(hab, hab);
+          int32_t d0 = _mm_cvtsi128_si32(hab);
+          int32_t d1 = _mm_cvtsi128_si32(_mm_srli_si128(hab, 4));
+          *(sis[r]) += (int32_t)sc_h[2 * c + 0] * (d0 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 0]) +
+                       (int32_t)sc_h[2 * c + 1] * (d1 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 1]);
+        }
+      }
+#elif defined(__SSSE3__)
+      __m128i qh0 = _mm_loadu_si128((const __m128i *)qh_h);
+      __m128i qh1 = _mm_loadu_si128((const __m128i *)(qh_h + 16));
+      __m128i ql0a = _mm_loadu_si128((const __m128i *)ql_h);
+      __m128i ql1a = _mm_loadu_si128((const __m128i *)(ql_h + 16));
+      __m128i ql0b = _mm_loadu_si128((const __m128i *)(ql_h + 32));
+      __m128i ql1b = _mm_loadu_si128((const __m128i *)(ql_h + 48));
+      for (int32_t c = 0; c < 4; ++c) {
+        __m128i qla = (c & 1) ? ql0b : ql0a, qlb = (c & 1) ? ql1b : ql1a;
+        __m128i u0 = _mm_or_si128(_mm_and_si128((c >= 2) ? _mm_srli_epi16(qla, 4) : qla, m4),
+                                  _mm_slli_epi16(_mm_and_si128((c == 0) ? qh0 : _mm_srli_epi16(qh0, c * 2), m3), 4));
+        __m128i u1 = _mm_or_si128(_mm_and_si128((c >= 2) ? _mm_srli_epi16(qlb, 4) : qlb, m4),
+                                  _mm_slli_epi16(_mm_and_si128((c == 0) ? qh1 : _mm_srli_epi16(qh1, c * 2), m3), 4));
+        const _vira_block_q8_K *xs[4] = {&x0[b], &x1[b], &x2[b], &x3[b]};
+        int32_t *sis[4] = {&si0, &si1, &si2, &si3};
+        for (int32_t r = 0; r < 4; ++r) {
+          __m128i p0 = _mm_maddubs_epi16(u0, _mm_loadu_si128((const __m128i *)(xs[r]->qs + qoff + c * 32)));
+          __m128i p1 = _mm_maddubs_epi16(u1, _mm_loadu_si128((const __m128i *)(xs[r]->qs + qoff + c * 32 + 16)));
+          __m128i hab = _mm_hadd_epi32(_mm_madd_epi16(p0, ones), _mm_madd_epi16(p1, ones));
+          hab = _mm_hadd_epi32(hab, hab);
+          int32_t d0 = _mm_cvtsi128_si32(hab);
+          int32_t d1 = _mm_cvtsi128_si32(_mm_srli_si128(hab, 4));
+          *(sis[r]) += (int32_t)sc_h[2 * c + 0] * (d0 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 0]) +
+                       (int32_t)sc_h[2 * c + 1] * (d1 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 1]);
+        }
+      }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+      uint8x16_t qh0 = vld1q_u8(qh_h), qh1 = vld1q_u8(qh_h + 16);
+      uint8x16_t ql0a = vld1q_u8(ql_h), ql1a = vld1q_u8(ql_h + 16);
+      uint8x16_t ql0b = vld1q_u8(ql_h + 32), ql1b = vld1q_u8(ql_h + 48);
+      for (int32_t c = 0; c < 4; ++c) {
+        uint8x16_t qla = (c & 1) ? ql0b : ql0a, qlb = (c & 1) ? ql1b : ql1a;
+        uint8x16_t lo0 = (c >= 2) ? vshrq_n_u8(qla, 4) : vandq_u8(qla, m4);
+        uint8x16_t lo1 = (c >= 2) ? vshrq_n_u8(qlb, 4) : vandq_u8(qlb, m4);
+        uint8x16_t hr0 = (c == 0) ? qh0 : ((c == 1) ? vshrq_n_u8(qh0, 2) : ((c == 2) ? vshrq_n_u8(qh0, 4) : vshrq_n_u8(qh0, 6)));
+        uint8x16_t hr1 = (c == 0) ? qh1 : ((c == 1) ? vshrq_n_u8(qh1, 2) : ((c == 2) ? vshrq_n_u8(qh1, 4) : vshrq_n_u8(qh1, 6)));
+        int8x16_t u0 = vreinterpretq_s8_u8(vorrq_u8(lo0, vshlq_n_u8(vandq_u8(hr0, m3), 4)));
+        int8x16_t u1 = vreinterpretq_s8_u8(vorrq_u8(lo1, vshlq_n_u8(vandq_u8(hr1, m3), 4)));
+        const _vira_block_q8_K *xs[4] = {&x0[b], &x1[b], &x2[b], &x3[b]};
+        int32_t *sis[4] = {&si0, &si1, &si2, &si3};
+        for (int32_t r = 0; r < 4; ++r) {
+          int32_t d0 = _vira_neon_hsum_i32(_vira_neon_dot_s8(vdupq_n_s32(0), u0, vld1q_s8(xs[r]->qs + qoff + c * 32)));
+          int32_t d1 = _vira_neon_hsum_i32(_vira_neon_dot_s8(vdupq_n_s32(0), u1, vld1q_s8(xs[r]->qs + qoff + c * 32 + 16)));
+          *(sis[r]) += (int32_t)sc_h[2 * c + 0] * (d0 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 0]) +
+                       (int32_t)sc_h[2 * c + 1] * (d1 - 32 * (int32_t)xs[r]->bsums[boff + 2 * c + 1]);
+        }
+      }
+#else
+      for (int32_t l = 0; l < 32; ++l) {
+        int32_t is = l >> 4;
+        int32_t q1 = (int32_t)((ql_h[l + 0] & 0x0Fu) | (((qh_h[l] >> 0) & 3u) << 4)) - 32;
+        int32_t q2 = (int32_t)((ql_h[l + 32] & 0x0Fu) | (((qh_h[l] >> 2) & 3u) << 4)) - 32;
+        int32_t q3 = (int32_t)((ql_h[l + 0] >> 4) | (((qh_h[l] >> 4) & 3u) << 4)) - 32;
+        int32_t q4 = (int32_t)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3u) << 4)) - 32;
+        si0 += (int32_t)sc_h[is + 0] * q1 * x0[b].qs[qoff + l] + (int32_t)sc_h[is + 2] * q2 * x0[b].qs[qoff + l + 32] +
+               (int32_t)sc_h[is + 4] * q3 * x0[b].qs[qoff + l + 64] + (int32_t)sc_h[is + 6] * q4 * x0[b].qs[qoff + l + 96];
+        si1 += (int32_t)sc_h[is + 0] * q1 * x1[b].qs[qoff + l] + (int32_t)sc_h[is + 2] * q2 * x1[b].qs[qoff + l + 32] +
+               (int32_t)sc_h[is + 4] * q3 * x1[b].qs[qoff + l + 64] + (int32_t)sc_h[is + 6] * q4 * x1[b].qs[qoff + l + 96];
+        si2 += (int32_t)sc_h[is + 0] * q1 * x2[b].qs[qoff + l] + (int32_t)sc_h[is + 2] * q2 * x2[b].qs[qoff + l + 32] +
+               (int32_t)sc_h[is + 4] * q3 * x2[b].qs[qoff + l + 64] + (int32_t)sc_h[is + 6] * q4 * x2[b].qs[qoff + l + 96];
+        si3 += (int32_t)sc_h[is + 0] * q1 * x3[b].qs[qoff + l] + (int32_t)sc_h[is + 2] * q2 * x3[b].qs[qoff + l + 32] +
+               (int32_t)sc_h[is + 4] * q3 * x3[b].qs[qoff + l + 64] + (int32_t)sc_h[is + 6] * q4 * x3[b].qs[qoff + l + 96];
+      }
+#endif
+    }
+    sf0 += d * x0[b].d * (float)si0;
+    sf1 += d * x1[b].d * (float)si1;
+    sf2 += d * x2[b].d * (float)si2;
+    sf3 += d * x3[b].d * (float)si3;
+  }
+  out4[0] = sf0; out4[1] = sf1; out4[2] = sf2; out4[3] = sf3;
+}
+
+static inline float _vira_cpu_dot_f16_f32(const uint8_t *w_row,
+                                          const float *x_row, int32_t K) {
+  float sumf = 0.0f;
+  int32_t k = 0;
+#if defined(__AVX2__) && defined(__F16C__)
+  __m256 vs = _mm256_setzero_ps();
+  for (; k + 8 <= K; k += 8) {
+    __m128i wh = _mm_loadu_si128((const __m128i *)(w_row + (size_t)k * 2u));
+    __m256 wf = _mm256_cvtph_ps(wh);
+    __m256 xf = _mm256_loadu_ps(&x_row[k]);
+#if defined(__FMA__)
+    vs = _mm256_fmadd_ps(wf, xf, vs);
+#else
+    vs = _mm256_add_ps(vs, _mm256_mul_ps(wf, xf));
+#endif
+  }
+  __m128 s = _mm_add_ps(_mm256_castps256_ps128(vs), _mm256_extractf128_ps(vs, 1));
+  s = _mm_hadd_ps(s, s);
+  s = _mm_hadd_ps(s, s);
+  sumf = _mm_cvtss_f32(s);
+#endif
+  for (; k < K; ++k) {
+    uint16_t h = 0;
+    memcpy(&h, w_row + (size_t)k * 2u, 2);
+    sumf += _vira_fp16_to_fp32(h) * x_row[k];
+  }
+  return sumf;
+}
+
+static inline void _vira_cpu_dot_4rows_f16_f32(const uint8_t *w_row,
+                                               const float *x0, const float *x1,
+                                               const float *x2, const float *x3,
+                                               int32_t K, float *out4) {
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+  int32_t k = 0;
+#if defined(__AVX2__) && defined(__F16C__)
+  __m256 v0 = _mm256_setzero_ps(), v1 = _mm256_setzero_ps();
+  __m256 v2 = _mm256_setzero_ps(), v3 = _mm256_setzero_ps();
+  for (; k + 8 <= K; k += 8) {
+    __m256 wf = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(w_row + (size_t)k * 2u)));
+#if defined(__FMA__)
+    v0 = _mm256_fmadd_ps(wf, _mm256_loadu_ps(&x0[k]), v0);
+    v1 = _mm256_fmadd_ps(wf, _mm256_loadu_ps(&x1[k]), v1);
+    v2 = _mm256_fmadd_ps(wf, _mm256_loadu_ps(&x2[k]), v2);
+    v3 = _mm256_fmadd_ps(wf, _mm256_loadu_ps(&x3[k]), v3);
+#else
+    v0 = _mm256_add_ps(v0, _mm256_mul_ps(wf, _mm256_loadu_ps(&x0[k])));
+    v1 = _mm256_add_ps(v1, _mm256_mul_ps(wf, _mm256_loadu_ps(&x1[k])));
+    v2 = _mm256_add_ps(v2, _mm256_mul_ps(wf, _mm256_loadu_ps(&x2[k])));
+    v3 = _mm256_add_ps(v3, _mm256_mul_ps(wf, _mm256_loadu_ps(&x3[k])));
+#endif
+  }
+  __m128 a0 = _mm_add_ps(_mm256_castps256_ps128(v0), _mm256_extractf128_ps(v0, 1));
+  __m128 a1 = _mm_add_ps(_mm256_castps256_ps128(v1), _mm256_extractf128_ps(v1, 1));
+  __m128 a2 = _mm_add_ps(_mm256_castps256_ps128(v2), _mm256_extractf128_ps(v2, 1));
+  __m128 a3 = _mm_add_ps(_mm256_castps256_ps128(v3), _mm256_extractf128_ps(v3, 1));
+  a0 = _mm_hadd_ps(a0, a0); a0 = _mm_hadd_ps(a0, a0); s0 = _mm_cvtss_f32(a0);
+  a1 = _mm_hadd_ps(a1, a1); a1 = _mm_hadd_ps(a1, a1); s1 = _mm_cvtss_f32(a1);
+  a2 = _mm_hadd_ps(a2, a2); a2 = _mm_hadd_ps(a2, a2); s2 = _mm_cvtss_f32(a2);
+  a3 = _mm_hadd_ps(a3, a3); a3 = _mm_hadd_ps(a3, a3); s3 = _mm_cvtss_f32(a3);
+#endif
+  for (; k < K; ++k) {
+    uint16_t h = 0;
+    memcpy(&h, w_row + (size_t)k * 2u, 2);
+    float wf = _vira_fp16_to_fp32(h);
+    s0 += wf * x0[k]; s1 += wf * x1[k]; s2 += wf * x2[k]; s3 += wf * x3[k];
+  }
+  out4[0] = s0; out4[1] = s1; out4[2] = s2; out4[3] = s3;
+}
+
+typedef struct {
+  uint32_t gguf_dtype;
+  const uint8_t *w_raw;
+  const void *x_q8;
+  const float *x_f32;
+  float *y_base;
+  int32_t M;
+  int32_t K;
+  int32_t N;
+  int32_t nb;
+  size_t row_bytes;
+  int32_t n_start;
+  int32_t n_end;
+} _vira_quant_linear_job;
+
+static void _vira_quant_linear_job_fn(void *raw_env) {
+  _vira_quant_linear_job *j = (_vira_quant_linear_job *)raw_env;
+  const int32_t M = j->M, K = j->K, N = j->N, nb = j->nb;
+  const int32_t n0 = j->n_start, n1 = j->n_end;
+  const size_t rb = j->row_bytes;
+  const uint32_t dt = j->gguf_dtype;
+
+  if (dt == 1) {
+    int32_t m = 0;
+    for (; m + 4 <= M; m += 4) {
+      const float *xr0 = j->x_f32 + (size_t)(m + 0) * (size_t)K;
+      const float *xr1 = j->x_f32 + (size_t)(m + 1) * (size_t)K;
+      const float *xr2 = j->x_f32 + (size_t)(m + 2) * (size_t)K;
+      const float *xr3 = j->x_f32 + (size_t)(m + 3) * (size_t)K;
+      float *y0 = j->y_base + (size_t)(m + 0) * (size_t)N;
+      float *y1 = j->y_base + (size_t)(m + 1) * (size_t)N;
+      float *y2 = j->y_base + (size_t)(m + 2) * (size_t)N;
+      float *y3 = j->y_base + (size_t)(m + 3) * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n) {
+        float acc4[4];
+        _vira_cpu_dot_4rows_f16_f32(j->w_raw + (size_t)n * rb, xr0, xr1, xr2, xr3, K, acc4);
+        y0[n] = acc4[0]; y1[n] = acc4[1]; y2[n] = acc4[2]; y3[n] = acc4[3];
+      }
+    }
+    for (; m < M; ++m) {
+      const float *xr = j->x_f32 + (size_t)m * (size_t)K;
+      float *yr = j->y_base + (size_t)m * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n) {
+        yr[n] = _vira_cpu_dot_f16_f32(j->w_raw + (size_t)n * rb, xr, K);
+      }
+    }
+    return;
+  }
+
+  if (dt <= 8) {
+    const _vira_block_q8_0 *xq = (const _vira_block_q8_0 *)j->x_q8;
+    int32_t m = 0;
+    if (dt == 2 || dt == 8) {
+      for (; m + 4 <= M; m += 4) {
+        const _vira_block_q8_0 *x0 = xq + (size_t)(m + 0) * (size_t)nb;
+        const _vira_block_q8_0 *x1 = xq + (size_t)(m + 1) * (size_t)nb;
+        const _vira_block_q8_0 *x2 = xq + (size_t)(m + 2) * (size_t)nb;
+        const _vira_block_q8_0 *x3 = xq + (size_t)(m + 3) * (size_t)nb;
+        float *y0 = j->y_base + (size_t)(m + 0) * (size_t)N;
+        float *y1 = j->y_base + (size_t)(m + 1) * (size_t)N;
+        float *y2 = j->y_base + (size_t)(m + 2) * (size_t)N;
+        float *y3 = j->y_base + (size_t)(m + 3) * (size_t)N;
+        for (int32_t n = n0; n < n1; ++n) {
+          const uint8_t *wr = j->w_raw + (size_t)n * rb;
+          float acc4[4];
+          if (dt == 2) _vira_cpu_dot_4rows_q4_0_q8_0(wr, x0, x1, x2, x3, nb, acc4);
+          else         _vira_cpu_dot_4rows_q8_0_q8_0(wr, x0, x1, x2, x3, nb, acc4);
+          y0[n] = acc4[0]; y1[n] = acc4[1]; y2[n] = acc4[2]; y3[n] = acc4[3];
+        }
+      }
+    }
+    for (; m < M; ++m) {
+      const _vira_block_q8_0 *xm = xq + (size_t)m * (size_t)nb;
+      float *yr = j->y_base + (size_t)m * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n) {
+        const uint8_t *wr = j->w_raw + (size_t)n * rb;
+        if (dt == 2)      yr[n] = _vira_cpu_dot_q4_0_q8_0(wr, xm, nb);
+        else if (dt == 3) yr[n] = _vira_cpu_dot_q4_1_q8_0(wr, xm, nb);
+        else if (dt == 6) yr[n] = _vira_cpu_dot_q5_0_q8_0(wr, xm, nb);
+        else if (dt == 7) yr[n] = _vira_cpu_dot_q5_1_q8_0(wr, xm, nb);
+        else              yr[n] = _vira_cpu_dot_q8_0_q8_0(wr, xm, nb);
+      }
+    }
+  } else {
+    const _vira_block_q8_K *xq = (const _vira_block_q8_K *)j->x_q8;
+    int32_t m = 0;
+    if (dt == 12 || dt == 14) {
+      for (; m + 4 <= M; m += 4) {
+        const _vira_block_q8_K *x0 = xq + (size_t)(m + 0) * (size_t)nb;
+        const _vira_block_q8_K *x1 = xq + (size_t)(m + 1) * (size_t)nb;
+        const _vira_block_q8_K *x2 = xq + (size_t)(m + 2) * (size_t)nb;
+        const _vira_block_q8_K *x3 = xq + (size_t)(m + 3) * (size_t)nb;
+        float *y0 = j->y_base + (size_t)(m + 0) * (size_t)N;
+        float *y1 = j->y_base + (size_t)(m + 1) * (size_t)N;
+        float *y2 = j->y_base + (size_t)(m + 2) * (size_t)N;
+        float *y3 = j->y_base + (size_t)(m + 3) * (size_t)N;
+        for (int32_t n = n0; n < n1; ++n) {
+          const uint8_t *wr = j->w_raw + (size_t)n * rb;
+          float acc4[4];
+          if (dt == 12) _vira_cpu_dot_4rows_q4_k_q8_K(wr, x0, x1, x2, x3, nb, acc4);
+          else          _vira_cpu_dot_4rows_q6_k_q8_K(wr, x0, x1, x2, x3, nb, acc4);
+          y0[n] = acc4[0]; y1[n] = acc4[1]; y2[n] = acc4[2]; y3[n] = acc4[3];
+        }
+      }
+    }
+    for (; m < M; ++m) {
+      const _vira_block_q8_K *xm = xq + (size_t)m * (size_t)nb;
+      float *yr = j->y_base + (size_t)m * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n) {
+        const uint8_t *wr = j->w_raw + (size_t)n * rb;
+        if (dt == 12)      yr[n] = _vira_cpu_dot_q4_k_q8_K(wr, xm, nb);
+        else if (dt == 13) yr[n] = _vira_cpu_dot_q5_k_q8_K(wr, xm, nb);
+        else               yr[n] = _vira_cpu_dot_q6_k_q8_K(wr, xm, nb);
+      }
+    }
+  }
+}
+
+static inline bool _vira_rt_quant_cpu_linear(vira_arena *opt_arena,
+                                             vira_tensor_f32 x,
+                                             vira_tensor_f32 w,
+                                             vira_tensor_f32 *out_tensor) {
+  if (!out_tensor || _vira_gpu_is_ptr_dirty(w.data))
+    return false;
+  uint32_t dtype = 0;
+  const void *raw_q = NULL;
+  size_t raw_bytes = 0, elems = 0;
+  if (!_vira_rt_quant_try_get(w.data, &dtype, &raw_q, &raw_bytes, &elems))
+    return false;
+  int32_t M = x.rows, K = x.cols, N = w.rows;
+  size_t qk = _vira_gguf_dtype_qk(dtype);
+  size_t bs = _vira_gguf_dtype_bs(dtype);
+  if (qk == 0 || bs == 0 || elems != (size_t)N * (size_t)K ||
+      ((size_t)K % qk) != 0)
+    return false;
+  int32_t nb = (int32_t)((size_t)K / qk);
+  size_t row_bytes = (size_t)nb * bs;
+  if ((size_t)N * row_bytes > raw_bytes)
+    return false;
+  if (!(dtype == 1 || dtype == 2 || dtype == 3 || dtype == 6 || dtype == 7 ||
+        dtype == 8 || dtype == 12 || dtype == 13 || dtype == 14))
+    return false;
+
+  _vira_tensor_sync_host_f32(x.data);
+
+  uint8_t stack_q8[16384];
+  void *heap_q8 = NULL;
+  void *x_q8 = NULL;
+  if (dtype != 1) {
+    size_t blk_sz = (qk == 32) ? sizeof(_vira_block_q8_0) : sizeof(_vira_block_q8_K);
+    size_t need = (size_t)M * (size_t)nb * blk_sz;
+    if (need <= sizeof(stack_q8)) {
+      x_q8 = stack_q8;
+    } else {
+      heap_q8 = malloc(need);
+      if (!heap_q8)
+        return false;
+      x_q8 = heap_q8;
+    }
+    for (int32_t m = 0; m < M; ++m) {
+      const float *xr = x.data + (size_t)m * (size_t)K;
+      if (qk == 32) {
+        _vira_quantize_row_q8_0(xr, K,
+                                (_vira_block_q8_0 *)x_q8 + (size_t)m * (size_t)nb);
+      } else {
+        _vira_quantize_row_q8_K(xr, K,
+                                (_vira_block_q8_K *)x_q8 + (size_t)m * (size_t)nb);
+      }
+    }
+  }
+
+  int32_t out_dims[2] = {M, N};
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
+
+  int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
+  if (total_ops >= 131072LL && N >= 32 && !_vira_in_active_actor()) {
+    vira_scheduler_ensure_init();
+    int32_t nw = vira_scheduler_num_workers();
+    if (nw > 16) nw = 16;
+    if (nw > N) nw = N;
+    if (nw > 1) {
+      _vira_quant_linear_job jobs[16];
+      vira_task tasks[16];
+      int32_t base_n = N / nw;
+      int32_t extra = N % nw;
+      int32_t cur = 0;
+      for (int32_t wi = 0; wi < nw; ++wi) {
+        int32_t cnt = base_n + (wi < extra ? 1 : 0);
+        jobs[wi] = (_vira_quant_linear_job){.gguf_dtype = dtype,
+                                            .w_raw = (const uint8_t *)raw_q,
+                                            .x_q8 = x_q8,
+                                            .x_f32 = x.data,
+                                            .y_base = out.data,
+                                            .M = M,
+                                            .K = K,
+                                            .N = N,
+                                            .nb = nb,
+                                            .row_bytes = row_bytes,
+                                            .n_start = cur,
+                                            .n_end = cur + cnt};
+        cur += cnt;
+        if (wi > 0) {
+          tasks[wi] = (vira_task){.fn = _vira_quant_linear_job_fn,
+                                  .env = &jobs[wi],
+                                  .next_actor_msg = NULL,
+                                  .done = 0};
+          vira_scheduler_submit_async(&tasks[wi]);
+        }
+      }
+      _vira_quant_linear_job_fn(&jobs[0]);
+      for (int32_t wi = 1; wi < nw; ++wi) {
+        vira_scheduler_await(&tasks[wi]);
+      }
+      if (heap_q8) free(heap_q8);
+      *out_tensor = out;
+      return true;
+    }
+  }
+
+  _vira_quant_linear_job single = {.gguf_dtype = dtype,
+                                   .w_raw = (const uint8_t *)raw_q,
+                                   .x_q8 = x_q8,
+                                   .x_f32 = x.data,
+                                   .y_base = out.data,
+                                   .M = M,
+                                   .K = K,
+                                   .N = N,
+                                   .nb = nb,
+                                   .row_bytes = row_bytes,
+                                   .n_start = 0,
+                                   .n_end = N};
+  _vira_quant_linear_job_fn(&single);
+  if (heap_q8) free(heap_q8);
+  *out_tensor = out;
+  return true;
+}
+
 // Multi-threaded AVX2+FMA / NEON Linear Projection `x.linear(w)` computing `x @ w^T`
 // where `x` has shape `(M, K)` and `w` has shape `(N, K)` (GGUF row-major weight layout),
 // producing `(M, N)` without transposing `w`.
@@ -2906,8 +4948,15 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
     return gpu_out;
   }
 
-  _vira_gpu_sync_host(x.data);
-  _vira_gpu_sync_host(w.data);
+  {
+    vira_tensor_f32 q_out = {0};
+    if (_vira_rt_quant_cpu_linear(opt_arena, x, w, &q_out)) {
+      return q_out;
+    }
+  }
+
+  _vira_tensor_sync_host_f32(x.data);
+  _vira_tensor_sync_host_f32(w.data);
 
   int32_t out_dims[2] = {M, N};
   vira_tensor_f32 out =
@@ -2975,7 +5024,7 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
  */
 static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
   _vira_tensor_norm_shape(&t);
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   int32_t total = t.rows * t.cols;
   int32_t i = 0;
   vira_f32 sum = 0.0f;
@@ -3015,7 +5064,7 @@ static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
 static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
                                                vira_tensor_f32 t) {
   _vira_tensor_norm_shape(&t);
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
@@ -3145,8 +5194,8 @@ vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(a.data);
-  _vira_gpu_sync_host(b.data);
+  _vira_tensor_sync_host_f32(a.data);
+  _vira_tensor_sync_host_f32(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
     vira_tensor_f32 out =
@@ -3193,8 +5242,8 @@ static inline vira_tensor_f32
 vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   _vira_tensor_norm_shape(&a);
   _vira_tensor_norm_shape(&b);
-  _vira_gpu_sync_host(a.data);
-  _vira_gpu_sync_host(b.data);
+  _vira_tensor_sync_host_f32(a.data);
+  _vira_tensor_sync_host_f32(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
     vira_tensor_f32 out =
@@ -3249,7 +5298,7 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
@@ -3288,6 +5337,7 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
 static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
   if (t != NULL && !t->is_arena && !t->is_view && t->raw_alloc != NULL) {
     _vira_gpu_evict_ptr(t->data);
+    _vira_rt_quant_free(t->data);
     free(t->raw_alloc);
     t->raw_alloc = NULL;
     t->data = NULL;
@@ -3306,10 +5356,18 @@ static inline vira_tensor_f32 vira_tensor_f32_clone(vira_tensor_f32 t) {
     return (vira_tensor_f32){0};
   }
   _vira_tensor_norm_shape(&t);
-  _vira_gpu_sync_host(t.data);
+  if (!_vira_gpu_is_ptr_dirty(t.data)) {
+    vira_tensor_f32 lazy_copy = {0};
+    if (_vira_rt_quant_try_clone_lazy(t, &lazy_copy)) {
+      _vira_gpu_clone_quant(lazy_copy.data, t.data);
+      return lazy_copy;
+    }
+  }
+  _vira_tensor_sync_host_f32(t.data);
   vira_tensor_f32 copy = vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
   size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
   memcpy(copy.data, t.data, bytes);
+  _vira_rt_quant_clone_entry(copy.data, t.data);
   _vira_gpu_clone_quant(copy.data, t.data);
   return copy;
 }
@@ -4950,7 +7008,7 @@ static inline Result_bool vira_tensor_save_bin(vira_tensor_f32 t,
     return (Result_bool){.is_err = true, .err = err, .val = false};
   }
 
-  _vira_gpu_sync_host(t.data);
+  _vira_tensor_sync_host_f32(t.data);
   size_t total = (size_t)t.rows * (size_t)t.cols;
   size_t written = fwrite(t.data, sizeof(vira_f32), total, f);
   fclose(f);
@@ -6290,8 +8348,8 @@ vira_tensor_matmul_grad_b(vira_tensor_f32 a, vira_tensor_f32 grad_out) {
 static inline vira_tensor_f32
 vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
   _vira_tensor_norm_shape(&input);
-  _vira_gpu_sync_host(input.data);
-  _vira_gpu_sync_host(grad_out.data);
+  _vira_tensor_sync_host_f32(input.data);
+  _vira_tensor_sync_host_f32(grad_out.data);
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(input.n_dims, input.dims);
   int total = input.rows * input.cols;
   int i = 0;
@@ -6324,8 +8382,8 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
                                         vira_tensor_f32 grad, float lr) {
   if (!param || !param->data || !grad.data)
     return;
-  _vira_gpu_sync_host(param->data);
-  _vira_gpu_sync_host(grad.data);
+  _vira_tensor_sync_host_f32(param->data);
+  _vira_tensor_sync_host_f32(grad.data);
   int total = param->rows * param->cols;
   int i = 0;
 
@@ -6343,50 +8401,11 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
   for (; i < total; ++i) {
     param->data[i] -= lr * grad.data[i];
   }
+  _vira_rt_quant_remove(param->data);
   _vira_gpu_evict_ptr(param->data);
 }
 
-// ============================================================================
-// 16. NATIVE GGUF V2/V3 ZERO-COPY BINARY PARSER (Q4_0, Q8_0, F16, F32)
-// ============================================================================
 
-/**
- * Converts a 16-bit IEEE 754 half-precision float into a 32-bit single-precision float.
- * @param h Raw 16-bit half precision float bits.
- * @return Converted 32-bit float value.
- * Usage: Dequantization of FP16 model weights during GGUF parsing.
- */
-static inline float _vira_fp16_to_fp32(uint16_t h) {
-#if defined(__F16C__)
-  return _cvtsh_ss(h);
-#else
-  uint32_t sign = ((uint32_t)h & 0x8000) << 16;
-  uint32_t exp = ((uint32_t)h & 0x7C00) >> 10;
-  uint32_t mant = (uint32_t)h & 0x03FF;
-  if (exp == 0) {
-    if (mant == 0) {
-      float res;
-      uint32_t bits = sign;
-      memcpy(&res, &bits, sizeof(float));
-      return res;
-    }
-    while ((mant & 0x0400) == 0) {
-      mant <<= 1;
-      exp--;
-    }
-    exp++;
-    mant &= ~0x0400;
-  } else if (exp == 31) {
-    exp = 255;
-  } else {
-    exp = exp - 15 + 127;
-  }
-  uint32_t bits = sign | (exp << 23) | (mant << 13);
-  float res;
-  memcpy(&res, &bits, sizeof(float));
-  return res;
-#endif
-}
 
 /**
  * Advances the file cursor past a GGUF metadata value according to its type descriptor.
@@ -6475,25 +8494,7 @@ static struct {
   _vira_gguf_tensor_entry *entries;
 } _vira_gguf_dir_cache = {"", 0, NULL};
 
-/**
- * Decodes a 6-bit sub-block scale and min pair from a 12-byte GGUF K-quant (`Q4_K` / `Q5_K`) scale table.
- * @param sub Sub-block index in `[0, 7]`.
- * @param scales Pointer to the 12-byte packed GGUF scale array.
- * @param out_sc Output pointer receiving the 6-bit unsigned scale factor.
- * @param out_m Output pointer receiving the 6-bit unsigned minimum offset.
- * Usage: Internal helper used by `vira_gguf_load_tensor` for `Q4_K` and `Q5_K` super-block dequantization.
- */
-static inline void _vira_gguf_k4_scale_min(int32_t sub, const uint8_t *scales,
-                                           uint8_t *out_sc, uint8_t *out_m) {
-  if (sub < 4) {
-    *out_sc = (uint8_t)(scales[sub] & 63u);
-    *out_m = (uint8_t)(scales[sub + 4] & 63u);
-  } else {
-    *out_sc = (uint8_t)((scales[sub + 4] & 0x0Fu) |
-                        ((scales[sub - 4] >> 6) << 4));
-    *out_m = (uint8_t)((scales[sub + 4] >> 4) | ((scales[sub] >> 6) << 4));
-  }
-}
+ 
 
 /**
  * Parses a GGUF v2/v3 binary file, locates the requested tensor, and streams it to GPU VRAM or dequantizes to CPU SIMD.
@@ -6690,262 +8691,55 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   fseeko(f, tensor_file_pos, SEEK_SET);
 #endif
 
-  vira_tensor_f32 t = vira_tensor_f32_alloc_nd(matched_ndims, matched_dims);
+  vira_tensor_f32 t =
+      _vira_tensor_f32_alloc_uninit_nd(matched_ndims, matched_dims);
   size_t total = (size_t)t.rows * (size_t)t.cols;
-  size_t _nr = 0;
+  size_t qk = _vira_gguf_dtype_qk(matched_type);
+  size_t bs = _vira_gguf_dtype_bs(matched_type);
 
   if (matched_type == 0) {
-    _nr = fread(t.data, sizeof(float), total, f);
-  } else if (matched_type == 1) {
-    uint16_t *hbuf = (uint16_t *)malloc(total * sizeof(uint16_t));
-    if (hbuf) {
-      _nr = fread(hbuf, sizeof(uint16_t), total, f);
-      for (size_t i = 0; i < total; ++i) {
-        t.data[i] = _vira_fp16_to_fp32(hbuf[i]);
-      }
-      if (_nr == total && total > 0) {
-        _vira_gpu_register_quant(t.data, 1, hbuf, total * sizeof(uint16_t),
-                                 total);
-      }
-      free(hbuf);
+    size_t nr = fread(t.data, sizeof(float), total, f);
+    if (nr != total) {
+      fclose(f);
+      vira_tensor_f32_free(&t);
+      vira_string err = vira_str_format(
+          "truncated GGUF F32 tensor (expected %zu floats, got %zu)", total,
+          nr);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
     }
-  } else if (matched_type == 2 && (total & 31u) == 0) {
-    size_t blocks = total / 32;
-    size_t raw_bytes = blocks * 18;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 18, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 18;
-        uint16_t scale_h = 0;
-        memcpy(&scale_h, blk, 2);
-        float scale = _vira_fp16_to_fp32(scale_h);
-        const uint8_t *nibbles = blk + 2;
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 16; ++j) {
-          uint8_t byte = nibbles[j];
-          int8_t v0 = (int8_t)(byte & 0x0Fu) - 8;
-          int8_t v1 = (int8_t)(byte >> 4) - 8;
-          dst[j] = scale * (float)v0;
-          dst[j + 16] = scale * (float)v1;
-        }
-      }
-      _vira_gpu_register_quant(t.data, 2, raw_q, raw_bytes, total);
+  } else if (qk > 0 && bs > 0 && (qk == 1 || (total % qk) == 0)) {
+    size_t blocks = (qk == 1) ? total : (total / qk);
+    size_t raw_bytes = blocks * bs;
+    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes > 0 ? raw_bytes : 1u);
+    if (!raw_q) {
+      fclose(f);
+      vira_tensor_f32_free(&t);
+      vira_string err =
+          vira_str_format("out of memory loading GGUF tensor (%zu bytes)",
+                          raw_bytes);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
+    size_t nr = (blocks > 0) ? fread(raw_q, bs, blocks, f) : 0;
+    if (nr != blocks) {
       free(raw_q);
+      fclose(f);
+      vira_tensor_f32_free(&t);
+      vira_string err = vira_str_format(
+          "truncated GGUF dtype %u tensor (expected %zu blocks, got %zu)",
+          matched_type, blocks, nr);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
     }
-  } else if (matched_type == 3 && (total & 31u) == 0) {
-    size_t blocks = total / 32;
-    size_t raw_bytes = blocks * 20;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 20, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 20;
-        uint16_t d_h = 0, m_h = 0;
-        memcpy(&d_h, blk, 2);
-        memcpy(&m_h, blk + 2, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        float m = _vira_fp16_to_fp32(m_h);
-        const uint8_t *qs = blk + 4;
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 16; ++j) {
-          uint8_t byte = qs[j];
-          dst[j] = d * (float)(byte & 0x0Fu) + m;
-          dst[j + 16] = d * (float)(byte >> 4) + m;
-        }
-      }
-      _vira_gpu_register_quant(t.data, 3, raw_q, raw_bytes, total);
-      free(raw_q);
+    bool deferred = (matched_ndims >= 2 && total >= 65536u &&
+                     _vira_lazy_host_fp32_enabled());
+    if (!deferred) {
+      _vira_rt_dequant_blocks_to_fp32(matched_type, raw_q, 0, blocks, t.data);
     }
-  } else if (matched_type == 6 && (total & 31u) == 0) {
-    size_t blocks = total / 32;
-    size_t raw_bytes = blocks * 22;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 22, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 22;
-        uint16_t d_h = 0;
-        memcpy(&d_h, blk, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8) |
-                      ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
-        const uint8_t *qs = blk + 6;
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 16; ++j) {
-          uint8_t byte = qs[j];
-          int32_t v0 =
-              (int32_t)((uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4)) -
-              16;
-          int32_t v1 =
-              (int32_t)((uint32_t)(byte >> 4) |
-                        (((qh >> (j + 16)) & 1u) << 4)) -
-              16;
-          dst[j] = d * (float)v0;
-          dst[j + 16] = d * (float)v1;
-        }
-      }
-      _vira_gpu_register_quant(t.data, 6, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
-  } else if (matched_type == 7 && (total & 31u) == 0) {
-    size_t blocks = total / 32;
-    size_t raw_bytes = blocks * 24;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 24, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 24;
-        uint16_t d_h = 0, m_h = 0;
-        memcpy(&d_h, blk, 2);
-        memcpy(&m_h, blk + 2, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        float m = _vira_fp16_to_fp32(m_h);
-        uint32_t qh = (uint32_t)blk[4] | ((uint32_t)blk[5] << 8) |
-                      ((uint32_t)blk[6] << 16) | ((uint32_t)blk[7] << 24);
-        const uint8_t *qs = blk + 8;
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 16; ++j) {
-          uint8_t byte = qs[j];
-          uint32_t v0 = (uint32_t)(byte & 0x0Fu) | (((qh >> j) & 1u) << 4);
-          uint32_t v1 =
-              (uint32_t)(byte >> 4) | (((qh >> (j + 16)) & 1u) << 4);
-          dst[j] = d * (float)v0 + m;
-          dst[j + 16] = d * (float)v1 + m;
-        }
-      }
-      _vira_gpu_register_quant(t.data, 7, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
-  } else if (matched_type == 8 && (total & 31u) == 0) {
-    size_t blocks = total / 32;
-    size_t raw_bytes = blocks * 34;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 34, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 34;
-        uint16_t scale_h = 0;
-        memcpy(&scale_h, blk, 2);
-        float scale = _vira_fp16_to_fp32(scale_h);
-        const int8_t *qs = (const int8_t *)(blk + 2);
-        float *dst = t.data + b * 32;
-        for (int32_t j = 0; j < 32; ++j) {
-          dst[j] = scale * (float)qs[j];
-        }
-      }
-      _vira_gpu_register_quant(t.data, 8, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
-  } else if (matched_type == 12 && (total & 255u) == 0) {
-    size_t blocks = total / 256;
-    size_t raw_bytes = blocks * 144;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 144, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 144;
-        uint16_t d_h = 0, dmin_h = 0;
-        memcpy(&d_h, blk, 2);
-        memcpy(&dmin_h, blk + 2, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        float dmin = _vira_fp16_to_fp32(dmin_h);
-        const uint8_t *scales = blk + 4;
-        const uint8_t *qs = blk + 16;
-        float *dst = t.data + b * 256;
-        for (int32_t ib = 0; ib < 8; ++ib) {
-          uint8_t sc = 0, m_sc = 0;
-          _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
-          float d_sub = d * (float)sc;
-          float min_sub = dmin * (float)m_sc;
-          const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
-          int32_t shift = (ib & 1) * 4;
-          float *dst_sub = dst + ib * 32;
-          for (int32_t l = 0; l < 32; ++l) {
-            dst_sub[l] =
-                d_sub * (float)((qs_sub[l] >> shift) & 0x0Fu) - min_sub;
-          }
-        }
-      }
-      _vira_gpu_register_quant(t.data, 12, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
-  } else if (matched_type == 13 && (total & 255u) == 0) {
-    size_t blocks = total / 256;
-    size_t raw_bytes = blocks * 176;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 176, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 176;
-        uint16_t d_h = 0, dmin_h = 0;
-        memcpy(&d_h, blk, 2);
-        memcpy(&dmin_h, blk + 2, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        float dmin = _vira_fp16_to_fp32(dmin_h);
-        const uint8_t *scales = blk + 4;
-        const uint8_t *qh = blk + 16;
-        const uint8_t *qs = blk + 48;
-        float *dst = t.data + b * 256;
-        for (int32_t ib = 0; ib < 8; ++ib) {
-          uint8_t sc = 0, m_sc = 0;
-          _vira_gguf_k4_scale_min(ib, scales, &sc, &m_sc);
-          float d_sub = d * (float)sc;
-          float min_sub = dmin * (float)m_sc;
-          const uint8_t *qs_sub = qs + ((ib >> 1) * 32);
-          int32_t shift = (ib & 1) * 4;
-          uint8_t u_mask = (uint8_t)(1u << ib);
-          float *dst_sub = dst + ib * 32;
-          for (int32_t l = 0; l < 32; ++l) {
-            uint32_t q = (uint32_t)((qs_sub[l] >> shift) & 0x0Fu) |
-                         ((qh[l] & u_mask) ? 16u : 0u);
-            dst_sub[l] = d_sub * (float)q - min_sub;
-          }
-        }
-      }
-      _vira_gpu_register_quant(t.data, 13, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
-  } else if (matched_type == 14 && (total & 255u) == 0) {
-    size_t blocks = total / 256;
-    size_t raw_bytes = blocks * 210;
-    uint8_t *raw_q = (uint8_t *)malloc(raw_bytes);
-    if (raw_q) {
-      _nr = fread(raw_q, 210, blocks, f);
-      for (size_t b = 0; b < blocks; ++b) {
-        const uint8_t *blk = raw_q + b * 210;
-        uint16_t d_h = 0;
-        memcpy(&d_h, blk + 208, 2);
-        float d = _vira_fp16_to_fp32(d_h);
-        for (int32_t h = 0; h < 2; ++h) {
-          const uint8_t *ql_h = blk + h * 64;
-          const uint8_t *qh_h = blk + 128 + h * 32;
-          const int8_t *sc_h = (const int8_t *)(blk + 192) + h * 8;
-          float *dst_h = t.data + b * 256 + h * 128;
-          for (int32_t l = 0; l < 32; ++l) {
-            int32_t is = l >> 4;
-            int32_t q1 =
-                (int32_t)((ql_h[l + 0] & 0x0Fu) | (((qh_h[l] >> 0) & 3u) << 4)) -
-                32;
-            int32_t q2 = (int32_t)((ql_h[l + 32] & 0x0Fu) |
-                                   (((qh_h[l] >> 2) & 3u) << 4)) -
-                         32;
-            int32_t q3 =
-                (int32_t)((ql_h[l + 0] >> 4) | (((qh_h[l] >> 4) & 3u) << 4)) -
-                32;
-            int32_t q4 =
-                (int32_t)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3u) << 4)) -
-                32;
-            dst_h[l + 0] = d * (float)sc_h[is + 0] * (float)q1;
-            dst_h[l + 32] = d * (float)sc_h[is + 2] * (float)q2;
-            dst_h[l + 64] = d * (float)sc_h[is + 4] * (float)q3;
-            dst_h[l + 96] = d * (float)sc_h[is + 6] * (float)q4;
-          }
-        }
-      }
-      _vira_gpu_register_quant(t.data, 14, raw_q, raw_bytes, total);
-      free(raw_q);
-    }
+    _vira_rt_quant_register(t.data, matched_type, raw_q, raw_bytes, total,
+                            t.rows, t.cols, !deferred);
+    _vira_gpu_register_quant(t.data, matched_type, raw_q, raw_bytes, total);
   } else {
     fclose(f);
     vira_tensor_f32_free(&t);
@@ -6955,7 +8749,6 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     return (Result_tensor_f32){
         .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
-  (void)_nr;
 
   fclose(f);
   return (Result_tensor_f32){
@@ -6988,8 +8781,8 @@ vira_tensor_rmsnorm(vira_arena *opt_arena, vira_tensor_f32 x,
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(x.data);
-  _vira_gpu_sync_host(weight.data);
+  _vira_tensor_sync_host_f32(x.data);
+  _vira_tensor_sync_host_f32(weight.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
                 : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
@@ -7064,7 +8857,7 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_arena *opt_arena,
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(q.data);
+  _vira_tensor_sync_host_f32(q.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, q.n_dims, q.dims)
                 : vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
@@ -7122,7 +8915,7 @@ static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(x.data);
+  _vira_tensor_sync_host_f32(x.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
                 : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
@@ -7192,8 +8985,8 @@ vira_tensor_elemwise_mul(vira_arena *opt_arena, vira_tensor_f32 a,
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(a.data);
-  _vira_gpu_sync_host(b.data);
+  _vira_tensor_sync_host_f32(a.data);
+  _vira_tensor_sync_host_f32(b.data);
   if (a.rows == b.rows && a.cols == b.cols) {
     const vira_tensor_f32 *sh = (a.n_dims >= b.n_dims) ? &a : &b;
     vira_tensor_f32 out =
@@ -7246,7 +9039,7 @@ static inline vira_tensor_f32 vira_tensor_softmax(vira_arena *opt_arena,
     _vira_tls_gpu_fallback = false;
     return gpu_out;
   }
-  _vira_gpu_sync_host(logits.data);
+  _vira_tensor_sync_host_f32(logits.data);
   vira_tensor_f32 out =
       opt_arena
           ? vira_tensor_f32_arena_alloc_nd(opt_arena, logits.n_dims, logits.dims)
@@ -7294,7 +9087,7 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
     if (gpu_idx >= 0) {
       return gpu_idx;
     }
-    _vira_gpu_sync_host(logits.data);
+    _vira_tensor_sync_host_f32(logits.data);
     int64_t best_idx = 0;
     float best_val = logits.data[0];
     for (int32_t i = 1; i < total; ++i) {
@@ -7309,7 +9102,7 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
   vira_tensor_f32 scaled = vira_tensor_scale(NULL, logits, 1.0f / temperature);
   vira_tensor_f32 probs = vira_tensor_softmax(NULL, scaled);
   vira_tensor_f32_free(&scaled);
-  _vira_gpu_sync_host(probs.data);
+  _vira_tensor_sync_host_f32(probs.data);
 
   float r = (float)rand() / (float)RAND_MAX;
   float cdf = 0.0f;
@@ -7343,12 +9136,102 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_arena *opt_arena,
             (long long)token_id, table.rows);
     exit(1);
   }
-  _vira_gpu_sync_host(table.data);
+  if (!_vira_gpu_is_ptr_dirty(table.data)) {
+    uint32_t q_dtype = 0;
+    const void *q_raw = NULL;
+    size_t q_bytes = 0, q_elems = 0;
+    if (_vira_rt_quant_try_get(table.data, &q_dtype, &q_raw, &q_bytes,
+                               &q_elems)) {
+      size_t qk = _vira_gguf_dtype_qk(q_dtype);
+      size_t bs = _vira_gguf_dtype_bs(q_dtype);
+      size_t cols = (size_t)table.cols;
+      if (qk > 0 && bs > 0 && (qk == 1 || (cols % qk) == 0)) {
+        size_t row_blocks = (qk == 1) ? cols : (cols / qk);
+        size_t start_blk = (size_t)token_id * row_blocks;
+        if ((start_blk + row_blocks) * bs <= q_bytes) {
+          int32_t odims[2] = {1, table.cols};
+          vira_tensor_f32 out =
+              opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, odims)
+                        : _vira_tensor_f32_alloc_uninit_nd(2, odims);
+          _vira_rt_dequant_blocks_to_fp32(q_dtype, (const uint8_t *)q_raw,
+                                          start_blk, row_blocks, out.data);
+          return out;
+        }
+      }
+    }
+  }
+  _vira_tensor_sync_host_f32(table.data);
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, 1, table.cols)
                 : vira_tensor_f32_alloc(1, table.cols);
   memcpy(out.data, &table.data[token_id * table.cols],
          (size_t)table.cols * sizeof(float));
+  return out;
+}
+
+/**
+ * Retrieves a batch of token embedding row vectors from an embedding weight table matrix.
+ * @param opt_arena Optional memory arena for output allocation.
+ * @param table Embedding table tensor of shape (vocab_size, hidden_dim).
+ * @param token_ids Slice of integer token vocabulary identifiers.
+ * @return 2D tensor of shape (token_ids.len, hidden_dim).
+ * Usage: Batched prompt token embedding lookup (`tensor_embedding_batch(tok_emb, token_ids)`).
+ */
+static inline vira_tensor_f32 vira_tensor_embedding_batch(
+    vira_arena *opt_arena, vira_tensor_f32 table, vira_slice_int token_ids) {
+  _vira_tensor_norm_shape(&table);
+  if (token_ids.len <= 0 || token_ids.data == NULL) {
+    fprintf(stderr,
+            "vira tensor error: embedding_batch token_ids slice cannot be empty (len=%d)\n",
+            token_ids.len);
+    exit(1);
+  }
+  for (int32_t i = 0; i < token_ids.len; ++i) {
+    int32_t tid = token_ids.data[i];
+    if (tid < 0 || tid >= table.rows) {
+      fprintf(stderr,
+              "vira tensor error: embedding_batch index %d (pos %d) out of range [0, %d)\n",
+              tid, i, table.rows);
+      exit(1);
+    }
+  }
+  if (!_vira_gpu_is_ptr_dirty(table.data)) {
+    uint32_t q_dtype = 0;
+    const void *q_raw = NULL;
+    size_t q_bytes = 0, q_elems = 0;
+    if (_vira_rt_quant_try_get(table.data, &q_dtype, &q_raw, &q_bytes,
+                               &q_elems)) {
+      size_t qk = _vira_gguf_dtype_qk(q_dtype);
+      size_t bs = _vira_gguf_dtype_bs(q_dtype);
+      size_t cols = (size_t)table.cols;
+      if (qk > 0 && bs > 0 && (qk == 1 || (cols % qk) == 0)) {
+        size_t row_blocks = (qk == 1) ? cols : (cols / qk);
+        if ((size_t)table.rows * row_blocks * bs <= q_bytes) {
+          int32_t odims[2] = {token_ids.len, table.cols};
+          vira_tensor_f32 out =
+              opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, odims)
+                        : _vira_tensor_f32_alloc_uninit_nd(2, odims);
+          for (int32_t i = 0; i < token_ids.len; ++i) {
+            size_t start_blk = (size_t)token_ids.data[i] * row_blocks;
+            _vira_rt_dequant_blocks_to_fp32(
+                q_dtype, (const uint8_t *)q_raw, start_blk, row_blocks,
+                &out.data[(size_t)i * cols]);
+          }
+          return out;
+        }
+      }
+    }
+  }
+  _vira_tensor_sync_host_f32(table.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, token_ids.len, table.cols)
+                : vira_tensor_f32_alloc(token_ids.len, table.cols);
+  size_t row_bytes = (size_t)table.cols * sizeof(float);
+  for (int32_t i = 0; i < token_ids.len; ++i) {
+    int32_t tid = token_ids.data[i];
+    memcpy(&out.data[(size_t)i * (size_t)table.cols],
+           &table.data[(size_t)tid * (size_t)table.cols], row_bytes);
+  }
   return out;
 }
 
@@ -9151,17 +11034,23 @@ static inline void vira_report_mem_stats(void) {
 #if defined(VIRA_QUIET_RT)
   vira_gpu_shutdown();
   vira_scheduler_shutdown();
+  _vira_rt_quant_shutdown();
+  _vira_flush_tls_mem_stats();
   return;
 #else
   if (_vira_quiet_rt) {
     vira_gpu_shutdown();
     vira_scheduler_shutdown();
+    _vira_rt_quant_shutdown();
+    _vira_flush_tls_mem_stats();
     return;
   }
   const char *env_stats = getenv("VIRA_RT_STATS");
   if (env_stats != NULL && strcmp(env_stats, "0") == 0) {
     vira_gpu_shutdown();
     vira_scheduler_shutdown();
+    _vira_rt_quant_shutdown();
+    _vira_flush_tls_mem_stats();
     return;
   }
   if (vira_gpu_is_available()) {
@@ -9178,6 +11067,8 @@ static inline void vira_report_mem_stats(void) {
   }
   vira_gpu_shutdown();
   vira_scheduler_shutdown();
+  _vira_rt_quant_shutdown();
+  _vira_flush_tls_mem_stats();
   printf("[vira_rt] simd=%s\n", vira_simd_backend_name());
   printf(
       "[vira_rt] pool_workers=%d | actor_tasks_run=%lld | work_steals=%lld\n",

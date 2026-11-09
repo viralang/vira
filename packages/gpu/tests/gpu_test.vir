@@ -2,6 +2,7 @@ module main
 
 import gpu
 import math
+import os
 
 fn test_gpu_telemetry_and_linear() {
 	dev := gpu.info()
@@ -390,4 +391,547 @@ fn test_gpu_layer0_residual_and_tied_weight_parity() {
 		panic('layer0 residual/tied parity logits diverged: diff=${diff_sum} cpu=${sum_cpu}')
 	}
 	println('✓ test_gpu_layer0_residual_and_tied_weight_parity passed')
+}
+
+fn push_u32_le(mut buf []u8, v int) {
+	buf.push(u8(v & 255))
+	buf.push(u8((v >> 8) & 255))
+	buf.push(u8((v >> 16) & 255))
+	buf.push(u8((v >> 24) & 255))
+}
+
+fn push_u64_le(mut buf []u8, v int) {
+	push_u32_le(mut buf, v)
+	push_u32_le(mut buf, 0)
+}
+
+fn push_gguf_str(mut buf []u8, s string) {
+	push_u64_le(mut buf, s.len)
+	mut i := 0
+	for i < s.len {
+		b := s.byte_at(i) or { 0 }
+		buf.push(u8(b))
+		i += 1
+	}
+}
+
+fn pad_to_32(mut buf []u8) {
+	for (buf.len % 32) != 0 {
+		buf.push(u8(0))
+	}
+}
+
+fn build_synthetic_quant_gguf(path string) {
+	// Writes 5 quantized 2D weight tensors aligned to 32 bytes:
+	//   - w_q4_0_sq  [N=896,  K=896 ] (dtype 2, Q4_0)
+	//   - w_q4_0_ffn [N=4864, K=896 ] (dtype 2, Q4_0)
+	//   - w_q8_0     [N=896,  K=896 ] (dtype 8, Q8_0)
+	//   - w_q4_k     [N=896,  K=4864] (dtype 12, Q4_K)
+	//   - w_q6_k     [N=896,  K=4864] (dtype 14, Q6_K)
+	mut buf := []u8{}
+	// Header: 'GGUF', version=3, n_tensors=5, n_kv=0
+	push_u32_le(mut buf, 1179993927)
+	push_u32_le(mut buf, 3)
+	push_u64_le(mut buf, 5)
+	push_u64_le(mut buf, 0)
+
+	q4_0_sq_bytes := 896 * (896 / 32) * 18
+	q4_0_ffn_bytes := 4864 * (896 / 32) * 18
+	q8_0_bytes := 896 * (896 / 32) * 34
+	q4_k_bytes := 896 * (4864 / 256) * 144
+	q6_k_bytes := 896 * (4864 / 256) * 210
+
+	off0 := 0
+	off1 := ((off0 + q4_0_sq_bytes + 31) / 32) * 32
+	off2 := ((off1 + q4_0_ffn_bytes + 31) / 32) * 32
+	off3 := ((off2 + q8_0_bytes + 31) / 32) * 32
+	off4 := ((off3 + q4_k_bytes + 31) / 32) * 32
+	total_data := ((off4 + q6_k_bytes + 31) / 32) * 32
+
+	// Tensor 0: w_q4_0_sq [cols=896, rows=896] dtype=2
+	push_gguf_str(mut buf, 'w_q4_0_sq')
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, 896)
+	push_u64_le(mut buf, 896)
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, off0)
+
+	// Tensor 1: w_q4_0_ffn [cols=896, rows=4864] dtype=2
+	push_gguf_str(mut buf, 'w_q4_0_ffn')
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, 896)
+	push_u64_le(mut buf, 4864)
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, off1)
+
+	// Tensor 2: w_q8_0 [cols=896, rows=896] dtype=8
+	push_gguf_str(mut buf, 'w_q8_0')
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, 896)
+	push_u64_le(mut buf, 896)
+	push_u32_le(mut buf, 8)
+	push_u64_le(mut buf, off2)
+
+	// Tensor 3: w_q4_k [cols=4864, rows=896] dtype=12
+	push_gguf_str(mut buf, 'w_q4_k')
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, 4864)
+	push_u64_le(mut buf, 896)
+	push_u32_le(mut buf, 12)
+	push_u64_le(mut buf, off3)
+
+	// Tensor 4: w_q6_k [cols=4864, rows=896] dtype=14
+	push_gguf_str(mut buf, 'w_q6_k')
+	push_u32_le(mut buf, 2)
+	push_u64_le(mut buf, 4864)
+	push_u64_le(mut buf, 896)
+	push_u32_le(mut buf, 14)
+	push_u64_le(mut buf, off4)
+
+	pad_to_32(mut buf)
+	data_start := buf.len
+
+	mut z := 0
+	for z < total_data {
+		buf.push(u8(0))
+		z += 1
+	}
+
+	// Fill Q4_0 w_q4_0_sq blocks: fp16 d = 0.0625 (0x2C00), varied nibbles
+	mut n := 0
+	n_blocks_896 := 896 / 32
+	for n < 896 {
+		mut b := 0
+		for b < n_blocks_896 {
+			pos := data_start + off0 + (n * n_blocks_896 + b) * 18
+			buf.set(pos, u8(0x00))
+			buf.set(pos + 1, u8(0x2C))
+			mut j := 0
+			for j < 16 {
+				v0 := ((n + b * 3 + j) % 15) + 1
+				v1 := ((n * 2 + b + j * 3) % 15) + 1
+				buf.set(pos + 2 + j, u8((v1 << 4) | v0))
+				j += 1
+			}
+			b += 1
+		}
+		n += 1
+	}
+
+	// Fill Q4_0 w_q4_0_ffn blocks: fp16 d = 0.03125 (0x2800), varied nibbles
+	n = 0
+	for n < 4864 {
+		mut b := 0
+		for b < n_blocks_896 {
+			pos := data_start + off1 + (n * n_blocks_896 + b) * 18
+			buf.set(pos, u8(0x00))
+			buf.set(pos + 1, u8(0x28))
+			mut j := 0
+			for j < 16 {
+				v0 := ((n * 3 + b + j * 5) % 15) + 1
+				v1 := ((n + b * 7 + j) % 15) + 1
+				buf.set(pos + 2 + j, u8((v1 << 4) | v0))
+				j += 1
+			}
+			b += 1
+		}
+		n += 1
+	}
+
+	// Fill Q8_0 w_q8_0 blocks: fp16 d = 0.015625 (0x2400), signed int8 patterns
+	n = 0
+	for n < 896 {
+		mut b := 0
+		for b < n_blocks_896 {
+			pos := data_start + off2 + (n * n_blocks_896 + b) * 34
+			buf.set(pos, u8(0x00))
+			buf.set(pos + 1, u8(0x24))
+			mut j := 0
+			for j < 32 {
+				raw_b := ((n * 5 + b * 11 + j * 7) % 127) - 63
+				buf.set(pos + 2 + j, u8(raw_b & 255))
+				j += 1
+			}
+			b += 1
+		}
+		n += 1
+	}
+
+	// Fill Q4_K w_q4_k superblocks: d = 0.015625 (0x2400), dmin = 0.0078125 (0x2000)
+	n = 0
+	n_sb_4864 := 4864 / 256
+	for n < 896 {
+		mut sb := 0
+		for sb < n_sb_4864 {
+			pos := data_start + off3 + (n * n_sb_4864 + sb) * 144
+			buf.set(pos, u8(0x00))
+			buf.set(pos + 1, u8(0x24))
+			buf.set(pos + 2, u8(0x00))
+			buf.set(pos + 3, u8(0x20))
+			mut s := 0
+			for s < 12 {
+				buf.set(pos + 4 + s, u8(((n + sb + s) % 5) + 1))
+				s += 1
+			}
+			mut q := 0
+			for q < 128 {
+				lo := (n + sb * 3 + q) & 15
+				hi := (n * 2 + sb + q * 3) & 15
+				buf.set(pos + 16 + q, u8((hi << 4) | lo))
+				q += 1
+			}
+			sb += 1
+		}
+		n += 1
+	}
+
+	// Fill Q6_K w_q6_k superblocks: ql[128], qh[64], sc[16], fp16 d = 0.015625 (0x2400)
+	n = 0
+	for n < 896 {
+		mut sb := 0
+		for sb < n_sb_4864 {
+			pos := data_start + off4 + (n * n_sb_4864 + sb) * 210
+			mut qi := 0
+			for qi < 128 {
+				lo := (n + sb * 5 + qi) & 15
+				hi := (n * 3 + sb + qi * 7) & 15
+				buf.set(pos + qi, u8((hi << 4) | lo))
+				qi += 1
+			}
+			mut hi := 0
+			for hi < 64 {
+				buf.set(pos + 128 + hi, u8((n + sb + hi * 3) & 255))
+				hi += 1
+			}
+			mut si := 0
+			for si < 16 {
+				sc := ((n + sb + si) % 7) - 3
+				buf.set(pos + 192 + si, u8(sc & 255))
+				si += 1
+			}
+			buf.set(pos + 208, u8(0x00))
+			buf.set(pos + 209, u8(0x24))
+			sb += 1
+		}
+		n += 1
+	}
+
+	os.write_bytes(path, buf) or {
+		panic('failed to write synthetic gguf: ${err}')
+	}
+}
+
+fn verify_quant_linear_m_sizes(w tensor[f32], tag string) {
+	k := w.cols
+	n := w.rows
+	w_t := w.transpose()
+	ms := []int{1, 5, 17, 64}
+	mut mi := 0
+	for mi < ms.len {
+		m := ms[mi]
+		x := tensor_fill(m, k, 0.0)
+		mut r := 0
+		for r < m {
+			mut c := 0
+			for c < k {
+				x.set(r, c, f32(((r * 13 + c * 7) % 23) - 11) * f32(0.03))
+				c += 1
+			}
+			r += 1
+		}
+
+		gpu.set_backend(gpu.backend_auto)
+		y_gpu := gpu.linear(x, w)
+		if y_gpu.rows != m || y_gpu.cols != n {
+			panic('${tag} M=${m}: unexpected shape ${y_gpu.rows}x${y_gpu.cols}')
+		}
+
+		// Independent FP32 reference using @ matmul (also avoids recursive quant dispatch)
+		gpu.set_backend(gpu.backend_cpu)
+		y_ref := x @ w_t
+		gpu.set_backend(gpu.backend_auto)
+
+		mut max_err := 0.0
+		mut rr := 0
+		for rr < m {
+			mut cc := 0
+			for cc < n {
+				d := math.abs(f64(y_gpu.get(rr, cc) - y_ref.get(rr, cc)))
+				if d > max_err {
+					max_err = d
+				}
+				cc += 1
+			}
+			rr += 1
+		}
+		if max_err > 0.02 {
+			panic('${tag} M=${m} max_err=${max_err} exceeded 2e-2')
+		}
+		mi += 1
+	}
+}
+
+fn test_gpu_quant_wmma_prefill_parity() {
+	tmp_path := '/tmp/vira_gpu_quant_wmma_test.gguf'
+	build_synthetic_quant_gguf(tmp_path)
+	defer {
+		_ := os.remove(tmp_path) or { false }
+	}
+
+	w_q4_sq := gguf_load_tensor(tmp_path, 'w_q4_0_sq') or { panic(err) }
+	w_q4_ffn := gguf_load_tensor(tmp_path, 'w_q4_0_ffn') or { panic(err) }
+	w_q8 := gguf_load_tensor(tmp_path, 'w_q8_0') or { panic(err) }
+	w_q4k := gguf_load_tensor(tmp_path, 'w_q4_k') or { panic(err) }
+
+	verify_quant_linear_m_sizes(w_q4_sq, 'Q4_0_896x896')
+	verify_quant_linear_m_sizes(w_q4_ffn, 'Q4_0_4864x896')
+	verify_quant_linear_m_sizes(w_q8, 'Q8_0_896x896')
+	verify_quant_linear_m_sizes(w_q4k, 'Q4_K_896x4864')
+	println('✓ test_gpu_quant_wmma_prefill_parity passed')
+}
+
+fn init_det_tensor(rows int, cols int, seed int, scale f32) tensor[f32] {
+	t := tensor_fill(rows, cols, 0.0)
+	mut r := 0
+	for r < rows {
+		mut c := 0
+		for c < cols {
+			t.set(r, c, f32(((r * 17 + c * 13 + seed) % 29) - 14) * scale)
+			c += 1
+		}
+		r += 1
+	}
+	return t
+}
+
+fn test_gpu_batched_prefill_exact_equivalence() {
+	gpu.set_backend(gpu.backend_auto)
+	seq_len := 16
+	vocab_size := 64
+	dim := 128
+	n_heads := 4
+	n_kv_heads := 2
+	head_dim := 32
+	kv_dim := n_kv_heads * head_dim
+	ffn_dim := 256
+	max_ctx := 32
+	eps := f32(0.00001)
+	rope_base := f32(10000.0)
+	attn_scale := f32(1.0 / math.sqrt(f64(head_dim)))
+
+	tok_emb := init_det_tensor(vocab_size, dim, 3, f32(0.05))
+	an := init_det_tensor(1, dim, 5, f32(0.05))
+	wq := init_det_tensor(dim, dim, 7, f32(0.02))
+	bq := init_det_tensor(1, dim, 11, f32(0.01))
+	wk := init_det_tensor(kv_dim, dim, 13, f32(0.02))
+	bk := init_det_tensor(1, kv_dim, 17, f32(0.01))
+	wv := init_det_tensor(kv_dim, dim, 19, f32(0.02))
+	bv := init_det_tensor(1, kv_dim, 23, f32(0.01))
+	wo := init_det_tensor(dim, dim, 29, f32(0.02))
+	fn_w := init_det_tensor(1, dim, 31, f32(0.05))
+	w_gate := init_det_tensor(ffn_dim, dim, 37, f32(0.02))
+	w_up := init_det_tensor(ffn_dim, dim, 41, f32(0.02))
+	w_down := init_det_tensor(dim, ffn_dim, 43, f32(0.02))
+	out_norm := init_det_tensor(1, dim, 47, f32(0.05))
+	out_w := init_det_tensor(vocab_size, dim, 53, f32(0.04))
+
+	mut tokens := []int{}
+	mut t := 0
+	for t < seq_len {
+		tokens.push((t * 7 + 5) % vocab_size)
+		t += 1
+	}
+
+	// 1. Sequential 1-token reference across 16 steps
+	k_cache_seq := tensor_fill(max_ctx, kv_dim, 0.0)
+	v_cache_seq := tensor_fill(max_ctx, kv_dim, 0.0)
+	x_seq_last := tensor_fill(1, dim, 0.0)
+	mut pos := 0
+	for pos < seq_len {
+		arena {
+			x := tensor_embedding(tok_emb, tokens[pos])
+			xn := gpu.rmsnorm(x, an, eps)
+			q_lin := xn.gpu_linear(wq) + bq
+			k_lin := xn.gpu_linear(wk) + bk
+			v := xn.gpu_linear(wv) + bv
+			q_h := gpu.rope(q_lin.reshape_2d(n_heads, head_dim), i64(pos), rope_base)
+			k_h := gpu.rope(k_lin.reshape_2d(n_kv_heads, head_dim), i64(pos), rope_base)
+			k_cache_seq.copy_row(pos, k_h.reshape_2d(1, kv_dim))
+			v_cache_seq.copy_row(pos, v)
+			attn := gpu.gqa_attention(q_h, k_cache_seq, v_cache_seq, i64(pos), attn_scale)
+			x2 := x + attn.reshape_2d(1, dim).gpu_linear(wo)
+			x2n := gpu.rmsnorm(x2, fn_w, eps)
+			gate := gpu.silu(x2n.gpu_linear(w_gate))
+			up := x2n.gpu_linear(w_up)
+			x_next := x2 + tensor_elemwise_mul(gate, up).gpu_linear(w_down)
+			if pos == seq_len - 1 {
+				x_seq_last.copy_row(0, x_next)
+			}
+		}
+		pos += 1
+	}
+	xf_seq := gpu.rmsnorm(x_seq_last, out_norm, eps)
+	logits_seq := xf_seq.gpu_linear(out_w)
+
+	// 2. Batched prefill pipeline for the exact same 16 tokens
+	k_cache_bat := tensor_fill(max_ctx, kv_dim, 0.0)
+	v_cache_bat := tensor_fill(max_ctx, kv_dim, 0.0)
+	mut x_bat := tensor_embedding_batch(tok_emb, tokens)
+	arena {
+		xn := gpu.rmsnorm(x_bat, an, eps)
+		q_lin := xn.gpu_linear(wq) + bq
+		k_lin := xn.gpu_linear(wk) + bk
+		v := xn.gpu_linear(wv) + bv
+		q_h := gpu.rope_seq(q_lin.reshape_2d(seq_len * n_heads, head_dim), i64(0), n_heads, rope_base)
+		k_h := gpu.rope_seq(k_lin.reshape_2d(seq_len * n_kv_heads, head_dim), i64(0), n_kv_heads, rope_base)
+		k_cache_bat.copy_rows(0, k_h.reshape_2d(seq_len, kv_dim))
+		v_cache_bat.copy_rows(0, v)
+		attn := gpu.gqa_prefill(q_h, k_cache_bat, v_cache_bat, i64(0), seq_len, n_heads, attn_scale)
+		x2 := x_bat + attn.reshape_2d(seq_len, dim).gpu_linear(wo)
+		x2n := gpu.rmsnorm(x2, fn_w, eps)
+		gate := gpu.silu(x2n.gpu_linear(w_gate))
+		up := x2n.gpu_linear(w_up)
+		x_next := x2 + tensor_elemwise_mul(gate, up).gpu_linear(w_down)
+		x_bat.copy_rows(0, x_next)
+	}
+	x_last := x_bat.slice_rows(seq_len - 1, seq_len)
+	xf_bat := gpu.rmsnorm(x_last, out_norm, eps)
+	logits_bat := xf_bat.gpu_linear(out_w)
+
+	mut max_diff := 0.0
+	mut c := 0
+	for c < vocab_size {
+		d := math.abs(f64(logits_bat.get(0, c) - logits_seq.get(0, c)))
+		if d > max_diff {
+			max_diff = d
+		}
+		c += 1
+	}
+	tok_seq := sample_token(logits_seq, f32(0.0))
+	tok_bat := sample_token(logits_bat, f32(0.0))
+	if tok_seq != tok_bat || max_diff > 0.0001 {
+		panic('batched prefill mismatch: max_diff=${max_diff}, tok_seq=${tok_seq}, tok_bat=${tok_bat}')
+	}
+
+	// Verify OOM fallback handling on gpu.rope_seq & gpu.gqa_prefill
+	before_fb := gpu.oom_fallbacks()
+	gpu.simulate_oom(true)
+	_ := gpu.rope_seq(tensor_fill(seq_len * n_heads, head_dim, 0.25), i64(0), n_heads, rope_base)
+	_ := gpu.gqa_prefill(tensor_fill(seq_len * n_heads, head_dim, 0.25), k_cache_bat, v_cache_bat, i64(0), seq_len, n_heads, attn_scale)
+	gpu.simulate_oom(false)
+	if gpu.oom_fallbacks() < before_fb + 2 {
+		panic('expected oom_fallbacks increment for gpu.rope_seq / gpu.gqa_prefill')
+	}
+	println('✓ test_gpu_batched_prefill_exact_equivalence passed')
+}
+
+fn verify_dp4a_mmvq_weight(w tensor[f32], tag string) {
+	k := w.cols
+	n := w.rows
+	w_t := w.transpose()
+	x := tensor_fill(1, k, 0.0)
+	mut c := 0
+	for c < k {
+		x.set(0, c, f32(((c * 19 + 7) % 31) - 15) * f32(0.04))
+		c += 1
+	}
+
+	gpu.set_backend(gpu.backend_auto)
+	y_gpu := gpu.linear(x, w)
+	if y_gpu.rows != 1 || y_gpu.cols != n {
+		panic('${tag} unexpected shape ${y_gpu.rows}x${y_gpu.cols}')
+	}
+
+	// Verify cached x_slot Q8_1 reuse followed by mutation invalidation on x
+	y_gpu_reuse := gpu.linear(x, w)
+	x.set(0, 0, f32(1.5))
+	y_gpu_mut := gpu.linear(x, w)
+
+	gpu.set_backend(gpu.backend_cpu)
+	y_ref_mut := x @ w_t
+	// Restore x.set(0,0) for ref of original x
+	x_orig := tensor_fill(1, k, 0.0)
+	c = 0
+	for c < k {
+		x_orig.set(0, c, f32(((c * 19 + 7) % 31) - 15) * f32(0.04))
+		c += 1
+	}
+	y_ref := x_orig @ w_t
+	gpu.set_backend(gpu.backend_auto)
+
+	mut diff2 := 0.0
+	mut ref2 := 0.0
+	mut mut_diff2 := 0.0
+	mut mut_ref2 := 0.0
+	mut cc := 0
+	for cc < n {
+		if math.abs(f64(y_gpu.get(0, cc) - y_gpu_reuse.get(0, cc))) > 0.0001 {
+			panic('${tag} Q8_1 reuse mismatch at col ${cc}')
+		}
+		d := f64(y_gpu.get(0, cc) - y_ref.get(0, cc))
+		r := f64(y_ref.get(0, cc))
+		diff2 += d * d
+		ref2 += r * r
+		dm := f64(y_gpu_mut.get(0, cc) - y_ref_mut.get(0, cc))
+		rm := f64(y_ref_mut.get(0, cc))
+		mut_diff2 += dm * dm
+		mut_ref2 += rm * rm
+		cc += 1
+	}
+	rel_l2 := math.sqrt(diff2 / (ref2 + 0.000000000001))
+	mut_rel_l2 := math.sqrt(mut_diff2 / (mut_ref2 + 0.000000000001))
+	if rel_l2 > 0.01 || mut_rel_l2 > 0.01 {
+		panic('${tag} MMVQ rel_l2 too high: rel=${rel_l2}, mut_rel=${mut_rel_l2}')
+	}
+}
+
+fn test_gpu_dp4a_mmvq_parity() {
+	tmp_path := '/tmp/vira_gpu_dp4a_mmvq_test.gguf'
+	build_synthetic_quant_gguf(tmp_path)
+	defer {
+		_ := os.remove(tmp_path) or { false }
+	}
+
+	w_q4_sq := gguf_load_tensor(tmp_path, 'w_q4_0_sq') or { panic(err) }
+	w_q8 := gguf_load_tensor(tmp_path, 'w_q8_0') or { panic(err) }
+	w_q6k := gguf_load_tensor(tmp_path, 'w_q6_k') or { panic(err) }
+
+	// Also test back-to-back shared activation x across two different weight formats (Q4_0 + Q8_0)
+	x_shared := tensor_fill(1, 896, 0.0)
+	mut c := 0
+	for c < 896 {
+		x_shared.set(0, c, f32(((c * 11 + 3) % 21) - 10) * f32(0.05))
+		c += 1
+	}
+	gpu.set_backend(gpu.backend_auto)
+	y_s1 := gpu.linear(x_shared, w_q4_sq)
+	y_s2 := gpu.linear(x_shared, w_q8)
+	gpu.set_backend(gpu.backend_cpu)
+	r_s1 := x_shared @ w_q4_sq.transpose()
+	r_s2 := x_shared @ w_q8.transpose()
+	gpu.set_backend(gpu.backend_auto)
+	mut d1 := 0.0
+	mut n1 := 0.0
+	mut d2 := 0.0
+	mut n2 := 0.0
+	mut cc := 0
+	for cc < 896 {
+		a := f64(y_s1.get(0, cc) - r_s1.get(0, cc))
+		b := f64(r_s1.get(0, cc))
+		d1 += a * a
+		n1 += b * b
+		a2 := f64(y_s2.get(0, cc) - r_s2.get(0, cc))
+		b2 := f64(r_s2.get(0, cc))
+		d2 += a2 * a2
+		n2 += b2 * b2
+		cc += 1
+	}
+	if math.sqrt(d1 / (n1 + 0.000000000001)) > 0.01 || math.sqrt(d2 / (n2 + 0.000000000001)) > 0.01 {
+		panic('shared Q8_1 multi-projection mismatch')
+	}
+
+	verify_dp4a_mmvq_weight(w_q4_sq, 'DP4A_Q4_0_896')
+	verify_dp4a_mmvq_weight(w_q8, 'DP4A_Q8_0_896')
+	verify_dp4a_mmvq_weight(w_q6k, 'DP4A_Q6_K_4864')
+	println('✓ test_gpu_dp4a_mmvq_parity passed')
 }

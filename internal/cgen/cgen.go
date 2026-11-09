@@ -2769,6 +2769,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_tensor_embedding(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "tensor_embedding_batch":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_tensor_embedding_batch(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "sample_token":
 			return fmt.Sprintf("vira_sample_token(%s)", strings.Join(argStrs, ", "))
 		case "gpu_is_available":
@@ -2821,6 +2827,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_gpu_rope(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_rope_seq":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_rope_seq(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "gpu_softmax":
 			arenaArg := "NULL"
 			if g.activeArena != "" {
@@ -2839,6 +2851,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_gpu_gqa_attention(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_gqa_prefill":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_gqa_prefill(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "gui_init":
 			return fmt.Sprintf("vira_gui_init(%s)", strings.Join(argStrs, ", "))
 		case "gui_should_close":
@@ -3387,6 +3405,8 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				return fmt.Sprintf("vira_tensor_f32_set(%s, %s, %s, %s)", tExpr, argStrs[0], argStrs[1], argStrs[2])
 			case "copy_row":
 				return fmt.Sprintf("vira_tensor_f32_copy_row(%s, %s, %s)", tExpr, argStrs[0], argStrs[1])
+			case "copy_rows":
+				return fmt.Sprintf("vira_tensor_f32_copy_rows(%s, %s, %s)", tExpr, argStrs[0], argStrs[1])
 			case "slice_rows":
 				return fmt.Sprintf("vira_tensor_slice_rows(%s, %s, %s, %s)", arenaArg, tExpr, argStrs[0], argStrs[1])
 			case "linear":

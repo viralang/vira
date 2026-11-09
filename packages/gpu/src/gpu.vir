@@ -108,6 +108,10 @@ pub fn rope(q tensor[f32], pos int, freq_base f32) tensor[f32] {
 	return gpu_rope(q, pos, freq_base)
 }
 
+pub fn rope_seq(q tensor[f32], start_pos i64, n_heads int, freq_base f32) tensor[f32] {
+	return gpu_rope_seq(q, start_pos, n_heads, freq_base)
+}
+
 pub fn softmax(logits tensor[f32]) tensor[f32] {
 	return gpu_softmax(logits)
 }
@@ -118,5 +122,9 @@ pub fn silu(x tensor[f32]) tensor[f32] {
 
 pub fn gqa_attention(q_heads tensor[f32], k_cache tensor[f32], v_cache tensor[f32], kv_pos i64, scale f32) tensor[f32] {
 	return gpu_gqa_attention(q_heads, k_cache, v_cache, kv_pos, scale)
+}
+
+pub fn gqa_prefill(q_seq tensor[f32], k_cache tensor[f32], v_cache tensor[f32], start_pos i64, seq_len int, n_heads int, scale f32) tensor[f32] {
+	return gpu_gqa_prefill(q_seq, k_cache, v_cache, start_pos, seq_len, n_heads, scale)
 }
 
