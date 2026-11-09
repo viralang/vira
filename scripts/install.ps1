@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$DefaultVersion = "v0.7.6"
+$DefaultVersion = "v0.7.7"
 $ViraVersion = if ($Version) { $Version } elseif ($env:VIRA_VERSION) { $env:VIRA_VERSION } else { $DefaultVersion }
 if (-not $ViraVersion.StartsWith("v")) {
     $ViraVersion = "v$ViraVersion"
