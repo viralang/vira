@@ -120,6 +120,7 @@ typedef vira_cl_int(VIRA_CL_API *pfn_clEnqueueCopyBuffer)(
 #define VIRA_GPU_WEIGHT_CACHE_CAP 4096
 #define VIRA_GPU_WEIGHT_PROBE_LEN 64
 #define VIRA_GPU_ACT_RING_CAP 240
+#define VIRA_GPU_ACT_HASH_BUCKETS 512
 #define VIRA_GPU_NUM_KERNELS 23
 #define VIRA_GPU_NUM_REQUIRED_KERNELS 12
 #define VIRA_GPU_UPLOAD_CHUNK_ELEMS (1u << 22)
@@ -217,6 +218,8 @@ typedef struct {
   vira_cu_deviceptr cu_buf;
   size_t buf_cap;
   uint64_t last_used;
+  int16_t hash_next_plus1;
+  uint16_t hash_bucket_plus1;
   bool dev_dirty;
   bool persistent;
 } _vira_gpu_act_entry;
@@ -344,6 +347,7 @@ typedef struct {
 
   vira_cu_device cu_device;
   vira_cu_context cu_context;
+  uint64_t cu_ctx_gen;
   vira_cu_stream cu_stream;
   vira_cu_module cu_module;
   vira_cu_module cu_wmma_module;
@@ -384,12 +388,16 @@ typedef struct {
   int32_t *argmax_host_idxs;
   int32_t argmax_cap;
 
-  // Activation Residency Ring
+  // Activation Residency Ring & O(1) Host-Pointer Hash Index
+  int16_t act_buckets[VIRA_GPU_ACT_HASH_BUCKETS];
   _vira_gpu_act_entry act_ring[VIRA_GPU_ACT_RING_CAP];
 
   // Persistent weight cache
   _vira_gpu_cache_entry weight_cache[VIRA_GPU_WEIGHT_CACHE_CAP];
 } _vira_gpu_state;
+
+static __thread vira_cu_context _vira_tls_cu_ctx = NULL;
+static __thread uint64_t _vira_tls_cu_ctx_gen = 0;
 
 static _vira_gpu_state _vira_gpu = {
     .initialized = 0,
@@ -426,6 +434,7 @@ static _vira_gpu_state _vira_gpu = {
 };
 
 static inline void vira_gpu_init(void);
+static inline void vira_gpu_sync(void);
 static inline void vira_gpu_shutdown(void);
 static inline void _vira_gpu_evict_all_locked(void);
 static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr);
@@ -1631,8 +1640,16 @@ static inline bool _vira_gpu_cuda_ensure_ctx_locked(void) {
       _vira_gpu.cu_context == NULL) {
     return true;
   }
+  if (_vira_tls_cu_ctx == _vira_gpu.cu_context &&
+      _vira_tls_cu_ctx_gen == _vira_gpu.cu_ctx_gen) {
+    return true;
+  }
   if (_vira_gpu.cuCtxSetCurrent != NULL) {
-    return _vira_gpu.cuCtxSetCurrent(_vira_gpu.cu_context) == VIRA_CUDA_SUCCESS;
+    if (_vira_gpu.cuCtxSetCurrent(_vira_gpu.cu_context) != VIRA_CUDA_SUCCESS) {
+      return false;
+    }
+    _vira_tls_cu_ctx = _vira_gpu.cu_context;
+    _vira_tls_cu_ctx_gen = _vira_gpu.cu_ctx_gen;
   }
   return true;
 }
@@ -1642,12 +1659,77 @@ static inline uint32_t _vira_gpu_bloom_idx(const vira_f32 *ptr) {
   return (uint32_t)((h >> 52) & 4095u);
 }
 
+static inline int32_t _vira_gpu_weight_slot_start(const vira_f32 *ptr) {
+  uint64_t h = ((uint64_t)(uintptr_t)ptr >> 6) * 11400714819323198485ULL;
+  return (int32_t)((h >> 52) & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+}
+
+static inline uint32_t _vira_gpu_act_hash(const vira_f32 *ptr) {
+  uint64_t h = ((uint64_t)(uintptr_t)ptr >> 6) * 11400714819323198485ULL;
+  return (uint32_t)((h >> 55) & (VIRA_GPU_ACT_HASH_BUCKETS - 1));
+}
+
+static inline void _vira_gpu_act_hash_unlink_locked(_vira_gpu_act_entry *e) {
+  if (e == NULL || e->hash_bucket_plus1 == 0) return;
+  int32_t self_idx = (int32_t)(e - _vira_gpu.act_ring);
+  int16_t self_p1 = (int16_t)(self_idx + 1);
+  uint32_t b = (uint32_t)(e->hash_bucket_plus1 - 1);
+  int16_t cur_p1 = _vira_gpu.act_buckets[b];
+  int16_t prev_p1 = 0;
+  while (cur_p1 != 0) {
+    if (cur_p1 == self_p1) {
+      if (prev_p1 == 0) {
+        _vira_gpu.act_buckets[b] = e->hash_next_plus1;
+      } else {
+        _vira_gpu.act_ring[prev_p1 - 1].hash_next_plus1 = e->hash_next_plus1;
+      }
+      break;
+    }
+    prev_p1 = cur_p1;
+    cur_p1 = _vira_gpu.act_ring[cur_p1 - 1].hash_next_plus1;
+  }
+  e->hash_next_plus1 = 0;
+  e->hash_bucket_plus1 = 0;
+}
+
+static inline void _vira_gpu_act_hash_link_locked(_vira_gpu_act_entry *e,
+                                                  const vira_f32 *ptr) {
+  if (e == NULL || ptr == NULL) return;
+  if (e->hash_bucket_plus1 != 0) {
+    _vira_gpu_act_hash_unlink_locked(e);
+  }
+  uint32_t b = _vira_gpu_act_hash(ptr);
+  int32_t self_idx = (int32_t)(e - _vira_gpu.act_ring);
+  e->hash_next_plus1 = _vira_gpu.act_buckets[b];
+  e->hash_bucket_plus1 = (uint16_t)(b + 1);
+  _vira_gpu.act_buckets[b] = (int16_t)(self_idx + 1);
+}
+
+static inline _vira_gpu_act_entry *_vira_gpu_act_hash_find_locked(
+    const vira_f32 *ptr) {
+  if (ptr == NULL) return NULL;
+  uint32_t b = _vira_gpu_act_hash(ptr);
+  int16_t cur_p1 = _vira_gpu.act_buckets[b];
+  while (cur_p1 != 0) {
+    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[cur_p1 - 1];
+    if (e->host_ptr == ptr) {
+      return e;
+    }
+    cur_p1 = e->hash_next_plus1;
+  }
+  return NULL;
+}
+
 static inline void _vira_gpu_mark_act_dirty_locked(_vira_gpu_act_entry *e,
                                                    const vira_f32 *ptr) {
   if (!e->dev_dirty && ptr != NULL) {
     e->dev_dirty = true;
-    __atomic_store_n(&_vira_gpu.ptr_bloom[_vira_gpu_bloom_idx(ptr)], 1,
-                     __ATOMIC_RELAXED);
+    uint32_t bidx = _vira_gpu_bloom_idx(ptr);
+    uint8_t cur = __atomic_load_n(&_vira_gpu.ptr_bloom[bidx], __ATOMIC_RELAXED);
+    if (cur < 255u) {
+      __atomic_store_n(&_vira_gpu.ptr_bloom[bidx], (uint8_t)(cur + 1u),
+                       __ATOMIC_RELAXED);
+    }
     __atomic_add_fetch(&_vira_gpu.dev_dirty_count, 1, __ATOMIC_RELEASE);
   }
 }
@@ -1655,6 +1737,15 @@ static inline void _vira_gpu_mark_act_dirty_locked(_vira_gpu_act_entry *e,
 static inline void _vira_gpu_clear_act_dirty_locked(_vira_gpu_act_entry *e) {
   if (e->dev_dirty) {
     e->dev_dirty = false;
+    if (e->host_ptr != NULL) {
+      uint32_t bidx = _vira_gpu_bloom_idx(e->host_ptr);
+      uint8_t cur =
+          __atomic_load_n(&_vira_gpu.ptr_bloom[bidx], __ATOMIC_RELAXED);
+      if (cur > 0u && cur < 255u) {
+        __atomic_store_n(&_vira_gpu.ptr_bloom[bidx], (uint8_t)(cur - 1u),
+                         __ATOMIC_RELAXED);
+      }
+    }
     int32_t rem =
         __atomic_sub_fetch(&_vira_gpu.dev_dirty_count, 1, __ATOMIC_ACQ_REL);
     if (rem <= 0) {
@@ -1668,6 +1759,7 @@ static inline void _vira_gpu_clear_act_dirty_locked(_vira_gpu_act_entry *e) {
 
 static inline void _vira_gpu_act_entry_reset(_vira_gpu_act_entry *e) {
   _vira_gpu_clear_act_dirty_locked(e);
+  _vira_gpu_act_hash_unlink_locked(e);
   e->host_ptr = NULL;
   e->bytes = 0;
   e->epoch = 0;
@@ -1678,12 +1770,29 @@ static inline void _vira_gpu_act_entry_reset(_vira_gpu_act_entry *e) {
 static inline void _vira_gpu_dedup_host_ptr_locked(
     const vira_f32 *ptr, const _vira_gpu_act_entry *keep) {
   if (ptr == NULL) return;
-  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[i];
+  uint32_t b = _vira_gpu_act_hash(ptr);
+  int16_t cur_p1 = _vira_gpu.act_buckets[b];
+  while (cur_p1 != 0) {
+    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[cur_p1 - 1];
+    int16_t next_p1 = e->hash_next_plus1;
     if (e != keep && e->host_ptr == ptr) {
       _vira_gpu_act_entry_reset(e);
     }
+    cur_p1 = next_p1;
   }
+}
+
+static inline void _vira_gpu_act_bind_locked(_vira_gpu_act_entry *slot,
+                                             const vira_f32 *ptr, size_t bytes,
+                                             uint64_t ep, uint64_t now,
+                                             bool persistent) {
+  _vira_gpu_dedup_host_ptr_locked(ptr, slot);
+  slot->host_ptr = ptr;
+  slot->bytes = bytes;
+  slot->epoch = ep;
+  slot->last_used = now;
+  slot->persistent = persistent;
+  _vira_gpu_act_hash_link_locked(slot, ptr);
 }
 
 static inline bool _vira_gpu_sync_slot_locked(_vira_gpu_act_entry *e) {
@@ -1718,14 +1827,10 @@ static inline bool _vira_gpu_sync_slot_locked(_vira_gpu_act_entry *e) {
 
 static inline bool _vira_gpu_is_ptr_dirty_locked(const vira_f32 *ptr) {
   if (!_vira_gpu.available || ptr == NULL) return false;
+  _vira_gpu_act_entry *e = _vira_gpu_act_hash_find_locked(ptr);
+  if (e == NULL || !e->dev_dirty) return false;
   uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
-  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[i];
-    if (e->dev_dirty && e->epoch == ep && e->host_ptr == ptr) {
-      return true;
-    }
-  }
-  return false;
+  return e->epoch == ep;
 }
 
 static inline bool _vira_gpu_is_ptr_dirty(const vira_f32 *ptr) {
@@ -1762,10 +1867,10 @@ static inline void _vira_gpu_sync_host(const vira_f32 *ptr) {
   }
   pthread_mutex_lock(&_vira_gpu.lock);
   if (_vira_gpu_cuda_ensure_ctx_locked()) {
-    uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
-    for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-      _vira_gpu_act_entry *e = &_vira_gpu.act_ring[i];
-      if (e->dev_dirty && e->epoch == ep && e->host_ptr == ptr) {
+    _vira_gpu_act_entry *e = _vira_gpu_act_hash_find_locked(ptr);
+    if (e != NULL && e->dev_dirty) {
+      uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
+      if (e->epoch == ep) {
         _vira_gpu_sync_slot_locked(e);
       }
     }
@@ -1796,17 +1901,13 @@ static inline void _vira_gpu_invalidate_activations(const void *arena_ptr) {
 
 static inline bool _vira_gpu_is_activation_ptr_locked(const vira_f32 *ptr) {
   if (ptr == NULL) return false;
+  _vira_gpu_act_entry *e = _vira_gpu_act_hash_find_locked(ptr);
+  if (e == NULL) return false;
   uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
-  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-    bool has_buf = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
-                       ? (_vira_gpu.act_ring[i].cu_buf != 0)
-                       : (_vira_gpu.act_ring[i].dev_buf != NULL);
-    if (has_buf && _vira_gpu.act_ring[i].epoch == ep &&
-        _vira_gpu.act_ring[i].host_ptr == ptr) {
-      return true;
-    }
-  }
-  return false;
+  if (e->epoch != ep) return false;
+  return (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
+             ? (e->cu_buf != 0)
+             : (e->dev_buf != NULL);
 }
 
 static inline bool _vira_gpu_act_is_avoid(
@@ -2100,25 +2201,23 @@ static inline _vira_gpu_act_entry *_vira_gpu_get_or_upload_activation_locked(
   uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
   uint64_t now = ++_vira_gpu.access_clock;
 
-  // 1. Check for residency hit
-  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[i];
+  // 1. Check for residency hit via O(1) host-pointer hash index
+  _vira_gpu_act_entry *hit = _vira_gpu_act_hash_find_locked(ptr);
+  if (hit != NULL) {
     bool has_buf = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
-                       ? (e->cu_buf != 0)
-                       : (e->dev_buf != NULL);
-    if (has_buf && e->epoch == ep && e->host_ptr == ptr) {
-      if (e->bytes == bytes) {
-        e->last_used = now;
-        if (persistent) e->persistent = true;
-        if (out_hit) *out_hit = true;
-        *out_err = VIRA_CL_SUCCESS;
-        return e;
-      }
-      if (e->dev_dirty) {
-        _vira_gpu_sync_slot_locked(e);
-      }
-      _vira_gpu_act_entry_reset(e);
+                       ? (hit->cu_buf != 0)
+                       : (hit->dev_buf != NULL);
+    if (has_buf && hit->epoch == ep && hit->bytes == bytes) {
+      hit->last_used = now;
+      if (persistent) hit->persistent = true;
+      if (out_hit) *out_hit = true;
+      *out_err = VIRA_CL_SUCCESS;
+      return hit;
     }
+    if (hit->dev_dirty && hit->epoch == ep) {
+      _vira_gpu_sync_slot_locked(hit);
+    }
+    _vira_gpu_act_entry_reset(hit);
   }
 
   // 2. Cache miss: find capacity-smart or LRU slot and upload from host
@@ -2131,7 +2230,16 @@ static inline _vira_gpu_act_entry *_vira_gpu_get_or_upload_activation_locked(
   }
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
-    if (_vira_gpu.cuMemcpyHtoD(slot->cu_buf, ptr, bytes) != VIRA_CUDA_SUCCESS) {
+    bool h2d_ok = false;
+    if (_vira_gpu.cuMemcpyHtoDAsync != NULL && _vira_gpu.cu_stream != NULL) {
+      h2d_ok = (_vira_gpu.cuMemcpyHtoDAsync(slot->cu_buf, ptr, bytes,
+                                            _vira_gpu.cu_stream) ==
+                VIRA_CUDA_SUCCESS);
+    } else {
+      h2d_ok = (_vira_gpu.cuMemcpyHtoD(slot->cu_buf, ptr, bytes) ==
+                VIRA_CUDA_SUCCESS);
+    }
+    if (!h2d_ok) {
       _vira_gpu_act_entry_reset(slot);
       *out_err = VIRA_CL_ERR_NO_ROOM;
       return NULL;
@@ -2146,12 +2254,7 @@ static inline _vira_gpu_act_entry *_vira_gpu_get_or_upload_activation_locked(
     }
   }
 
-  _vira_gpu_dedup_host_ptr_locked(ptr, slot);
-  slot->host_ptr = ptr;
-  slot->bytes = bytes;
-  slot->epoch = ep;
-  slot->last_used = now;
-  slot->persistent = persistent;
+  _vira_gpu_act_bind_locked(slot, ptr, bytes, ep, now, persistent);
   *out_err = VIRA_CL_SUCCESS;
   return slot;
 }
@@ -2170,8 +2273,7 @@ static inline void _vira_gpu_evict_weight_ptr_locked(const vira_f32 *host_ptr) {
   if (!_vira_gpu.available || host_ptr == NULL) {
     return;
   }
-  uint64_t h = ((uint64_t)(uintptr_t)host_ptr >> 6) * 11400714819323198485ULL;
-  int32_t start_slot = (int32_t)(h & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+  int32_t start_slot = _vira_gpu_weight_slot_start(host_ptr);
 
   for (int32_t probe = 0; probe < VIRA_GPU_WEIGHT_PROBE_LEN; ++probe) {
     int32_t idx = (start_slot + probe) & (VIRA_GPU_WEIGHT_CACHE_CAP - 1);
@@ -2189,11 +2291,7 @@ static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr) {
   if (!_vira_gpu.available || host_ptr == NULL) {
     return;
   }
-  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
-    if (_vira_gpu.act_ring[i].host_ptr == host_ptr) {
-      _vira_gpu_act_entry_reset(&_vira_gpu.act_ring[i]);
-    }
-  }
+  _vira_gpu_dedup_host_ptr_locked(host_ptr, NULL);
   _vira_gpu_evict_weight_ptr_locked(host_ptr);
 }
 
@@ -2222,6 +2320,7 @@ static inline void _vira_gpu_evict_all_locked(void) {
     _vira_gpu.act_ring[i].buf_cap = 0;
     _vira_gpu_act_entry_reset(&_vira_gpu.act_ring[i]);
   }
+  memset(_vira_gpu.act_buckets, 0, sizeof(_vira_gpu.act_buckets));
   if (_vira_gpu.cl_argmax_vals != NULL && _vira_gpu.clReleaseMemObject) {
     _vira_gpu.clReleaseMemObject(_vira_gpu.cl_argmax_vals);
     _vira_gpu.cl_argmax_vals = NULL;
@@ -2269,8 +2368,7 @@ static inline void _vira_gpu_clone_quant(const vira_f32 *dst_ptr,
     return;
   }
 
-  uint64_t sh = ((uint64_t)(uintptr_t)src_ptr >> 6) * 11400714819323198485ULL;
-  int32_t s_start = (int32_t)(sh & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+  int32_t s_start = _vira_gpu_weight_slot_start(src_ptr);
   _vira_gpu_cache_entry *src_e = NULL;
   for (int32_t probe = 0; probe < VIRA_GPU_WEIGHT_PROBE_LEN; ++probe) {
     int32_t idx = (s_start + probe) & (VIRA_GPU_WEIGHT_CACHE_CAP - 1);
@@ -2279,7 +2377,7 @@ static inline void _vira_gpu_clone_quant(const vira_f32 *dst_ptr,
                        ? (e->cu_buf != 0)
                        : (e->dev_buf != NULL);
     if (e->host_ptr == src_ptr && !e->uncacheable && has_buf &&
-        e->fmt >= VIRA_WFMT_Q4_0) {
+        e->fmt >= VIRA_WFMT_F16) {
       src_e = e;
       break;
     }
@@ -2305,8 +2403,7 @@ static inline void _vira_gpu_clone_quant(const vira_f32 *dst_ptr,
     return;
   }
 
-  uint64_t dh = ((uint64_t)(uintptr_t)dst_ptr >> 6) * 11400714819323198485ULL;
-  int32_t d_start = (int32_t)(dh & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+  int32_t d_start = _vira_gpu_weight_slot_start(dst_ptr);
   int32_t empty_slot = -1;
   int32_t oldest_probe = -1;
   uint64_t oldest_clock = 0xFFFFFFFFFFFFFFFFULL;
@@ -2421,19 +2518,20 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
                                             size_t raw_bytes, size_t elems) {
   vira_gpu_init();
   if (!_vira_gpu.available || !_vira_gpu.enabled || host_ptr == NULL ||
-      raw_blocks == NULL || raw_bytes == 0 || (elems & 31) != 0) {
+      raw_blocks == NULL || raw_bytes == 0 || elems == 0) {
     return;
   }
   _vira_gpu_wfmt fmt;
   switch (gguf_dtype) {
-  case 2:  fmt = VIRA_WFMT_Q4_0; break;
-  case 3:  fmt = VIRA_WFMT_Q4_1; break;
-  case 6:  fmt = VIRA_WFMT_Q5_0; break;
-  case 7:  fmt = VIRA_WFMT_Q5_1; break;
-  case 8:  fmt = VIRA_WFMT_Q8_0; break;
-  case 12: fmt = VIRA_WFMT_Q4_K; break;
-  case 13: fmt = VIRA_WFMT_Q5_K; break;
-  case 14: fmt = VIRA_WFMT_Q6_K; break;
+  case 1:  fmt = VIRA_WFMT_F16; break;
+  case 2:  if ((elems & 31) != 0) return; fmt = VIRA_WFMT_Q4_0; break;
+  case 3:  if ((elems & 31) != 0) return; fmt = VIRA_WFMT_Q4_1; break;
+  case 6:  if ((elems & 31) != 0) return; fmt = VIRA_WFMT_Q5_0; break;
+  case 7:  if ((elems & 31) != 0) return; fmt = VIRA_WFMT_Q5_1; break;
+  case 8:  if ((elems & 31) != 0) return; fmt = VIRA_WFMT_Q8_0; break;
+  case 12: if ((elems & 255) != 0) return; fmt = VIRA_WFMT_Q4_K; break;
+  case 13: if ((elems & 255) != 0) return; fmt = VIRA_WFMT_Q5_K; break;
+  case 14: if ((elems & 255) != 0) return; fmt = VIRA_WFMT_Q6_K; break;
   default: return;
   }
 
@@ -2452,8 +2550,7 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
     return;
   }
 
-  uint64_t h = ((uint64_t)(uintptr_t)host_ptr >> 6) * 11400714819323198485ULL;
-  int32_t start_slot = (int32_t)(h & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+  int32_t start_slot = _vira_gpu_weight_slot_start(host_ptr);
   int32_t empty_slot = -1;
   int32_t oldest_probe = -1;
   uint64_t oldest_clock = 0xFFFFFFFFFFFFFFFFULL;
@@ -2532,8 +2629,7 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
 static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
     const vira_f32 *host_ptr, size_t elems, bool prefer_half,
     bool allow_quant_or_half, _vira_gpu_wfmt *out_fmt, vira_cl_int *out_err) {
-  uint64_t h = ((uint64_t)(uintptr_t)host_ptr >> 6) * 11400714819323198485ULL;
-  int32_t start_slot = (int32_t)(h & (VIRA_GPU_WEIGHT_CACHE_CAP - 1));
+  int32_t start_slot = _vira_gpu_weight_slot_start(host_ptr);
   uint64_t now = ++_vira_gpu.access_clock;
 
   int32_t empty_slot = -1;
@@ -2880,6 +2976,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (g->cuModuleLoadData(&mod, _vira_cuda_kernel_ptx) != VIRA_CUDA_SUCCESS || mod == NULL) {
     if (stream && g->cuStreamDestroy) g->cuStreamDestroy(stream);
     g->cuCtxDestroy(ctx);
+    _vira_tls_cu_ctx = NULL;
+    _vira_tls_cu_ctx_gen = 0;
     return false;
   }
 
@@ -2913,12 +3011,18 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
     g->cuModuleUnload(mod);
     if (stream && g->cuStreamDestroy) g->cuStreamDestroy(stream);
     g->cuCtxDestroy(ctx);
+    _vira_tls_cu_ctx = NULL;
+    _vira_tls_cu_ctx_gen = 0;
     return false;
   }
 
   g->cuda_lib_handle = lib;
   g->cu_device = best_dev;
   g->cu_context = ctx;
+  g->cu_ctx_gen++;
+  if (g->cu_ctx_gen == 0) g->cu_ctx_gen = 1;
+  _vira_tls_cu_ctx = ctx;
+  _vira_tls_cu_ctx_gen = g->cu_ctx_gen;
   g->cu_stream = stream;
   g->cu_module = mod;
 
@@ -2953,6 +3057,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->argmax_cap = 0;
   __atomic_store_n(&g->dev_dirty_count, 0, __ATOMIC_RELEASE);
   memset(g->ptr_bloom, 0, sizeof(g->ptr_bloom));
+  memset(g->act_buckets, 0, sizeof(g->act_buckets));
   if (g->act_epoch == 0) g->act_epoch = 1;
 
   g->has_tensor_cores = false;
@@ -3285,6 +3390,7 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
   g->argmax_cap = 0;
   __atomic_store_n(&g->dev_dirty_count, 0, __ATOMIC_RELEASE);
   memset(g->ptr_bloom, 0, sizeof(g->ptr_bloom));
+  memset(g->act_buckets, 0, sizeof(g->act_buckets));
   if (g->act_epoch == 0) g->act_epoch = 1;
 
   g->active_backend = VIRA_GPU_BACKEND_OPENCL;
@@ -3498,6 +3604,10 @@ static inline void vira_gpu_shutdown(void) {
       if (_vira_gpu.cu_context && _vira_gpu.cuCtxDestroy) {
         _vira_gpu.cuCtxDestroy(_vira_gpu.cu_context);
         _vira_gpu.cu_context = NULL;
+        _vira_gpu.cu_ctx_gen++;
+        if (_vira_gpu.cu_ctx_gen == 0) _vira_gpu.cu_ctx_gen = 1;
+        _vira_tls_cu_ctx = NULL;
+        _vira_tls_cu_ctx_gen = 0;
       }
       if (_vira_gpu.cuda_lib_handle) {
 #ifdef _WIN32
@@ -3604,12 +3714,20 @@ static inline bool vira_gpu_has_tensor_cores(void) {
 
 static inline vira_string vira_gpu_device_name(void) {
   vira_gpu_init();
-  return vira_str_lit(_vira_gpu.device_name, (int32_t)strlen(_vira_gpu.device_name));
+  char buf[256];
+  pthread_mutex_lock(&_vira_gpu.lock);
+  snprintf(buf, sizeof(buf), "%s", _vira_gpu.device_name);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return vira_str_from_cstr(buf);
 }
 
 static inline vira_string vira_gpu_backend_name(void) {
   vira_gpu_init();
-  return vira_str_lit(_vira_gpu.backend_name, (int32_t)strlen(_vira_gpu.backend_name));
+  char buf[64];
+  pthread_mutex_lock(&_vira_gpu.lock);
+  snprintf(buf, sizeof(buf), "%s", _vira_gpu.backend_name);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return vira_str_from_cstr(buf);
 }
 
 static inline int64_t vira_gpu_vram_bytes(void) {
@@ -3640,6 +3758,7 @@ static inline void vira_gpu_simulate_oom(bool enable) {
 }
 
 static inline void vira_gpu_set_backend(vira_string backend) {
+  vira_gpu_sync();
   vira_gpu_shutdown();
   pthread_mutex_lock(&_vira_gpu.lock);
   if (backend.data != NULL && backend.len > 0) {
@@ -3654,6 +3773,7 @@ static inline void vira_gpu_set_backend(vira_string backend) {
 }
 
 static inline void vira_gpu_set_device(vira_string device) {
+  vira_gpu_sync();
   vira_gpu_shutdown();
   pthread_mutex_lock(&_vira_gpu.lock);
   if (device.data != NULL && device.len > 0) {
@@ -3667,10 +3787,30 @@ static inline void vira_gpu_set_device(vira_string device) {
   vira_gpu_init();
 }
 
+static inline void _vira_gpu_sync_all_dirty_locked(void) {
+  if (!_vira_gpu.available) {
+    return;
+  }
+  if (__atomic_load_n(&_vira_gpu.dev_dirty_count, __ATOMIC_ACQUIRE) <= 0) {
+    return;
+  }
+  if (!_vira_gpu_cuda_ensure_ctx_locked()) {
+    return;
+  }
+  uint64_t ep = __atomic_load_n(&_vira_gpu.act_epoch, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < VIRA_GPU_ACT_RING_CAP; ++i) {
+    _vira_gpu_act_entry *e = &_vira_gpu.act_ring[i];
+    if (e->dev_dirty && e->epoch == ep && e->host_ptr != NULL) {
+      _vira_gpu_sync_slot_locked(e);
+    }
+  }
+}
+
 static inline void vira_gpu_sync(void) {
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) == 2 &&
       _vira_gpu.available) {
     pthread_mutex_lock(&_vira_gpu.lock);
+    _vira_gpu_sync_all_dirty_locked();
     if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
       if (_vira_gpu_cuda_ensure_ctx_locked() && _vira_gpu.cuCtxSynchronize) {
         _vira_gpu.cuCtxSynchronize();
@@ -3973,10 +4113,8 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
                 : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = y_bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, y_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4110,10 +4248,8 @@ static inline vira_tensor_f32 vira_gpu_matmul(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
                 : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, c_slot);
-  c_slot->host_ptr = out.data;
-  c_slot->bytes = c_bytes;
-  c_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(c_slot, out.data, c_bytes, c_slot->epoch,
+                            c_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(c_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4264,10 +4400,8 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, x.n_dims, x.dims)
                 : _vira_tensor_f32_alloc_uninit_nd(x.n_dims, x.dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = x_bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, x_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4378,10 +4512,8 @@ static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, q.n_dims, q.dims)
                 : _vira_tensor_f32_alloc_uninit_nd(q.n_dims, q.dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = q_bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, q_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4483,10 +4615,8 @@ static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, logits.n_dims, logits.dims)
                 : _vira_tensor_f32_alloc_uninit_nd(logits.n_dims, logits.dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4584,10 +4714,8 @@ static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, x.n_dims, x.dims)
                 : _vira_tensor_f32_alloc_uninit_nd(x.n_dims, x.dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4666,12 +4794,13 @@ static inline vira_tensor_f32 _vira_gpu_binary_elemwise(
   _vira_gpu_act_entry *a_slot = NULL;
   _vira_gpu_act_entry *b_slot = NULL;
 
+  bool a_in_act = _vira_gpu_is_activation_ptr_locked(a.data);
+  bool b_in_act = _vira_gpu_is_activation_ptr_locked(b.data);
   bool a_bias = (a.data != b.data) && !a.is_arena && a.rows == 1 &&
-                !_vira_gpu_is_activation_ptr_locked(a.data) &&
-                !_vira_gpu_is_ptr_dirty_locked(a.data);
+                !a_in_act && !_vira_gpu_is_ptr_dirty_locked(a.data) &&
+                !(mode == 0 && b_in_act);
   bool b_bias = (a.data != b.data) && !b.is_arena && b.rows == 1 &&
-                !_vira_gpu_is_activation_ptr_locked(b.data) &&
-                !_vira_gpu_is_ptr_dirty_locked(b.data);
+                !b_in_act && !_vira_gpu_is_ptr_dirty_locked(b.data);
 
   if (a_bias) {
     _vira_gpu_wfmt wfmt = VIRA_WFMT_F32;
@@ -4800,10 +4929,8 @@ static inline vira_tensor_f32 _vira_gpu_binary_elemwise(
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, out_sh->n_dims, out_sh->dims)
                 : _vira_tensor_f32_alloc_uninit_nd(out_sh->n_dims, out_sh->dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = y_bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, y_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -4916,10 +5043,8 @@ static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, t.n_dims, t.dims)
                 : _vira_tensor_f32_alloc_uninit_nd(t.n_dims, t.dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, y_slot);
-  y_slot->host_ptr = out.data;
-  y_slot->bytes = bytes;
-  y_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(y_slot, out.data, bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
@@ -5136,10 +5261,8 @@ static inline vira_tensor_f32 vira_gpu_gqa_attention(
   vira_tensor_f32 out =
       opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
                 : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
-  _vira_gpu_dedup_host_ptr_locked(out.data, o_slot);
-  o_slot->host_ptr = out.data;
-  o_slot->bytes = q_bytes;
-  o_slot->persistent = !out.is_arena;
+  _vira_gpu_act_bind_locked(o_slot, out.data, q_bytes, o_slot->epoch,
+                            o_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(o_slot, out.data);
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;

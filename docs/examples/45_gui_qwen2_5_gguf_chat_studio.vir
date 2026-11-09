@@ -390,7 +390,7 @@ fn qwen2_forward_step(
 	mut l := 0
 	for l < meta.n_layers {
 		arena {
-			xn := tensor_rmsnorm(x, l_an[l], meta.rms_eps)
+			xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
 
 			q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
 			k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]

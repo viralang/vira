@@ -1292,7 +1292,9 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 	}
 
 	waFlags := []string{}
-	if targetOS != "darwin" && strings.Contains(filepath.Base(compiler), "gcc") && goRuntime.GOARCH == "amd64" {
+	baseCompiler := strings.ToLower(filepath.Base(compiler))
+	if targetOS != "darwin" && goRuntime.GOARCH == "amd64" &&
+		(strings.Contains(baseCompiler, "gcc") || (goRuntime.GOOS == "windows" && (baseCompiler == "cc" || baseCompiler == "cc.exe"))) {
 		waFlags = append(waFlags, "-Wa,-muse-unaligned-vector-move")
 	}
 

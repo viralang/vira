@@ -426,7 +426,7 @@ fn qwen2_forward_step(
     mut l := 0
     for l < meta.n_layers {
         arena {
-            xn := tensor_rmsnorm(x, l_an[l], meta.rms_eps)
+            xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
 
             // Qwen 2.5 QKV linear projections + QKV biases
             q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]

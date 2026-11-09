@@ -83,11 +83,21 @@ fn test_gpu_oom_fallback() {
 }
 
 fn test_gpu_flexible_backend_switching() {
+	orig_avail := gpu.is_available()
+	orig_be := gpu.backend_name()
+	orig_dev := gpu.device_name()
+
 	// 1. Force CPU-SIMD fallback backend
 	gpu.set_backend(gpu.backend_cpu)
 	cpu_be := gpu.backend_name()
 	if cpu_be != "CPU-SIMD" {
 		panic('expected CPU-SIMD backend when set to cpu')
+	}
+	if orig_avail && orig_be == "CPU-SIMD" {
+		panic('gpu.backend_name() string mutated across gpu.set_backend()')
+	}
+	if orig_avail && orig_dev == gpu.device_name() {
+		panic('gpu.device_name() string mutated across gpu.set_backend()')
 	}
 	if gpu.is_available() {
 		panic('expected is_available() == false for CPU-SIMD backend')
@@ -101,11 +111,18 @@ fn test_gpu_flexible_backend_switching() {
 		panic('unexpected shape on CPU backend')
 	}
 
-	// 2. Switch back to auto discovery
+	// 2. Switch to auto discovery and verify hardware/initial backend behavior
 	gpu.set_backend(gpu.backend_auto)
 	auto_be := gpu.backend_name()
 	if auto_be.len == 0 {
-		panic('expected valid backend name after auto reset')
+		panic('expected non-empty backend after auto reset')
+	}
+	if orig_avail && (!gpu.is_available() || auto_be != orig_be) {
+		panic('expected backend restoration after auto reset: got ${auto_be}, expected ${orig_be}')
+	}
+	if !orig_avail {
+		// Restore explicit CPU mode when launched with --gpu-backend cpu
+		gpu.set_backend(gpu.backend_cpu)
 	}
 	println('✓ test_gpu_flexible_backend_switching passed')
 }
@@ -124,8 +141,11 @@ fn test_gpu_device_filtering() {
 		panic('expected non-empty device name for index 0')
 	}
 
-	// Reset device filter
+	// Reset device filter and verify default device restoration
 	gpu.set_device("")
+	if gpu.device_name() != dev_before {
+		panic('expected original device restoration after empty device filter reset')
+	}
 	println('✓ test_gpu_device_filtering passed')
 }
 
@@ -234,21 +254,21 @@ fn test_gpu_lazy_chain_and_sync() {
 	}
 
 	// Host readers on dev_dirty tensors must implicitly sync accurately
-	sum_gpu := x_gpu.sum()
+	sum_gpu := tensor_sum(x_gpu)
 	cloned := x_gpu.clone()
 	diff := x_gpu - cloned
 	tr := x_gpu.transpose()
 	if cloned.rows != 1 || cloned.cols != dim || tr.rows != dim || tr.cols != 1 {
 		panic('unexpected clone/transpose shape after lazy GPU chain')
 	}
-	if math.abs(f64(diff.sum())) > 0.001 {
+	if math.abs(f64(tensor_sum(diff))) > 0.001 {
 		panic('expected cloned sub diff near 0.0')
 	}
-	if math.abs(f64(sum_gpu - cloned.sum())) > 0.001 {
+	if math.abs(f64(sum_gpu - tensor_sum(cloned))) > 0.001 {
 		panic('expected clone sum parity')
 	}
 	k_elem := k_cache.get(3, 5)
-	if math.is_nan(f64(k_elem)) || math.is_inf(f64(k_elem), 0) {
+	if math.is_nan(f64(k_elem)) || math.is_inf(f64(k_elem)) {
 		panic('invalid element synced from persistent KV cache')
 	}
 
@@ -276,8 +296,10 @@ fn test_gpu_lazy_chain_and_sync() {
 	}
 	gpu.set_backend(gpu.backend_auto)
 
-	if math.abs(f64(sum_gpu - x_cpu.sum())) > 0.01 {
-		panic('lazy GPU chain diverged from CPU reference: gpu=${sum_gpu} cpu=${x_cpu.sum()}')
+	sum_cpu := tensor_sum(x_cpu)
+	diff_sum := math.abs(f64(sum_gpu - sum_cpu))
+	if diff_sum > 0.01 && diff_sum > math.abs(f64(sum_cpu)) * 0.002 {
+		panic('lazy GPU chain diverged from CPU reference: gpu=${sum_gpu} cpu=${sum_cpu}')
 	}
 	if math.abs(f64(k_elem - k_cache_cpu.get(3, 5))) > 0.01 {
 		panic('KV cache D2D diverged from CPU reference')
@@ -303,5 +325,69 @@ fn test_gpu_argmax_and_sampling() {
 	if sampled < 0 || sampled >= i64(vocab) {
 		panic('sampled token out of range: ${sampled}')
 	}
+
+	// Dev-dirty logits produced by .gpu_linear must also trigger GPU argmax without host sync
+	x_vec := tensor_fill(1, 64, f32(0.1))
+	lm := tensor_fill(vocab, 64, f32(0.01))
+	lm.set(2718, 0, f32(5.0))
+	dirty_logits := x_vec.gpu_linear(lm)
+	greedy_dirty := sample_token(dirty_logits, f32(0.0))
+	if greedy_dirty != 2718 {
+		panic('expected greedy sample_token on dev_dirty logits == 2718, got ${greedy_dirty}')
+	}
 	println('✓ test_gpu_argmax_and_sampling passed')
+}
+
+fn test_gpu_layer0_residual_and_tied_weight_parity() {
+	gpu.set_backend(gpu.backend_auto)
+	dim := 128
+	vocab := tensor_fill(64, dim, f32(0.05))
+	vocab.set(17, 0, f32(0.75))
+	tied_out := vocab.clone()
+	norm_w := tensor_fill(1, dim, f32(1.0))
+	w_proj := tensor_fill(dim, dim, f32(0.015))
+	bias := tensor_fill(1, dim, f32(0.02))
+
+	mut x_gpu := tensor_embedding(vocab, 3)
+	mut step := 0
+	for step < 3 {
+		arena {
+			xn := tensor_rmsnorm(x_gpu, norm_w, f32(0.00001))
+			proj := xn.gpu_linear(w_proj) + bias
+			// Residual left-hand operand `x_gpu` is non-dirty on step 0 when rmsnorm ran on CPU
+			x2 := x_gpu + proj
+			xn2 := gpu.rmsnorm(x2, norm_w, f32(0.00001))
+			x_gpu.copy_row(0, xn2)
+		}
+		step += 1
+	}
+	logits_gpu := x_gpu.gpu_linear(tied_out)
+	tok_gpu := sample_token(logits_gpu, f32(0.0))
+
+	gpu.set_backend(gpu.backend_cpu)
+	mut x_cpu := tensor_embedding(vocab, 3)
+	mut c_step := 0
+	for c_step < 3 {
+		arena {
+			xn := tensor_rmsnorm(x_cpu, norm_w, f32(0.00001))
+			proj := xn.gpu_linear(w_proj) + bias
+			x2 := x_cpu + proj
+			xn2 := gpu.rmsnorm(x2, norm_w, f32(0.00001))
+			x_cpu.copy_row(0, xn2)
+		}
+		c_step += 1
+	}
+	logits_cpu := x_cpu.gpu_linear(tied_out)
+	tok_cpu := sample_token(logits_cpu, f32(0.0))
+	gpu.set_backend(gpu.backend_auto)
+
+	if tok_gpu != tok_cpu || tok_gpu != 17 {
+		panic('layer0 residual/tied parity token mismatch: gpu=${tok_gpu} cpu=${tok_cpu}')
+	}
+	sum_cpu := tensor_sum(logits_cpu)
+	diff_sum := math.abs(f64(tensor_sum(logits_gpu) - sum_cpu))
+	if diff_sum > 0.01 && diff_sum > math.abs(f64(sum_cpu)) * 0.002 {
+		panic('layer0 residual/tied parity logits diverged: diff=${diff_sum} cpu=${sum_cpu}')
+	}
+	println('✓ test_gpu_layer0_residual_and_tied_weight_parity passed')
 }

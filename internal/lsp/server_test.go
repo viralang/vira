@@ -539,6 +539,7 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 
 	sendRPC(&in, "initialize", map[string]interface{}{}, 1)
 
+	var ex43Text string
 	for _, relPath := range examples {
 		absPath, err := filepath.Abs(relPath)
 		if err != nil {
@@ -547,6 +548,9 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 		contentBytes, err := os.ReadFile(absPath)
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", relPath, err)
+		}
+		if strings.Contains(relPath, "43_qwen2_5") {
+			ex43Text = string(contentBytes)
 		}
 		uri := "file:///" + strings.Replace(filepath.ToSlash(absPath), ":", "%3A", 1)
 		sendRPC(&in, "textDocument/didOpen", map[string]interface{}{
@@ -557,15 +561,34 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 		}, nil)
 	}
 
-	// Hover on `.linear` in Example 43 (line 468, `scores := tensor_scale(q_group.linear(k_head), scale)`)
+	// Hover on `.gpu_linear` and `gpu_gqa_attention` in Example 43
+	findTokenPos := func(src, tok string) (int, int) {
+		for lnIdx, line := range strings.Split(src, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			if col := strings.Index(line, tok); col >= 0 {
+				return lnIdx, col + 2
+			}
+		}
+		t.Fatalf("token %q not found in Example 43", tok)
+		return 0, 0
+	}
+	linLine, linCol := findTokenPos(ex43Text, "gpu_linear(")
+	gqaLine, gqaCol := findTokenPos(ex43Text, "gpu_gqa_attention(")
+
 	ex43Abs, _ := filepath.Abs(examples[2])
 	ex43URI := "file:///" + strings.Replace(filepath.ToSlash(ex43Abs), ":", "%3A", 1)
 	sendRPC(&in, "textDocument/hover", map[string]interface{}{
 		"textDocument": map[string]interface{}{"uri": ex43URI},
-		"position":     map[string]interface{}{"line": 467, "character": 48},
+		"position":     map[string]interface{}{"line": linLine, "character": linCol},
 	}, 2)
+	sendRPC(&in, "textDocument/hover", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": ex43URI},
+		"position":     map[string]interface{}{"line": gqaLine, "character": gqaCol},
+	}, 3)
 
-	sendRPC(&in, "shutdown", map[string]interface{}{}, 3)
+	sendRPC(&in, "shutdown", map[string]interface{}{}, 4)
 
 	server := lsp.NewServer(&in, &out)
 	if err := server.Run(); err != nil {
@@ -576,7 +599,10 @@ func TestLSPExamples41_42_43_ZeroDiagnosticsAndHover(t *testing.T) {
 	if strings.Count(res, `"diagnostics":[]`) < 3 {
 		t.Fatalf("expected all 3 LLM examples (41, 42, 43) to have clean diagnostics:[], got:\n%s", res)
 	}
-	if !strings.Contains(res, "tensor.linear(weight: tensor[f32])") {
-		t.Errorf("expected hover on .linear to show tensor.linear documentation, got:\n%s", res)
+	if !strings.Contains(res, "gpu_linear(x: tensor[f32], weight: tensor[f32])") {
+		t.Errorf("expected hover on .gpu_linear to show gpu_linear documentation, got:\n%s", res)
+	}
+	if !strings.Contains(res, "gpu_gqa_attention(q_heads: tensor[f32]") {
+		t.Errorf("expected hover on gpu_gqa_attention to show GQA documentation, got:\n%s", res)
 	}
 }

@@ -254,7 +254,7 @@ fn main() {
 
 	// Discover host C compiler
 	var cCompiler string
-	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+	for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
 		if _, err := exec.LookPath(cand); err == nil {
 			cCompiler = cand
 			break
@@ -288,7 +288,7 @@ fn main() {
 		t.Fatalf("write C file: %v", err)
 	}
 
-	cFlags := []string{"-std=c99", "-O2", "-march=native", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+	cFlags := buildTestCFlags(cCompiler, runtimeDir, cFile, binFile, false)
 	buildCmd := exec.Command(cCompiler, cFlags...)
 	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
@@ -308,6 +308,29 @@ fn main() {
 	}
 }
 
+// buildTestCFlags constructs C99 build flags matching `cmd/vira` (including Windows/amd64
+// MinGW AVX2 stack-realignment & unaligned-vector-move guards to prevent #GP on 16-byte ABI stacks).
+func buildTestCFlags(cCompiler, runtimeDir, cFile, binFile string, useSanitizer bool) []string {
+	var flags []string
+	if useSanitizer {
+		flags = []string{"-std=c99", "-O1", "-g", "-fno-omit-frame-pointer"}
+	} else {
+		flags = []string{"-std=c99", "-O2", "-march=native"}
+	}
+	base := strings.ToLower(filepath.Base(cCompiler))
+	if runtime.GOARCH == "amd64" && base != "tcc" && base != "tcc.exe" {
+		flags = append(flags, "-mstackrealign")
+		if runtime.GOOS != "darwin" && (strings.Contains(base, "gcc") || (runtime.GOOS == "windows" && (base == "cc" || base == "cc.exe"))) {
+			flags = append(flags, "-Wa,-muse-unaligned-vector-move")
+		}
+	}
+	if useSanitizer {
+		flags = append(flags, "-fsanitize=address,undefined")
+	}
+	flags = append(flags, "-pthread", "-I"+runtimeDir, cFile, "-o", binFile)
+	return flags
+}
+
 // --- 4. END-TO-END GOLDEN & ASAN/UBSAN EXECUTION TESTS (`testdata/run/*.vir`) ---
 
 func TestEndToEndGoldenAndSanitizers(t *testing.T) {
@@ -315,7 +338,7 @@ func TestEndToEndGoldenAndSanitizers(t *testing.T) {
 
 	// Discover host C compiler
 	var cCompiler string
-	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+	for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
 		if _, err := exec.LookPath(cand); err == nil {
 			cCompiler = cand
 			break
@@ -394,14 +417,7 @@ func TestEndToEndGoldenAndSanitizers(t *testing.T) {
 			}
 
 			// 3. Compile with C99 + pthreads (+ ASan/UBSan if supported)
-			cFlags := []string{"-std=c99", "-O2", "-march=native", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
-			if useSanitizer {
-				cFlags = []string{
-					"-std=c99", "-O1", "-g", "-fno-omit-frame-pointer",
-					"-fsanitize=address,undefined", "-pthread",
-					"-I" + runtimeDir, cFile, "-o", binFile,
-				}
-			}
+			cFlags := buildTestCFlags(cCompiler, runtimeDir, cFile, binFile, useSanitizer)
 
 			buildCmd := exec.Command(cCompiler, cFlags...)
 			buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1333,7 +1349,7 @@ fn main() {
 	cCode := gen.EmitFile(astFile)
 
 	var cCompiler string
-	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+	for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
 		if _, err := exec.LookPath(cand); err == nil {
 			cCompiler = cand
 			break
@@ -1367,7 +1383,7 @@ fn main() {
 		t.Fatalf("write C file: %v", err)
 	}
 
-	cFlags := []string{"-std=c99", "-O2", "-march=native", "-pthread", "-I" + runtimeDir, cFile, "-o", binFile}
+	cFlags := buildTestCFlags(cCompiler, runtimeDir, cFile, binFile, false)
 	buildCmd := exec.Command(cCompiler, cFlags...)
 	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
@@ -1389,7 +1405,7 @@ fn main() {
 
 func TestRuntimeCorrectnessAndSchedulerFixes(t *testing.T) {
 	var cCompiler string
-	for _, cand := range []string{"cc", "gcc", "clang", "tcc"} {
+	for _, cand := range []string{"gcc", "clang", "cc", "tcc"} {
 		if _, err := exec.LookPath(cand); err == nil {
 			cCompiler = cand
 			break

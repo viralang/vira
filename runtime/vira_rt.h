@@ -6703,6 +6703,10 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       for (size_t i = 0; i < total; ++i) {
         t.data[i] = _vira_fp16_to_fp32(hbuf[i]);
       }
+      if (_nr == total && total > 0) {
+        _vira_gpu_register_quant(t.data, 1, hbuf, total * sizeof(uint16_t),
+                                 total);
+      }
       free(hbuf);
     }
   } else if (matched_type == 2 && (total & 31u) == 0) {
