@@ -167,10 +167,18 @@ New-Item -ItemType Directory -Force -Path $ViraCacheBin | Out-Null
 if (Test-Path ".\runtime\vira_rt.h") {
     Copy-Item -Path ".\runtime\*.h" -Destination $RuntimeDir -Force
     Copy-Item -Path ".\runtime\*.h" -Destination $ViraCacheRuntime -Force
+    if (Test-Path ".\runtime\rt") {
+        Copy-Item -Path ".\runtime\rt" -Destination $RuntimeDir -Recurse -Force
+        Copy-Item -Path ".\runtime\rt" -Destination $ViraCacheRuntime -Recurse -Force
+    }
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } elseif (Test-Path "..\runtime\vira_rt.h") {
     Copy-Item -Path "..\runtime\*.h" -Destination $RuntimeDir -Force
     Copy-Item -Path "..\runtime\*.h" -Destination $ViraCacheRuntime -Force
+    if (Test-Path "..\runtime\rt") {
+        Copy-Item -Path "..\runtime\rt" -Destination $RuntimeDir -Recurse -Force
+        Copy-Item -Path "..\runtime\rt" -Destination $ViraCacheRuntime -Recurse -Force
+    }
     Write-Host "  ✓ Copied runtime headers to $RuntimeDir" -ForegroundColor Green
 } else {
     Write-Host "  ✓ Embedded runtime headers will auto-extract on first run" -ForegroundColor Green

@@ -154,9 +154,11 @@ fi
 echo "${YELLOW}[4/5] Deploying runtime headers and examples...${RESET}"
 if [ -d "./runtime" ]; then
     cp -r ./runtime/*.h "$RUNTIME_DIR/" 2>/dev/null || true
+    [ -d "./runtime/rt" ] && cp -r ./runtime/rt "$RUNTIME_DIR/" 2>/dev/null || true
     echo "  ${GREEN}✓ Copied runtime headers to $RUNTIME_DIR${RESET}"
 elif [ -d "../runtime" ]; then
     cp -r ../runtime/*.h "$RUNTIME_DIR/" 2>/dev/null || true
+    [ -d "../runtime/rt" ] && cp -r ../runtime/rt "$RUNTIME_DIR/" 2>/dev/null || true
     echo "  ${GREEN}✓ Copied runtime headers to $RUNTIME_DIR${RESET}"
 else
     echo "  ${GREEN}✓ Embedded runtime headers will auto-extract on first run${RESET}"
@@ -179,6 +181,7 @@ if [ "$INSTALL_DIR" != "$HOME/.vira" ]; then
     cp -f "$BIN_DIR/vira" "$HOME/.vira/bin/vira" 2>/dev/null || true
     cp -f "$BIN_DIR/vex" "$HOME/.vira/bin/vex" 2>/dev/null || true
     cp -rf "$RUNTIME_DIR"/*.h "$HOME/.vira/runtime/" 2>/dev/null || true
+    [ -d "$RUNTIME_DIR/rt" ] && cp -rf "$RUNTIME_DIR/rt" "$HOME/.vira/runtime/" 2>/dev/null || true
 fi
 
 # 5. Dependency Resolution (C Compiler & System Libraries)

@@ -1481,22 +1481,32 @@ func resolveRuntimeDir() string {
 		}
 	}
 
-	// Portable fallback: Extract embedded headers from virart.RuntimeFS to ~/.vir/runtime/
+	// Portable fallback: Extract embedded headers from virart.RuntimeFS to ~/.vira/runtime/
 	home, err := os.UserHomeDir()
 	if err == nil {
 		cacheDir := filepath.Join(home, ".vira", "runtime")
 		_ = os.MkdirAll(cacheDir, 0755)
 
-		entries, err := virart.RuntimeFS.ReadDir(".")
-		if err == nil && len(entries) > 0 {
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".h") {
-					data, err := virart.RuntimeFS.ReadFile(e.Name())
-					if err == nil {
-						_ = os.WriteFile(filepath.Join(cacheDir, e.Name()), data, 0644)
+		extracted := 0
+		_ = fs.WalkDir(virart.RuntimeFS, ".", func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil || path == "." {
+				return nil
+			}
+			dest := filepath.Join(cacheDir, filepath.FromSlash(path))
+			if d.IsDir() {
+				return os.MkdirAll(dest, 0755)
+			}
+			if strings.HasSuffix(d.Name(), ".h") {
+				if data, readErr := virart.RuntimeFS.ReadFile(path); readErr == nil {
+					_ = os.MkdirAll(filepath.Dir(dest), 0755)
+					if writeErr := os.WriteFile(dest, data, 0644); writeErr == nil {
+						extracted++
 					}
 				}
 			}
+			return nil
+		})
+		if extracted > 0 {
 			return cacheDir
 		}
 	}
