@@ -1,0 +1,1677 @@
+// ============================================================================
+// Pure Vira Qwen 2.5 (3B / 7B) Large-Context NVIDIA Tesla T4 GPU Benchmark
+// ============================================================================
+// Stress-tests Vira's zero-SDK CUDA/OpenCL compute engine and CPU SIMD fallback
+// at true Tesla T4 (`sm_75`, 16 GiB GDDR6, 320 GB/s, 65 TFLOPS FP16 TC) scale,
+// upgrading both model size and context depth far beyond Ex 43 (`0.5B @ ctx=512`):
+//
+//   * Default Model   : `bartowski/Qwen2.5-7B-Instruct-GGUF` (`Q4_K_M`, 4.68 GB)
+//                       28 layers, dim=3584, ffn=18944, 28Q/4KV (head_dim=128),
+//                       152,064 vocab, untied Q6_K LM head.
+//                       Every linear dimension (3584, 18944, 512) is an exact
+//                       multiple of QK_K=256 so all 32 warp lanes in DP4A MMVQ
+//                       and Turing m16n16k16 WMMA Tensor Cores stay saturated.
+//   * Default Context : `8192` tokens (`896 MiB` FP32 KV cache, ~5.5 GiB total VRAM)
+//                       with `16K` / `32K` long-context options (`--preset 3b`
+//                       supports up to `-c 32768` across 36 layers / 16Q:2KV).
+//   * Benchmark Suites:
+//       - Warmup          : Pre-warms PTX JIT, persistent VRAM weight cache,
+//                           and verifies zero OOM fallbacks.
+//       - Suite A (pp)    : Chunked prefill scaling (`pp128` -> `pp4096+`)
+//                           reporting latency, tok/s, and Tensor Core TFLOPS.
+//       - Suite B (tg@kv) : Long-context KV decode scaling across increasing
+//                           filled context depths (`kv=0` -> `kv=6144+`),
+//                           reporting tok/s, ms/tok, KV MB/step, and GDDR6 GB/s.
+//       - Suite C         : Optional ChatML greedy coherence check (`--verify`).
+//
+// Recommended Build & Run on Tesla T4 (Colab / Linux):
+//   ./vira build -prod -o bench46 docs/examples/46_qwen2_5_t4_large_ctx_benchmark.vir
+//   VIRA_NO_RAYLIB=1 ./bench46
+//   VIRA_NO_RAYLIB=1 ./bench46 --preset 3b -c 16384 --pp-list 512,2048,4096,8192
+//   VIRA_NO_RAYLIB=1 ./bench46 --preset 7b-q8_0 -c 4096 --verify
+// ============================================================================
+
+import os
+import io
+import time
+import math
+import exec
+import gpu
+import strings
+
+struct BenchPreset {
+    name        string
+    url         string
+    model_path  string
+    default_ctx int
+    approx_size string
+    desc        string
+}
+
+struct Qwen2Metadata {
+mut:
+    version     int
+    n_tensors   int
+    n_kv        int
+    arch        string
+    name        string
+    n_layers    int
+    dim         int
+    ffn_dim     int
+    n_heads     int
+    n_kv_heads  int
+    train_ctx   int
+    vocab_size  int
+    rope_base   f32
+    rms_eps     f32
+    bos_id      int
+    eos_id      int
+    im_start_id int
+    im_end_id   int
+    newline_id  int
+}
+
+fn resolve_preset(name string) !BenchPreset {
+    lower := name.to_lower()
+    if lower == '7b' || lower == '7b-q4_k_m' {
+        return BenchPreset{
+            name: '7b',
+            url: 'https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf',
+            model_path: 'models/Qwen2.5-7B-Instruct-Q4_K_M.gguf',
+            default_ctx: 8192,
+            approx_size: '4.68 GB',
+            desc: 'Qwen2.5-7B-Instruct Q4_K_M (28L, dim=3584, ffn=18944, 28Q/4KV, hd=128)'
+        }
+    }
+    if lower == '7b-q4_0' {
+        return BenchPreset{
+            name: '7b-q4_0',
+            url: 'https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_0.gguf',
+            model_path: 'models/Qwen2.5-7B-Instruct-Q4_0.gguf',
+            default_ctx: 8192,
+            approx_size: '4.44 GB',
+            desc: 'Qwen2.5-7B-Instruct Q4_0 (28L, dim=3584, ffn=18944, 28Q/4KV, hd=128)'
+        }
+    }
+    if lower == '7b-q8_0' {
+        return BenchPreset{
+            name: '7b-q8_0',
+            url: 'https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q8_0.gguf',
+            model_path: 'models/Qwen2.5-7B-Instruct-Q8_0.gguf',
+            default_ctx: 4096,
+            approx_size: '8.10 GB',
+            desc: 'Qwen2.5-7B-Instruct Q8_0 (28L, 8-bit High-VRAM / Bandwidth Stress)'
+        }
+    }
+    if lower == '3b' || lower == '3b-q4_k_m' {
+        return BenchPreset{
+            name: '3b',
+            url: 'https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf',
+            model_path: 'models/qwen2.5-3b-instruct-q4_k_m.gguf',
+            default_ctx: 16384,
+            approx_size: '2.10 GB',
+            desc: 'Qwen2.5-3B-Instruct Q4_K_M (36L, dim=2048, ffn=11008, 16Q/2KV, hd=128)'
+        }
+    }
+    if lower == '3b-q4_0' {
+        return BenchPreset{
+            name: '3b-q4_0',
+            url: 'https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_0.gguf',
+            model_path: 'models/qwen2.5-3b-instruct-q4_0.gguf',
+            default_ctx: 16384,
+            approx_size: '2.00 GB',
+            desc: 'Qwen2.5-3B-Instruct Q4_0 (36L, Long-Context up to 32K KV Stress)'
+        }
+    }
+    if lower == '1.5b' || lower == '1.5b-q4_k_m' {
+        return BenchPreset{
+            name: '1.5b',
+            url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+            model_path: 'models/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+            default_ctx: 16384,
+            approx_size: '1.12 GB',
+            desc: 'Qwen2.5-1.5B-Instruct Q4_K_M (28L, dim=1536, ffn=8960, 12Q/2KV, hd=128)'
+        }
+    }
+    return error('unknown preset "${name}" (valid: 7b, 7b-q4_0, 7b-q8_0, 3b, 3b-q4_0, 1.5b)')
+}
+
+fn fmt_f1(v f64) string {
+    if v < 0.0 {
+        neg := fmt_f1(-v)
+        return '-${neg}'
+    }
+    scaled := i64(v * 10.0 + 0.5)
+    whole := scaled / i64(10)
+    frac := int(scaled % i64(10))
+    return '${whole}.${frac}'
+}
+
+fn fmt_f2(v f64) string {
+    if v < 0.0 {
+        neg := fmt_f2(-v)
+        return '-${neg}'
+    }
+    scaled := i64(v * 100.0 + 0.5)
+    whole := scaled / i64(100)
+    rem := int(scaled % i64(100))
+    if rem < 10 {
+        return '${whole}.0${rem}'
+    }
+    return '${whole}.${rem}'
+}
+
+fn pad_l(s string, width int) string {
+    return strings.pad_left(s, width, ' ')
+}
+
+fn pad_r(s string, width int) string {
+    return strings.pad_right(s, width, ' ')
+}
+
+fn parse_int_csv(csv string) []int {
+    mut res := []int{}
+    if csv.len == 0 {
+        return res
+    }
+    parts := strings.split(csv, ',')
+    for p in parts {
+        tr := p.trim()
+        if tr.len > 0 {
+            val := tr.to_int() or { -1 }
+            if val >= 0 {
+                res.push(val)
+            }
+        }
+    }
+    return res
+}
+
+fn sort_f64s_asc(mut arr []f64) {
+    mut i := 0
+    for i < arr.len {
+        mut j := i + 1
+        for j < arr.len {
+            if arr[j] < arr[i] {
+                tmp := arr[i]
+                arr.set(i, arr[j])
+                arr.set(j, tmp)
+            }
+            j += 1
+        }
+        i += 1
+    }
+}
+
+fn dedup_sorted_ints(arr []int) []int {
+    mut work := []int{}
+    for v in arr {
+        work.push(v)
+    }
+    mut i := 0
+    for i < work.len {
+        mut j := i + 1
+        for j < work.len {
+            if work[j] < work[i] {
+                tmp := work[i]
+                work.set(i, work[j])
+                work.set(j, tmp)
+            }
+            j += 1
+        }
+        i += 1
+    }
+    mut dedup := []int{}
+    for v in work {
+        if dedup.len == 0 || dedup[dedup.len - 1] != v {
+            dedup.push(v)
+        }
+    }
+    return dedup
+}
+
+fn read_u32_le(buf []u8, offset int) int {
+    if offset < 0 || offset + 4 > buf.len {
+        return 0
+    }
+    b0 := int(buf[offset])
+    b1 := int(buf[offset + 1])
+    b2 := int(buf[offset + 2])
+    b3 := int(buf[offset + 3])
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn read_u64_le_as_int(buf []u8, offset int) int {
+    return read_u32_le(buf, offset)
+}
+
+fn read_f32_le(buf []u8, offset int) f32 {
+    bits := read_u32_le(buf, offset)
+    sign := (bits >> 31) & 1
+    exp := (bits >> 23) & 255
+    mant := bits & 8388607
+    if exp == 0 && mant == 0 {
+        return f32(0.0)
+    }
+    m := 1.0 + (f64(mant) / 8388608.0)
+    mut e := exp - 127
+    mut scale := 1.0
+    if e > 0 {
+        for e > 0 {
+            scale = scale * 2.0
+            e -= 1
+        }
+    } else if e < 0 {
+        for e < 0 {
+            scale = scale * 0.5
+            e += 1
+        }
+    }
+    mut res := m * scale
+    if sign == 1 {
+        res = -res
+    }
+    return f32(res)
+}
+
+fn read_gguf_string(buf []u8, offset int) string {
+    if offset < 0 || offset + 8 > buf.len {
+        return ''
+    }
+    slen := read_u64_le_as_int(buf, offset)
+    start := offset + 8
+    if slen <= 0 || start + slen > buf.len {
+        return ''
+    }
+    sub := buf.slice(start, start + slen)
+    return sub.to_string()
+}
+
+fn skip_gguf_value(buf []u8, offset int, vtype int) int {
+    if offset < 0 || offset >= buf.len {
+        return buf.len
+    }
+    if vtype == 0 || vtype == 1 || vtype == 7 {
+        if offset + 1 > buf.len { return buf.len }
+        return offset + 1
+    }
+    if vtype == 2 || vtype == 3 {
+        if offset + 2 > buf.len { return buf.len }
+        return offset + 2
+    }
+    if vtype == 4 || vtype == 5 || vtype == 6 {
+        if offset + 4 > buf.len { return buf.len }
+        return offset + 4
+    }
+    if vtype == 10 || vtype == 11 || vtype == 12 {
+        if offset + 8 > buf.len { return buf.len }
+        return offset + 8
+    }
+    if vtype == 8 {
+        if offset + 8 > buf.len { return buf.len }
+        slen := read_u64_le_as_int(buf, offset)
+        if slen < 0 || offset + 8 + slen > buf.len {
+            return buf.len
+        }
+        return offset + 8 + slen
+    }
+    if vtype == 9 {
+        if offset + 12 > buf.len { return buf.len }
+        elem_type := read_u32_le(buf, offset)
+        elem_count := read_u64_le_as_int(buf, offset + 4)
+        mut cur := offset + 12
+        if elem_count < 0 {
+            return buf.len
+        }
+        if elem_type == 0 || elem_type == 1 || elem_type == 7 {
+            next := cur + elem_count
+            if next > buf.len { return buf.len }
+            return next
+        }
+        if elem_type == 2 || elem_type == 3 {
+            next := cur + (elem_count * 2)
+            if next > buf.len { return buf.len }
+            return next
+        }
+        if elem_type == 4 || elem_type == 5 || elem_type == 6 {
+            next := cur + (elem_count * 4)
+            if next > buf.len { return buf.len }
+            return next
+        }
+        if elem_type == 10 || elem_type == 11 || elem_type == 12 {
+            next := cur + (elem_count * 8)
+            if next > buf.len { return buf.len }
+            return next
+        }
+        mut i := 0
+        for i < elem_count && cur < buf.len {
+            cur = skip_gguf_value(buf, cur, elem_type)
+            i += 1
+        }
+        return cur
+    }
+    return offset + 4
+}
+
+fn hash_token_str(s string) int {
+    mut h := 5381
+    mut i := 0
+    for i < s.len {
+        b := s.byte_at(i) or { 0 }
+        h = ((h * 33) + b) & 2147483647
+        i += 1
+    }
+    return h & 65535
+}
+
+fn parse_qwen2_gguf(
+    raw []u8,
+    gpt2_newline string,
+    mut vocab []string,
+    mut bucket_head []int,
+    mut next_in_bucket []int
+) !Qwen2Metadata {
+    if raw.len < 24 {
+        return error('GGUF file too small (< 24 bytes)')
+    }
+    magic := read_u32_le(raw, 0)
+    if magic != 1179993927 {
+        return error('invalid GGUF magic header (expected 0x46554747)')
+    }
+    version := read_u32_le(raw, 4)
+    n_tensors := read_u64_le_as_int(raw, 8)
+    n_kv := read_u64_le_as_int(raw, 16)
+
+    mut meta := Qwen2Metadata{
+        version: version,
+        n_tensors: n_tensors,
+        n_kv: n_kv,
+        arch: 'qwen2',
+        name: 'qwen2.5-instruct',
+        n_layers: 28,
+        dim: 3584,
+        ffn_dim: 18944,
+        n_heads: 28,
+        n_kv_heads: 4,
+        train_ctx: 32768,
+        vocab_size: 0,
+        rope_base: f32(1000000.0),
+        rms_eps: f32(0.000001),
+        bos_id: 151643,
+        eos_id: 151645,
+        im_start_id: 151644,
+        im_end_id: 151645,
+        newline_id: 198
+    }
+
+    mut b_init := 0
+    for b_init < 65536 {
+        bucket_head.push(-1)
+        b_init += 1
+    }
+
+    mut found_nl := false
+    mut cursor := 24
+    mut k := 0
+    for k < n_kv && cursor + 12 <= raw.len {
+        key := read_gguf_string(raw, cursor)
+        cursor = cursor + 8 + key.len
+        if cursor + 4 > raw.len {
+            break
+        }
+        vtype := read_u32_le(raw, cursor)
+        cursor = cursor + 4
+
+        if key == 'general.architecture' && vtype == 8 {
+            meta.arch = read_gguf_string(raw, cursor)
+            cursor = skip_gguf_value(raw, cursor, vtype)
+        } else if key == 'general.name' && vtype == 8 {
+            meta.name = read_gguf_string(raw, cursor)
+            cursor = skip_gguf_value(raw, cursor, vtype)
+        } else if key.ends_with('.block_count') && vtype == 4 {
+            meta.n_layers = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.context_length') && vtype == 4 {
+            meta.train_ctx = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.embedding_length') && vtype == 4 {
+            meta.dim = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.feed_forward_length') && vtype == 4 {
+            meta.ffn_dim = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.attention.head_count') && vtype == 4 {
+            meta.n_heads = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.attention.head_count_kv') && vtype == 4 {
+            meta.n_kv_heads = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.rope.freq_base') && vtype == 6 {
+            meta.rope_base = read_f32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key.ends_with('.attention.layer_norm_rms_epsilon') && vtype == 6 {
+            meta.rms_eps = read_f32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key == 'tokenizer.ggml.bos_token_id' && vtype == 4 {
+            meta.bos_id = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key == 'tokenizer.ggml.eos_token_id' && vtype == 4 {
+            meta.eos_id = read_u32_le(raw, cursor)
+            cursor = cursor + 4
+        } else if key == 'tokenizer.ggml.tokens' && vtype == 9 {
+            if cursor + 12 > raw.len {
+                break
+            }
+            elem_type := read_u32_le(raw, cursor)
+            elem_count := read_u64_le_as_int(raw, cursor + 4)
+            cursor = cursor + 12
+            if elem_type == 8 {
+                mut t_idx := 0
+                for t_idx < elem_count && cursor + 8 <= raw.len {
+                    slen := read_u64_le_as_int(raw, cursor)
+                    tok_str := read_gguf_string(raw, cursor)
+                    cursor = cursor + 8 + slen
+                    if tok_str == '<|im_start|>' {
+                        meta.im_start_id = t_idx
+                    } else if tok_str == '<|im_end|>' {
+                        meta.im_end_id = t_idx
+                    } else if !found_nl && (tok_str == gpt2_newline || tok_str == '\n') {
+                        meta.newline_id = t_idx
+                        found_nl = true
+                    }
+                    b := hash_token_str(tok_str)
+                    prev_head := bucket_head[b]
+                    next_in_bucket.push(prev_head)
+                    bucket_head.set(b, t_idx)
+                    vocab.push(tok_str)
+                    t_idx += 1
+                }
+            }
+        } else {
+            cursor = skip_gguf_value(raw, cursor, vtype)
+        }
+        k += 1
+    }
+
+    if vocab.len <= 0 {
+        return error('failed to index tokenizer.ggml.tokens from GGUF header (increase header read limit or check GGUF)')
+    }
+    meta.vocab_size = vocab.len
+
+    if meta.bos_id < 0 || meta.bos_id >= meta.vocab_size {
+        meta.bos_id = 0
+    }
+    if meta.eos_id < 0 || meta.eos_id >= meta.vocab_size {
+        meta.eos_id = meta.vocab_size - 1
+    }
+    if meta.im_start_id < 0 || meta.im_start_id >= meta.vocab_size {
+        meta.im_start_id = meta.bos_id
+    }
+    if meta.im_end_id < 0 || meta.im_end_id >= meta.vocab_size {
+        meta.im_end_id = meta.eos_id
+    }
+    if meta.newline_id < 0 || meta.newline_id >= meta.vocab_size {
+        meta.newline_id = 0
+    }
+
+    if meta.n_heads <= 0 || meta.n_kv_heads <= 0 || (meta.dim % meta.n_heads) != 0 || (meta.n_heads % meta.n_kv_heads) != 0 {
+        return error('invalid attention geometry: dim=${meta.dim}, n_heads=${meta.n_heads}, n_kv_heads=${meta.n_kv_heads}')
+    }
+
+    return meta
+}
+
+fn lookup_token_id(target string, vocab []string, bucket_head []int, next_in_bucket []int) int {
+    b := hash_token_str(target)
+    mut cur := bucket_head[b]
+    for cur >= 0 {
+        if vocab[cur] == target {
+            return cur
+        }
+        cur = next_in_bucket[cur]
+    }
+    return -1
+}
+
+fn bpe_encode_segment(text string, gpt2_space string, gpt2_newline string, vocab []string, bucket_head []int, next_in_bucket []int, mut out_ids []int) {
+    if text.len == 0 {
+        return
+    }
+    p1 := text.replace(' ', gpt2_space)
+    pre := p1.replace('\n', gpt2_newline)
+    mut pos := 0
+    for pos < pre.len {
+        mut max_l := pre.len - pos
+        if max_l > 24 {
+            max_l = 24
+        }
+        mut matched_id := -1
+        mut matched_len := 1
+        mut l := max_l
+        for l >= 1 {
+            sub := pre.slice(pos, pos + l)
+            tid := lookup_token_id(sub, vocab, bucket_head, next_in_bucket)
+            if tid >= 0 {
+                matched_id = tid
+                matched_len = l
+                break
+            }
+            l -= 1
+        }
+        if matched_id >= 0 {
+            out_ids.push(matched_id)
+        }
+        pos = pos + matched_len
+    }
+}
+
+fn encode_qwen2_chatml_turn(
+    sys_prompt string,
+    user_prompt string,
+    include_sys bool,
+    meta Qwen2Metadata,
+    gpt2_space string,
+    gpt2_newline string,
+    vocab []string,
+    bucket_head []int,
+    next_in_bucket []int
+) []int {
+    mut ids := []int{}
+    if include_sys {
+        ids.push(meta.im_start_id)
+        bpe_encode_segment('system\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+        bpe_encode_segment(sys_prompt, gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+        ids.push(meta.im_end_id)
+        ids.push(meta.newline_id)
+    }
+    ids.push(meta.im_start_id)
+    bpe_encode_segment('user\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+    bpe_encode_segment(user_prompt, gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+    ids.push(meta.im_end_id)
+    ids.push(meta.newline_id)
+    ids.push(meta.im_start_id)
+    bpe_encode_segment('assistant\n', gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket, mut ids)
+    return ids
+}
+
+fn decode_qwen2_token(raw_tok string, gpt2_space string, gpt2_newline string, gpt2_tab string) string {
+    s1 := raw_tok.replace(gpt2_space, ' ')
+    s2 := s1.replace(gpt2_newline, '\n')
+    res := s2.replace(gpt2_tab, '\t')
+    return res
+}
+
+fn load_gguf_or_die(path string, name string) tensor[f32] {
+    t := gguf_load_tensor(path, name) or {
+        println('Fatal error loading GGUF tensor ${name}: ${err}')
+        os.exit(1)
+    }
+    return t
+}
+
+fn load_gguf_bias_or_zeros(path string, name string, dim int) tensor[f32] {
+    t := gguf_load_tensor(path, name) or {
+        return tensor_fill(1, dim, 0.0)
+    }
+    return t
+}
+
+// ============================================================================
+// Single-Token Autoregressive Transformer Step (Decode M = 1)
+// ============================================================================
+// Dispatches 100% through VRAM-resident GPU operators (`gpu_rmsnorm`,
+// `gpu_linear` DP4A MMVQ, `gpu_rope`, `copy_row` D2D, `gpu_gqa_attention`,
+// `gpu_silu`, `tensor_elemwise_mul`) with 6-layer O(1) `arena {}` resets.
+fn qwen2_forward_step(
+    token_id int,
+    pos int,
+    meta Qwen2Metadata,
+    tok_emb tensor[f32],
+    l_an []tensor[f32],
+    l_wq []tensor[f32],
+    l_bq []tensor[f32],
+    l_wk []tensor[f32],
+    l_bk []tensor[f32],
+    l_wv []tensor[f32],
+    l_bv []tensor[f32],
+    l_wo []tensor[f32],
+    l_fn []tensor[f32],
+    l_w_gate []tensor[f32],
+    l_w_up []tensor[f32],
+    l_w_down []tensor[f32],
+    out_norm tensor[f32],
+    out_weight tensor[f32],
+    has_tied_out bool,
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32],
+    compute_logits bool
+) tensor[f32] {
+    head_dim := meta.dim / meta.n_heads
+    kv_dim := meta.n_kv_heads * head_dim
+    scale := f32(1.0 / math.sqrt(f64(head_dim)))
+
+    mut x := tensor_embedding(tok_emb, token_id)
+
+    mut l_base := 0
+    for l_base < meta.n_layers {
+        arena {
+            mut l_end := l_base + 6
+            if l_end > meta.n_layers {
+                l_end = meta.n_layers
+            }
+            mut l := l_base
+            for l < l_end {
+                xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+
+                q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+                k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+                v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+
+                q_heads := gpu_rope(q_lin.reshape_2d(meta.n_heads, head_dim), i64(pos), meta.rope_base)
+                k_heads := gpu_rope(k_lin.reshape_2d(meta.n_kv_heads, head_dim), i64(pos), meta.rope_base)
+                k_flat := k_heads.reshape_2d(1, kv_dim)
+
+                k_caches[l].copy_row(pos, k_flat)
+                v_caches[l].copy_row(pos, v)
+
+                attn_out := gpu_gqa_attention(q_heads, k_caches[l], v_caches[l], i64(pos), scale)
+                attn_flat := attn_out.reshape_2d(1, meta.dim)
+                attn_proj := attn_flat.gpu_linear(l_wo[l])
+                x2 := x + attn_proj
+
+                x2n := gpu_rmsnorm(x2, l_fn[l], meta.rms_eps)
+                gate := gpu_silu(x2n.gpu_linear(l_w_gate[l]))
+                up := x2n.gpu_linear(l_w_up[l])
+                ffn_hidden := tensor_elemwise_mul(gate, up)
+                down := ffn_hidden.gpu_linear(l_w_down[l])
+                x_next := x2 + down
+                x.copy_row(0, x_next)
+                l += 1
+            }
+        }
+        l_base += 6
+    }
+
+    if !compute_logits {
+        return tensor_fill(1, 1, 0.0)
+    }
+
+    xf := gpu_rmsnorm(x, out_norm, meta.rms_eps)
+    if has_tied_out {
+        tied_logits := xf.gpu_linear(tok_emb)
+        return tied_logits
+    }
+    logits := xf.gpu_linear(out_weight)
+    return logits
+}
+
+// ============================================================================
+// Chunked Batched Prefill Pass (WMMA Tensor Core GEMM + Causal FlashAttention)
+// ============================================================================
+// Processes long prompts in `chunk_limit` slices (default 512) with 3-layer
+// arena sweeps to bound peak FFN activation VRAM (~585 MiB on 7B ffn=18944).
+fn qwen2_forward_prefill(
+    tokens []int,
+    start_pos int,
+    chunk_limit int,
+    meta Qwen2Metadata,
+    tok_emb tensor[f32],
+    l_an []tensor[f32],
+    l_wq []tensor[f32],
+    l_bq []tensor[f32],
+    l_wk []tensor[f32],
+    l_bk []tensor[f32],
+    l_wv []tensor[f32],
+    l_bv []tensor[f32],
+    l_wo []tensor[f32],
+    l_fn []tensor[f32],
+    l_w_gate []tensor[f32],
+    l_w_up []tensor[f32],
+    l_w_down []tensor[f32],
+    out_norm tensor[f32],
+    out_weight tensor[f32],
+    has_tied_out bool,
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32],
+    compute_logits bool
+) tensor[f32] {
+    if tokens.len <= 0 {
+        return tensor_fill(1, 1, 0.0)
+    }
+    head_dim := meta.dim / meta.n_heads
+    kv_dim := meta.n_kv_heads * head_dim
+    scale := f32(1.0 / math.sqrt(f64(head_dim)))
+    mut c_lim := chunk_limit
+    if c_lim < 16 {
+        c_lim = 16
+    }
+
+    mut c_start := 0
+    for c_start < tokens.len {
+        mut c_end := c_start + c_lim
+        if c_end > tokens.len {
+            c_end = tokens.len
+        }
+        chunk_tokens := tokens.slice(c_start, c_end)
+        m := chunk_tokens.len
+        cur_pos := start_pos + c_start
+
+        mut x := tensor_embedding_batch(tok_emb, chunk_tokens)
+
+        mut l_base := 0
+        for l_base < meta.n_layers {
+            arena {
+                mut l_end := l_base + 3
+                if l_end > meta.n_layers {
+                    l_end = meta.n_layers
+                }
+                mut l := l_base
+                for l < l_end {
+                    xn := gpu_rmsnorm(x, l_an[l], meta.rms_eps)
+
+                    q_lin := xn.gpu_linear(l_wq[l]) + l_bq[l]
+                    k_lin := xn.gpu_linear(l_wk[l]) + l_bk[l]
+                    v := xn.gpu_linear(l_wv[l]) + l_bv[l]
+
+                    q_heads := gpu_rope_seq(q_lin.reshape_2d(m * meta.n_heads, head_dim), i64(cur_pos), meta.n_heads, meta.rope_base)
+                    k_heads := gpu_rope_seq(k_lin.reshape_2d(m * meta.n_kv_heads, head_dim), i64(cur_pos), meta.n_kv_heads, meta.rope_base)
+                    k_flat := k_heads.reshape_2d(m, kv_dim)
+
+                    k_caches[l].copy_rows(cur_pos, k_flat)
+                    v_caches[l].copy_rows(cur_pos, v)
+
+                    attn_out := gpu_gqa_prefill(q_heads, k_caches[l], v_caches[l], i64(cur_pos), m, meta.n_heads, scale)
+                    attn_flat := attn_out.reshape_2d(m, meta.dim)
+                    attn_proj := attn_flat.gpu_linear(l_wo[l])
+                    x2 := x + attn_proj
+
+                    x2n := gpu_rmsnorm(x2, l_fn[l], meta.rms_eps)
+                    gate := gpu_silu(x2n.gpu_linear(l_w_gate[l]))
+                    up := x2n.gpu_linear(l_w_up[l])
+                    ffn_hidden := tensor_elemwise_mul(gate, up)
+                    down := ffn_hidden.gpu_linear(l_w_down[l])
+                    x_next := x2 + down
+                    x.copy_rows(0, x_next)
+                    l += 1
+                }
+            }
+            l_base += 3
+        }
+
+        if compute_logits && c_end == tokens.len {
+            x_last := x.slice_rows(m - 1, m)
+            xf := gpu_rmsnorm(x_last, out_norm, meta.rms_eps)
+            if has_tied_out {
+                tied_logits := xf.gpu_linear(tok_emb)
+                return tied_logits
+            }
+            logits := xf.gpu_linear(out_weight)
+            return logits
+        }
+
+        c_start = c_end
+    }
+
+    return tensor_fill(1, 1, 0.0)
+}
+
+fn make_synth_tokens(count int, vocab_len int, seed_offset int, im_end_id int) []int {
+    mut toks := []int{}
+    mut mod_v := vocab_len
+    if mod_v <= 0 {
+        mod_v = 256
+    }
+    mut i := 0
+    for i < count {
+        mut tid := (101 + seed_offset * 31 + i * 17) % mod_v
+        if tid == im_end_id && mod_v > 2 {
+            tid = (tid + 1) % mod_v
+        }
+        toks.push(tid)
+        i += 1
+    }
+    return toks
+}
+
+fn compute_linear_flops_per_tok(meta Qwen2Metadata, kv_dim int) f64 {
+    d := f64(meta.dim)
+    d_kv := f64(kv_dim)
+    f := f64(meta.ffn_dim)
+    nl := f64(meta.n_layers)
+    return 2.0 * nl * (2.0 * d * d + 2.0 * d * d_kv + 3.0 * d * f)
+}
+
+fn estimate_active_weight_bytes(meta Qwen2Metadata, kv_dim int, vocab_rows int, has_tied_out bool, file_bytes i64) f64 {
+    d := f64(meta.dim)
+    d_kv := f64(kv_dim)
+    f := f64(meta.ffn_dim)
+    nl := f64(meta.n_layers)
+    layer_elems := nl * (2.0 * d * d + 2.0 * d * d_kv + 3.0 * d * f)
+    emb_elems := d * f64(vocab_rows)
+    active_elems := layer_elems + emb_elems
+    mut all_2d_elems := layer_elems + emb_elems
+    if !has_tied_out {
+        all_2d_elems = all_2d_elems + emb_elems
+    }
+    if file_bytes > i64(8000000) && all_2d_elems > 0.0 {
+        mut frac := 1.0
+        if !has_tied_out {
+            frac = active_elems / all_2d_elems
+        }
+        return f64(file_bytes - i64(6000000)) * frac
+    }
+    return active_elems * 0.5625
+}
+
+fn run_chatml_turn(
+    turn_tokens []int,
+    user_prompt string,
+    max_context int,
+    max_new_tokens int,
+    temperature f32,
+    chunk_limit int,
+    meta Qwen2Metadata,
+    vocab []string,
+    gpt2_space string,
+    gpt2_newline string,
+    gpt2_tab string,
+    tok_emb tensor[f32],
+    l_an []tensor[f32],
+    l_wq []tensor[f32],
+    l_bq []tensor[f32],
+    l_wk []tensor[f32],
+    l_bk []tensor[f32],
+    l_wv []tensor[f32],
+    l_bv []tensor[f32],
+    l_wo []tensor[f32],
+    l_fn []tensor[f32],
+    l_w_gate []tensor[f32],
+    l_w_up []tensor[f32],
+    l_w_down []tensor[f32],
+    out_norm tensor[f32],
+    out_weight tensor[f32],
+    has_tied_out bool,
+    mut k_caches []tensor[f32],
+    mut v_caches []tensor[f32]
+) {
+    println('User     > ${user_prompt}')
+    print('Qwen2.5  > ')
+
+    mut kv_pos := 0
+    mut next_token := meta.eos_id
+    mut prefill_n := turn_tokens.len
+    if prefill_n > max_context - 2 {
+        prefill_n = max_context - 2
+    }
+
+    gpu.sync()
+    t0 := time.monotonic_ns()
+    if prefill_n == 1 {
+        logits := qwen2_forward_step(
+            turn_tokens[0], 0, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        next_token = int(sample_token(logits, temperature))
+        kv_pos = 1
+    } else if prefill_n > 1 {
+        prompt_sub := turn_tokens.slice(0, prefill_n)
+        logits := qwen2_forward_prefill(
+            prompt_sub, 0, chunk_limit, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        next_token = int(sample_token(logits, temperature))
+        kv_pos = prefill_n
+    }
+    gpu.sync()
+    pp_ms := f64(time.monotonic_ns() - t0) / 1000000.0
+
+    t_g0 := time.monotonic_ns()
+    mut gen_steps := 0
+    for gen_steps < max_new_tokens {
+        if kv_pos >= max_context - 1 {
+            break
+        }
+        if next_token == meta.eos_id || next_token == meta.im_end_id || next_token == meta.bos_id {
+            break
+        }
+        if next_token >= 0 && next_token < vocab.len {
+            piece := decode_qwen2_token(vocab[next_token], gpt2_space, gpt2_newline, gpt2_tab)
+            print(piece)
+        }
+        logits := qwen2_forward_step(
+            next_token, kv_pos, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        next_token = int(sample_token(logits, temperature))
+        kv_pos += 1
+        gen_steps += 1
+    }
+    gpu.sync()
+    tg_ms := f64(time.monotonic_ns() - t_g0) / 1000000.0
+
+    mut safe_pp_ms := pp_ms
+    if safe_pp_ms < 0.001 { safe_pp_ms = 0.001 }
+    mut safe_tg_ms := tg_ms
+    if safe_tg_ms < 0.001 { safe_tg_ms = 0.001 }
+
+    pp_tps := (f64(prefill_n) * 1000.0) / safe_pp_ms
+    tg_tps := (f64(gen_steps) * 1000.0) / safe_tg_ms
+
+    println('')
+    println('           [chatml | pp${prefill_n}: ${fmt_f2(pp_ms)} ms (${fmt_f1(pp_tps)} tok/s) | tg${gen_steps}: ${fmt_f2(tg_ms)} ms (${fmt_f1(tg_tps)} tok/s) | kv_pos=${kv_pos}]')
+}
+
+fn main() {
+    mut preset_name := '7b'
+    mut model_path := ''
+    mut hf_url := ''
+    mut user_ctx := 0
+    mut chunk_limit := 512
+    mut pp_csv := ''
+    mut kv_csv := ''
+    mut tg_steps := 64
+    mut reps := 3
+    mut warmup_n := 64
+    mut verify_chat := false
+    mut custom_prompt := ''
+    mut sys_prompt := 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.'
+    mut max_new_tokens := 64
+    mut temperature := f32(0.0)
+    mut use_gpu := true
+    mut gpu_backend_arg := ''
+    mut gpu_device_arg := ''
+    mut verbose_rt := false
+
+    os.set_quiet_rt(true)
+    cli_args := os.args()
+    mut a_idx := 1
+    for a_idx < cli_args.len {
+        arg := cli_args[a_idx]
+        if arg == '-h' || arg == '--help' {
+            println('Usage: ./bench46 [options]  (build: vira build -prod -o bench46 docs/examples/46_qwen2_5_t4_large_ctx_benchmark.vir)')
+            println('')
+            println('Model Presets & Paths:')
+            println('  --preset <name>        7b (default, 4.68 GB Q4_K_M @ ctx 8192),')
+            println('                         7b-q4_0, 7b-q8_0, 3b, 3b-q4_0, 1.5b')
+            println('  -m, --model <path>     Custom local GGUF v3 file path')
+            println('  --url <url>            Custom Hugging Face / HTTPS GGUF URL')
+            println('')
+            println('Benchmark Configuration:')
+            println('  -c, --ctx <int>        Max context / KV cache rows (default: 8192 for 7B, 16384 for 3B)')
+            println('  --chunk <int>          Batched prefill micro-batch chunk size (default: 512)')
+            println('  --pp-list <csv>        Comma-separated prefill sizes (default auto-fits ctx, e.g. 128,512,1024,2048,4096)')
+            println('  --kv-list <csv>        Comma-separated KV depths for decode tests (default: 0,1024,2048,4096,6144)')
+            println('  --tg <int>             Decode tokens generated per KV depth (default: 64)')
+            println('  --reps <int>           Timed repetitions per point (default: 3)')
+            println('  --warmup <int>         Warmup prefill token count (default: 64)')
+            println('  --verify               Run an additional ChatML greedy coherence sanity prompt')
+            println('  -p, --prompt <text>    Run standalone ChatML prompt instead of synthetic sweeps')
+            println('  --system <text>        Custom ChatML system prompt')
+            println('  -n, --max-tokens <int> Max generated tokens for -p / --verify (default: 64)')
+            println('  -t, --temp <float>     Sampling temperature for -p / --verify (default: 0.0)')
+            println('')
+            println('Hardware & Runtime:')
+            println('  --gpu                  Enable GPU offload (default: on when GPU available)')
+            println('  --cpu                  Force CPU SIMD fallback')
+            println('  --gpu-backend <name>   "auto", "cuda", "opencl", or "cpu"')
+            println('  --gpu-device <filter>  Device index ("0") or substring ("T4")')
+            println('  --verbose-rt           Show Vira runtime leak / arena diagnostic banner')
+            println('  -h, --help             Display this help message')
+            return
+        } else if arg == '--preset' && a_idx + 1 < cli_args.len {
+            preset_name = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if (arg == '-m' || arg == '--model') && a_idx + 1 < cli_args.len {
+            model_path = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if arg == '--url' && a_idx + 1 < cli_args.len {
+            hf_url = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if (arg == '-c' || arg == '--ctx' || arg == '--context') && a_idx + 1 < cli_args.len {
+            user_ctx = cli_args[a_idx + 1].to_int() or { 0 }
+            a_idx += 1
+        } else if arg == '--chunk' && a_idx + 1 < cli_args.len {
+            chunk_limit = cli_args[a_idx + 1].to_int() or { 512 }
+            if chunk_limit < 16 { chunk_limit = 16 }
+            a_idx += 1
+        } else if arg == '--pp-list' && a_idx + 1 < cli_args.len {
+            pp_csv = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if arg == '--kv-list' && a_idx + 1 < cli_args.len {
+            kv_csv = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if arg == '--tg' && a_idx + 1 < cli_args.len {
+            tg_steps = cli_args[a_idx + 1].to_int() or { 64 }
+            if tg_steps < 1 { tg_steps = 1 }
+            a_idx += 1
+        } else if arg == '--reps' && a_idx + 1 < cli_args.len {
+            reps = cli_args[a_idx + 1].to_int() or { 3 }
+            if reps < 1 { reps = 1 }
+            a_idx += 1
+        } else if arg == '--warmup' && a_idx + 1 < cli_args.len {
+            warmup_n = cli_args[a_idx + 1].to_int() or { 64 }
+            if warmup_n < 1 { warmup_n = 1 }
+            a_idx += 1
+        } else if arg == '--verify' {
+            verify_chat = true
+        } else if (arg == '-p' || arg == '--prompt') && a_idx + 1 < cli_args.len {
+            custom_prompt = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if arg == '--system' && a_idx + 1 < cli_args.len {
+            sys_prompt = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if (arg == '-n' || arg == '--max-tokens') && a_idx + 1 < cli_args.len {
+            max_new_tokens = cli_args[a_idx + 1].to_int() or { 64 }
+            if max_new_tokens < 1 { max_new_tokens = 1 }
+            a_idx += 1
+        } else if (arg == '-t' || arg == '--temp') && a_idx + 1 < cli_args.len {
+            temperature = cli_args[a_idx + 1].to_f32() or { f32(0.0) }
+            a_idx += 1
+        } else if arg == '--gpu' {
+            use_gpu = true
+        } else if arg == '--cpu' {
+            use_gpu = false
+        } else if arg == '--gpu-backend' && a_idx + 1 < cli_args.len {
+            gpu_backend_arg = cli_args[a_idx + 1]
+            use_gpu = (gpu_backend_arg.to_lower() != 'cpu')
+            a_idx += 1
+        } else if arg == '--gpu-device' && a_idx + 1 < cli_args.len {
+            gpu_device_arg = cli_args[a_idx + 1]
+            a_idx += 1
+        } else if arg == '--verbose-rt' {
+            verbose_rt = true
+            os.set_quiet_rt(false)
+        } else if strings.has_prefix(arg, '-') {
+            eprintln('Error: unknown or incomplete option "${arg}" (pass --help for usage)')
+            os.exit(1)
+        }
+        a_idx += 1
+    }
+
+    preset := resolve_preset(preset_name) or {
+        eprintln('Error: ${err}')
+        os.exit(1)
+    }
+
+    custom_model_set := (model_path.len > 0)
+    custom_url_set := (hf_url.len > 0)
+    if !custom_model_set {
+        model_path = preset.model_path
+    }
+    if !custom_url_set {
+        hf_url = preset.url
+    }
+
+    mut max_context := preset.default_ctx
+    if user_ctx > 0 {
+        max_context = user_ctx
+    }
+    if max_context < 64 {
+        max_context = 64
+    }
+
+    // Build prefill & KV decode benchmark schedules before allocating KV cache
+    mut pp_list := []int{}
+    if pp_csv.len > 0 {
+        raw_pp := parse_int_csv(pp_csv)
+        for p in raw_pp {
+            if p >= 1 {
+                pp_list.push(p)
+            }
+        }
+    } else {
+        defaults_pp := []int{128, 512, 1024, 2048, 4096, 8192}
+        for p in defaults_pp {
+            if p + 8 <= max_context {
+                pp_list.push(p)
+            }
+        }
+        if pp_list.len == 0 {
+            pp_list.push(max_context / 2)
+        }
+    }
+
+    mut kv_list := []int{}
+    if kv_csv.len > 0 {
+        kv_list = parse_int_csv(kv_csv)
+    } else {
+        defaults_kv := []int{0, 1024, 2048, 4096, 6144, 12288}
+        for kd in defaults_kv {
+            if kd + tg_steps + 4 <= max_context {
+                kv_list.push(kd)
+            }
+        }
+        if kv_list.len == 0 {
+            kv_list.push(0)
+        }
+    }
+
+    // Auto-expand max_context only when explicit schedules need more room & -c was omitted
+    if user_ctx == 0 {
+        mut needed_ctx := max_context
+        for p in pp_list {
+            if p + 16 > needed_ctx {
+                needed_ctx = p + 16
+            }
+        }
+        for kd in kv_list {
+            if kd + tg_steps + 16 > needed_ctx {
+                needed_ctx = kd + tg_steps + 16
+            }
+        }
+        max_context = needed_ctx
+    }
+
+    // Filter out-of-range items if user explicitly capped -c
+    mut filtered_pp := []int{}
+    for p in pp_list {
+        if p >= 1 && p + 2 <= max_context {
+            filtered_pp.push(p)
+        } else {
+            println('Note: skipping pp=${p} (exceeds -c ${max_context} - 2)')
+        }
+    }
+    pp_list = filtered_pp
+
+    mut filtered_kv := []int{}
+    for kd in kv_list {
+        if kd >= 0 && kd + tg_steps + 2 <= max_context {
+            filtered_kv.push(kd)
+        } else {
+            println('Note: skipping kv=${kd} (kv + tg ${tg_steps} exceeds -c ${max_context} - 2)')
+        }
+    }
+    kv_list = dedup_sorted_ints(filtered_kv)
+
+    println('================================================================================')
+    println('  Pure Vira Qwen 2.5 Large-Model / Large-Context Tesla T4 GPU Benchmark (v1.0)  ')
+    println('================================================================================')
+    if !custom_model_set {
+        println('Preset          : ${preset.name} (${preset.approx_size}) - ${preset.desc}')
+    }
+
+    // 1. Download GGUF model safely via .part staging if missing
+    if !os.exists(model_path) {
+        if custom_model_set && !custom_url_set {
+            eprintln('Error: model file not found at "${model_path}" (pass --url <hf_url> to auto-download).')
+            os.exit(1)
+        }
+        parent_dir := os.dir_name(model_path)
+        if parent_dir.len > 0 && parent_dir != '.' && !os.is_dir(parent_dir) {
+            _ := os.mkdir_all(parent_dir, 493) or { false }
+        }
+        part_path := '${model_path}.part'
+        println('-> Downloading GGUF model via Hugging Face...')
+        println('   URL  : ${hf_url}')
+        println('   Dest : ${model_path}')
+        mut dl_cmd := exec.Command.new('curl', ['-fL', '-C', '-', '--progress-bar', '-o', part_path, hf_url])
+        dl_cmd.set_inherit_stdio(true)
+        dl_code := dl_cmd.run() or {
+            eprintln('Failed to execute curl for download: ${err}')
+            os.exit(1)
+        }
+        if dl_code != 0 {
+            eprintln('curl exited with code ${dl_code}. Partial file kept at ${part_path} for resume.')
+            os.exit(1)
+        }
+        _ := io.rename(part_path, model_path) or {
+            eprintln('Failed to move downloaded file ${part_path} -> ${model_path}: ${err}')
+            os.exit(1)
+        }
+        println('   Download complete!')
+    }
+
+    // Query exact GGUF file size if 64-bit ftell succeeded
+    mut model_file_bytes := i64(0)
+    mut stat_f := io.File.open(model_path, 'rb') or {
+        eprintln('Failed to open model file ${model_path}: ${err}')
+        os.exit(1)
+    }
+    model_file_bytes = stat_f.size()
+    _ := stat_f.close() or { false }
+
+    // 2. Initialize GPU runtime BEFORE calling gpu.set_enabled(use_gpu)
+    //    so `--cpu` is never overwritten by lazy initialization inside gpu.device_name().
+    if gpu_backend_arg.len > 0 {
+        gpu.set_backend(gpu_backend_arg)
+    }
+    if gpu_device_arg.len > 0 {
+        gpu.set_device(gpu_device_arg)
+    }
+    _ := gpu.info()
+    gpu.set_enabled(use_gpu)
+    dev := gpu.info()
+
+    // 3. Parse GGUF v3 header (up to 12 MB covers all Qwen2.5 1.5B/3B/7B KV + merges)
+    sp_bytes := []u8{196, 160}
+    nl_bytes := []u8{196, 138}
+    tb_bytes := []u8{196, 137}
+    gpt2_space := sp_bytes.to_string()
+    gpt2_newline := nl_bytes.to_string()
+    gpt2_tab := tb_bytes.to_string()
+
+    t_hdr0 := time.monotonic_ns()
+    raw_hdr := os.read_bytes_head(model_path, 12000000) or {
+        eprintln('Failed to read GGUF header from ${model_path}: ${err}')
+        os.exit(1)
+    }
+    mut vocab := []string{}
+    mut bucket_head := []int{}
+    mut next_in_bucket := []int{}
+    meta := parse_qwen2_gguf(raw_hdr, gpt2_newline, mut vocab, mut bucket_head, mut next_in_bucket) or {
+        eprintln('GGUF header parse error: ${err}')
+        os.exit(1)
+    }
+    hdr_ms := f64(time.monotonic_ns() - t_hdr0) / 1000000.0
+
+    head_dim := meta.dim / meta.n_heads
+    kv_dim := meta.n_kv_heads * head_dim
+    kv_cache_bytes := i64(2) * i64(meta.n_layers) * i64(max_context) * i64(kv_dim) * i64(4)
+    kv_cache_mb := f64(kv_cache_bytes) / 1048576.0
+    vram_tot_mb := gpu.vram_mb()
+
+    mut size_tag := 'size>2GB (Win32 32-bit ftell)'
+    if model_file_bytes > i64(0) {
+        size_mib := f64(model_file_bytes) / 1048576.0
+        size_gib := f64(model_file_bytes) / 1073741824.0
+        size_tag = '${fmt_f1(size_mib)} MiB (${fmt_f2(size_gib)} GiB)'
+    }
+
+    mut tc_tag := 'No Tensor Cores'
+    if dev.has_tensor_cores {
+        tc_tag = 'Tensor Cores (WMMA FP16 + DP4A)'
+    }
+    mut compute_line := 'CPU SIMD Fallback (no GPU detected)'
+    if dev.available {
+        compute_line = '${dev.device_name} | ${dev.backend_name} | ${tc_tag} | enabled=${dev.enabled}'
+    }
+
+    println('Model File      : ${model_path} [${size_tag}]')
+    println('Architecture    : ${meta.arch} (${meta.name}, GGUF v${meta.version}, ${meta.n_tensors} tensors, vocab=${meta.vocab_size})')
+    println('Geometry        : layers=${meta.n_layers}, dim=${meta.dim}, ffn=${meta.ffn_dim}, head_dim=${head_dim}, GQA=${meta.n_heads}Q/${meta.n_kv_heads}KV (mul=${meta.n_heads / meta.n_kv_heads})')
+    println('Context & KV    : max_context=${max_context} (train_ctx=${meta.train_ctx}) | FP32 KV=${fmt_f1(kv_cache_mb)} MiB | prefill_chunk=${chunk_limit}')
+    println('Compute Device  : ${compute_line}')
+    if dev.available && dev.vram_bytes > i64(0) {
+        println('Device VRAM     : ${vram_tot_mb} MiB total (Tesla T4 Ref: 15360 MiB GDDR6, 320.0 GB/s, 65.0 TFLOPS FP16 TC)')
+    }
+    println('Header Indexed  : ${vocab.len} tokens in ${fmt_f1(hdr_ms)} ms')
+
+    // 4. Load all GGUF tensors & allocate persistent FP32 KV caches
+    print('Loading ${meta.n_tensors} GGUF tensors + allocating ${fmt_f1(kv_cache_mb)} MiB KV cache... ')
+    t_load0 := time.monotonic_ns()
+
+    tok_emb := load_gguf_or_die(model_path, 'token_embd.weight')
+    out_norm := load_gguf_or_die(model_path, 'output_norm.weight')
+    mut has_tied_out := false
+    out_weight := gguf_load_tensor(model_path, 'output.weight') or {
+        has_tied_out = true
+        tensor_fill(1, 1, 0.0)
+    }
+
+    mut l_an := []tensor[f32]{}
+    mut l_wq := []tensor[f32]{}
+    mut l_bq := []tensor[f32]{}
+    mut l_wk := []tensor[f32]{}
+    mut l_bk := []tensor[f32]{}
+    mut l_wv := []tensor[f32]{}
+    mut l_bv := []tensor[f32]{}
+    mut l_wo := []tensor[f32]{}
+    mut l_fn := []tensor[f32]{}
+    mut l_w_gate := []tensor[f32]{}
+    mut l_w_up := []tensor[f32]{}
+    mut l_w_down := []tensor[f32]{}
+
+    mut k_caches := []tensor[f32]{}
+    mut v_caches := []tensor[f32]{}
+
+    mut l := 0
+    for l < meta.n_layers {
+        prefix := 'blk.${l}'
+        an_name := '${prefix}.attn_norm.weight'
+        wq_name := '${prefix}.attn_q.weight'
+        bq_name := '${prefix}.attn_q.bias'
+        wk_name := '${prefix}.attn_k.weight'
+        bk_name := '${prefix}.attn_k.bias'
+        wv_name := '${prefix}.attn_v.weight'
+        bv_name := '${prefix}.attn_v.bias'
+        wo_name := '${prefix}.attn_output.weight'
+        fn_name := '${prefix}.ffn_norm.weight'
+        w_gate_name := '${prefix}.ffn_gate.weight'
+        w_up_name := '${prefix}.ffn_up.weight'
+        w_down_name := '${prefix}.ffn_down.weight'
+
+        l_an.push(load_gguf_or_die(model_path, an_name))
+        l_wq.push(load_gguf_or_die(model_path, wq_name))
+        l_bq.push(load_gguf_bias_or_zeros(model_path, bq_name, meta.dim))
+        l_wk.push(load_gguf_or_die(model_path, wk_name))
+        l_bk.push(load_gguf_bias_or_zeros(model_path, bk_name, kv_dim))
+        l_wv.push(load_gguf_or_die(model_path, wv_name))
+        l_bv.push(load_gguf_bias_or_zeros(model_path, bv_name, kv_dim))
+        l_wo.push(load_gguf_or_die(model_path, wo_name))
+        l_fn.push(load_gguf_or_die(model_path, fn_name))
+        l_w_gate.push(load_gguf_or_die(model_path, w_gate_name))
+        l_w_up.push(load_gguf_or_die(model_path, w_up_name))
+        l_w_down.push(load_gguf_or_die(model_path, w_down_name))
+
+        k_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+        v_caches.push(tensor_fill(max_context, kv_dim, 0.0))
+        l += 1
+    }
+
+    load_ms := f64(time.monotonic_ns() - t_load0) / 1000000.0
+    println('done in ${fmt_f1(load_ms)} ms (tied_out=${has_tied_out})')
+    if dev.available && dev.enabled {
+        pre_vram_mb := f64(gpu.allocated_bytes()) / 1048576.0
+        println('VRAM Pre-Warmup : ${fmt_f1(pre_vram_mb)} MiB / ${vram_tot_mb} MiB (weights staged in compressed VRAM)')
+    }
+
+    // Standalone prompt mode (-p "...")
+    if custom_prompt.len > 0 {
+        println('--------------------------------------------------------------------------------')
+        turn_tokens := encode_qwen2_chatml_turn(
+            sys_prompt, custom_prompt, true, meta,
+            gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket
+        )
+        run_chatml_turn(
+            turn_tokens, custom_prompt, max_context, max_new_tokens, temperature, chunk_limit,
+            meta, vocab, gpt2_space, gpt2_newline, gpt2_tab, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches
+        )
+        println('--------------------------------------------------------------------------------')
+        return
+    }
+
+    // 5. Warmup pass (populates CUDA PTX kernels, weight cache, Q8_1 scratch, KV device buffers)
+    println('--------------------------------------------------------------------------------')
+    mut eff_warmup := warmup_n
+    if eff_warmup >= max_context - 8 {
+        eff_warmup = max_context / 2
+    }
+    if eff_warmup < 2 {
+        eff_warmup = 2
+    }
+    oom_before := gpu.oom_fallbacks()
+    print('[Warmup] Running pp${eff_warmup} + tg4 (PTX JIT & VRAM residency warmup)... ')
+    w_toks := make_synth_tokens(eff_warmup, tok_emb.rows, 1, meta.im_end_id)
+    gpu.sync()
+    t_w0 := time.monotonic_ns()
+    w_logits := qwen2_forward_prefill(
+        w_toks, 0, chunk_limit, meta, tok_emb,
+        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+        mut k_caches, mut v_caches, true
+    )
+    mut w_tok := int(sample_token(w_logits, f32(0.0)))
+    mut ws := 0
+    for ws < 4 && (eff_warmup + ws) < max_context - 1 {
+        dl := qwen2_forward_step(
+            w_tok, eff_warmup + ws, meta, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches, true
+        )
+        w_tok = int(sample_token(dl, f32(0.0)))
+        ws += 1
+    }
+    gpu.sync()
+    warm_ms := f64(time.monotonic_ns() - t_w0) / 1000000.0
+    warm_vram_mb := f64(gpu.allocated_bytes()) / 1048576.0
+    println('done in ${fmt_f1(warm_ms)} ms (VRAM=${fmt_f1(warm_vram_mb)} MiB / ${vram_tot_mb} MiB, OOM_fallbacks=${gpu.oom_fallbacks()})')
+
+    linear_flops_tok := compute_linear_flops_per_tok(meta, kv_dim)
+    lm_head_flops := 2.0 * f64(meta.dim) * f64(tok_emb.rows)
+    active_weight_bytes := estimate_active_weight_bytes(meta, kv_dim, tok_emb.rows, has_tied_out, model_file_bytes)
+    active_weight_mb := active_weight_bytes / 1048576.0
+
+    mut best_pp_tps := 0.0
+    mut best_pp_tflops := 0.0
+    mut best_pp_label := 'n/a'
+    mut best_tg_tps := 0.0
+    mut best_tg_gbps := 0.0
+    mut best_tg_label := 'n/a'
+
+    // 6. Suite A: Batched Prefill (`pp`) Scaling & Tensor Core Compute Sweep
+    if pp_list.len > 0 {
+        println('')
+        println('=== Suite A: Batched Prefill Scaling (reps=${reps}, chunk=${chunk_limit}, T4 Peak=65.0 TFLOPS FP16) ===')
+        c_test := pad_r('Test', 9)
+        c_avg_ms := pad_l('Avg ms', 10)
+        c_min_ms := pad_l('Min ms', 10)
+        c_avg_tps := pad_l('Avg tok/s', 11)
+        c_peak_tps := pad_l('Peak tok/s', 11)
+        c_tflops := pad_l('TFLOPS', 7)
+        c_tc := pad_l('% T4 TC', 7)
+        println('${c_test} | ${c_avg_ms} | ${c_min_ms} | ${c_avg_tps} | ${c_peak_tps} | ${c_tflops} | ${c_tc}')
+        println('----------+------------+------------+-------------+-------------+---------+--------')
+
+        for pp in pp_list {
+            prompt_toks := make_synth_tokens(pp, tok_emb.rows, pp, meta.im_end_id)
+            mut run_times := []f64{}
+            mut sum_ms := 0.0
+            mut r := 0
+            for r < reps {
+                gpu.sync()
+                tp0 := time.monotonic_ns()
+                if pp == 1 {
+                    lg := qwen2_forward_step(
+                        prompt_toks[0], 0, meta, tok_emb,
+                        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                        mut k_caches, mut v_caches, true
+                    )
+                    _ := sample_token(lg, f32(0.0))
+                } else {
+                    lg := qwen2_forward_prefill(
+                        prompt_toks, 0, chunk_limit, meta, tok_emb,
+                        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                        mut k_caches, mut v_caches, true
+                    )
+                    _ := sample_token(lg, f32(0.0))
+                }
+                gpu.sync()
+                elapsed_ms := f64(time.monotonic_ns() - tp0) / 1000000.0
+                run_times.push(elapsed_ms)
+                sum_ms = sum_ms + elapsed_ms
+                r += 1
+            }
+
+            sort_f64s_asc(mut run_times)
+            min_ms := run_times[0]
+            avg_ms := sum_ms / f64(reps)
+            mut safe_min := min_ms
+            if safe_min < 0.001 { safe_min = 0.001 }
+            mut safe_avg := avg_ms
+            if safe_avg < 0.001 { safe_avg = 0.001 }
+
+            avg_tps := (f64(pp) * 1000.0) / safe_avg
+            peak_tps := (f64(pp) * 1000.0) / safe_min
+
+            attn_flops := 2.0 * f64(meta.n_layers) * f64(meta.dim) * f64(pp) * f64(pp + 1)
+            tot_flops := linear_flops_tok * f64(pp) + lm_head_flops + attn_flops
+            tflops := tot_flops / (safe_avg * 1000000000.0)
+            tc_pct := (tflops / 65.0) * 100.0
+
+            if avg_tps > best_pp_tps {
+                best_pp_tps = avg_tps
+                best_pp_tflops = tflops
+                best_pp_label = 'pp${pp}'
+            }
+
+            pp_lbl := 'pp${pp}'
+            tc_lbl := '${fmt_f1(tc_pct)}%'
+            v_lbl := pad_r(pp_lbl, 9)
+            v_avg := pad_l(fmt_f2(avg_ms), 10)
+            v_min := pad_l(fmt_f2(min_ms), 10)
+            v_atps := pad_l(fmt_f1(avg_tps), 11)
+            v_ptps := pad_l(fmt_f1(peak_tps), 11)
+            v_tfl := pad_l(fmt_f2(tflops), 7)
+            v_tcp := pad_l(tc_lbl, 7)
+            println('${v_lbl} | ${v_avg} | ${v_min} | ${v_atps} | ${v_ptps} | ${v_tfl} | ${v_tcp}')
+        }
+    }
+
+    // 7. Suite B: Long-Context KV Cache Decode (`tg`) & Memory-Bandwidth Sweep
+    if kv_list.len > 0 {
+        println('')
+        println('=== Suite B: Long-Context KV Decode Scaling (tg=${tg_steps}, reps=${reps}, W_act~${fmt_f1(active_weight_mb)} MiB, T4 BW=320.0 GB/s) ===')
+        b_depth := pad_r('KV Depth', 11)
+        b_ms := pad_l('ms/tok', 8)
+        b_atps := pad_l('Avg tok/s', 10)
+        b_ptps := pad_l('Peak tok/s', 10)
+        b_kvmb := pad_l('KV MB/step', 10)
+        b_bw := pad_l('Eff BW GB/s', 11)
+        b_bwp := pad_l('% T4 BW', 7)
+        println('${b_depth} | ${b_ms} | ${b_atps} | ${b_ptps} | ${b_kvmb} | ${b_bw} | ${b_bwp}')
+        println('------------+----------+------------+------------+------------+-------------+--------')
+
+        mut filled_pos := 0
+        mut seed_tok := meta.bos_id
+        for kd in kv_list {
+            // Incrementally fill KV cache once from `filled_pos` -> `kd` without repeating across reps
+            if kd > filled_pos {
+                fill_cnt := kd - filled_pos
+                fill_toks := make_synth_tokens(fill_cnt, tok_emb.rows, filled_pos + 7, meta.im_end_id)
+                if fill_cnt == 1 {
+                    lg := qwen2_forward_step(
+                        fill_toks[0], filled_pos, meta, tok_emb,
+                        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                        mut k_caches, mut v_caches, true
+                    )
+                    seed_tok = int(sample_token(lg, f32(0.0)))
+                } else {
+                    lg := qwen2_forward_prefill(
+                        fill_toks, filled_pos, chunk_limit, meta, tok_emb,
+                        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                        mut k_caches, mut v_caches, true
+                    )
+                    seed_tok = int(sample_token(lg, f32(0.0)))
+                }
+                filled_pos = kd
+            }
+
+            mut run_times := []f64{}
+            mut sum_ms := 0.0
+            mut r := 0
+            for r < reps {
+                mut cur_tok := seed_tok
+                mut pos := kd
+                gpu.sync()
+                td0 := time.monotonic_ns()
+                mut step := 0
+                for step < tg_steps {
+                    lg := qwen2_forward_step(
+                        cur_tok, pos, meta, tok_emb,
+                        l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+                        l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+                        mut k_caches, mut v_caches, true
+                    )
+                    cur_tok = int(sample_token(lg, f32(0.0)))
+                    pos += 1
+                    step += 1
+                }
+                gpu.sync()
+                elapsed_ms := f64(time.monotonic_ns() - td0) / 1000000.0
+                run_times.push(elapsed_ms)
+                sum_ms = sum_ms + elapsed_ms
+                r += 1
+            }
+
+            sort_f64s_asc(mut run_times)
+            min_ms := run_times[0]
+            avg_ms := sum_ms / f64(reps)
+            mut safe_min := min_ms
+            if safe_min < 0.001 { safe_min = 0.001 }
+            mut safe_avg := avg_ms
+            if safe_avg < 0.001 { safe_avg = 0.001 }
+
+            ms_per_tok := safe_avg / f64(tg_steps)
+            avg_tps := (f64(tg_steps) * 1000.0) / safe_avg
+            peak_tps := (f64(tg_steps) * 1000.0) / safe_min
+
+            avg_kv_len := f64(kd) + 0.5 * f64(tg_steps)
+            kv_step_bytes := 2.0 * f64(meta.n_layers) * avg_kv_len * f64(kv_dim) * 4.0
+            kv_step_mb := kv_step_bytes / 1048576.0
+            eff_bw_gbps := ((active_weight_bytes + kv_step_bytes) * avg_tps) / 1000000000.0
+            bw_pct := (eff_bw_gbps / 320.0) * 100.0
+
+            if avg_tps > best_tg_tps {
+                best_tg_tps = avg_tps
+                best_tg_gbps = eff_bw_gbps
+                best_tg_label = 'kv=${kd}'
+            }
+
+            kv_lbl := 'kv=${kd}'
+            bw_lbl := '${fmt_f1(bw_pct)}%'
+            r_dep := pad_r(kv_lbl, 11)
+            r_ms := pad_l(fmt_f2(ms_per_tok), 8)
+            r_atps := pad_l(fmt_f1(avg_tps), 10)
+            r_ptps := pad_l(fmt_f1(peak_tps), 10)
+            r_kvmb := pad_l(fmt_f1(kv_step_mb), 10)
+            r_bw := pad_l(fmt_f1(eff_bw_gbps), 11)
+            r_bwp := pad_l(bw_lbl, 7)
+            println('${r_dep} | ${r_ms} | ${r_atps} | ${r_ptps} | ${r_kvmb} | ${r_bw} | ${r_bwp}')
+        }
+    }
+
+    // 8. Optional Suite C: ChatML Coherence Check (--verify)
+    if verify_chat {
+        println('')
+        println('=== Suite C: ChatML Greedy Coherence Verification ===')
+        verify_q := 'In 3 concise bullet points, explain why KV cache size and Tensor Core batching govern LLM throughput on a 16 GB Tesla T4 GPU.'
+        turn_tokens := encode_qwen2_chatml_turn(
+            sys_prompt, verify_q, true, meta,
+            gpt2_space, gpt2_newline, vocab, bucket_head, next_in_bucket
+        )
+        run_chatml_turn(
+            turn_tokens, verify_q, max_context, max_new_tokens, temperature, chunk_limit,
+            meta, vocab, gpt2_space, gpt2_newline, gpt2_tab, tok_emb,
+            l_an, l_wq, l_bq, l_wk, l_bk, l_wv, l_bv, l_wo,
+            l_fn, l_w_gate, l_w_up, l_w_down, out_norm, out_weight, has_tied_out,
+            mut k_caches, mut v_caches
+        )
+    }
+
+    // 9. Hardware Summary & Apples-to-Apples llama-bench Reference Command
+    oom_delta := gpu.oom_fallbacks() - oom_before
+    final_vram_mb := f64(gpu.allocated_bytes()) / 1048576.0
+    mut vram_pct := 0.0
+    if vram_tot_mb > i64(0) {
+        vram_pct = (final_vram_mb / f64(vram_tot_mb)) * 100.0
+    }
+    println('')
+    println('================================================================================')
+    println('  Benchmark Telemetry & Roofline Summary')
+    println('================================================================================')
+    println('Peak Prefill    : ${best_pp_label} -> ${fmt_f1(best_pp_tps)} tok/s (${fmt_f2(best_pp_tflops)} TFLOPS, ${fmt_f1((best_pp_tflops / 65.0) * 100.0)}% of T4 65.0 TFLOPS FP16)')
+    println('Peak Decode     : ${best_tg_label} -> ${fmt_f1(best_tg_tps)} tok/s (${fmt_f1(best_tg_gbps)} GB/s, ${fmt_f1((best_tg_gbps / 320.0) * 100.0)}% of T4 320.0 GB/s)')
+    if dev.available && dev.enabled {
+        println('VRAM Footprint  : ${fmt_f1(final_vram_mb)} MiB / ${vram_tot_mb} MiB (${fmt_f1(vram_pct)}% used) | OOM fallbacks=${oom_delta}')
+    } else {
+        println('Compute Mode    : CPU SIMD (pass --gpu on CUDA/OpenCL hosts) | OOM fallbacks=${oom_delta}')
+    }
+    print('llama-bench Cmd : llama-bench -m ${model_path} -ngl 99 -fa 1')
+    if pp_list.len > 0 {
+        print(' -p ')
+        mut p_i := 0
+        for p_i < pp_list.len {
+            if p_i > 0 {
+                print(',')
+            }
+            print('${pp_list[p_i]}')
+            p_i += 1
+        }
+    }
+    println(' -n ${tg_steps} -r ${reps}')
+    println('================================================================================')
+}
