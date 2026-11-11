@@ -25,6 +25,62 @@ static inline void vira_scheduler_submit_async(vira_task *task);
 static inline void vira_scheduler_await(vira_task *task);
 static inline int32_t vira_scheduler_num_workers(void);
 
+typedef void (*_vira_team_fn)(void *ctx, int32_t tid, int32_t n_threads);
+static inline void _vira_team_run(_vira_team_fn fn, void *ctx, int32_t max_threads);
+static inline void _vira_team_shutdown(void);
+static inline void vira_scheduler_shutdown(void);
+static inline int32_t vira_sched_get_threads(void);
+static inline void vira_sched_set_threads(int32_t n);
+static inline void _vira_llm_shutdown(void);
+
+#if defined(__AVX2__)
+static inline __m256 _vira_avx2_expf(__m256 x) {
+  const __m256 exp_hi = _mm256_set1_ps(88.0f);
+  const __m256 exp_lo = _mm256_set1_ps(-87.3f);
+  const __m256 valid = _mm256_cmp_ps(x, exp_lo, _CMP_GT_OS);
+  x = _mm256_min_ps(x, exp_hi);
+  x = _mm256_max_ps(x, exp_lo);
+
+  const __m256 log2ef = _mm256_set1_ps(1.44269504088896341f);
+  __m256 fx = _mm256_round_ps(_mm256_mul_ps(x, log2ef),
+                            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+
+  const __m256 ln2_hi = _mm256_set1_ps(0.693359375f);
+  const __m256 ln2_lo = _mm256_set1_ps(-2.12194440e-4f);
+#if defined(__FMA__)
+  x = _mm256_fnmadd_ps(fx, ln2_hi, x);
+  x = _mm256_fnmadd_ps(fx, ln2_lo, x);
+#else
+  x = _mm256_sub_ps(x, _mm256_mul_ps(fx, ln2_hi));
+  x = _mm256_sub_ps(x, _mm256_mul_ps(fx, ln2_lo));
+#endif
+
+  const __m256 z = _mm256_mul_ps(x, x);
+  __m256 y = _mm256_set1_ps(1.9875691500e-4f);
+#if defined(__FMA__)
+  y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(1.3981999507e-3f));
+  y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(8.3334519073e-3f));
+  y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(4.1665795894e-2f));
+  y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(1.6666665459e-1f));
+  y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(5.0000001201e-1f));
+  y = _mm256_fmadd_ps(y, z, x);
+#else
+  y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(1.3981999507e-3f));
+  y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(8.3334519073e-3f));
+  y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(4.1665795894e-2f));
+  y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(1.6666665459e-1f));
+  y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(5.0000001201e-1f));
+  y = _mm256_add_ps(_mm256_mul_ps(y, z), x);
+#endif
+  y = _mm256_add_ps(y, _mm256_set1_ps(1.0f));
+
+  __m256i emm0 = _mm256_cvtps_epi32(fx);
+  emm0 = _mm256_slli_epi32(_mm256_add_epi32(emm0, _mm256_set1_epi32(127)), 23);
+  __m256 pow2n = _mm256_castsi256_ps(emm0);
+  return _mm256_and_ps(_mm256_mul_ps(y, pow2n), valid);
+}
+#endif
+
 /**
  * Returns the human-readable identifier of the active CPU SIMD instruction set.
  * @return C-string ("x86_64 AVX2", "x86_64 SSE2", "ARM NEON", or "Scalar Fallback").

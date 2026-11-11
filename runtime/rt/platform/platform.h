@@ -113,6 +113,93 @@ static inline void vira_cpu_relax(void) {
 #endif
 }
 
+/**
+ * Detects the number of online logical CPU hardware threads.
+ */
+static inline int32_t _vira_detect_logical_cores(void) {
+#ifdef _WIN32
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  int32_t n = (int32_t)si.dwNumberOfProcessors;
+  return n > 0 ? n : 4;
+#else
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (int32_t)n : 4;
+#endif
+}
+
+/**
+ * Detects the number of physical CPU cores (excluding SMT/Hyper-Threading siblings when possible).
+ */
+static inline int32_t _vira_detect_physical_cores(void) {
+#ifdef _WIN32
+  uint8_t stack_buf[16384];
+  DWORD len = (DWORD)sizeof(stack_buf);
+  if (GetLogicalProcessorInformationEx(
+          RelationProcessorCore,
+          (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)stack_buf, &len)) {
+    int32_t cores = 0;
+    DWORD off = 0;
+    while (off + 8 <= len) {
+      PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info =
+          (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(stack_buf + off);
+      if (info->Size == 0 || off + info->Size > len) {
+        break;
+      }
+      if (info->Relationship == RelationProcessorCore) {
+        cores++;
+      }
+      off += info->Size;
+    }
+    if (cores > 0) {
+      return cores;
+    }
+  }
+#elif defined(__linux__)
+  FILE *f = fopen("/proc/cpuinfo", "r");
+  if (f) {
+    char line[256];
+    int64_t seen[256];
+    int32_t seen_cnt = 0;
+    int32_t cur_phys = -1;
+    int32_t cur_core = -1;
+    while (fgets(line, (int)sizeof(line), f)) {
+      if (strncmp(line, "physical id", 11) == 0) {
+        const char *colon = strchr(line, ':');
+        if (colon) cur_phys = atoi(colon + 1);
+      } else if (strncmp(line, "core id", 7) == 0) {
+        const char *colon = strchr(line, ':');
+        if (colon) cur_core = atoi(colon + 1);
+      } else if (line[0] == '\n' || line[0] == '\r') {
+        if (cur_phys >= 0 && cur_core >= 0 && seen_cnt < 256) {
+          int64_t key = ((int64_t)cur_phys << 32) | (uint32_t)cur_core;
+          bool found = false;
+          for (int32_t i = 0; i < seen_cnt; i++) {
+            if (seen[i] == key) { found = true; break; }
+          }
+          if (!found) seen[seen_cnt++] = key;
+        }
+        cur_phys = -1;
+        cur_core = -1;
+      }
+    }
+    if (cur_phys >= 0 && cur_core >= 0 && seen_cnt < 256) {
+      int64_t key = ((int64_t)cur_phys << 32) | (uint32_t)cur_core;
+      bool found = false;
+      for (int32_t i = 0; i < seen_cnt; i++) {
+        if (seen[i] == key) { found = true; break; }
+      }
+      if (!found) seen[seen_cnt++] = key;
+    }
+    fclose(f);
+    if (seen_cnt > 0) {
+      return seen_cnt;
+    }
+  }
+#endif
+  return _vira_detect_logical_cores();
+}
+
 // --- THREAD-SAFE TELEMETRY COUNTERS FOR ZERO-LEAK VERIFICATION ---
 static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_active_heap_allocs = 0;
 static VIRA_CACHELINE_ALIGNED volatile int64_t _vira_total_heap_frees = 0;

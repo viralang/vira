@@ -14,6 +14,7 @@ static inline void vira_report_mem_stats(void) {
 #if defined(VIRA_QUIET_RT)
   vira_gpu_shutdown();
   vira_scheduler_shutdown();
+  _vira_llm_shutdown();
   _vira_rt_quant_shutdown();
   _vira_flush_tls_mem_stats();
   return;
@@ -21,6 +22,7 @@ static inline void vira_report_mem_stats(void) {
   if (_vira_quiet_rt) {
     vira_gpu_shutdown();
     vira_scheduler_shutdown();
+    _vira_llm_shutdown();
     _vira_rt_quant_shutdown();
     _vira_flush_tls_mem_stats();
     return;
@@ -29,6 +31,7 @@ static inline void vira_report_mem_stats(void) {
   if (env_stats != NULL && strcmp(env_stats, "0") == 0) {
     vira_gpu_shutdown();
     vira_scheduler_shutdown();
+    _vira_llm_shutdown();
     _vira_rt_quant_shutdown();
     _vira_flush_tls_mem_stats();
     return;
@@ -47,6 +50,7 @@ static inline void vira_report_mem_stats(void) {
   }
   vira_gpu_shutdown();
   vira_scheduler_shutdown();
+  _vira_llm_shutdown();
   _vira_rt_quant_shutdown();
   _vira_flush_tls_mem_stats();
   printf("[vira_rt] simd=%s\n", vira_simd_backend_name());

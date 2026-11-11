@@ -710,11 +710,244 @@ static inline void vira_scheduler_init(int32_t num_workers) {
   __atomic_store_n(&_vira_sched.initialized, true, __ATOMIC_RELEASE);
 }
 
+// ============================================================================
+// PERSISTENT LOW-BARRIER COMPUTE WORKER TEAM (SPIN-THEN-SLEEP FOR LINEAR/GQA)
+// ============================================================================
+
+#define VIRA_TEAM_MAX_THREADS 16
+#define VIRA_TEAM_SPIN_ITERS 4096
+
+typedef struct {
+  pthread_mutex_t call_mu;
+  pthread_mutex_t wake_mu;
+  pthread_cond_t wake_cv;
+  VIRA_CACHELINE_ALIGNED volatile uint64_t gen;
+  VIRA_CACHELINE_ALIGNED volatile int32_t remaining;
+  VIRA_CACHELINE_ALIGNED volatile int32_t parked;
+  volatile int32_t shutdown;
+  int32_t active_workers;
+  int32_t configured_threads;
+  int32_t call_threads;
+  _vira_team_fn fn;
+  void *ctx;
+  pthread_t threads[VIRA_TEAM_MAX_THREADS];
+  int32_t tids[VIRA_TEAM_MAX_THREADS];
+} _vira_compute_team_state;
+
+static _vira_compute_team_state _vira_team = {
+    .call_mu = PTHREAD_MUTEX_INITIALIZER,
+    .wake_mu = PTHREAD_MUTEX_INITIALIZER,
+    .wake_cv = PTHREAD_COND_INITIALIZER,
+    .gen = 0,
+    .remaining = 0,
+    .parked = 0,
+    .shutdown = 0,
+    .active_workers = 0,
+    .configured_threads = 0,
+    .call_threads = 0,
+    .fn = NULL,
+    .ctx = NULL,
+};
+
+static __thread bool _vira_tls_in_team = false;
+
+static inline int32_t vira_sched_get_threads(void) {
+  int32_t cfg = __atomic_load_n(&_vira_team.configured_threads, __ATOMIC_ACQUIRE);
+  if (cfg > 0) {
+    return cfg > VIRA_TEAM_MAX_THREADS ? VIRA_TEAM_MAX_THREADS : cfg;
+  }
+  const char *env = getenv("VIRA_THREADS");
+  if (env != NULL && env[0] != '\0') {
+    int32_t v = atoi(env);
+    if (v > 0) {
+      return v > VIRA_TEAM_MAX_THREADS ? VIRA_TEAM_MAX_THREADS : v;
+    }
+  }
+  int32_t n = _vira_detect_logical_cores();
+  if (n < 1) n = 1;
+  if (n > VIRA_TEAM_MAX_THREADS) n = VIRA_TEAM_MAX_THREADS;
+  return n;
+}
+
+static void *_vira_team_worker_main(void *arg) {
+  int32_t tid = *(const int32_t *)arg;
+  _vira_compute_team_state *t = &_vira_team;
+  uint64_t seen_gen = 0;
+
+  while (true) {
+    uint64_t cur_gen = 0;
+    bool timed_out_spin = true;
+    for (int32_t spin = 0; spin < VIRA_TEAM_SPIN_ITERS; ++spin) {
+      cur_gen = __atomic_load_n(&t->gen, __ATOMIC_ACQUIRE);
+      if (cur_gen != seen_gen) {
+        timed_out_spin = false;
+        break;
+      }
+      if (__atomic_load_n(&t->shutdown, __ATOMIC_ACQUIRE)) {
+        _vira_flush_tls_mem_stats();
+        return NULL;
+      }
+      vira_cpu_relax();
+    }
+
+    if (timed_out_spin) {
+      pthread_mutex_lock(&t->wake_mu);
+      __atomic_add_fetch(&t->parked, 1, __ATOMIC_SEQ_CST);
+      while ((cur_gen = __atomic_load_n(&t->gen, __ATOMIC_SEQ_CST)) == seen_gen &&
+             !__atomic_load_n(&t->shutdown, __ATOMIC_SEQ_CST)) {
+        pthread_cond_wait(&t->wake_cv, &t->wake_mu);
+      }
+      __atomic_sub_fetch(&t->parked, 1, __ATOMIC_SEQ_CST);
+      pthread_mutex_unlock(&t->wake_mu);
+    }
+
+    if (cur_gen == seen_gen) {
+      if (__atomic_load_n(&t->shutdown, __ATOMIC_ACQUIRE)) {
+        break;
+      }
+      continue;
+    }
+
+    seen_gen = cur_gen;
+    _vira_team_fn fn = t->fn;
+    void *ctx = t->ctx;
+    int32_t nt = t->call_threads;
+    if (fn != NULL && tid < nt) {
+      _vira_tls_in_team = true;
+      fn(ctx, tid, nt);
+      _vira_tls_in_team = false;
+    }
+    __atomic_sub_fetch(&t->remaining, 1, __ATOMIC_ACQ_REL);
+  }
+
+  _vira_flush_tls_mem_stats();
+  return NULL;
+}
+
+static inline void _vira_team_shutdown_locked(void) {
+  _vira_compute_team_state *t = &_vira_team;
+  if (t->active_workers > 0) {
+    __atomic_store_n(&t->shutdown, 1, __ATOMIC_SEQ_CST);
+    pthread_mutex_lock(&t->wake_mu);
+    pthread_cond_broadcast(&t->wake_cv);
+    pthread_mutex_unlock(&t->wake_mu);
+    for (int32_t i = 0; i < t->active_workers; ++i) {
+      pthread_join(t->threads[i], NULL);
+    }
+    t->active_workers = 0;
+    __atomic_store_n(&t->gen, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->shutdown, 0, __ATOMIC_RELEASE);
+  }
+}
+
+static inline void _vira_team_shutdown(void) {
+  pthread_mutex_lock(&_vira_team.call_mu);
+  _vira_team_shutdown_locked();
+  pthread_mutex_unlock(&_vira_team.call_mu);
+}
+
+static inline void _vira_team_ensure_init_locked(int32_t target_threads) {
+  _vira_compute_team_state *t = &_vira_team;
+  if (target_threads < 1) target_threads = 1;
+  if (target_threads > VIRA_TEAM_MAX_THREADS) target_threads = VIRA_TEAM_MAX_THREADS;
+  int32_t want_workers = target_threads - 1;
+  if (t->active_workers == want_workers) {
+    return;
+  }
+  if (t->active_workers > 0) {
+    _vira_team_shutdown_locked();
+  }
+  if (want_workers > 0) {
+    __atomic_store_n(&t->shutdown, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->gen, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->remaining, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->parked, 0, __ATOMIC_RELEASE);
+    for (int32_t i = 0; i < want_workers; ++i) {
+      t->tids[i] = i + 1;
+      pthread_create(&t->threads[i], NULL, _vira_team_worker_main, &t->tids[i]);
+    }
+    t->active_workers = want_workers;
+  }
+}
+
+static inline void _vira_team_run(_vira_team_fn fn, void *ctx, int32_t max_threads) {
+  if (fn == NULL) return;
+  if (_vira_tls_in_team || _vira_in_active_actor() || max_threads <= 1) {
+    fn(ctx, 0, 1);
+    return;
+  }
+  _vira_compute_team_state *t = &_vira_team;
+  pthread_mutex_lock(&t->call_mu);
+  int32_t target = vira_sched_get_threads();
+  int32_t eff = target;
+  if (max_threads > 0 && max_threads < eff) {
+    eff = max_threads;
+  }
+  if (eff <= 1) {
+    pthread_mutex_unlock(&t->call_mu);
+    fn(ctx, 0, 1);
+    return;
+  }
+  _vira_team_ensure_init_locked(target);
+  if (t->active_workers <= 0) {
+    pthread_mutex_unlock(&t->call_mu);
+    fn(ctx, 0, 1);
+    return;
+  }
+  if (eff > t->active_workers + 1) {
+    eff = t->active_workers + 1;
+  }
+
+  t->fn = fn;
+  t->ctx = ctx;
+  t->call_threads = eff;
+  __atomic_store_n(&t->remaining, t->active_workers, __ATOMIC_RELEASE);
+  __atomic_add_fetch(&t->gen, 1, __ATOMIC_SEQ_CST);
+
+  if (__atomic_load_n(&t->parked, __ATOMIC_SEQ_CST) > 0) {
+    pthread_mutex_lock(&t->wake_mu);
+    pthread_cond_broadcast(&t->wake_cv);
+    pthread_mutex_unlock(&t->wake_mu);
+  }
+
+  _vira_tls_in_team = true;
+  fn(ctx, 0, eff);
+  _vira_tls_in_team = false;
+
+  while (__atomic_load_n(&t->remaining, __ATOMIC_ACQUIRE) > 0) {
+    vira_cpu_relax();
+  }
+  pthread_mutex_unlock(&t->call_mu);
+}
+
+static inline void vira_sched_set_threads(int32_t n) {
+  if (n <= 0) {
+    pthread_mutex_lock(&_vira_team.call_mu);
+    __atomic_store_n(&_vira_team.configured_threads, 0, __ATOMIC_RELEASE);
+    int32_t target = vira_sched_get_threads();
+    if (_vira_team.active_workers > 0 && _vira_team.active_workers != target - 1) {
+      _vira_team_shutdown_locked();
+    }
+    pthread_mutex_unlock(&_vira_team.call_mu);
+    return;
+  }
+  if (n > VIRA_TEAM_MAX_THREADS) {
+    n = VIRA_TEAM_MAX_THREADS;
+  }
+  pthread_mutex_lock(&_vira_team.call_mu);
+  if (_vira_team.active_workers > 0 && _vira_team.active_workers != n - 1) {
+    _vira_team_shutdown_locked();
+  }
+  __atomic_store_n(&_vira_team.configured_threads, n, __ATOMIC_RELEASE);
+  pthread_mutex_unlock(&_vira_team.call_mu);
+}
+
 /**
  * Signals all worker threads to exit, drains remaining queues, and shuts down the thread pool.
  * Usage: Clean teardown of scheduler resources at application termination.
  */
 static inline void vira_scheduler_shutdown(void) {
+  _vira_team_shutdown();
   if (!__atomic_load_n(&_vira_sched.initialized, __ATOMIC_ACQUIRE))
     return;
   pthread_mutex_lock(&_vira_sched_init_mu);
