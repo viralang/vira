@@ -82,6 +82,33 @@ vira_tensor_rmsnorm(vira_arena *opt_arena, vira_tensor_f32 x,
   return out;
 }
 
+/* Per-thread cache of RoPE inverse frequencies: powf() runs once per (cols, base)
+ * instead of half_dim times for every rotated tensor. */
+static __thread float *_vira_rope_inv_cache = NULL;
+static __thread int32_t _vira_rope_inv_cols = 0;
+static __thread float _vira_rope_inv_base = 0.0f;
+
+static inline const float *_vira_rope_inv_freq(int32_t cols, float freq_base) {
+  if (_vira_rope_inv_cache == NULL || _vira_rope_inv_cols != cols ||
+      _vira_rope_inv_base != freq_base) {
+    free(_vira_rope_inv_cache);
+    int32_t half = cols / 2;
+    _vira_rope_inv_cache = (float *)malloc((size_t)(half > 0 ? half : 1) * sizeof(float));
+    for (int32_t i = 0; i < half; ++i) {
+      _vira_rope_inv_cache[i] = powf(freq_base, -(2.0f * (float)i) / (float)cols);
+    }
+    _vira_rope_inv_cols = cols;
+    _vira_rope_inv_base = freq_base;
+  }
+  return _vira_rope_inv_cache;
+}
+
+static inline void _vira_llm_shutdown(void) {
+  free(_vira_rope_inv_cache);
+  _vira_rope_inv_cache = NULL;
+  _vira_rope_inv_cols = 0;
+}
+
 /**
  * Applies Rotary Position Embeddings (RoPE) to attention query or key vectors.
  * @param q Query or key tensor.
@@ -115,10 +142,9 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_arena *opt_arena,
   float *sin_tab =
       (half_dim <= 256) ? sin_stack : (float *)malloc(half_dim * sizeof(float));
 
+  const float *inv_freq = _vira_rope_inv_freq(q.cols, freq_base);
   for (int32_t i = 0; i < half_dim; ++i) {
-    float exponent = -(2.0f * (float)i) / (float)q.cols;
-    float freq = powf(freq_base, exponent);
-    float angle = (float)pos * freq;
+    float angle = (float)pos * inv_freq[i];
     cos_tab[i] = cosf(angle);
     sin_tab[i] = sinf(angle);
   }
@@ -177,10 +203,9 @@ static inline vira_tensor_f32 vira_tensor_rope_norm(vira_arena *opt_arena,
   float *sin_tab =
       (half_dim <= 256) ? sin_stack : (float *)malloc(half_dim * sizeof(float));
 
+  const float *inv_freq = _vira_rope_inv_freq(q.cols, freq_base);
   for (int32_t i = 0; i < half_dim; ++i) {
-    float exponent = -(2.0f * (float)i) / (float)q.cols;
-    float freq = powf(freq_base, exponent);
-    float angle = (float)pos * freq;
+    float angle = (float)pos * inv_freq[i];
     cos_tab[i] = cosf(angle);
     sin_tab[i] = sinf(angle);
   }

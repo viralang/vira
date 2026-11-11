@@ -112,6 +112,7 @@ typedef struct {
   bool is_view;
   bool is_vmem;
 } vira_tensor_f32;
+static inline void vira_tensor_f32_free(vira_tensor_f32 *t);
 
 /**
  * Internal helper to initialize shape dimensions and stride metadata for an N-D tensor.
