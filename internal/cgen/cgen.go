@@ -2745,6 +2745,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_tensor_rope(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "tensor_rope_norm":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_tensor_rope_norm(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "tensor_silu":
 			arenaArg := "NULL"
 			if g.activeArena != "" {
@@ -2827,12 +2833,24 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_gpu_rope(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_rope_norm":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_rope_norm(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "gpu_rope_seq":
 			arenaArg := "NULL"
 			if g.activeArena != "" {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_gpu_rope_seq(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_rope_seq_norm":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_rope_seq_norm(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "gpu_softmax":
 			arenaArg := "NULL"
 			if g.activeArena != "" {

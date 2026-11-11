@@ -570,7 +570,7 @@ static inline bool _vira_rt_quant_try_clone_lazy(vira_tensor_f32 src,
   memcpy(copy_buf, e->raw_q, raw_bytes);
   pthread_mutex_unlock(&_vira_rt_quant_lock);
 
-  vira_tensor_f32 copy = _vira_tensor_f32_alloc_uninit_nd(src.n_dims, src.dims);
+  vira_tensor_f32 copy = _vira_tensor_f32_alloc_reserved_nd(src.n_dims, src.dims);
   _vira_rt_quant_register(copy.data, dtype, copy_buf, raw_bytes, elems, rows,
                           cols, false);
   *out_copy = copy;
@@ -599,6 +599,22 @@ static inline void _vira_rt_ensure_fp32_host_ptr(const vira_f32 *ptr) {
   const uint8_t *raw_q = (const uint8_t *)e->raw_q;
   size_t elems = e->elems;
   pthread_mutex_unlock(&_vira_rt_quant_lock);
+
+#ifdef _WIN32
+  if (elems > 0) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+        mbi.State == MEM_RESERVE) {
+      if (!VirtualAlloc((LPVOID)(uintptr_t)ptr, elems * sizeof(float),
+                        MEM_COMMIT, PAGE_READWRITE)) {
+        fprintf(stderr,
+                "vira panic: out of memory committing FP32 host buffer (%zu bytes)\n",
+                elems * sizeof(float));
+        exit(1);
+      }
+    }
+  }
+#endif
 
   size_t qk = _vira_gguf_dtype_qk(dtype);
   if (raw_q && qk > 0 && elems > 0 && (elems % qk) == 0) {

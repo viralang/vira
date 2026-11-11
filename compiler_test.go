@@ -1441,7 +1441,7 @@ static void dummy_task(void* env) {
 }
 
 int main(void) {
-    // 1. Test RoPE pairing (half_dim split)
+    // 1. Test RoPE pairing (half_dim split) and interleaved RoPE (2*i, 2*i+1)
     vira_tensor_f32 q = vira_tensor_f32_alloc(1, 4);
     q.data[0] = 1.0f;
     q.data[1] = 2.0f;
@@ -1453,8 +1453,19 @@ int main(void) {
     assert(fabsf(r0.data[1] - 2.0f) < 1e-4);
     assert(fabsf(r0.data[2] - 3.0f) < 1e-4);
     assert(fabsf(r0.data[3] - 4.0f) < 1e-4);
+    // At pos = 1 with freq_base = 10000, dim=4: pair 0 angle = 1.0 rad, pair 1 angle = 0.01 rad
+    vira_tensor_f32 r_neox = vira_tensor_rope(NULL, q, 1, 10000.0f);
+    assert(fabsf(r_neox.data[0] - (1.0f * cosf(1.0f) - 3.0f * sinf(1.0f))) < 1e-4);
+    assert(fabsf(r_neox.data[2] - (1.0f * sinf(1.0f) + 3.0f * cosf(1.0f))) < 1e-4);
+    vira_tensor_f32 r_norm = vira_tensor_rope_norm(NULL, q, 1, 10000.0f);
+    assert(fabsf(r_norm.data[0] - (1.0f * cosf(1.0f) - 2.0f * sinf(1.0f))) < 1e-4);
+    assert(fabsf(r_norm.data[1] - (1.0f * sinf(1.0f) + 2.0f * cosf(1.0f))) < 1e-4);
+    assert(fabsf(r_norm.data[2] - (3.0f * cosf(0.01f) - 4.0f * sinf(0.01f))) < 1e-4);
+    assert(fabsf(r_norm.data[3] - (3.0f * sinf(0.01f) + 4.0f * cosf(0.01f))) < 1e-4);
     vira_tensor_f32_free(&q);
     vira_tensor_f32_free(&r0);
+    vira_tensor_f32_free(&r_neox);
+    vira_tensor_f32_free(&r_norm);
 
     // 2. Test JSON parsing on non-NUL-terminated slices
     const char raw_json[] = "{\"id\":12345,\"name\":\"antigravity\",\"score\":99.5}TRAILING_GARBAGE";

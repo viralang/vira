@@ -552,6 +552,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["tensor_rope_norm"] = &FnSig{
+		Name:       "tensor_rope_norm",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["tensor_silu"] = &FnSig{
 		Name:       "tensor_silu",
 		IsPub:      true,
@@ -692,8 +698,20 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["gpu_rope_norm"] = &FnSig{
+		Name:       "gpu_rope_norm",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "pos", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["gpu_rope_seq"] = &FnSig{
 		Name:       "gpu_rope_seq",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "start_pos", Type: TypeI64}, {Name: "n_heads", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
+	c.functions["gpu_rope_seq_norm"] = &FnSig{
+		Name:       "gpu_rope_seq_norm",
 		IsPub:      true,
 		Params:     []ParamInfo{{Name: "q", Type: &TensorType{DType: TypeF32}}, {Name: "start_pos", Type: TypeI64}, {Name: "n_heads", Type: TypeInt}, {Name: "freq_base", Type: TypeF32}},
 		ReturnType: &TensorType{DType: TypeF32},

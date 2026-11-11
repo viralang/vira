@@ -935,3 +935,77 @@ fn test_gpu_dp4a_mmvq_parity() {
 	verify_dp4a_mmvq_weight(w_q6k, 'DP4A_Q6_K_4864')
 	println('✓ test_gpu_dp4a_mmvq_parity passed')
 }
+
+fn test_gpu_rope_norm_parity() {
+	seq_len := 4
+	n_heads := 2
+	head_dim := 16
+	rope_base := f32(10000.0)
+	start_pos := i64(5)
+
+	x := tensor_fill(seq_len * n_heads, head_dim, 0.0)
+	mut r := 0
+	for r < seq_len * n_heads {
+		mut c := 0
+		for c < head_dim {
+			x.set(r, c, f32(((r * 13 + c * 7) % 19) - 9) * f32(0.1))
+			c += 1
+		}
+		r += 1
+	}
+
+	// GPU path vs CPU SIMD path
+	gpu.set_backend(gpu.backend_auto)
+	seq_gpu := gpu.rope_seq_norm(x, start_pos, n_heads, rope_base)
+	step_gpu := gpu.rope_norm(x.slice_rows(0, n_heads), int(start_pos), rope_base)
+
+	gpu.set_backend(gpu.backend_cpu)
+	seq_cpu := gpu.rope_seq_norm(x, start_pos, n_heads, rope_base)
+	step_cpu := tensor_rope_norm(x.slice_rows(0, n_heads), int(start_pos), rope_base)
+	gpu.set_backend(gpu.backend_auto)
+
+	mut max_diff := 0.0
+	r = 0
+	for r < seq_len * n_heads {
+		mut c := 0
+		for c < head_dim {
+			d := math.abs(f64(seq_gpu.get(r, c) - seq_cpu.get(r, c)))
+			if d > max_diff {
+				max_diff = d
+			}
+			c += 1
+		}
+		r += 1
+	}
+	if max_diff > 0.0001 {
+		panic('gpu.rope_seq_norm GPU vs CPU mismatch: ${max_diff}')
+	}
+
+	// First token rows (pos == start_pos) from batched seq must match single-step rope_norm
+	mut max_step_diff := 0.0
+	r = 0
+	for r < n_heads {
+		mut c := 0
+		for c < head_dim {
+			d1 := math.abs(f64(step_gpu.get(r, c) - step_cpu.get(r, c)))
+			d2 := math.abs(f64(seq_cpu.get(r, c) - step_cpu.get(r, c)))
+			if d1 > max_step_diff { max_step_diff = d1 }
+			if d2 > max_step_diff { max_step_diff = d2 }
+			c += 1
+		}
+		r += 1
+	}
+	if max_step_diff > 0.0001 {
+		panic('gpu.rope_norm vs tensor_rope_norm mismatch: ${max_step_diff}')
+	}
+
+	// Arena test
+	arena {
+		a_seq := gpu_rope_seq_norm(x, start_pos, n_heads, rope_base)
+		a_step := tensor_rope_norm(x.slice_rows(0, n_heads), int(start_pos), rope_base)
+		if a_seq.rows != seq_len * n_heads || a_step.rows != n_heads {
+			panic('arena rope_norm unexpected shape')
+		}
+	}
+	println('✓ test_gpu_rope_norm_parity passed')
+}

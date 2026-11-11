@@ -121,7 +121,7 @@ typedef vira_cl_int(VIRA_CL_API *pfn_clEnqueueCopyBuffer)(
 #define VIRA_GPU_WEIGHT_PROBE_LEN 64
 #define VIRA_GPU_ACT_RING_CAP 512
 #define VIRA_GPU_ACT_HASH_BUCKETS 1024
-#define VIRA_GPU_NUM_KERNELS 33
+#define VIRA_GPU_NUM_KERNELS 35
 #define VIRA_GPU_NUM_REQUIRED_KERNELS 12
 #define VIRA_GPU_UPLOAD_CHUNK_ELEMS (1u << 22)
 
@@ -330,6 +330,8 @@ typedef struct {
   vira_cl_kernel kernel_gemm_q6_k;
   vira_cl_kernel kernel_rope_seq;
   vira_cl_kernel kernel_gqa_prefill;
+  vira_cl_kernel kernel_rope_norm;
+  vira_cl_kernel kernel_rope_seq_norm;
 
   // NVIDIA CUDA Driver API & handles
   void *cuda_lib_handle;
@@ -421,6 +423,8 @@ typedef struct {
   vira_cu_function cu_k_mmvq_q6_k;
   vira_cu_function cu_k_rope_seq;
   vira_cu_function cu_k_gqa_prefill;
+  vira_cu_function cu_k_rope_norm;
+  vira_cu_function cu_k_rope_seq_norm;
 
   // Argmax scratch buffers
   vira_cl_mem cl_argmax_vals;
@@ -496,11 +500,19 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
                                             vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_norm(vira_arena *opt_arena,
+                                                 vira_tensor_f32 q, int64_t pos,
+                                                 float freq_base);
 static inline vira_tensor_f32 vira_gpu_rope_seq(vira_arena *opt_arena,
                                                 vira_tensor_f32 q,
                                                 int64_t start_pos,
                                                 int32_t n_heads,
                                                 float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_seq_norm(vira_arena *opt_arena,
+                                                     vira_tensor_f32 q,
+                                                     int64_t start_pos,
+                                                     int32_t n_heads,
+                                                     float freq_base);
 static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
                                                vira_tensor_f32 logits);
 static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
@@ -2238,6 +2250,50 @@ static const char *_vira_opencl_kernel_src =
     "      if (d < head_dim) op[d] = acc[r] * inv_l;\n"
     "    }\n"
     "  }\n"
+    "}\n"
+    "\n"
+    "// 34. Classic/Interleaved RoPE (2*i, 2*i+1)\n"
+    "__kernel void vira_cl_rope_norm_f32(\n"
+    "    __global const float* restrict q,\n"
+    "    __global float* restrict out,\n"
+    "    const int rows, const int cols, const int half_dim,\n"
+    "    const float pos, const float freq_base) {\n"
+    "  const int i = (int)get_global_id(0);\n"
+    "  const int r = (int)get_global_id(1);\n"
+    "  if (i >= half_dim || r >= rows) return;\n"
+    "  const float exponent = -(2.0f * (float)i) / (float)cols;\n"
+    "  const float angle = pos * pow(freq_base, exponent);\n"
+    "  const float cos_a = cos(angle);\n"
+    "  const float sin_a = sin(angle);\n"
+    "  __global const float* q_row = q + (size_t)r * (size_t)cols;\n"
+    "  __global float* o_row = out + (size_t)r * (size_t)cols;\n"
+    "  const float q0 = q_row[2 * i];\n"
+    "  const float q1 = q_row[2 * i + 1];\n"
+    "  o_row[2 * i]     = fma(q0, cos_a, -q1 * sin_a);\n"
+    "  o_row[2 * i + 1] = fma(q0, sin_a,  q1 * cos_a);\n"
+    "}\n"
+    "\n"
+    "// 35. Batched Sequence Classic/Interleaved RoPE (2*i, 2*i+1)\n"
+    "__kernel void vira_cl_rope_seq_norm_f32(\n"
+    "    __global const float* restrict q,\n"
+    "    __global float* restrict out,\n"
+    "    const int rows, const int cols, const int half_dim,\n"
+    "    const int n_heads, const long start_pos, const float freq_base) {\n"
+    "  const int i = (int)get_global_id(0);\n"
+    "  const int r = (int)get_global_id(1);\n"
+    "  if (i >= half_dim || r >= rows) return;\n"
+    "  const int seq_idx = r / n_heads;\n"
+    "  const float pos_f = (float)(start_pos + (long)seq_idx);\n"
+    "  const float exponent = -(2.0f * (float)i) / (float)cols;\n"
+    "  const float angle = pos_f * pow(freq_base, exponent);\n"
+    "  const float cos_a = cos(angle);\n"
+    "  const float sin_a = sin(angle);\n"
+    "  __global const float* q_row = q + (size_t)r * (size_t)cols;\n"
+    "  __global float* o_row = out + (size_t)r * (size_t)cols;\n"
+    "  const float q0 = q_row[2 * i];\n"
+    "  const float q1 = q_row[2 * i + 1];\n"
+    "  o_row[2 * i]     = fma(q0, cos_a, -q1 * sin_a);\n"
+    "  o_row[2 * i + 1] = fma(q0, sin_a,  q1 * cos_a);\n"
     "}\n";
 
 static const char *_vira_opencl_kernel_names[VIRA_GPU_NUM_KERNELS] = {
@@ -2258,6 +2314,7 @@ static const char *_vira_opencl_kernel_names[VIRA_GPU_NUM_KERNELS] = {
     "vira_cl_gemm_q8_0",        "vira_cl_gemm_q4_k",
     "vira_cl_gemm_q5_k",        "vira_cl_gemm_q6_k",
     "vira_cl_rope_seq_f32",     "vira_cl_gqa_prefill_f32",
+    "vira_cl_rope_norm_f32",    "vira_cl_rope_seq_norm_f32",
 };
 
 static inline bool _vira_gpu_debug(void) {
@@ -2997,6 +3054,7 @@ static inline _vira_gpu_act_entry *_vira_gpu_get_or_upload_activation_locked(
   if (slot == NULL) {
     return NULL;
   }
+  _vira_rt_ensure_fp32_host_ptr(ptr);
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
     bool h2d_ok = false;
@@ -3451,8 +3509,38 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
     return NULL;
   }
 
-  const size_t bytes =
-      elems * (prefer_half ? sizeof(uint16_t) : sizeof(vira_f32));
+  bool use_quant = false;
+  const void *quant_raw_q = NULL;
+  size_t quant_bytes = 0;
+  _vira_gpu_wfmt quant_fmt = VIRA_WFMT_F32;
+  if (allow_quant_or_half) {
+    uint32_t q_dtype = 0;
+    size_t q_elems = 0;
+    if (_vira_rt_quant_try_get(host_ptr, &q_dtype, &quant_raw_q, &quant_bytes,
+                               &q_elems) &&
+        quant_raw_q != NULL && quant_bytes > 0 && q_elems == elems) {
+      bool q_ok = true;
+      switch (q_dtype) {
+      case 1:  quant_fmt = VIRA_WFMT_F16; break;
+      case 2:  if ((elems & 31) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q4_0; break;
+      case 3:  if ((elems & 31) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q4_1; break;
+      case 6:  if ((elems & 31) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q5_0; break;
+      case 7:  if ((elems & 31) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q5_1; break;
+      case 8:  if ((elems & 31) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q8_0; break;
+      case 12: if ((elems & 255) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q4_K; break;
+      case 13: if ((elems & 255) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q5_K; break;
+      case 14: if ((elems & 255) != 0) q_ok = false; quant_fmt = VIRA_WFMT_Q6_K; break;
+      default: q_ok = false; break;
+      }
+      if (q_ok) {
+        use_quant = true;
+      }
+    }
+  }
+
+  const size_t bytes = use_quant
+      ? quant_bytes
+      : (elems * (prefer_half ? sizeof(uint16_t) : sizeof(vira_f32)));
   _vira_gpu_evict_lru_bytes_locked(bytes);
 
   _vira_gpu_cache_entry *slot = &_vira_gpu.weight_cache[empty_slot];
@@ -3462,7 +3550,7 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
   slot->dev_buf = NULL;
   slot->cu_buf = 0;
   slot->last_used = now;
-  slot->fmt = prefer_half ? VIRA_WFMT_F16 : VIRA_WFMT_F32;
+  slot->fmt = use_quant ? quant_fmt : (prefer_half ? VIRA_WFMT_F16 : VIRA_WFMT_F32);
   slot->uncacheable = true;
 
   int64_t cur_alloc =
@@ -3474,6 +3562,10 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
     return NULL;
   }
 
+  if (!use_quant) {
+    _vira_rt_ensure_fp32_host_ptr(host_ptr);
+  }
+
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
     vira_cu_deviceptr cu_b = 0;
     if (_vira_gpu.cuMemAlloc(&cu_b, bytes) != VIRA_CUDA_SUCCESS || cu_b == 0) {
@@ -3482,7 +3574,14 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
       *out_err = VIRA_CL_ERR_NO_ROOM;
       return NULL;
     }
-    if (prefer_half) {
+    if (use_quant) {
+      if (_vira_gpu.cuMemcpyHtoD(cu_b, quant_raw_q, bytes) != VIRA_CUDA_SUCCESS) {
+        _vira_gpu.cuMemFree(cu_b);
+        _vira_gpu_cache_entry_reset(slot);
+        *out_err = VIRA_CL_ERR_NO_ROOM;
+        return NULL;
+      }
+    } else if (prefer_half) {
       uint16_t *tmp = (uint16_t *)malloc(bytes);
       if (tmp == NULL || !_vira_f32_to_f16_block(host_ptr, tmp, elems) ||
           _vira_gpu.cuMemcpyHtoD(cu_b, tmp, bytes) != VIRA_CUDA_SUCCESS) {
@@ -3505,7 +3604,11 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked(
   } else {
     vira_cl_int err = 0;
     vira_cl_mem buf = NULL;
-    if (prefer_half) {
+    if (use_quant) {
+      buf = _vira_gpu.clCreateBuffer(
+          _vira_gpu.context, VIRA_CL_MEM_READ_ONLY | VIRA_CL_MEM_COPY_HOST_PTR,
+          bytes, (void *)quant_raw_q, &err);
+    } else if (prefer_half) {
       const size_t chunk = elems < VIRA_GPU_UPLOAD_CHUNK_ELEMS ? elems : VIRA_GPU_UPLOAD_CHUNK_ELEMS;
       uint16_t *tmp[2];
       tmp[0] = (uint16_t *)malloc(chunk * sizeof(uint16_t));
@@ -3770,6 +3873,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       "vira_cu_gemm_q8_0",         "vira_cu_gemm_q4_k",
       "vira_cu_gemm_q5_k",         "vira_cu_gemm_q6_k",
       "vira_cu_rope_seq_f32",      "vira_cu_gqa_prefill_f32",
+      "vira_cu_rope_norm_f32",     "vira_cu_rope_seq_norm_f32",
   };
 
   bool required_ok = true;
@@ -3834,6 +3938,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_gemm_q6_k = ks[30];
   g->cu_k_rope_seq = ks[31];
   g->cu_k_gqa_prefill = ks[32];
+  g->cu_k_rope_norm = ks[33];
+  g->cu_k_rope_seq_norm = ks[34];
 
   g->cu_argmax_vals = 0;
   g->cu_argmax_idxs = 0;
@@ -4231,6 +4337,8 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
   g->kernel_gemm_q6_k = ks[30];
   g->kernel_rope_seq = ks[31];
   g->kernel_gqa_prefill = ks[32];
+  g->kernel_rope_norm = ks[33];
+  g->kernel_rope_seq_norm = ks[34];
 
   g->cl_argmax_vals = NULL;
   g->cl_argmax_idxs = NULL;
@@ -4475,6 +4583,8 @@ static inline void vira_gpu_shutdown(void) {
       _vira_gpu.cu_k_gemm_q6_k = NULL;
       _vira_gpu.cu_k_rope_seq = NULL;
       _vira_gpu.cu_k_gqa_prefill = NULL;
+      _vira_gpu.cu_k_rope_norm = NULL;
+      _vira_gpu.cu_k_rope_seq_norm = NULL;
       if (_vira_gpu.cu_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_module);
         _vira_gpu.cu_module = NULL;
@@ -4523,7 +4633,8 @@ static inline void vira_gpu_shutdown(void) {
           _vira_gpu.kernel_gemm_q5_0,        _vira_gpu.kernel_gemm_q5_1,
           _vira_gpu.kernel_gemm_q8_0,        _vira_gpu.kernel_gemm_q4_k,
           _vira_gpu.kernel_gemm_q5_k,        _vira_gpu.kernel_gemm_q6_k,
-          _vira_gpu.kernel_rope_seq,         _vira_gpu.kernel_gqa_prefill};
+          _vira_gpu.kernel_rope_seq,         _vira_gpu.kernel_gqa_prefill,
+          _vira_gpu.kernel_rope_norm,        _vira_gpu.kernel_rope_seq_norm};
       for (int i = 0; i < VIRA_GPU_NUM_KERNELS; ++i) {
         if (ks[i]) {
           _vira_gpu.clReleaseKernel(ks[i]);
@@ -4562,6 +4673,8 @@ static inline void vira_gpu_shutdown(void) {
       _vira_gpu.kernel_gemm_q6_k = NULL;
       _vira_gpu.kernel_rope_seq = NULL;
       _vira_gpu.kernel_gqa_prefill = NULL;
+      _vira_gpu.kernel_rope_norm = NULL;
+      _vira_gpu.kernel_rope_seq_norm = NULL;
       if (_vira_gpu.program) {
         _vira_gpu.clReleaseProgram(_vira_gpu.program);
         _vira_gpu.program = NULL;
@@ -5812,6 +5925,290 @@ static inline vira_tensor_f32 vira_gpu_rope_seq(
     pthread_mutex_unlock(&_vira_gpu.lock);
     __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
     return _vira_cpu_rope_seq(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, q.n_dims, q.dims)
+                : _vira_tensor_f32_alloc_uninit_nd(q.n_dims, q.dims);
+  _vira_gpu_act_bind_locked(y_slot, out.data, q_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
+  _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return out;
+}
+
+static inline vira_tensor_f32 vira_gpu_rope_norm(vira_arena *opt_arena,
+                                                 vira_tensor_f32 q, int64_t pos,
+                                                 float freq_base) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&q);
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      q.data == NULL || q.n_dims < 2) {
+    if (_vira_gpu.simulate_oom) {
+      __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    }
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+
+  int32_t cols = q.dims[q.n_dims - 1];
+  int32_t rows = 1;
+  for (int32_t i = 0; i < q.n_dims - 1; ++i) {
+    rows *= q.dims[i];
+  }
+  if ((cols & 1) != 0 || cols <= 0 || rows <= 0) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+
+  int32_t half_dim = cols / 2;
+  float pos_f = (float)pos;
+
+  pthread_mutex_lock(&_vira_gpu.lock);
+  bool has_k = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
+                   ? (_vira_gpu.cu_k_rope_norm != NULL)
+                   : (_vira_gpu.kernel_rope_norm != NULL);
+  if (!has_k || !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+  const size_t q_bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
+
+  vira_cl_int err = 0;
+  bool q_hit = false;
+  _vira_gpu_act_entry *q_slot = _vira_gpu_get_or_upload_activation_locked(
+      q.data, q_bytes, !q.is_arena, &q_hit, NULL, NULL, 0, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || q_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+
+  _vira_gpu_act_entry *y_slot = _vira_gpu_alloc_activation_slot_locked(
+      q_bytes, q_slot->dev_buf, NULL, NULL, q_slot->cu_buf, 0, 0, NULL, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || y_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &pos_f, &freq_base};
+    unsigned int gx = (unsigned int)((half_dim + 15) / 16);
+    unsigned int gy = (unsigned int)((rows + 15) / 16);
+    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_norm, gx, gy, 1, 16, 16, 1,
+                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+  } else {
+    err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 1, sizeof(vira_cl_mem), &y_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 2, sizeof(int32_t), &rows);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 3, sizeof(int32_t), &cols);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 4, sizeof(int32_t), &half_dim);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 5, sizeof(float), &pos_f);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 6, sizeof(float), &freq_base);
+    size_t lw1 = (_vira_gpu.max_wg_size >= 256) ? 16 : ((_vira_gpu.max_wg_size >= 128) ? 8 : 4);
+    size_t l_work[2] = {16, lw1};
+    size_t g_work[2] = {((size_t)half_dim + 15) & ~15ULL, (((size_t)rows + lw1 - 1) / lw1) * lw1};
+    if (err == VIRA_CL_SUCCESS) {
+      err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, _vira_gpu.kernel_rope_norm, 2,
+                                             NULL, g_work, l_work, 0, NULL, NULL);
+    }
+  }
+
+  if (err != VIRA_CL_SUCCESS) {
+    _vira_gpu_act_entry_reset(y_slot);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 res = vira_tensor_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return res;
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, q.n_dims, q.dims)
+                : _vira_tensor_f32_alloc_uninit_nd(q.n_dims, q.dims);
+  _vira_gpu_act_bind_locked(y_slot, out.data, q_bytes, y_slot->epoch,
+                            y_slot->last_used, !out.is_arena);
+  _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return out;
+}
+
+static inline vira_tensor_f32 _vira_cpu_rope_seq_norm(
+    vira_arena *opt_arena, vira_tensor_f32 q, int64_t start_pos,
+    int32_t n_heads, float freq_base) {
+  _vira_tensor_norm_shape(&q);
+  _vira_gpu_sync_host(q.data);
+  if (q.data == NULL || q.n_dims < 2) {
+    fprintf(stderr, "vira tensor error: rope_seq_norm requires >=2D tensor\n");
+    exit(1);
+  }
+  int32_t cols = q.dims[q.n_dims - 1];
+  int32_t rows = 1;
+  for (int32_t i = 0; i < q.n_dims - 1; ++i) {
+    rows *= q.dims[i];
+  }
+  if (cols <= 0 || rows <= 0 || (cols & 1) != 0 || n_heads <= 0) {
+    fprintf(stderr,
+            "vira tensor error: rope_seq_norm invalid shape (%dx%d) n_heads=%d\n",
+            rows, cols, n_heads);
+    exit(1);
+  }
+
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, q.n_dims, q.dims)
+                : vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
+  int32_t half_dim = cols / 2;
+  float inv_stack[256], cos_stack[256], sin_stack[256];
+  float *inv_tab =
+      (half_dim <= 256) ? inv_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  float *cos_tab =
+      (half_dim <= 256) ? cos_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  float *sin_tab =
+      (half_dim <= 256) ? sin_stack : (float *)malloc((size_t)half_dim * sizeof(float));
+  if (!inv_tab || !cos_tab || !sin_tab) {
+    fprintf(stderr, "vira panic: rope_seq_norm scratch allocation failed\n");
+    exit(1);
+  }
+
+  for (int32_t i = 0; i < half_dim; ++i) {
+    float exponent = -(2.0f * (float)i) / (float)cols;
+    inv_tab[i] = powf(freq_base, exponent);
+  }
+
+  int32_t cur_seq = -1;
+  for (int32_t r = 0; r < rows; ++r) {
+    int32_t seq_idx = r / n_heads;
+    if (seq_idx != cur_seq) {
+      cur_seq = seq_idx;
+      float pos_f = (float)(start_pos + (int64_t)seq_idx);
+      for (int32_t i = 0; i < half_dim; ++i) {
+        float angle = pos_f * inv_tab[i];
+        cos_tab[i] = cosf(angle);
+        sin_tab[i] = sinf(angle);
+      }
+    }
+    const float *q_row = &q.data[(size_t)r * (size_t)cols];
+    float *out_row = &out.data[(size_t)r * (size_t)cols];
+    for (int32_t i = 0; i < half_dim; ++i) {
+      float cos_a = cos_tab[i];
+      float sin_a = sin_tab[i];
+      float q0 = q_row[2 * i];
+      float q1 = q_row[2 * i + 1];
+      out_row[2 * i] = q0 * cos_a - q1 * sin_a;
+      out_row[2 * i + 1] = q0 * sin_a + q1 * cos_a;
+    }
+  }
+
+  if (half_dim > 256) {
+    free(inv_tab);
+    free(cos_tab);
+    free(sin_tab);
+  }
+  return out;
+}
+
+static inline vira_tensor_f32 vira_gpu_rope_seq_norm(
+    vira_arena *opt_arena, vira_tensor_f32 q, int64_t start_pos,
+    int32_t n_heads, float freq_base) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&q);
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      q.data == NULL || q.n_dims < 2) {
+    if (_vira_gpu.simulate_oom) {
+      __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    }
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  int32_t cols = q.dims[q.n_dims - 1];
+  int32_t rows = 1;
+  for (int32_t i = 0; i < q.n_dims - 1; ++i) {
+    rows *= q.dims[i];
+  }
+  if ((cols & 1) != 0 || cols <= 0 || rows <= 0 || n_heads <= 0) {
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  int32_t half_dim = cols / 2;
+  int64_t start_pos_arg = start_pos;
+
+  pthread_mutex_lock(&_vira_gpu.lock);
+  bool has_k = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
+                   ? (_vira_gpu.cu_k_rope_seq_norm != NULL)
+                   : (_vira_gpu.kernel_rope_seq_norm != NULL);
+  if (!has_k || !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+  const size_t q_bytes = (size_t)rows * (size_t)cols * sizeof(vira_f32);
+
+  vira_cl_int err = 0;
+  bool q_hit = false;
+  _vira_gpu_act_entry *q_slot = _vira_gpu_get_or_upload_activation_locked(
+      q.data, q_bytes, !q.is_arena, &q_hit, NULL, NULL, 0, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || q_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  _vira_gpu_act_entry *y_slot = _vira_gpu_alloc_activation_slot_locked(
+      q_bytes, q_slot->dev_buf, NULL, NULL, q_slot->cu_buf, 0, 0, NULL, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || y_slot == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
+  }
+
+  if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+    void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols,
+                    &half_dim, &n_heads, &start_pos_arg, &freq_base};
+    unsigned int gx = (unsigned int)((half_dim + 15) / 16);
+    unsigned int gy = (unsigned int)((rows + 15) / 16);
+    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_seq_norm, gx, gy, 1, 16, 16, 1,
+                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+  } else {
+    err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 1, sizeof(vira_cl_mem), &y_slot->dev_buf);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 2, sizeof(int32_t), &rows);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 3, sizeof(int32_t), &cols);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 4, sizeof(int32_t), &half_dim);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 5, sizeof(int32_t), &n_heads);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 6, sizeof(int64_t), &start_pos_arg);
+    err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_seq_norm, 7, sizeof(float), &freq_base);
+    size_t lw1 = (_vira_gpu.max_wg_size >= 256) ? 16 : ((_vira_gpu.max_wg_size >= 128) ? 8 : 4);
+    size_t l_work[2] = {16, lw1};
+    size_t g_work[2] = {((size_t)half_dim + 15) & ~15ULL, (((size_t)rows + lw1 - 1) / lw1) * lw1};
+    if (err == VIRA_CL_SUCCESS) {
+      err = _vira_gpu.clEnqueueNDRangeKernel(_vira_gpu.queue, _vira_gpu.kernel_rope_seq_norm, 2,
+                                             NULL, g_work, l_work, 0, NULL, NULL);
+    }
+  }
+
+  if (err != VIRA_CL_SUCCESS) {
+    _vira_gpu_act_entry_reset(y_slot);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    __atomic_add_fetch(&_vira_gpu.oom_fallbacks, 1, __ATOMIC_RELAXED);
+    return _vira_cpu_rope_seq_norm(opt_arena, q, start_pos, n_heads, freq_base);
   }
 
   vira_tensor_f32 out =

@@ -54,6 +54,7 @@ typedef struct {
   int32_t n_dims;
   bool is_arena;
   bool is_view;
+  bool is_vmem;
 } vira_tensor_f32;
 
 /**
@@ -232,8 +233,40 @@ static inline vira_tensor_f32 _vira_tensor_f32_alloc_uninit_nd(int32_t n_dims,
   t.raw_alloc = raw;
   t.is_arena = false;
   t.is_view = false;
+  t.is_vmem = false;
   _vira_record_alloc();
   return t;
+}
+
+/**
+ * Reserves virtual address space without committing physical memory or pagefile
+ * for deferred host-quantized GGUF tensors; pages are committed on demand if
+ * host FP32 materialization is ever triggered.
+ */
+static inline vira_tensor_f32
+_vira_tensor_f32_alloc_reserved_nd(int32_t n_dims, const int32_t *dims) {
+#ifdef _WIN32
+  vira_tensor_f32 t = {0};
+  _vira_tensor_init_shape(&t, n_dims, dims);
+  size_t bytes = (size_t)t.rows * (size_t)t.cols * sizeof(vira_f32);
+  if (bytes == 0)
+    bytes = sizeof(vira_f32);
+  void *raw = VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE);
+  if (!raw) {
+    fprintf(stderr, "vira panic: tensor virtual reserve failed (%zu bytes)\n",
+            bytes);
+    exit(1);
+  }
+  t.data = (vira_f32 *)raw;
+  t.raw_alloc = raw;
+  t.is_arena = false;
+  t.is_view = false;
+  t.is_vmem = true;
+  _vira_record_alloc();
+  return t;
+#else
+  return _vira_tensor_f32_alloc_uninit_nd(n_dims, dims);
+#endif
 }
 
 /**
@@ -449,11 +482,19 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
                                             vira_tensor_f32 q, int64_t pos,
                                             float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_norm(vira_arena *opt_arena,
+                                                 vira_tensor_f32 q, int64_t pos,
+                                                 float freq_base);
 static inline vira_tensor_f32 vira_gpu_rope_seq(vira_arena *opt_arena,
                                                 vira_tensor_f32 q,
                                                 int64_t start_pos,
                                                 int32_t n_heads,
                                                 float freq_base);
+static inline vira_tensor_f32 vira_gpu_rope_seq_norm(vira_arena *opt_arena,
+                                                     vira_tensor_f32 q,
+                                                     int64_t start_pos,
+                                                     int32_t n_heads,
+                                                     float freq_base);
 static inline vira_tensor_f32 vira_gpu_softmax(vira_arena *opt_arena,
                                                vira_tensor_f32 logits);
 static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,

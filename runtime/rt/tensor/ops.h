@@ -1105,9 +1105,18 @@ static inline void vira_tensor_f32_free(vira_tensor_f32 *t) {
   if (t != NULL && !t->is_arena && !t->is_view && t->raw_alloc != NULL) {
     _vira_gpu_evict_ptr(t->data);
     _vira_rt_quant_free(t->data);
+#ifdef _WIN32
+    if (t->is_vmem) {
+      VirtualFree(t->raw_alloc, 0, MEM_RELEASE);
+    } else {
+      free(t->raw_alloc);
+    }
+#else
     free(t->raw_alloc);
+#endif
     t->raw_alloc = NULL;
     t->data = NULL;
+    t->is_vmem = false;
     _vira_record_free();
   }
 }

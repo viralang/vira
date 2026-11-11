@@ -108,8 +108,16 @@ pub fn rope(q tensor[f32], pos int, freq_base f32) tensor[f32] {
 	return gpu_rope(q, pos, freq_base)
 }
 
+pub fn rope_norm(q tensor[f32], pos int, freq_base f32) tensor[f32] {
+	return gpu_rope_norm(q, pos, freq_base)
+}
+
 pub fn rope_seq(q tensor[f32], start_pos i64, n_heads int, freq_base f32) tensor[f32] {
 	return gpu_rope_seq(q, start_pos, n_heads, freq_base)
+}
+
+pub fn rope_seq_norm(q tensor[f32], start_pos i64, n_heads int, freq_base f32) tensor[f32] {
+	return gpu_rope_seq_norm(q, start_pos, n_heads, freq_base)
 }
 
 pub fn softmax(logits tensor[f32]) tensor[f32] {

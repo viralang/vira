@@ -1043,7 +1043,13 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	case "gpu_rmsnorm":
 		return "**`gpu_rmsnorm(x: tensor[f32], weight: tensor[f32], eps: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD Root Mean Square Layer Normalization across each row."
 	case "gpu_rope":
-		return "**`gpu_rope(q: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD Rotary Position Embeddings (RoPE) at sequence position `pos`."
+		return "**`gpu_rope(q: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD NeoX split-half Rotary Position Embeddings (RoPE) at sequence position `pos`."
+	case "gpu_rope_norm":
+		return "**`gpu_rope_norm(q: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies GPU/SIMD classic interleaved Rotary Position Embeddings (RoPE, `(2*i, 2*i+1)` pairs) at sequence position `pos`."
+	case "gpu_rope_seq":
+		return "**`gpu_rope_seq(q: tensor[f32], start_pos: i64, n_heads: int, freq_base: f32) -> tensor[f32]`**\n\nApplies batched GPU/SIMD NeoX split-half RoPE across a prefill sequence starting at `start_pos`."
+	case "gpu_rope_seq_norm":
+		return "**`gpu_rope_seq_norm(q: tensor[f32], start_pos: i64, n_heads: int, freq_base: f32) -> tensor[f32]`**\n\nApplies batched GPU/SIMD classic interleaved RoPE across a prefill sequence starting at `start_pos`."
 	case "gpu_softmax":
 		return "**`gpu_softmax(logits: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU/SIMD numerically stable row-wise Softmax."
 	case "gpu_silu":
@@ -1059,7 +1065,9 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	case "tensor_rmsnorm":
 		return "**`tensor_rmsnorm(x: tensor[f32], weight: tensor[f32], eps: f32) -> tensor[f32]`**\n\nApplies Root Mean Square Layer Normalization (`x * weight / sqrt(mean(x^2) + eps)`) across each row."
 	case "tensor_rope":
-		return "**`tensor_rope(x: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies Rotary Position Embeddings (RoPE) at sequence position `pos` with base frequency `freq_base` (e.g. `10000.0` for LLaMA, `1000000.0` NeoX split-half for Qwen 2.5)."
+		return "**`tensor_rope(x: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies NeoX split-half Rotary Position Embeddings (RoPE) at sequence position `pos` with base frequency `freq_base` (e.g. `1000000.0` for Qwen 2.5)."
+	case "tensor_rope_norm":
+		return "**`tensor_rope_norm(x: tensor[f32], pos: int, freq_base: f32) -> tensor[f32]`**\n\nApplies classic interleaved Rotary Position Embeddings (RoPE, `(2*i, 2*i+1)` pairs) at sequence position `pos` with base frequency `freq_base` (e.g. `10000.0` for LLaMA / DeepSeek)."
 	case "tensor_silu":
 		return "**`tensor_silu(x: tensor[f32]) -> tensor[f32]`**\n\nApplies the Sigmoid Linear Unit (`SiLU(x) = x / (1 + exp(-x))`) activation function for SwiGLU feed-forward networks."
 	case "tensor_elemwise_mul":
@@ -1422,7 +1430,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 			for _, l := range lines {
 				lTrim := strings.TrimSpace(l)
 				if strings.Contains(lTrim, receiverIdent) && strings.Contains(lTrim, ":=") {
-					for _, marker := range []string{"tensor_fill(", "tensor_fill_3d(", "tensor_fill_4d(", ".reshape_2d(", ".reshape_3d(", ".reshape_4d(", ".transpose(", ".linear(", ".slice_rows(", " @ ", "tensor_relu(", "tensor_add(", "tensor_scale(", "tensor_elemwise_mul(", "tensor_rmsnorm(", "tensor_rope(", "tensor_silu(", "tensor_softmax(", "tensor_embedding(", "safetensors_load(", "gguf_load_tensor(", "gguf_tensor_dequant("} {
+					for _, marker := range []string{"tensor_fill(", "tensor_fill_3d(", "tensor_fill_4d(", ".reshape_2d(", ".reshape_3d(", ".reshape_4d(", ".transpose(", ".linear(", ".slice_rows(", " @ ", "tensor_relu(", "tensor_add(", "tensor_scale(", "tensor_elemwise_mul(", "tensor_rmsnorm(", "tensor_rope(", "tensor_rope_norm(", "tensor_silu(", "tensor_softmax(", "tensor_embedding(", "safetensors_load(", "gguf_load_tensor(", "gguf_tensor_dequant("} {
 						if strings.Contains(lTrim, marker) {
 							isTensorReceiver = true
 							break
@@ -1631,8 +1639,8 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 		"json_get_str", "json_get_int", "json_get_f32", "json_is_valid",
 		"tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_scale", "tensor_sum", "tensor_relu", "tensor_add", "tensor_elemwise_mul", "tensor_silu", "tensor_softmax", "tensor_embedding", "tensor_transpose",
 		"tensor_load_bin", "tensor_save_bin", "safetensors_load", "gguf_load", "gguf_load_tensor", "gguf_tensor_dequant",
-		"tensor_rmsnorm", "tensor_rope", "rmsnorm", "rope", "swiglu", "causal_self_attention", "sample_token", "sample_argmax", "sample_top_p",
-		"gpu_rmsnorm", "gpu_rope", "gpu_softmax", "gpu_silu", "gpu_gqa_attention",
+		"tensor_rmsnorm", "tensor_rope", "tensor_rope_norm", "rmsnorm", "rope", "swiglu", "causal_self_attention", "sample_token", "sample_argmax", "sample_top_p",
+		"gpu_rmsnorm", "gpu_rope", "gpu_rope_norm", "gpu_rope_seq", "gpu_rope_seq_norm", "gpu_softmax", "gpu_silu", "gpu_gqa_attention",
 		"gui_init", "gui_should_close", "gui_cancel_close", "gui_set_target_fps", "gui_window_width", "gui_window_height", "gui_begin", "gui_end", "gui_close", "gui_clear", "gui_frame_time", "gui_poll",
 		"gui_vstack_begin", "gui_hstack_begin", "gui_stack_end", "gui_spacing", "gui_card_begin", "gui_card_end", "gui_scroll_begin", "gui_scroll_end", "gui_mouse_wheel", "gui_separator", "gui_badge",
 		"gui_btn", "gui_btn_danger", "gui_check", "gui_slide", "gui_lbl", "gui_input", "gui_progress", "gui_radio",

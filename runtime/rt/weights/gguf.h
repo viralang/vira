@@ -41,7 +41,11 @@ static inline void _vira_gguf_skip_val(FILE *f, uint32_t val_type) {
         if (slen > 0)
           _nr = fread(scratch, 1, (size_t)slen, f);
       } else {
-        fseek(f, (long)slen, SEEK_CUR);
+#ifdef _WIN32
+        _fseeki64(f, (int64_t)slen, SEEK_CUR);
+#else
+        fseeko(f, (off_t)slen, SEEK_CUR);
+#endif
       }
     }
     break;
@@ -166,8 +170,13 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       if (fread(key_buf, 1, to_read, f) != to_read)
         break;
       key_buf[to_read] = '\0';
-      if (klen > to_read)
-        fseek(f, (long)(klen - to_read), SEEK_CUR);
+      if (klen > to_read) {
+#ifdef _WIN32
+        _fseeki64(f, (int64_t)(klen - to_read), SEEK_CUR);
+#else
+        fseeko(f, (off_t)(klen - to_read), SEEK_CUR);
+#endif
+      }
 
       uint32_t val_type = 0;
       if (fread(&val_type, 4, 1, f) != 1)
@@ -203,8 +212,13 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       if (fread(cur_name, 1, to_read, f) != to_read)
         break;
       cur_name[to_read] = '\0';
-      if (n_len > to_read)
-        fseek(f, (long)(n_len - to_read), SEEK_CUR);
+      if (n_len > to_read) {
+#ifdef _WIN32
+        _fseeki64(f, (int64_t)(n_len - to_read), SEEK_CUR);
+#else
+        fseeko(f, (off_t)(n_len - to_read), SEEK_CUR);
+#endif
+      }
 
       uint32_t n_dims = 0;
       if (fread(&n_dims, 4, 1, f) != 1)
@@ -216,7 +230,11 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
           break;
       }
       if (n_dims > 4) {
-        fseek(f, (long)(8 * (n_dims - 4)), SEEK_CUR);
+#ifdef _WIN32
+        _fseeki64(f, (int64_t)(8u * (uint64_t)(n_dims - 4u)), SEEK_CUR);
+#else
+        fseeko(f, (off_t)(8u * (uint64_t)(n_dims - 4u)), SEEK_CUR);
+#endif
       }
 
       uint32_t dtype = 0;
@@ -244,7 +262,8 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 #else
     int64_t cur_pos = (int64_t)ftello(f);
 #endif
-    int64_t pad = (alignment - (cur_pos % alignment)) % alignment;
+    int64_t align64 = (int64_t)alignment;
+    int64_t pad = (align64 - (cur_pos % align64)) % align64;
     int64_t data_start = cur_pos + pad;
     for (int32_t t = 0; t < _vira_gguf_dir_cache.count; ++t) {
       _vira_gguf_dir_cache.entries[t].file_pos += data_start;
@@ -289,11 +308,20 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
   fseeko(f, tensor_file_pos, SEEK_SET);
 #endif
 
-  vira_tensor_f32 t =
-      _vira_tensor_f32_alloc_uninit_nd(matched_ndims, matched_dims);
-  size_t total = (size_t)t.rows * (size_t)t.cols;
+  size_t total = 1;
+  for (int32_t d = 0; d < matched_ndims; ++d) {
+    total *= (size_t)matched_dims[d];
+  }
   size_t qk = _vira_gguf_dtype_qk(matched_type);
   size_t bs = _vira_gguf_dtype_bs(matched_type);
+  bool deferred = (matched_type != 0 && qk > 0 && bs > 0 &&
+                   (qk == 1 || (total % qk) == 0) &&
+                   matched_ndims >= 2 && total >= 65536u &&
+                   _vira_lazy_host_fp32_enabled());
+
+  vira_tensor_f32 t = deferred
+      ? _vira_tensor_f32_alloc_reserved_nd(matched_ndims, matched_dims)
+      : _vira_tensor_f32_alloc_uninit_nd(matched_ndims, matched_dims);
 
   if (matched_type == 0) {
     size_t nr = fread(t.data, sizeof(float), total, f);
@@ -330,8 +358,6 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       return (Result_tensor_f32){
           .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
     }
-    bool deferred = (matched_ndims >= 2 && total >= 65536u &&
-                     _vira_lazy_host_fp32_enabled());
     if (!deferred) {
       _vira_rt_dequant_blocks_to_fp32(matched_type, raw_q, 0, blocks, t.data);
     }

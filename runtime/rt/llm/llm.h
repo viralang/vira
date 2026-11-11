@@ -144,6 +144,68 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_arena *opt_arena,
 }
 
 /**
+ * Applies classic/interleaved Rotary Position Embeddings (RoPE, `(2*i, 2*i+1)` pairs)
+ * to attention query or key vectors (standard LLaMA / DeepSeek GGUF layout).
+ * @param q Query or key tensor.
+ * @param pos Sequence token position offset.
+ * @param freq_base Frequency base constant (e.g. 10000.0f).
+ * @return Rotated tensor with position encodings applied.
+ * Usage: Position encoding for LLaMA-style GGUF models (`tensor_rope_norm(q, pos, freq_base)`).
+ */
+static inline vira_tensor_f32 vira_tensor_rope_norm(vira_arena *opt_arena,
+                                                    vira_tensor_f32 q, int64_t pos,
+                                                    float freq_base) {
+  _vira_tensor_norm_shape(&q);
+  if (!_vira_tls_gpu_fallback && (q.cols & 1) == 0 &&
+      ((int64_t)q.rows * (int64_t)q.cols >= 16384LL ||
+       _vira_gpu_is_ptr_dirty(q.data)) &&
+      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+    _vira_tls_gpu_fallback = true;
+    vira_tensor_f32 gpu_out = vira_gpu_rope_norm(opt_arena, q, pos, freq_base);
+    _vira_tls_gpu_fallback = false;
+    return gpu_out;
+  }
+  _vira_tensor_sync_host_f32(q.data);
+  vira_tensor_f32 out =
+      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, q.n_dims, q.dims)
+                : vira_tensor_f32_alloc_nd(q.n_dims, q.dims);
+  int32_t half_dim = q.cols / 2;
+  float cos_stack[256];
+  float sin_stack[256];
+  float *cos_tab =
+      (half_dim <= 256) ? cos_stack : (float *)malloc(half_dim * sizeof(float));
+  float *sin_tab =
+      (half_dim <= 256) ? sin_stack : (float *)malloc(half_dim * sizeof(float));
+
+  for (int32_t i = 0; i < half_dim; ++i) {
+    float exponent = -(2.0f * (float)i) / (float)q.cols;
+    float freq = powf(freq_base, exponent);
+    float angle = (float)pos * freq;
+    cos_tab[i] = cosf(angle);
+    sin_tab[i] = sinf(angle);
+  }
+
+  for (int32_t r = 0; r < q.rows; ++r) {
+    const float *q_row = &q.data[r * q.cols];
+    float *out_row = &out.data[r * q.cols];
+    for (int32_t i = 0; i < half_dim; ++i) {
+      float cos_a = cos_tab[i];
+      float sin_a = sin_tab[i];
+      float q0 = q_row[2 * i];
+      float q1 = q_row[2 * i + 1];
+      out_row[2 * i] = q0 * cos_a - q1 * sin_a;
+      out_row[2 * i + 1] = q0 * sin_a + q1 * cos_a;
+    }
+  }
+
+  if (half_dim > 256) {
+    free(cos_tab);
+    free(sin_tab);
+  }
+  return out;
+}
+
+/**
  * Computes the SiLU (Swish) non-linear activation function `f(x) = x * sigmoid(x)` with SIMD.
  * @param x Input tensor.
  * @return Activated tensor.
