@@ -586,41 +586,192 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
 }
 
 typedef struct {
-  const vira_f32 *x_base;
   const vira_f32 *w_base;
+  const vira_f32 *bias;
   vira_f32 *y_base;
+  int32_t N;
+  bool accum;
+} _vira_multi_f32_mat;
+
+typedef struct {
+  const vira_f32 *x_base;
   int32_t M;
   int32_t K;
-  int32_t N;
-  int32_t n_start;
-  int32_t n_end;
-} _vira_linear_job;
+  int32_t n_mats;
+  int32_t total_N;
+  _vira_multi_f32_mat mats[3];
+} _vira_multi_f32_ctx;
 
-/**
- * Worker thread task callback executing parallel linear layer projection `x @ w^T`.
- * @param raw_env Pointer to `_vira_linear_job` environment structure.
- * Usage: Invoked by scheduler worker threads for parallel multi-threaded linear projections.
- */
-static void _vira_linear_job_fn(void *raw_env) {
-  _vira_linear_job *j = (_vira_linear_job *)raw_env;
-  int32_t M = j->M;
-  int32_t K = j->K;
-  int32_t N = j->N;
-  int32_t n_start = j->n_start;
-  int32_t n_end = j->n_end;
+static inline void _vira_f32_write1(vira_f32 *dst, int32_t n, float val,
+                                    const vira_f32 *bias, bool accum) {
+  if (bias) val += bias[n];
+  if (accum) dst[n] += val;
+  else dst[n] = val;
+}
 
-  for (int32_t m = 0; m < M; ++m) {
-    const vira_f32 *x_row = &j->x_base[(size_t)m * (size_t)K];
-    vira_f32 *y_row = &j->y_base[(size_t)m * (size_t)N];
-    for (int32_t n = n_start; n < n_end; ++n) {
-      const vira_f32 *w_row = &j->w_base[(size_t)n * (size_t)K];
-      int32_t k = 0;
-      float acc = 0.0f;
+static inline void _vira_f32_linear_range(const vira_f32 *x_base,
+                                          const vira_f32 *w_base,
+                                          const vira_f32 *bias,
+                                          vira_f32 *y_base, int32_t M,
+                                          int32_t K, int32_t N, int32_t n_start,
+                                          int32_t n_end, bool accum) {
+  if (n_start >= n_end || M <= 0) return;
 #if defined(__AVX2__)
-      __m256 sum0 = _mm256_setzero_ps();
-      __m256 sum1 = _mm256_setzero_ps();
-      __m256 sum2 = _mm256_setzero_ps();
-      __m256 sum3 = _mm256_setzero_ps();
+  int32_t m = 0;
+  for (; m + 4 <= M; m += 4) {
+    const vira_f32 *xr0 = &x_base[(size_t)(m + 0) * (size_t)K];
+    const vira_f32 *xr1 = &x_base[(size_t)(m + 1) * (size_t)K];
+    const vira_f32 *xr2 = &x_base[(size_t)(m + 2) * (size_t)K];
+    const vira_f32 *xr3 = &x_base[(size_t)(m + 3) * (size_t)K];
+    vira_f32 *y0 = &y_base[(size_t)(m + 0) * (size_t)N];
+    vira_f32 *y1 = &y_base[(size_t)(m + 1) * (size_t)N];
+    vira_f32 *y2 = &y_base[(size_t)(m + 2) * (size_t)N];
+    vira_f32 *y3 = &y_base[(size_t)(m + 3) * (size_t)N];
+    int32_t n = n_start;
+    for (; n + 2 <= n_end; n += 2) {
+      const vira_f32 *w0 = &w_base[(size_t)(n + 0) * (size_t)K];
+      const vira_f32 *w1 = &w_base[(size_t)(n + 1) * (size_t)K];
+      __m256 a00 = _mm256_setzero_ps(), a01 = _mm256_setzero_ps(),
+             a02 = _mm256_setzero_ps(), a03 = _mm256_setzero_ps();
+      __m256 a10 = _mm256_setzero_ps(), a11 = _mm256_setzero_ps(),
+             a12 = _mm256_setzero_ps(), a13 = _mm256_setzero_ps();
+      int32_t k = 0;
+      for (; k + 8 <= K; k += 8) {
+        __m256 vw0 = _mm256_loadu_ps(&w0[k]);
+        __m256 vw1 = _mm256_loadu_ps(&w1[k]);
+        __m256 vx0 = _mm256_loadu_ps(&xr0[k]);
+        __m256 vx1 = _mm256_loadu_ps(&xr1[k]);
+        __m256 vx2 = _mm256_loadu_ps(&xr2[k]);
+        __m256 vx3 = _mm256_loadu_ps(&xr3[k]);
+#if defined(__FMA__)
+        a00 = _mm256_fmadd_ps(vx0, vw0, a00);
+        a01 = _mm256_fmadd_ps(vx1, vw0, a01);
+        a02 = _mm256_fmadd_ps(vx2, vw0, a02);
+        a03 = _mm256_fmadd_ps(vx3, vw0, a03);
+        a10 = _mm256_fmadd_ps(vx0, vw1, a10);
+        a11 = _mm256_fmadd_ps(vx1, vw1, a11);
+        a12 = _mm256_fmadd_ps(vx2, vw1, a12);
+        a13 = _mm256_fmadd_ps(vx3, vw1, a13);
+#else
+        a00 = _mm256_add_ps(a00, _mm256_mul_ps(vx0, vw0));
+        a01 = _mm256_add_ps(a01, _mm256_mul_ps(vx1, vw0));
+        a02 = _mm256_add_ps(a02, _mm256_mul_ps(vx2, vw0));
+        a03 = _mm256_add_ps(a03, _mm256_mul_ps(vx3, vw0));
+        a10 = _mm256_add_ps(a10, _mm256_mul_ps(vx0, vw1));
+        a11 = _mm256_add_ps(a11, _mm256_mul_ps(vx1, vw1));
+        a12 = _mm256_add_ps(a12, _mm256_mul_ps(vx2, vw1));
+        a13 = _mm256_add_ps(a13, _mm256_mul_ps(vx3, vw1));
+#endif
+      }
+      float s00 = _vira_avx2_hsum_f32(a00), s01 = _vira_avx2_hsum_f32(a01),
+            s02 = _vira_avx2_hsum_f32(a02), s03 = _vira_avx2_hsum_f32(a03);
+      float s10 = _vira_avx2_hsum_f32(a10), s11 = _vira_avx2_hsum_f32(a11),
+            s12 = _vira_avx2_hsum_f32(a12), s13 = _vira_avx2_hsum_f32(a13);
+      for (; k < K; ++k) {
+        float w0k = w0[k], w1k = w1[k];
+        float x0k = xr0[k], x1k = xr1[k], x2k = xr2[k], x3k = xr3[k];
+        s00 += x0k * w0k; s01 += x1k * w0k; s02 += x2k * w0k; s03 += x3k * w0k;
+        s10 += x0k * w1k; s11 += x1k * w1k; s12 += x2k * w1k; s13 += x3k * w1k;
+      }
+      _vira_f32_write1(y0, n + 0, s00, bias, accum);
+      _vira_f32_write1(y1, n + 0, s01, bias, accum);
+      _vira_f32_write1(y2, n + 0, s02, bias, accum);
+      _vira_f32_write1(y3, n + 0, s03, bias, accum);
+      _vira_f32_write1(y0, n + 1, s10, bias, accum);
+      _vira_f32_write1(y1, n + 1, s11, bias, accum);
+      _vira_f32_write1(y2, n + 1, s12, bias, accum);
+      _vira_f32_write1(y3, n + 1, s13, bias, accum);
+    }
+    for (; n < n_end; ++n) {
+      const vira_f32 *wr = &w_base[(size_t)n * (size_t)K];
+      __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps(),
+             a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+      int32_t k = 0;
+      for (; k + 8 <= K; k += 8) {
+        __m256 vw = _mm256_loadu_ps(&wr[k]);
+        __m256 vx0 = _mm256_loadu_ps(&xr0[k]);
+        __m256 vx1 = _mm256_loadu_ps(&xr1[k]);
+        __m256 vx2 = _mm256_loadu_ps(&xr2[k]);
+        __m256 vx3 = _mm256_loadu_ps(&xr3[k]);
+#if defined(__FMA__)
+        a0 = _mm256_fmadd_ps(vx0, vw, a0);
+        a1 = _mm256_fmadd_ps(vx1, vw, a1);
+        a2 = _mm256_fmadd_ps(vx2, vw, a2);
+        a3 = _mm256_fmadd_ps(vx3, vw, a3);
+#else
+        a0 = _mm256_add_ps(a0, _mm256_mul_ps(vx0, vw));
+        a1 = _mm256_add_ps(a1, _mm256_mul_ps(vx1, vw));
+        a2 = _mm256_add_ps(a2, _mm256_mul_ps(vx2, vw));
+        a3 = _mm256_add_ps(a3, _mm256_mul_ps(vx3, vw));
+#endif
+      }
+      float s0 = _vira_avx2_hsum_f32(a0), s1 = _vira_avx2_hsum_f32(a1),
+            s2 = _vira_avx2_hsum_f32(a2), s3 = _vira_avx2_hsum_f32(a3);
+      for (; k < K; ++k) {
+        float wk = wr[k];
+        s0 += xr0[k] * wk; s1 += xr1[k] * wk; s2 += xr2[k] * wk; s3 += xr3[k] * wk;
+      }
+      _vira_f32_write1(y0, n, s0, bias, accum);
+      _vira_f32_write1(y1, n, s1, bias, accum);
+      _vira_f32_write1(y2, n, s2, bias, accum);
+      _vira_f32_write1(y3, n, s3, bias, accum);
+    }
+  }
+  for (; m < M; ++m) {
+    const vira_f32 *x_row = &x_base[(size_t)m * (size_t)K];
+    vira_f32 *y_row = &y_base[(size_t)m * (size_t)N];
+    int32_t n = n_start;
+    for (; n + 4 <= n_end; n += 4) {
+      const vira_f32 *w0 = &w_base[(size_t)(n + 0) * (size_t)K];
+      const vira_f32 *w1 = &w_base[(size_t)(n + 1) * (size_t)K];
+      const vira_f32 *w2 = &w_base[(size_t)(n + 2) * (size_t)K];
+      const vira_f32 *w3 = &w_base[(size_t)(n + 3) * (size_t)K];
+      __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps(),
+             acc2 = _mm256_setzero_ps(), acc3 = _mm256_setzero_ps();
+      int32_t k = 0;
+      for (; k + 8 <= K; k += 8) {
+        __m256 vx = _mm256_loadu_ps(&x_row[k]);
+        __m256 vw0 = _mm256_loadu_ps(&w0[k]);
+        __m256 vw1 = _mm256_loadu_ps(&w1[k]);
+        __m256 vw2 = _mm256_loadu_ps(&w2[k]);
+        __m256 vw3 = _mm256_loadu_ps(&w3[k]);
+#if defined(__FMA__)
+        acc0 = _mm256_fmadd_ps(vx, vw0, acc0);
+        acc1 = _mm256_fmadd_ps(vx, vw1, acc1);
+        acc2 = _mm256_fmadd_ps(vx, vw2, acc2);
+        acc3 = _mm256_fmadd_ps(vx, vw3, acc3);
+#else
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(vx, vw0));
+        acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(vx, vw1));
+        acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(vx, vw2));
+        acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(vx, vw3));
+#endif
+      }
+      __m128 r0 = _mm_add_ps(_mm256_castps256_ps128(acc0), _mm256_extractf128_ps(acc0, 1));
+      __m128 r1 = _mm_add_ps(_mm256_castps256_ps128(acc1), _mm256_extractf128_ps(acc1, 1));
+      __m128 r2 = _mm_add_ps(_mm256_castps256_ps128(acc2), _mm256_extractf128_ps(acc2, 1));
+      __m128 r3 = _mm_add_ps(_mm256_castps256_ps128(acc3), _mm256_extractf128_ps(acc3, 1));
+      _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+      __m128 tot = _mm_add_ps(_mm_add_ps(r0, r1), _mm_add_ps(r2, r3));
+      float s4[4];
+      _mm_storeu_ps(s4, tot);
+      for (; k < K; ++k) {
+        float xk = x_row[k];
+        s4[0] += xk * w0[k];
+        s4[1] += xk * w1[k];
+        s4[2] += xk * w2[k];
+        s4[3] += xk * w3[k];
+      }
+      _vira_f32_write1(y_row, n + 0, s4[0], bias, accum);
+      _vira_f32_write1(y_row, n + 1, s4[1], bias, accum);
+      _vira_f32_write1(y_row, n + 2, s4[2], bias, accum);
+      _vira_f32_write1(y_row, n + 3, s4[3], bias, accum);
+    }
+    for (; n < n_end; ++n) {
+      const vira_f32 *w_row = &w_base[(size_t)n * (size_t)K];
+      __m256 sum0 = _mm256_setzero_ps(), sum1 = _mm256_setzero_ps(),
+             sum2 = _mm256_setzero_ps(), sum3 = _mm256_setzero_ps();
+      int32_t k = 0;
       for (; k + 32 <= K; k += 32) {
         __m256 x0 = _mm256_loadu_ps(&x_row[k]);
         __m256 w0 = _mm256_loadu_ps(&w_row[k]);
@@ -642,8 +793,7 @@ static void _vira_linear_job_fn(void *raw_env) {
         sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(x3, w3));
 #endif
       }
-      sum0 = _mm256_add_ps(_mm256_add_ps(sum0, sum1),
-                           _mm256_add_ps(sum2, sum3));
+      sum0 = _mm256_add_ps(_mm256_add_ps(sum0, sum1), _mm256_add_ps(sum2, sum3));
       for (; k + 8 <= K; k += 8) {
         __m256 x0 = _mm256_loadu_ps(&x_row[k]);
         __m256 w0 = _mm256_loadu_ps(&w_row[k]);
@@ -653,19 +803,25 @@ static void _vira_linear_job_fn(void *raw_env) {
         sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(x0, w0));
 #endif
       }
-      __m128 lo = _mm256_castps256_ps128(sum0);
-      __m128 hi = _mm256_extractf128_ps(sum0, 1);
-      __m128 s128 = _mm_add_ps(lo, hi);
-      s128 = _mm_hadd_ps(s128, s128);
-      s128 = _mm_hadd_ps(s128, s128);
-      acc = _mm_cvtss_f32(s128);
-#elif defined(__ARM_NEON) || defined(__aarch64__)
+      float acc = _vira_avx2_hsum_f32(sum0);
+      for (; k < K; ++k) acc += x_row[k] * w_row[k];
+      _vira_f32_write1(y_row, n, acc, bias, accum);
+    }
+  }
+#else
+  for (int32_t m = 0; m < M; ++m) {
+    const vira_f32 *x_row = &x_base[(size_t)m * (size_t)K];
+    vira_f32 *y_row = &y_base[(size_t)m * (size_t)N];
+    for (int32_t n = n_start; n < n_end; ++n) {
+      const vira_f32 *w_row = &w_base[(size_t)n * (size_t)K];
+      int32_t k = 0;
+      float acc = 0.0f;
+#if defined(__ARM_NEON) || defined(__aarch64__)
       float32x4_t sum0 = vdupq_n_f32(0.0f);
       float32x4_t sum1 = vdupq_n_f32(0.0f);
       for (; k + 8 <= K; k += 8) {
         sum0 = vfmaq_f32(sum0, vld1q_f32(&x_row[k]), vld1q_f32(&w_row[k]));
-        sum1 =
-            vfmaq_f32(sum1, vld1q_f32(&x_row[k + 4]), vld1q_f32(&w_row[k + 4]));
+        sum1 = vfmaq_f32(sum1, vld1q_f32(&x_row[k + 4]), vld1q_f32(&w_row[k + 4]));
       }
       sum0 = vaddq_f32(sum0, sum1);
       acc = vaddvq_f32(sum0);
@@ -673,9 +829,74 @@ static void _vira_linear_job_fn(void *raw_env) {
       for (; k < K; ++k) {
         acc += x_row[k] * w_row[k];
       }
-      y_row[n] = acc;
+      _vira_f32_write1(y_row, n, acc, bias, accum);
     }
   }
+#endif
+}
+
+static void _vira_multi_f32_team_fn(void *raw_ctx, int32_t tid, int32_t nt) {
+  const _vira_multi_f32_ctx *ctx = (const _vira_multi_f32_ctx *)raw_ctx;
+  int32_t total = ctx->total_N;
+  int32_t base = total / nt;
+  int32_t extra = total % nt;
+  int32_t g_start = tid * base + (tid < extra ? tid : extra);
+  int32_t g_end = g_start + base + (tid < extra ? 1 : 0);
+  if (g_start >= g_end) return;
+
+  int32_t off = 0;
+  for (int32_t i = 0; i < ctx->n_mats; ++i) {
+    const _vira_multi_f32_mat *m = &ctx->mats[i];
+    int32_t m_end = off + m->N;
+    int32_t s = g_start > off ? (g_start - off) : 0;
+    int32_t e = g_end < m_end ? (g_end - off) : m->N;
+    if (s < e) {
+      _vira_f32_linear_range(ctx->x_base, m->w_base, m->bias, m->y_base,
+                             ctx->M, ctx->K, m->N, s, e, m->accum);
+    }
+    off = m_end;
+  }
+}
+
+static inline void _vira_multi_f32_linear_write(
+    const vira_f32 *x_base, int32_t M, int32_t K, int32_t n_mats,
+    const _vira_multi_f32_mat *mats) {
+  if (!x_base || M <= 0 || K <= 0 || n_mats <= 0 || n_mats > 3 || !mats) {
+    return;
+  }
+  _vira_multi_f32_ctx ctx = {0};
+  ctx.x_base = x_base;
+  ctx.M = M;
+  ctx.K = K;
+  ctx.n_mats = n_mats;
+  int32_t total_N = 0;
+  for (int32_t i = 0; i < n_mats; ++i) {
+    ctx.mats[i] = mats[i];
+    total_N += mats[i].N;
+  }
+  ctx.total_N = total_N;
+
+  int64_t total_ops = (int64_t)M * (int64_t)total_N * (int64_t)K;
+  if (total_ops >= 65536LL && total_N >= 32) {
+    _vira_team_run(_vira_multi_f32_team_fn, &ctx, total_N);
+  } else {
+    _vira_multi_f32_team_fn(&ctx, 0, 1);
+  }
+}
+
+static inline void _vira_linear_f32_write(const vira_f32 *x_base,
+                                          const vira_f32 *w_base,
+                                          const vira_f32 *bias,
+                                          vira_f32 *y_base, int32_t M,
+                                          int32_t K, int32_t N, bool accum) {
+  _vira_multi_f32_mat m = {
+      .w_base = w_base,
+      .bias = bias,
+      .y_base = y_base,
+      .N = N,
+      .accum = accum,
+  };
+  _vira_multi_f32_linear_write(x_base, M, K, 1, &m);
 }
 
 // Multi-threaded AVX2+FMA / NEON Linear Projection `x.linear(w)` computing `x @ w^T`
@@ -727,58 +948,10 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
 
   int32_t out_dims[2] = {M, N};
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
-                : vira_tensor_f32_alloc_nd(2, out_dims);
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
 
-  if (total_ops >= 262144LL && N >= 32 && !_vira_in_active_actor()) {
-    vira_scheduler_ensure_init();
-    int32_t nw = vira_scheduler_num_workers();
-    if (nw > 16)
-      nw = 16;
-    if (nw > N)
-      nw = N;
-    if (nw > 1) {
-      _vira_linear_job jobs[16];
-      vira_task tasks[16];
-      int32_t base_n = N / nw;
-      int32_t extra = N % nw;
-      int32_t cur = 0;
-      for (int32_t wi = 0; wi < nw; ++wi) {
-        int32_t cnt = base_n + (wi < extra ? 1 : 0);
-        jobs[wi] = (_vira_linear_job){.x_base = x.data,
-                                      .w_base = w.data,
-                                      .y_base = out.data,
-                                      .M = M,
-                                      .K = K,
-                                      .N = N,
-                                      .n_start = cur,
-                                      .n_end = cur + cnt};
-        cur += cnt;
-        if (wi > 0) {
-          tasks[wi] = (vira_task){.fn = _vira_linear_job_fn,
-                                  .env = &jobs[wi],
-                                  .next_actor_msg = NULL,
-                                  .done = 0};
-          vira_scheduler_submit_async(&tasks[wi]);
-        }
-      }
-      _vira_linear_job_fn(&jobs[0]);
-      for (int32_t wi = 1; wi < nw; ++wi) {
-        vira_scheduler_await(&tasks[wi]);
-      }
-      return out;
-    }
-  }
-
-  _vira_linear_job single = {.x_base = x.data,
-                             .w_base = w.data,
-                             .y_base = out.data,
-                             .M = M,
-                             .K = K,
-                             .N = N,
-                             .n_start = 0,
-                             .n_end = N};
-  _vira_linear_job_fn(&single);
+  _vira_linear_f32_write(x.data, w.data, NULL, out.data, M, K, N, false);
   return out;
 }
 
@@ -801,12 +974,7 @@ static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
   for (; i + 8 <= total; i += 8) {
     vsum = _mm256_add_ps(vsum, _mm256_loadu_ps(&t.data[i]));
   }
-  __m128 lo = _mm256_castps256_ps128(vsum);
-  __m128 hi = _mm256_extractf128_ps(vsum, 1);
-  __m128 s128 = _mm_add_ps(lo, hi);
-  s128 = _mm_hadd_ps(s128, s128);
-  s128 = _mm_hadd_ps(s128, s128);
-  sum += _mm_cvtss_f32(s128);
+  sum += _vira_avx2_hsum_f32(vsum);
 #elif defined(__ARM_NEON) || defined(__aarch64__)
   float32x4_t vsum = vdupq_n_f32(0.0f);
   for (; i + 4 <= total; i += 4) {
@@ -898,6 +1066,33 @@ static inline void _vira_vec_add_f32(vira_f32 *dst, const vira_f32 *pa,
 #endif
   for (; i < count; i++) {
     dst[i] = pa[i] + pb[i];
+  }
+}
+
+static inline void _vira_vec_add_inplace_f32(vira_f32 *dst, const vira_f32 *src,
+                                             int32_t count) {
+  int32_t i = 0;
+#if defined(__AVX2__)
+  for (; i + 8 <= count; i += 8) {
+    __m256 vd = _mm256_loadu_ps(&dst[i]);
+    __m256 vs = _mm256_loadu_ps(&src[i]);
+    _mm256_storeu_ps(&dst[i], _mm256_add_ps(vd, vs));
+  }
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+  for (; i + 4 <= count; i += 4) {
+    float32x4_t vd = vld1q_f32(&dst[i]);
+    float32x4_t vs = vld1q_f32(&src[i]);
+    vst1q_f32(&dst[i], vaddq_f32(vd, vs));
+  }
+#elif defined(__SSE2__)
+  for (; i + 4 <= count; i += 4) {
+    __m128 vd = _mm_loadu_ps(&dst[i]);
+    __m128 vs = _mm_loadu_ps(&src[i]);
+    _mm_storeu_ps(&dst[i], _mm_add_ps(vd, vs));
+  }
+#endif
+  for (; i < count; i++) {
+    dst[i] += src[i];
   }
 }
 
