@@ -102,6 +102,7 @@ type Checker struct {
 	// Function context during Pass 3
 	curFile         *ast.File
 	curFnReturn     Type
+	curActor        *StructType // actor whose method body is being checked (nil elsewhere)
 	inDeferDiscard  bool
 	inUnsafeContext bool
 }
@@ -1658,6 +1659,34 @@ func (c *Checker) promoteEmbeddedMembers(root *StructType) {
 	}
 }
 
+// --- ACTOR IDENTITY RULES ---
+//
+// An actor has identity: queued messages and the scheduler hold pointers to it. Copying one
+// would create a second mailbox over the same heap fields, and relocating one while messages
+// are pending leaves those pointers dangling. Actors are therefore created in place and
+// afterwards only referenced (`mut` parameters, `pool[i] <- method()`).
+
+// rejectActorCopy reports a binding or assignment that would copy an existing actor value.
+func (c *Checker) rejectActorCopy(value ast.Expr, t Type) {
+	st, ok := t.(*StructType)
+	if !ok || !st.IsActor {
+		return
+	}
+	switch value.(type) {
+	case *ast.IdentExpr, *ast.IndexExpr, *ast.SelectorExpr:
+		c.errorf(value.Span(),
+			"actor '%s' cannot be copied or moved into another variable; use it in place (pass it as a 'mut' parameter or send to it where it lives)",
+			st.Name)
+	}
+}
+
+// rejectActorSliceCopy reports slice operations that would duplicate the actors they hold.
+func (c *Checker) rejectActorSliceCopy(sl *SliceType, method string, span token.Span) {
+	if st, ok := sl.Elem.(*StructType); ok && st.IsActor {
+		c.errorf(span, "cannot call '.%s()' on a slice of actor '%s': actors cannot be copied", method, st.Name)
+	}
+}
+
 // --- PASS 3: BODY TYPE CHECKING, MUTABILITY & RESULT (!T) VERIFICATION ---
 
 func (c *Checker) checkFnBody(d *ast.FnDecl) {
@@ -1672,8 +1701,15 @@ func (c *Checker) checkFnBody(d *ast.FnDecl) {
 
 	scope := NewScope(nil)
 
+	prevActor := c.curActor
+	c.curActor = nil
+	defer func() { c.curActor = prevActor }()
+
 	if d.Receiver != nil {
 		recvType := c.resolveTypeExpr(d.Receiver.Type)
+		if rst, ok := recvType.(*StructType); ok && rst.IsActor {
+			c.curActor = rst // the actor's own methods may touch its state directly
+		}
 		scope.Define(&VarSymbol{
 			Name:  d.Receiver.Name.Name,
 			Type:  recvType,
@@ -1722,6 +1758,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 
 	case *ast.VarDeclStmt:
 		valType := c.checkExpr(s.Value, scope)
+		if s.Name.Name != "_" { // `_ := actor` only marks the value as used; nothing is copied
+			c.rejectActorCopy(s.Value, valType)
+		}
 		if s.Name.Name != "_" {
 			if !scope.Define(&VarSymbol{
 				Name:  s.Name.Name,
@@ -1736,6 +1775,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 	case *ast.AssignStmt:
 		lhsType := c.checkExpr(s.Target, scope)
 		rhsType := c.checkExpr(s.Value, scope)
+		c.rejectActorCopy(s.Value, rhsType)
 
 		// 1. Verify target mutability (both variable binding and 4-quadrant struct field rules)
 		c.verifyAssignmentMutability(s.Target, scope, s.StmtSpan)
@@ -2108,6 +2148,14 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 				if (finfo.Access == ast.AccessPrivateImm || finfo.Access == ast.AccessPrivateMut) && finfo.OwnerMod != c.currentMod {
 					c.errorf(e.SelSpan, "cannot read private field '%s.%s' from outside module '%s'",
 						st.Name, finfo.Name, finfo.OwnerMod)
+				}
+				// Actor isolation: mutable actor state is only touched by the actor's own
+				// handlers. Immutable fields never change after construction and stay readable.
+				if st.IsActor && c.curActor != st &&
+					(finfo.Access == ast.AccessPrivateMut || finfo.Access == ast.AccessPubMut) {
+					c.errorf(e.SelSpan,
+						"cannot access mutable field '%s.%s' from outside the actor; read or change it through a message ('<actor> <- method()')",
+						st.Name, finfo.Name)
 				}
 				if len(path) > 0 {
 					c.SelectorPaths[e] = path
@@ -2495,6 +2543,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					}
 					callName = "slice.clear"
 				case "clone":
+					c.rejectActorSliceCopy(sl, "clone", callee.SelSpan)
 					sig = &FnSig{
 						Name:       "clone",
 						Params:     nil,
@@ -2503,6 +2552,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					}
 					callName = "slice.clone"
 				case "slice":
+					c.rejectActorSliceCopy(sl, "slice", callee.SelSpan)
 					sig = &FnSig{
 						Name:       "slice",
 						Params:     []ParamInfo{{Name: "start", Type: TypeInt}, {Name: "end", Type: TypeInt}},
@@ -2785,6 +2835,16 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					c.SelectorPaths[callee] = path
 				}
 				callName = st.Name + "." + callee.Field.Name
+
+				// Actor isolation: from outside the actor, a method runs only as a message
+				// (`actor <- method()`), so it is serialized by the mailbox and supervised. A
+				// direct call would run on the caller's thread, race with in-flight messages
+				// and bypass the fault boundary.
+				if st.IsActor && !callee.IsActorSend && c.curActor != st {
+					c.errorf(call.CallSpan,
+						"cannot call method '%s()' directly on actor '%s' from outside the actor; send a message instead: '<actor> <- %s(...)'",
+						callee.Field.Name, st.Name, callee.Field.Name)
+				}
 
 				if baseSig.IsMutReceiver {
 					rootSym := c.findRootSymbol(callee.Left, scope)

@@ -245,6 +245,47 @@ static inline void _vira_record_free(void) {
   }
 }
 
+// Runtime fault entry point (bounds errors, division by zero, pop from empty slice, ...).
+// Defined in rt/scheduler/scheduler.h: inside an actor it is trapped by the supervisor like an
+// explicit `panic(...)`; elsewhere it prints the message and exits.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, format(printf, 1, 2)))
+#endif
+static void _vira_rt_fault(const char *fmt, ...);
+
+// --- CHECKED INTEGER DIVISION -------------------------------------------------
+// C leaves `x / 0`, `x % 0` and `INT_MIN / -1` undefined (SIGFPE on x86). The compiler lowers
+// integer `/` and `%` to these helpers so a zero divisor is a supervised runtime fault and the
+// `MIN / -1` overflow wraps like every other integer operation.
+static inline int32_t vira_div_i32(int32_t a, int32_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer division by zero");
+  if (b == -1) return (int32_t)(0u - (uint32_t)a);
+  return a / b;
+}
+static inline int32_t vira_mod_i32(int32_t a, int32_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer modulo by zero");
+  if (b == -1) return 0;
+  return a % b;
+}
+static inline int64_t vira_div_i64(int64_t a, int64_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer division by zero");
+  if (b == -1) return (int64_t)(0ull - (uint64_t)a);
+  return a / b;
+}
+static inline int64_t vira_mod_i64(int64_t a, int64_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer modulo by zero");
+  if (b == -1) return 0;
+  return a % b;
+}
+static inline uint64_t vira_div_u64(uint64_t a, uint64_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer division by zero");
+  return a / b;
+}
+static inline uint64_t vira_mod_u64(uint64_t a, uint64_t b) {
+  if (b == 0) _vira_rt_fault("vira panic: integer modulo by zero");
+  return a % b;
+}
+
 typedef float vira_f32;
 typedef uint16_t vira_bf16;
 

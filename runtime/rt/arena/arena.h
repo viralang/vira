@@ -161,8 +161,9 @@ static inline vira_string vira_arena_str_format(vira_arena *a, const char *fmt,
   vsnprintf(buf, (size_t)needed + 1, fmt, args_copy);
   va_end(args_copy);
 
+  // BORROWED from the arena slab: cloned to the heap if it is stored outside the arena.
   return (vira_string){
-      .data = (const uint8_t *)buf, .len = needed, .is_lit = true};
+      .data = (const uint8_t *)buf, .len = needed, .is_lit = true, .is_borrowed = true};
 }
 
 /**

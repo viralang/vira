@@ -1,0 +1,85 @@
+// OUT: doc-3
+// OUT: changed-3
+// OUT: again-3 L-3 2
+// OUT: c-3 mutated 8.00 4.00
+// OUT: fallback-3
+// OUT: l-3
+// OUT: A-0-1-2-3-4
+// OUT: 0
+// OUT: xz
+// OUT: 3
+// OUT: [vira_rt] active_leaks=0
+
+// A view of a string (`trim_left`, indexing) is copied when it is stored, so reassigning
+// the source cannot leave it dangling.
+struct Doc {
+pub mut:
+    title string
+    lines []string
+    grid [][]string
+    w tensor[f32]
+}
+fn trim_title(d Doc) string {
+    return d.title.trim_left()
+}
+fn mk(n int) Doc {
+    mut d := Doc{ title: '   doc-${n}', lines: []string{}, grid: [][]string{}, w: tensor_fill(2, 2, 1.0) }
+    d.lines.push('l-${n}')
+    mut row := []string{}
+    row.push('c-${n}')
+    d.grid.push(row)
+    row.push('extra')
+    d.grid.push(row)
+    return d
+}
+fn upper_all(xs []string) []string {
+    mut out := []string{}
+    for x in xs {
+        out.push(x.to_upper())
+    }
+    return out
+}
+fn first_or(xs []string, dflt string) string {
+    if xs.len == 0 {
+        return dflt
+    }
+    return xs[0]
+}
+fn main() {
+    n := 3
+    mut d := mk(n)
+    mut view := d.title.trim_left()
+    d.title = 'changed-${n}'
+    println(view)
+    view = d.title.trim_left()
+    d.title = 'again-${n}'
+    println(view)
+    t := trim_title(d)
+    u := upper_all(d.lines)
+    println('${t} ${u[0]} ${d.grid[1].len}')
+    mut e := d
+    e.grid[0][0] = 'mutated'
+    e.w = e.w @ d.w
+    println('${d.grid[0][0]} ${e.grid[0][0]} ${tensor_sum(e.w)} ${tensor_sum(d.w)}')
+    empty := []string{}
+    fb := 'fallback-${n}'
+    println(first_or(empty, fb))
+    println(first_or(d.lines, fb))
+    mut s := 'a'
+    for mut i := 0; i < 5; i += 1 {
+        s = '${s}-${i}'
+        s = s.to_upper()
+    }
+    println(s)
+    c := s[2]
+    s = 'gone'
+    println(c)
+    parts := 'x,y,z'.split(',')
+    joined := '${parts[0]}${parts[2]}'
+    println(joined)
+    mut total := 0
+    for p in 'q w e'.split(' ') {
+        total += p.len
+    }
+    println('${total}')
+}

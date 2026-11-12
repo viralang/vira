@@ -76,6 +76,11 @@ mut:
 	batches_served int = 0
 }
 
+// Actor state is private: outside code asks for it with a message.
+pub fn (mut s PretrainedInferenceActor) served() int {
+	return s.batches_served
+}
+
 pub fn (mut s PretrainedInferenceActor) predict(inputs tensor[f32]) f32 {
 	s.batches_served = s.batches_served + 1
 	return s.model.forward(inputs)
@@ -127,7 +132,8 @@ fn main() {
 	fut := server <- predict(test_inputs)
 	async_output := fut.await() or { 0.0 }
 	println('Asynchronous Actor Prediction Result : ${async_output}')
-	println('Actor Batches Served                 : ${server.batches_served}')
+	served := server <- served() or { 0 }
+	println('Actor Batches Served                 : ${served}')
 
 	println('--- 5. BIDIRECTIONAL PORTABILITY: EXPORTING WEIGHTS BACK TO PYTORCH ---')
 	// Export updated weights to disk so Python/PyTorch can read them back

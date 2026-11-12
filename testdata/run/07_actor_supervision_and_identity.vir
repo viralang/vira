@@ -1,0 +1,81 @@
+// OUT: pre-2:hello-2:2
+// OUT: index out of bounds: index 12 with len 3
+// OUT: vira panic: integer division by zero
+// OUT: hello-2
+// OUT: self-deadlock-avoided
+// OUT: hello-2 tag-2 1 pre-2
+// OUT: 40 hello-2
+// OUT: [vira_rt] active_leaks=0
+
+// Bounds errors and division by zero inside a handler are supervised, an actor waiting on
+// itself gets an error instead of hanging, and a growing slice of actors stays valid.
+struct Msg {
+pub mut:
+    body string
+    parts []string
+}
+pub actor Store {
+pub:
+    id int
+    prefix string
+mut:
+    last string
+    log []string
+    count int = 0
+}
+pub fn (mut s Store) put(m Msg, tag string) string {
+    s.count += 1
+    s.last = m.body
+    s.log.push(tag)
+    s.log.push(m.parts[0])
+    if tag == 'boom' {
+        xs := [1, 2, 3]
+        idx := s.count + 10
+        return '${xs[idx]}'
+    }
+    if tag == 'div' {
+        z := s.count - s.count
+        return '${10 / z}'
+    }
+    return '${s.prefix}:${s.last}:${s.log.len}'
+}
+pub fn (mut s Store) last_one() string {
+    return s.last
+}
+pub fn (mut s Store) self_call() string {
+    r := s <- last_one() or { 'self-deadlock-avoided' }
+    return r
+}
+fn main() {
+    n := 2
+    mut st := Store{ id: 1, prefix: 'pre-${n}', last: 'init', log: []string{}, count: 0 }
+    mut m := Msg{ body: 'hello-${n}', parts: []string{} }
+    m.parts.push('p-${n}')
+    tag := 'tag-${n}'
+    f1 := st <- put(m, tag)
+    f2 := st <- put(m, 'boom')
+    f3 := st <- put(m, 'div')
+    f4 := st <- put(m, tag)
+    r1 := f1.await() or { err }
+    r2 := f2.await() or { err }
+    r3 := f3.await() or { err }
+    r4 := f4.await() or { err }
+    println(r1)
+    println(r2)
+    println(r3)
+    println(r4)
+    st <- put(m, 'detached')
+    l := st <- last_one() or { 'err' }
+    println(l)
+    sc := st <- self_call() or { err }
+    println(sc)
+    println('${m.body} ${tag} ${st.id} ${st.prefix}')
+    mut pool := []Store{}
+    for mut i := 0; i < 40; i += 1 {
+        pool.push(Store{ id: i, prefix: 'w-${i}', last: '', log: []string{}, count: 0 })
+        pool[i] <- put(m, tag)
+        pool[0] <- put(m, tag)
+    }
+    q := pool[39] <- last_one() or { 'err' }
+    println('${pool.len} ${q}')
+}

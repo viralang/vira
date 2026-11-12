@@ -8,7 +8,7 @@
 #define VIRA_WS_CAP 4096
 #define VIRA_WS_MASK (VIRA_WS_CAP - 1)
 #define VIRA_MAX_WORKERS 32
-#define VIRA_ACTOR_MAX_DEFERS 128
+#define VIRA_ACTOR_INITIAL_DEFERS 16
 
 #ifndef _VIRA_TASK_DEFINED
 #define _VIRA_TASK_DEFINED
@@ -22,6 +22,19 @@ typedef struct _vira_task {
 } vira_task;
 #endif
 
+// `done` sentinels.
+//  VIRA_TASK_DETACHED:     fire-and-forget actor message; the drain loop frees the envelope.
+//  VIRA_TASK_SELF_MANAGED: the task owns its own lifetime (actor drain tasks). The scheduler must
+//                          NOT write `done` after running it, because the owning actor may already
+//                          have been destroyed by the time the task function returns.
+#define VIRA_TASK_DETACHED (-1)
+#define VIRA_TASK_SELF_MANAGED (-2)
+
+// Actor scheduling states (`vira_actor_ctx.scheduled`).
+#define VIRA_ACTOR_IDLE 0      // no drain task queued or running
+#define VIRA_ACTOR_SCHEDULED 1 // a drain task is queued or running
+#define VIRA_ACTOR_NOTIFIED 2  // a drain task is running and a sender enqueued more work
+
 typedef void (*vira_defer_fn)(void *ptr);
 
 typedef struct {
@@ -32,6 +45,7 @@ typedef struct {
 
 static void _vira_actor_drain_task(void *env);
 static inline void vira_scheduler_await(vira_task *task);
+static inline bool _vira_sched_help_one(uint32_t *rng);
 
 typedef enum {
   VIRA_ACTOR_RUNNING = 0,
@@ -55,7 +69,8 @@ struct _vira_actor_ctx {
   vira_task * volatile mbox_tail;
   volatile int32_t scheduled;
   vira_task drain_task;
-  vira_defer_entry defer_stack[VIRA_ACTOR_MAX_DEFERS];
+  vira_defer_entry *defer_stack; // Lazily allocated, grows on demand (never silently drops entries)
+  int32_t defer_cap;
   int32_t defer_top;
 };
 
@@ -108,10 +123,20 @@ static inline void _vira_actor_defer_push_ex(vira_defer_fn fn, void *ptr,
                                              bool is_arena) {
   if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor && ptr != NULL &&
       fn != NULL) {
-    if (_vira_tls_actor->defer_top < VIRA_ACTOR_MAX_DEFERS) {
-      _vira_tls_actor->defer_stack[_vira_tls_actor->defer_top++] =
-          (vira_defer_entry){.fn = fn, .ptr = ptr, .is_arena = is_arena};
+    vira_actor_ctx *ctx = _vira_tls_actor;
+    if (ctx->defer_top >= ctx->defer_cap) {
+      int32_t new_cap = ctx->defer_cap > 0 ? ctx->defer_cap * 2 : VIRA_ACTOR_INITIAL_DEFERS;
+      vira_defer_entry *grown = (vira_defer_entry *)realloc(
+          ctx->defer_stack, (size_t)new_cap * sizeof(vira_defer_entry));
+      if (grown == NULL) {
+        fprintf(stderr, "vira panic: out of memory growing actor defer stack\n");
+        exit(1);
+      }
+      ctx->defer_stack = grown;
+      ctx->defer_cap = new_cap;
     }
+    ctx->defer_stack[ctx->defer_top++] =
+        (vira_defer_entry){.fn = fn, .ptr = ptr, .is_arena = is_arena};
   }
 }
 
@@ -213,8 +238,38 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->drain_task.fn = _vira_actor_drain_task;
   ctx->drain_task.env = ctx;
   ctx->drain_task.next_actor_msg = NULL;
-  ctx->drain_task.done = 0;
+  ctx->drain_task.done = VIRA_TASK_SELF_MANAGED;
+  ctx->defer_stack = NULL;
+  ctx->defer_cap = 0;
   ctx->defer_top = 0;
+}
+
+/**
+ * Blocks until an actor has no queued or running work, helping the scheduler while it waits.
+ * After this returns (and until the next send) no worker thread holds a pointer into the actor,
+ * so the actor value may be moved or destroyed.
+ * @param ctx Pointer to actor context.
+ * Usage: Called before an actor is destroyed or relocated (e.g. when a slice of actors grows).
+ */
+static inline void vira_actor_quiesce(vira_actor_ctx *ctx) {
+  if (ctx == NULL)
+    return;
+  if (_vira_tls_actor == ctx && ctx->in_actor)
+    return; // An actor cannot wait for its own handler to finish
+  uint32_t rng = 0xC2B2AE35u;
+  int32_t idle = 0;
+  while (__atomic_load_n(&ctx->scheduled, __ATOMIC_SEQ_CST) != VIRA_ACTOR_IDLE) {
+    if (_vira_sched_help_one(&rng)) {
+      idle = 0;
+      continue;
+    }
+    if (idle < 32) {
+      vira_cpu_relax();
+    } else {
+      sched_yield();
+    }
+    idle++;
+  }
 }
 
 /**
@@ -223,16 +278,14 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
  * Usage: Invoked when an actor terminates or is shut down by its supervisor.
  */
 static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
-  if (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
-    vira_scheduler_await(&ctx->drain_task);
-    while (__atomic_load_n(&ctx->scheduled, __ATOMIC_ACQUIRE)) {
-      vira_cpu_relax();
-    }
-  }
+  vira_actor_quiesce(ctx);
   if (!ctx->last_error.is_lit && ctx->last_error.data != NULL) {
     vira_str_free(&ctx->last_error);
   }
   ctx->defer_top = 0;
+  ctx->defer_cap = 0;
+  free(ctx->defer_stack);
+  ctx->defer_stack = NULL;
   vira_arena_destroy(&ctx->isolated_heap);
 }
 
@@ -253,7 +306,7 @@ static inline void vira_panic(vira_string msg) {
     vira_string saved_err;
     if (msg.data == NULL || msg.len <= 0) {
       saved_err = vira_str_lit("", 0);
-    } else if (msg.is_lit && !in_arena) {
+    } else if (msg.is_lit && !msg.is_borrowed && !in_arena) {
       saved_err = msg;
     } else {
       char *buf = (char *)malloc((size_t)msg.len + 1);
@@ -274,6 +327,33 @@ static inline void vira_panic(vira_string msg) {
   }
   fprintf(stderr, "vira unrecoverable panic: %.*s\n", msg.len,
           (const char *)msg.data);
+  exit(1);
+}
+
+/**
+ * Raises a runtime fault (bounds error, division by zero, pop from empty slice, ...).
+ * Inside an actor handler the fault is routed through `vira_panic`, so the supervisor traps it
+ * and restarts the actor exactly like an explicit `panic(...)`. Outside an actor it prints the
+ * message and terminates the process.
+ */
+static void _vira_rt_fault(const char *fmt, ...) {
+  char buf[512];
+  va_list args;
+  va_start(args, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  if (n < 0) {
+    n = 0;
+    buf[0] = '\0';
+  }
+  if (n >= (int)sizeof(buf)) {
+    n = (int)sizeof(buf) - 1;
+  }
+  if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {
+    // Non-literal: vira_panic copies the bytes before unwinding this stack frame.
+    vira_panic((vira_string){.data = (const uint8_t *)buf, .len = (int32_t)n, .is_lit = false});
+  }
+  fprintf(stderr, "%s\n", buf);
   exit(1);
 }
 
@@ -494,26 +574,26 @@ static inline bool _vira_any_work(void) {
   return false;
 }
 
+// Clock the parker condition variable measures timeouts against. Set once in
+// `vira_scheduler_init`; `_vira_park` must compute its deadline with the SAME clock.
+static clockid_t _vira_parker_clock = CLOCK_REALTIME;
+static bool _vira_parker_cv_ready = false;
+
 /**
  * Wakes up one parked worker thread in the scheduler pool when new work is submitted.
  * Usage: Low-overhead thread signaling on task submission.
  */
 static inline void vira_sched_wake_one(void) {
-  // Fast check without a full fence if no one is sleeping
-  if (__atomic_load_n(&_vira_parker.sleepers, __ATOMIC_ACQUIRE) <= 0) {
+  // Full barrier between the producer's queue publish and this load of `sleepers`.
+  // Together with the barrier in `_vira_park` (sleepers++ then re-check queues) this closes the
+  // store-buffering window in which a producer skips the signal while a worker goes to sleep.
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&_vira_parker.sleepers, __ATOMIC_SEQ_CST) <= 0) {
     return;
   }
-  // Atomically claim one sleeper so concurrent producers don't pile onto the mutex
-  int32_t s = __atomic_load_n(&_vira_parker.sleepers, __ATOMIC_ACQUIRE);
-  while (s > 0) {
-    if (__atomic_compare_exchange_n(&_vira_parker.sleepers, &s, s - 1, true,
-                                    __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE)) {
-      pthread_mutex_lock(&_vira_parker.mu);
-      pthread_cond_signal(&_vira_parker.cv);
-      pthread_mutex_unlock(&_vira_parker.mu);
-      return;
-    }
-  }
+  pthread_mutex_lock(&_vira_parker.mu);
+  pthread_cond_signal(&_vira_parker.cv);
+  pthread_mutex_unlock(&_vira_parker.mu);
 }
 
 /**
@@ -523,25 +603,22 @@ static inline void vira_sched_wake_one(void) {
 static void _vira_park(void) {
   pthread_mutex_lock(&_vira_parker.mu);
   __atomic_add_fetch(&_vira_parker.sleepers, 1, __ATOMIC_SEQ_CST);
-  if (!_vira_any_work() && !__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_ACQUIRE)) {
-    // `_vira_parker.cv` uses `PTHREAD_COND_INITIALIZER`, which measures timeouts
-    // against `CLOCK_REALTIME`. Using `CLOCK_MONOTONIC` here caused
-    // `pthread_cond_timedwait` to return `ETIMEDOUT` immediately (0 ns) and
-    // busy-spin all worker threads at 100% CPU while idle.
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (!_vira_any_work() && !__atomic_load_n(&_vira_sched.shutdown, __ATOMIC_SEQ_CST)) {
+    // 50 ms fallback poll. The deadline MUST use the condvar's own clock: mixing
+    // CLOCK_REALTIME deadlines with a CLOCK_MONOTONIC condvar (or the reverse) makes the wait
+    // either return immediately or effectively never time out.
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 50000000L; // 50 ms fallback poll (producers wake via cond_signal immediately)
+    clock_gettime(_vira_parker_clock, &ts);
+    ts.tv_nsec += 50000000L;
     if (ts.tv_nsec >= 1000000000L) {
       ts.tv_sec++;
       ts.tv_nsec -= 1000000000L;
     }
     pthread_cond_timedwait(&_vira_parker.cv, &_vira_parker.mu, &ts);
   }
-  // If we timed out (weren't claimed by wake_one), decrement sleepers safely
-  int32_t s = __atomic_load_n(&_vira_parker.sleepers, __ATOMIC_RELAXED);
-  while (s > 0 && !__atomic_compare_exchange_n(&_vira_parker.sleepers, &s, s - 1,
-                                               true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-  }
+  // Exactly one decrement per park, whether signalled or timed out.
+  __atomic_sub_fetch(&_vira_parker.sleepers, 1, __ATOMIC_SEQ_CST);
   pthread_mutex_unlock(&_vira_parker.mu);
 }
 
@@ -629,9 +706,13 @@ static void *_vira_worker_loop(void *arg) {
 
       vira_task_fn fn = task->fn; // read before publishing done
       void *env = task->env;
+      bool self_managed =
+          (__atomic_load_n(&task->done, __ATOMIC_RELAXED) == VIRA_TASK_SELF_MANAGED);
       fn(env);
       local_run++;
-      __atomic_store_n(&task->done, 1, __ATOMIC_RELEASE); // task may be freed after this
+      if (!self_managed) {
+        __atomic_store_n(&task->done, 1, __ATOMIC_RELEASE); // task may be freed after this
+      }
       continue;
     }
 
@@ -673,15 +754,37 @@ static void *_vira_worker_loop(void *arg) {
 }
 
 /**
+ * Default worker-pool size: `VIRA_WORKERS` if set, otherwise the number of logical cores,
+ * clamped to [2, 16]. (At least 2 so one blocking handler cannot stall the whole pool.)
+ */
+static inline int32_t _vira_default_worker_count(void) {
+  const char *env = getenv("VIRA_WORKERS");
+  if (env != NULL && env[0] != '\0') {
+    int32_t v = atoi(env);
+    if (v > 0) {
+      return v > VIRA_MAX_WORKERS ? VIRA_MAX_WORKERS : v;
+    }
+  }
+  int32_t n = _vira_detect_logical_cores();
+  if (n < 2) n = 2;
+  if (n > 16) n = 16;
+  return n;
+}
+
+/**
  * Initializes the global work-stealing thread pool scheduler with the specified worker count.
- * @param num_workers Number of background worker threads to spawn (0 for CPU core count).
+ * @param num_workers Number of background worker threads to spawn (0 for the default, see
+ *                    `_vira_default_worker_count`).
  * Usage: Bootstraps the Vira concurrency and actor runtime.
  */
 static inline void vira_scheduler_init(int32_t num_workers) {
   if (_vira_sched.initialized)
     return;
-  if (num_workers <= 0 || num_workers > VIRA_MAX_WORKERS) {
-    num_workers = 4;
+  if (num_workers <= 0) {
+    num_workers = _vira_default_worker_count();
+  }
+  if (num_workers > VIRA_MAX_WORKERS) {
+    num_workers = VIRA_MAX_WORKERS;
   }
   _vira_sched.num_workers = num_workers;
   _vira_sched.shutdown = 0;
@@ -691,19 +794,35 @@ static inline void vira_scheduler_init(int32_t num_workers) {
   _vira_sched.overflow.tail = NULL;
   pthread_mutex_init(&_vira_sched.overflow.mu, NULL);
 
-  pthread_condattr_t cattr;
-  pthread_condattr_init(&cattr);
-#if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
-  pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+  if (!_vira_parker_cv_ready) {
+    _vira_parker_cv_ready = true; // configure once; survives shutdown / re-init
+#if defined(__linux__) && defined(CLOCK_MONOTONIC)
+    // On Linux, move the condvar to CLOCK_MONOTONIC so wall-clock adjustments cannot stretch
+    // or shrink the park timeout. `_vira_parker_clock` records the clock actually in use.
+    // Other platforms keep the statically initialised CLOCK_REALTIME condvar: not every
+    // pthread implementation honours pthread_condattr_setclock (some accept it and still
+    // time out against the wall clock), and a mismatch there is exactly the bug this guards
+    // against.
+    pthread_condattr_t cattr;
+    if (pthread_condattr_init(&cattr) == 0) {
+      if (pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC) == 0 &&
+          pthread_cond_init(&_vira_parker.cv, &cattr) == 0) {
+        _vira_parker_clock = CLOCK_MONOTONIC;
+      }
+      pthread_condattr_destroy(&cattr);
+    }
 #endif
-  pthread_cond_init(&_vira_parker.cv, &cattr);
-  pthread_condattr_destroy(&cattr);
+  }
 
+  // Initialise EVERY deque before starting any thread: a worker begins stealing from its
+  // peers immediately, so their indices must already be in place.
   for (int32_t i = 0; i < num_workers; i++) {
     _vira_sched.workers[i].worker_id = i;
-    _vira_sched.workers[i].top = 0;
-    _vira_sched.workers[i].bottom = 0;
-    _vira_sched.workers[i].push_lock = 0;
+    __atomic_store_n(&_vira_sched.workers[i].top, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&_vira_sched.workers[i].bottom, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&_vira_sched.workers[i].push_lock, 0, __ATOMIC_RELEASE);
+  }
+  for (int32_t i = 0; i < num_workers; i++) {
     pthread_create(&_vira_sched.workers[i].thread, NULL, _vira_worker_loop,
                    &_vira_sched.workers[i]);
   }
@@ -991,7 +1110,7 @@ static inline void vira_scheduler_ensure_init(void) {
   }
   pthread_mutex_lock(&_vira_sched_init_mu);
   if (!_vira_sched.initialized) {
-    vira_scheduler_init(8);
+    vira_scheduler_init(0); // sized from the machine's logical core count
   }
   pthread_mutex_unlock(&_vira_sched_init_mu);
 }
@@ -1011,6 +1130,7 @@ typedef struct {
   vira_task *task;
   void *env;
   void (*drop_fn)(void *env);
+  vira_actor_ctx *actor; // target actor for actor messages (NULL for plain async tasks)
 } vira_future;
 
 // Pushes a task onto a worker deque and returns immediately (non-blocking)
@@ -1021,7 +1141,9 @@ typedef struct {
  */
 static inline void vira_scheduler_submit_async(vira_task *task) {
   vira_scheduler_ensure_init();
-  __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
+  if (__atomic_load_n(&task->done, __ATOMIC_RELAXED) != VIRA_TASK_SELF_MANAGED) {
+    __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
+  }
 
   int32_t queue_idx = _vira_tls_worker_id;
   if (queue_idx < 0 || queue_idx >= _vira_sched.num_workers) {
@@ -1041,7 +1163,7 @@ static inline void vira_scheduler_submit_async(vira_task *task) {
  * Usage: Mailbox processing by actor drain tasks.
  */
 static inline vira_task *vira_actor_pop_msg(vira_actor_ctx *ctx) {
-  vira_task *head = ctx->mbox_head;
+  vira_task *head = __atomic_load_n(&ctx->mbox_head, __ATOMIC_ACQUIRE);
   if (!head) {
     if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_ACQUIRE) != NULL) {
       while ((head = __atomic_load_n(&ctx->mbox_head, __ATOMIC_ACQUIRE)) == NULL) {
@@ -1054,74 +1176,101 @@ static inline vira_task *vira_actor_pop_msg(vira_actor_ctx *ctx) {
 
   vira_task *next = __atomic_load_n(&head->next_actor_msg, __ATOMIC_ACQUIRE);
   if (next != NULL) {
-    ctx->mbox_head = next;
+    __atomic_store_n(&ctx->mbox_head, next, __ATOMIC_RELEASE);
     return head;
   }
 
+  // `head` is the last linked node. Clear `mbox_head` BEFORE publishing "empty" via the CAS on
+  // `mbox_tail`: once the tail is NULL a producer may immediately store a new head, and clearing
+  // afterwards would overwrite it (lost message, permanently wedged mailbox).
   vira_task *expected = head;
+  __atomic_store_n(&ctx->mbox_head, NULL, __ATOMIC_RELEASE);
   if (__atomic_compare_exchange_n(&ctx->mbox_tail, &expected, NULL, false,
                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    ctx->mbox_head = NULL;
     return head;
   }
 
   while ((next = __atomic_load_n(&head->next_actor_msg, __ATOMIC_ACQUIRE)) == NULL) {
     vira_cpu_relax();
   }
-  ctx->mbox_head = next;
+  __atomic_store_n(&ctx->mbox_head, next, __ATOMIC_RELEASE);
   return head;
+}
+
+/**
+ * Queues an actor's drain task on the scheduler. The caller must own the SCHEDULED state.
+ */
+static inline void _vira_actor_submit_drain(vira_actor_ctx *ctx) {
+  ctx->drain_task.fn = _vira_actor_drain_task;
+  ctx->drain_task.env = ctx;
+  ctx->drain_task.next_actor_msg = NULL;
+  ctx->drain_task.done = VIRA_TASK_SELF_MANAGED;
+  vira_scheduler_submit_async(&ctx->drain_task);
 }
 
 /**
  * Scheduler task function that continuously drains and processes messages in an actor's mailbox.
  * @param env Pointer to actor context.
  * Usage: Dispatched automatically to scheduler threads when messages are sent to an actor.
+ *
+ * Lifetime rule: the LAST access this function makes to `ctx` is either the CAS that releases
+ * the actor (SCHEDULED -> IDLE) or the re-submission of its drain task. `vira_actor_quiesce`
+ * relies on this: once it observes IDLE, no worker thread touches the actor again until the
+ * next send.
  */
 static void _vira_actor_drain_task(void *env) {
   vira_actor_ctx *ctx = (vira_actor_ctx *)env;
   int32_t quota = 64;
   int32_t count = 0;
 
-  while (quota-- > 0) {
-    vira_task *msg = vira_actor_pop_msg(ctx);
-    if (!msg) {
-      break;
-    }
-    vira_task_fn fn = msg->fn;
-    void *menv = msg->env;
-    bool is_detached = (__atomic_load_n(&msg->done, __ATOMIC_RELAXED) == -1);
-    fn(menv);
-    count++;
-    if (is_detached) {
-      free(menv);
-      _vira_record_free();
-    } else {
-      __atomic_store_n(&msg->done, 1, __ATOMIC_RELEASE);
-    }
-  }
-
-  if (count > 1) {
-    __atomic_add_fetch(&_vira_total_tasks_run, count - 1, __ATOMIC_RELAXED);
-  }
-
-  if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_ACQUIRE) != NULL ||
-      ctx->mbox_head != NULL) {
-    ctx->drain_task.fn = _vira_actor_drain_task;
-    ctx->drain_task.env = ctx;
-    ctx->drain_task.next_actor_msg = NULL;
-    ctx->drain_task.done = 0;
-    vira_scheduler_submit_async(&ctx->drain_task);
-  } else {
-    __atomic_store_n(&ctx->scheduled, 0, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&ctx->mbox_tail, __ATOMIC_SEQ_CST) != NULL ||
-        __atomic_load_n(&ctx->mbox_head, __ATOMIC_SEQ_CST) != NULL) {
-      if (__atomic_exchange_n(&ctx->scheduled, 1, __ATOMIC_SEQ_CST) == 0) {
-        ctx->drain_task.fn = _vira_actor_drain_task;
-        ctx->drain_task.env = ctx;
-        ctx->drain_task.next_actor_msg = NULL;
-        ctx->drain_task.done = 0;
-        vira_scheduler_submit_async(&ctx->drain_task);
+  for (;;) {
+    bool drained = false;
+    while (quota > 0) {
+      vira_task *msg = vira_actor_pop_msg(ctx);
+      if (!msg) {
+        drained = true;
+        break;
       }
+      quota--;
+      vira_task_fn fn = msg->fn;
+      void *menv = msg->env;
+      bool is_detached =
+          (__atomic_load_n(&msg->done, __ATOMIC_RELAXED) == VIRA_TASK_DETACHED);
+      fn(menv);
+      count++;
+      if (is_detached) {
+        free(menv);
+        _vira_record_free();
+      } else {
+        __atomic_store_n(&msg->done, 1, __ATOMIC_RELEASE);
+      }
+    }
+
+    if (!drained) {
+      // Quota exhausted: yield the worker and continue later. We still own SCHEDULED.
+      if (count > 1) {
+        __atomic_add_fetch(&_vira_total_tasks_run, count - 1, __ATOMIC_RELAXED);
+      }
+      __atomic_store_n(&ctx->scheduled, VIRA_ACTOR_SCHEDULED, __ATOMIC_SEQ_CST);
+      _vira_actor_submit_drain(ctx); // last access to ctx
+      return;
+    }
+
+    // Mailbox looked empty. Flush stats BEFORE releasing: nothing may touch ctx afterwards.
+    if (count > 1) {
+      __atomic_add_fetch(&_vira_total_tasks_run, count - 1, __ATOMIC_RELAXED);
+      count = 1;
+    }
+    int32_t expected = VIRA_ACTOR_SCHEDULED;
+    if (__atomic_compare_exchange_n(&ctx->scheduled, &expected, VIRA_ACTOR_IDLE, false,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      return; // released: last access to ctx
+    }
+    // A sender enqueued while we were draining (NOTIFIED). Take the work ourselves.
+    __atomic_store_n(&ctx->scheduled, VIRA_ACTOR_SCHEDULED, __ATOMIC_SEQ_CST);
+    if (quota <= 0) {
+      _vira_actor_submit_drain(ctx); // last access to ctx
+      return;
     }
   }
 }
@@ -1135,7 +1284,7 @@ static void _vira_actor_drain_task(void *env) {
 static inline void vira_actor_send(vira_actor_ctx *ctx, vira_task *task) {
   vira_scheduler_ensure_init();
   task->next_actor_msg = NULL;
-  if (__atomic_load_n(&task->done, __ATOMIC_RELAXED) != -1) {
+  if (__atomic_load_n(&task->done, __ATOMIC_RELAXED) != VIRA_TASK_DETACHED) {
     __atomic_store_n(&task->done, 0, __ATOMIC_RELAXED);
   }
 
@@ -1146,13 +1295,65 @@ static inline void vira_actor_send(vira_actor_ctx *ctx, vira_task *task) {
     __atomic_store_n(&ctx->mbox_head, task, __ATOMIC_RELEASE);
   }
 
-  if (__atomic_exchange_n(&ctx->scheduled, 1, __ATOMIC_ACQ_REL) == 0) {
-    ctx->drain_task.fn = _vira_actor_drain_task;
-    ctx->drain_task.env = ctx;
-    ctx->drain_task.next_actor_msg = NULL;
-    ctx->drain_task.done = 0;
-    vira_scheduler_submit_async(&ctx->drain_task);
+  // IDLE -> SCHEDULED (we submit the drain task), or SCHEDULED -> NOTIFIED (the running drain
+  // task will see the flag when it tries to release the actor and keep draining).
+  int32_t st = __atomic_load_n(&ctx->scheduled, __ATOMIC_SEQ_CST);
+  for (;;) {
+    if (st == VIRA_ACTOR_IDLE) {
+      if (__atomic_compare_exchange_n(&ctx->scheduled, &st, VIRA_ACTOR_SCHEDULED, false,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        _vira_actor_submit_drain(ctx);
+        return;
+      }
+    } else if (st == VIRA_ACTOR_NOTIFIED) {
+      return;
+    } else if (__atomic_compare_exchange_n(&ctx->scheduled, &st, VIRA_ACTOR_NOTIFIED, false,
+                                           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      return;
+    }
   }
+}
+
+// Work-helping can nest (a helped task may itself await). Bound the depth so a long chain of
+// awaits cannot overflow the C stack; past the limit the waiter just yields.
+#define VIRA_MAX_HELP_DEPTH 32
+static __thread int32_t _vira_tls_help_depth = 0;
+
+/**
+ * Steals and runs at most one pending task on the calling thread.
+ * @param rng Pointer to the caller's victim-selection RNG state.
+ * @return True if a task was executed.
+ * Usage: Shared by `vira_scheduler_await` and `vira_actor_quiesce`.
+ */
+static inline bool _vira_sched_help_one(uint32_t *rng) {
+  int32_t n = _vira_sched.num_workers;
+  if (n <= 0 || _vira_tls_help_depth >= VIRA_MAX_HELP_DEPTH) {
+    return false;
+  }
+  int32_t start = (int32_t)(_vira_xorshift(rng) % (uint32_t)n);
+  vira_task *stolen = NULL;
+  for (int32_t i = 0; i < n && stolen == NULL; i++) {
+    stolen = vira_ws_steal(&_vira_sched.workers[(start + i) % n]);
+  }
+  if (stolen == NULL) {
+    stolen = _vira_overflow_pop();
+  }
+  if (stolen == NULL) {
+    return false;
+  }
+  __atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);
+  vira_task_fn fn = stolen->fn;
+  void *env = stolen->env;
+  bool self_managed =
+      (__atomic_load_n(&stolen->done, __ATOMIC_RELAXED) == VIRA_TASK_SELF_MANAGED);
+  _vira_tls_help_depth++;
+  fn(env);
+  _vira_tls_help_depth--;
+  __atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);
+  if (!self_managed) {
+    __atomic_store_n(&stolen->done, 1, __ATOMIC_RELEASE);
+  }
+  return true;
 }
 
 // Waits for a future's task to complete; while waiting, the caller helps steal
@@ -1168,38 +1369,26 @@ static inline void vira_scheduler_await(vira_task *task) {
   uint32_t rng = 0x85EBCA6Bu;
   int32_t idle = 0;
   while (__atomic_load_n(&task->done, __ATOMIC_ACQUIRE) == 0) {
-    bool helped = false;
-    int32_t n = _vira_sched.num_workers;
-    if (n > 0) {
-      int32_t start = (int32_t)(_vira_xorshift(&rng) % (uint32_t)n);
-      for (int32_t i = 0; i < n; i++) {
-        int32_t v = (start + i) % n;
-        vira_task *stolen = vira_ws_steal(&_vira_sched.workers[v]);
-        if (stolen == NULL) {
-          stolen = _vira_overflow_pop();
-        }
-        if (stolen != NULL) {
-          __atomic_add_fetch(&_vira_total_work_steals, 1, __ATOMIC_RELAXED);
-          vira_task_fn fn = stolen->fn;
-          void *env = stolen->env;
-          fn(env);
-          __atomic_add_fetch(&_vira_total_tasks_run, 1, __ATOMIC_RELAXED);
-          __atomic_store_n(&stolen->done, 1, __ATOMIC_RELEASE);
-          helped = true;
-          idle = 0;
-          break;
-        }
-      }
+    if (_vira_sched_help_one(&rng)) {
+      idle = 0;
+      continue;
     }
-    if (!helped) {
-      if (idle < 32) {
-        vira_cpu_relax();
-      } else {
-        sched_yield();
-      }
-      idle++;
+    if (idle < 32) {
+      vira_cpu_relax();
+    } else {
+      sched_yield();
     }
+    idle++;
   }
+}
+
+/**
+ * True when the calling thread is running a handler of the given actor.
+ * Usage: Generated await/sync-call code uses this to reject an actor waiting on a message it
+ * sent to itself, which can never complete (the message is queued behind the running handler).
+ */
+static inline bool vira_actor_is_current(const vira_actor_ctx *ctx) {
+  return ctx != NULL && _vira_tls_actor == ctx && ctx->in_actor;
 }
 
 // Synchronous helper (spawn + immediate await)
@@ -1216,6 +1405,27 @@ static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void *env) {
   vira_scheduler_await(&task);
 }
 
+/**
+ * Handles a future whose message was sent by an actor to ITSELF and is still pending.
+ * Such a message is queued behind the running handler, so waiting for it would never return.
+ * The message is converted into a detached send (it still runs after the current handler, and
+ * the drain loop frees its envelope) and the future is emptied.
+ * @return True if the future was detached; the caller must not wait on it or free its envelope.
+ */
+static inline bool _vira_future_detach_if_self(vira_future *f) {
+  if (f == NULL || f->env == NULL || f->task == NULL)
+    return false;
+  if (!vira_actor_is_current(f->actor))
+    return false;
+  if (__atomic_load_n(&f->task->done, __ATOMIC_ACQUIRE) != 0)
+    return false; // already completed (or already detached)
+  __atomic_store_n(&f->task->done, VIRA_TASK_DETACHED, __ATOMIC_RELEASE);
+  f->env = NULL;
+  f->task = NULL;
+  f->drop_fn = NULL;
+  return true;
+}
+
 // Idempotent scope-exit cleanup injected by `internal/autofree` for Future[T]
 /**
  * Releases memory allocated for an asynchronous future structure.
@@ -1224,6 +1434,9 @@ static inline void vira_scheduler_submit_and_wait(vira_task_fn fn, void *env) {
  */
 static inline void vira_future_free(vira_future *f) {
   if (f != NULL && f->env != NULL) {
+    if (_vira_future_detach_if_self(f)) {
+      return;
+    }
     // If an early return skipped `.await()`, wait for the worker thread to
     // finish before freeing unconsumed result and envelope
     if (f->task != NULL) {

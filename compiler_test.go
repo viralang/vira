@@ -2019,3 +2019,163 @@ fn main() {
 
 
 
+
+// --- SCHEDULER REGRESSIONS FROM THE v0.7.7 RUNTIME REVIEW ---
+//
+// R1: several threads sending to ONE actor used to wedge its mailbox for good.
+// R4: an idle worker's 50 ms park timeout never fired (condvar clock != deadline clock).
+// R6: the pool is sized from the machine instead of a hardcoded 8 workers.
+// R7: the actor context no longer embeds a fixed 128-entry defer stack.
+func TestSchedulerMailboxConcurrentSendersAndParkTimeout(t *testing.T) {
+	var cCompiler string
+	for _, cand := range []string{"gcc", "clang", "cc"} {
+		if _, err := exec.LookPath(cand); err == nil {
+			cCompiler = cand
+			break
+		}
+	}
+	if cCompiler == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cand := filepath.Join(home, "w64devkit", "bin", "gcc.exe")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				cCompiler = cand
+			}
+		}
+	}
+	if cCompiler == "" {
+		t.Skip("Host C compiler not found in PATH; skipping scheduler regression test")
+		return
+	}
+	runtimeDir, err := filepath.Abs("runtime")
+	if err != nil {
+		t.Fatalf("failed to resolve runtime dir: %v", err)
+	}
+
+	cCode := `
+#include "vira_rt.h"
+
+#define PRODUCERS 4
+#define PER_PRODUCER 100000
+
+typedef struct { vira_task t; } msg_env;
+static volatile int64_t processed = 0;
+static vira_actor_ctx target;
+
+static void handler(void *e) { (void)e; __atomic_add_fetch(&processed, 1, __ATOMIC_RELAXED); }
+
+static void *producer(void *arg) {
+    uint32_t rng = (uint32_t)(uintptr_t)arg * 2654435761u + 1u;
+    for (int i = 0; i < PER_PRODUCER; i++) {
+        msg_env *e = (msg_env *)malloc(sizeof(msg_env));
+        _vira_record_alloc();
+        e->t.fn = handler;
+        e->t.env = e;
+        e->t.next_actor_msg = NULL;
+        e->t.done = VIRA_TASK_DETACHED;
+        vira_actor_send(&target, &e->t);
+        int spin = (int)(_vira_xorshift(&rng) & 63u); // keep the mailbox hovering around empty
+        for (int k = 0; k < spin; k++) vira_cpu_relax();
+    }
+    _vira_flush_tls_mem_stats(); // this thread's allocation counts would be lost at exit
+    return NULL;
+}
+
+static double now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static volatile int park_returned = 0;
+static void *parker(void *arg) { (void)arg; _vira_park(); park_returned = 1; return NULL; }
+
+int main(void) {
+    // R7: no fixed defer stack inside the actor context
+    if (sizeof(vira_actor_ctx) > 1024) {
+        printf("FAIL: vira_actor_ctx is %d bytes\n", (int)sizeof(vira_actor_ctx));
+        return 1;
+    }
+
+    vira_actor_ctx_init(&target, 1, "stress", 3);
+    vira_scheduler_ensure_init();
+
+    // R6: default pool size follows the machine, clamped to [2, 16]
+    int32_t cores = _vira_detect_logical_cores();
+    int32_t want = cores < 2 ? 2 : (cores > 16 ? 16 : cores);
+    if (getenv("VIRA_WORKERS") == NULL && vira_scheduler_num_workers() != want) {
+        printf("FAIL: pool has %d workers, expected %d\n", vira_scheduler_num_workers(), want);
+        return 1;
+    }
+
+    // R1: many senders, one mailbox
+    pthread_t th[PRODUCERS];
+    for (long i = 0; i < PRODUCERS; i++) pthread_create(&th[i], NULL, producer, (void *)(i + 1));
+    for (int i = 0; i < PRODUCERS; i++) pthread_join(th[i], NULL);
+
+    const int64_t total = (int64_t)PRODUCERS * PER_PRODUCER;
+    int64_t last = -1;
+    int stalls = 0;
+    for (;;) {
+        int64_t p = __atomic_load_n(&processed, __ATOMIC_RELAXED);
+        if (p == total) break;
+        if (p == last) {
+            if (++stalls >= 100) { // 10 s without progress
+                printf("FAIL: mailbox wedged at %lld of %lld (head=%p tail=%p)\n", (long long)p,
+                       (long long)total, (void *)target.mbox_head, (void *)target.mbox_tail);
+                fflush(stdout);
+                _exit(2);
+            }
+        } else {
+            stalls = 0;
+        }
+        last = p;
+        usleep(100000);
+    }
+    vira_actor_ctx_destroy(&target);
+
+    // R4: a parked thread with no work must wake up by itself (50 ms poll)
+    usleep(200000);
+    pthread_t pt;
+    double t0 = now_s();
+    pthread_create(&pt, NULL, parker, NULL);
+    while (!park_returned && now_s() - t0 < 3.0) usleep(5000);
+    if (!park_returned) {
+        printf("FAIL: _vira_park did not time out within 3 s\n");
+        fflush(stdout);
+        _exit(3);
+    }
+    pthread_join(pt, NULL);
+
+    vira_scheduler_shutdown();
+    _vira_flush_tls_mem_stats();
+    if (_vira_active_heap_allocs != 0) {
+        printf("FAIL: %lld allocations still live\n", (long long)_vira_active_heap_allocs);
+        return 4;
+    }
+    printf("scheduler regression ok: %lld messages\n", (long long)total);
+    return 0;
+}
+`
+	tmpDir := t.TempDir()
+	cFile := filepath.Join(tmpDir, "sched_regress.c")
+	binFile := filepath.Join(tmpDir, "sched_regress_bin")
+	if os.PathSeparator == '\\' {
+		binFile += ".exe"
+	}
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("write C file: %v", err)
+	}
+	cFlags := []string{"-std=c99", "-O2", "-g", "-pthread", "-I" + runtimeDir, cFile, "-lm", "-o", binFile}
+	buildCmd := exec.Command(cCompiler, cFlags...)
+	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("scheduler regression harness failed to compile (%v):\n%s", err, string(buildOut))
+	}
+	rawOut, err := exec.Command(binFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("scheduler regression failed (%v):\n%s", err, string(rawOut))
+	}
+	if !strings.Contains(string(rawOut), "scheduler regression ok") {
+		t.Fatalf("unexpected output:\n%s", string(rawOut))
+	}
+}

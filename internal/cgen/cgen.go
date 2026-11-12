@@ -24,6 +24,7 @@ type Generator struct {
 	currentMod   string
 	tmpCounter   int
 	activeArena  string          // non-empty inside arena { ... } or actor step
+	fnBaseArena  string          // arena bound for the whole current function (actor scratch arena) or ""
 	inMainFn     bool
 	curReceiver  string          // current receiver variable name if inside a method
 	curPtrParams map[string]bool // current mutable pointer parameter names in fn
@@ -39,6 +40,8 @@ type Generator struct {
 	actorSenders map[string]actorMethodDispatchSpec // "Actor_Method" -> supervisor wrapper
 	arrayTypes   map[string]*checker.ArrayType      // C Array name -> ArrayType
 	sliceTypes   map[string]*checker.SliceType      // C Slice name -> SliceType
+
+	orderingArgs map[*ast.CallExpr]bool // calls whose arguments are currently being sequenced
 }
 
 type vtablePair struct {
@@ -50,6 +53,9 @@ type actorMethodDispatchSpec struct {
 	Actor  *checker.StructType
 	Method *checker.FnSig
 }
+
+// selfAwaitErr is the Result error produced when an actor waits on a message it sent to itself.
+const selfAwaitErr = "deadlock avoided: an actor cannot wait on a message it sent to itself"
 
 func sanitizeModName(mod string) string {
 	if mod == "" {
@@ -227,6 +233,11 @@ func (g *Generator) EmitFile(file *ast.File) string {
 			out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vira_str_lit(\"future already awaited\", 22) };\n", cName))
 			out.WriteString("    }\n")
 			out.WriteString(fmt.Sprintf("    _FutureHeader_%s* hdr = (_FutureHeader_%s*)f->env;\n", cName, cName))
+			// An actor awaiting a message it sent to itself can never be satisfied (the message is
+			// queued behind the running handler). Detach it and report an error instead of hanging.
+			out.WriteString("    if (_vira_future_detach_if_self(f)) {\n")
+			out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vira_str_lit(%q, %d) };\n", cName, selfAwaitErr, len(selfAwaitErr)))
+			out.WriteString("    }\n")
 			out.WriteString("    vira_scheduler_await(&hdr->_task);\n")
 			out.WriteString(fmt.Sprintf("    %s res = hdr->result;\n", cName))
 			out.WriteString("    free(f->env);\n")
@@ -607,6 +618,13 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 		}
 		for _, fname := range st.FieldOrder {
 			f := st.Fields[fname]
+			// A restart rolls back what a handler may have left half-updated: the MUTABLE
+			// fields. Immutable fields (configuration, model weights, ids) cannot have been
+			// changed by any handler, so they survive the restart untouched; wiping them would
+			// leave the restarted actor without the data it was constructed with.
+			if f.Access == ast.AccessPrivateImm || f.Access == ast.AccessPubImm {
+				continue
+			}
 			if f.Type.Equals(checker.TypeString) {
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
@@ -735,6 +753,14 @@ func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.
 
 	out.WriteString(fmt.Sprintf("static inline void vira_slice_%s_push(vira_slice_%s* s, %s val) {\n", cStructName, cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    if (s->len >= s->cap) {\n"))
+	if st.IsActor {
+		// Growing reallocates the buffer and MOVES every actor in it. Queued messages hold
+		// pointers to their target actor, so wait until each one has an empty mailbox and no
+		// running handler before its address changes.
+		out.WriteString("        for (int32_t _qi = 0; _qi < s->len; _qi++) {\n")
+		out.WriteString("            vira_actor_quiesce(&s->data[_qi]._ctx);\n")
+		out.WriteString("        }\n")
+	}
 	out.WriteString(fmt.Sprintf("        _vira_slice_grow((void**)&s->data, &s->cap, sizeof(%s), s->is_arena);\n", cStructName))
 	out.WriteString(fmt.Sprintf("    }\n"))
 	out.WriteString(fmt.Sprintf("    s->data[s->len++] = val;\n"))
@@ -742,9 +768,12 @@ func (g *Generator) emitStructSliceDefinition(out *strings.Builder, st *checker.
 
 	out.WriteString(fmt.Sprintf("static inline %s vira_slice_%s_pop(vira_slice_%s* s) {\n", cStructName, cStructName, cStructName))
 	out.WriteString(fmt.Sprintf("    if (s->len <= 0) {\n"))
-	out.WriteString(fmt.Sprintf("        fprintf(stderr, \"vira panic: pop from empty slice\\n\");\n"))
-	out.WriteString(fmt.Sprintf("        exit(1);\n"))
+	out.WriteString(fmt.Sprintf("        _vira_rt_fault(\"vira panic: pop from empty slice\");\n"))
 	out.WriteString(fmt.Sprintf("    }\n"))
+	if st.IsActor {
+		// The popped actor is moved out by value: let its pending messages finish first.
+		out.WriteString("    vira_actor_quiesce(&s->data[s->len - 1]._ctx);\n")
+	}
 	out.WriteString(fmt.Sprintf("    return s->data[--s->len];\n"))
 	out.WriteString(fmt.Sprintf("}\n\n"))
 
@@ -855,8 +884,7 @@ func (g *Generator) emitGenericSliceDefinition(out *strings.Builder, sl *checker
 
 	out.WriteString(fmt.Sprintf("static inline %s %s_pop(%s* s) {\n", elemCType, sliceName, sliceName))
 	out.WriteString("    if (s->len <= 0) {\n")
-	out.WriteString("        fprintf(stderr, \"vira panic: pop from empty slice\\n\");\n")
-	out.WriteString("        exit(1);\n")
+	out.WriteString("        _vira_rt_fault(\"vira panic: pop from empty slice\");\n")
 	out.WriteString("    }\n")
 	out.WriteString("    return s->data[--s->len];\n")
 	out.WriteString("}\n\n")
@@ -1050,6 +1078,101 @@ func (g *Generator) emitCloneExpr(t checker.Type, expr string) string {
 	return expr
 }
 
+// emitExprHeap emits expr with arena allocation disabled, so tensors and interpolated strings it
+// creates live on the heap. Used for values that outlive the enclosing `arena { }` block or the
+// actor's scratch arena (returned values, values stored into fields or outer variables).
+func (g *Generator) emitExprHeap(expr ast.Expr) string {
+	prev := g.activeArena
+	g.activeArena = ""
+	out := g.emitExpr(expr)
+	g.activeArena = prev
+	return out
+}
+
+// identValueExpr emits a variable read as a VALUE: `mut` parameters and receivers are pointers
+// in the generated C and must be dereferenced before they can be cloned.
+func (g *Generator) identValueExpr(ident *ast.IdentExpr) string {
+	if _, isConst := g.chk.ResolvedConsts[ident]; !isConst && g.isPointerReceiverVar(ident.Ident.Name) {
+		return "(*" + ident.Ident.Name + ")"
+	}
+	return g.emitExpr(ident)
+}
+
+// emitStoredValue emits `value` for storing into a new owner of type t (a binding, an
+// assignment target, a struct field, a yielded or-block value).
+//   - A place expression (variable, field, element) is deep-cloned unless `moved` says the
+//     analyzer transferred ownership, so two owners never share heap memory.
+//   - A freshly computed string is passed through vira_str_own so a borrowed view (for example
+//     `s.trim_left()` or an arena-formatted string) is copied before it escapes.
+func (g *Generator) emitStoredValue(value ast.Expr, t checker.Type, moved bool, heap bool) string {
+	var valExpr string
+	if heap {
+		valExpr = g.emitExprHeap(value)
+	} else {
+		valExpr = g.emitExpr(value)
+	}
+	if !g.typeOwnsHeap(t) {
+		return valExpr
+	}
+	switch v := value.(type) {
+	case *ast.IdentExpr:
+		if !moved {
+			return g.emitCloneExpr(t, g.identValueExpr(v))
+		}
+	case *ast.SelectorExpr, *ast.IndexExpr:
+		return g.emitCloneExpr(t, valExpr)
+	case *ast.CallExpr:
+		// A call may hand back a borrowed VIEW (`s.trim_left()`, `s.char_at(i)`). Whoever
+		// stores the result becomes an owner, so the view is copied; owned results pass
+		// through untouched.
+		if t.Equals(checker.TypeString) {
+			return fmt.Sprintf("vira_str_own(%s)", valExpr)
+		}
+	}
+	return valExpr
+}
+
+// emitSliceStoreArg prepares a value for `slice.push(v)` / `slice.set(i, v)`. A slice owns its
+// elements on the heap: values coming from another place are cloned, and fresh temporaries are
+// (re-)emitted with arena allocation disabled so they cannot dangle once the arena is wiped.
+func (g *Generator) emitSliceStoreArg(arg ast.Expr, elem checker.Type, emitted string) string {
+	if _, isLit := arg.(*ast.LiteralExpr); isLit {
+		return emitted
+	}
+	if !isFreshOwningRValue(arg) {
+		if ident, ok := arg.(*ast.IdentExpr); ok {
+			return g.emitCloneExpr(elem, g.identValueExpr(ident))
+		}
+		return g.emitCloneExpr(elem, emitted)
+	}
+	valExpr := emitted
+	if g.activeArena != "" {
+		valExpr = g.emitExprHeap(arg)
+	}
+	if _, isCall := arg.(*ast.CallExpr); isCall && elem.Equals(checker.TypeString) {
+		valExpr = fmt.Sprintf("vira_str_own(%s)", valExpr)
+	}
+	return valExpr
+}
+
+// isTensorViewOp reports whether expr is a tensor method that may return a VIEW sharing its
+// receiver's buffer. Assigning such a view over its own source must not free the old value.
+func isTensorViewOp(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Callee.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	switch sel.Field.Name {
+	case "reshape_2d", "reshape_3d", "reshape_4d", "transpose", "slice_rows":
+		return true
+	}
+	return false
+}
+
 func (g *Generator) emitFreeLValueStmt(out *strings.Builder, indent string, t checker.Type, lval string) {
 	if t == nil {
 		return
@@ -1182,7 +1305,7 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("static void _%s_%s_worker_task(void* _raw_env) {\n", cActor, method.Name))
 	out.WriteString(fmt.Sprintf("    %s* env = (%s*)_raw_env;\n", envName, envName))
 	out.WriteString(fmt.Sprintf("    %s* self = env->self;\n", cActor))
-	out.WriteString("    bool _is_detached = (__atomic_load_n(&env->_hdr._task.done, __ATOMIC_RELAXED) == -1);\n")
+	out.WriteString("    bool _is_detached = (__atomic_load_n(&env->_hdr._task.done, __ATOMIC_RELAXED) == VIRA_TASK_DETACHED);\n")
 	out.WriteString("    if (self->_ctx.state == VIRA_ACTOR_STOPPED) {\n")
 	out.WriteString(fmt.Sprintf("        _%s_%s_free_params(env, false);\n", cActor, method.Name))
 	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = vira_str_lit(\"Actor has stopped due to unhandled faults\", 41) };\n", cRes))
@@ -1265,7 +1388,7 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString("    env->_hdr._task.env = env;\n")
 	out.WriteString("    env->_hdr._task.done = 0;\n")
 	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
-	out.WriteString(fmt.Sprintf("    return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result };\n", cActor, method.Name))
+	out.WriteString(fmt.Sprintf("    return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result, .actor = &self->_ctx };\n", cActor, method.Name))
 	out.WriteString("}\n\n")
 
 	// 4. Emit Fire-and-Forget Detached Sender (_send_detached_) — deep-clones heap arguments & auto-frees result
@@ -1285,13 +1408,17 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString(fmt.Sprintf("    env->_hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
 	out.WriteString("    env->_hdr._task.env = env;\n")
 	out.WriteString("    env->_hdr._task.next_actor_msg = NULL;\n")
-	out.WriteString("    env->_hdr._task.done = -1;\n")
+	out.WriteString("    env->_hdr._task.done = VIRA_TASK_DETACHED;\n")
 	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
 	out.WriteString("}\n\n")
 
 	// 5. Emit Zero-Alloc Synchronous Shorthand (_supervise_ = stack-allocated env)
 	out.WriteString(fmt.Sprintf("static inline %s %s_supervise_%s(%s) {\n",
 		cRes, cActor, method.Name, strings.Join(paramList, ", ")))
+	// A synchronous call from an actor to itself would wait forever on its own mailbox.
+	out.WriteString("    if (vira_actor_is_current(&self->_ctx)) {\n")
+	out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vira_str_lit(%q, %d) };\n", cRes, selfAwaitErr, len(selfAwaitErr)))
+	out.WriteString("    }\n")
 	out.WriteString(fmt.Sprintf("    %s env;\n", envName))
 	out.WriteString("    env.self = self;\n")
 	out.WriteString("    env.owns_params = false;\n")
@@ -1491,6 +1618,9 @@ func (g *Generator) emitFnDecl(out *strings.Builder, fn *ast.FnDecl) {
 			g.activeArena = fmt.Sprintf("(&%s->_ctx.isolated_heap)", fn.Receiver.Name.Name)
 		}
 	}
+	prevBaseArena := g.fnBaseArena
+	g.fnBaseArena = g.activeArena
+	defer func() { g.fnBaseArena = prevBaseArena }()
 
 	retType := g.resolveCheckType(fn)
 	out.WriteString(g.fnSignature(fn) + " {\n")
@@ -1617,14 +1747,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		if s.IsMut || g.needsMutableAddressForCleanup(valType) || checker.ExactEquals(valType, checker.TypeVoidPtr) {
 			qual = ""
 		}
-		valExpr := g.emitExpr(s.Value)
-		if g.typeOwnsHeap(valType) {
-			if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
-				valExpr = g.emitCloneExpr(valType, valExpr)
-			} else if _, isSel := s.Value.(*ast.SelectorExpr); isSel {
-				valExpr = g.emitCloneExpr(valType, valExpr)
-			}
-		}
+		// Binding from a place (`b := a`, `x := u.name`, `e := xs[i]`) deep-clones unless the
+		// analyzer proved the source dead and transferred ownership (s.MoveValue).
+		valExpr := g.emitStoredValue(s.Value, valType, s.MoveValue, s.HeapValue)
 		out.WriteString(fmt.Sprintf("%s%s%s %s = %s;\n",
 			indent, qual, g.cType(valType), s.Name.Name, valExpr))
 		if !g.inMainFn && g.fnDeferVarNames[s.Name.Name] {
@@ -1654,6 +1779,17 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			out.WriteString(fmt.Sprintf("%s(void)(%s);\n", indent, g.emitExpr(s.Value)))
 			return
 		}
+		targetType := g.chk.ExprTypes[s.Target]
+		ownsHeap := g.typeOwnsHeap(targetType)
+		if st, isSt := targetType.(*checker.StructType); isSt && st.IsActor {
+			ownsHeap = false // actors are never overwritten by value
+		}
+		if _, isFut := targetType.(*checker.FutureType); isFut {
+			ownsHeap = false
+		}
+		if _, isIf := targetType.(*checker.InterfaceType); isIf {
+			ownsHeap = false
+		}
 		if idxExpr, isIdx := s.Target.(*ast.IndexExpr); isIdx {
 			leftType := g.chk.ExprTypes[idxExpr.Left]
 			lenExpr := fmt.Sprintf("%s.len", g.emitLValue(idxExpr.Left))
@@ -1665,8 +1801,23 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			}
 			out.WriteString(fmt.Sprintf("%svira_bounds_check(%s, %s, __FILE__, __LINE__);\n",
 				indent, g.emitExpr(idxExpr.Index), lenExpr))
-			if elemType := g.chk.ExprTypes[s.Target]; elemType != nil && elemType.Equals(checker.TypeString) {
-				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.emitLValue(s.Target)))
+			if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
+				if targetType != nil && targetType.Equals(checker.TypeString) {
+					out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, g.emitLValue(s.Target)))
+				}
+				g.emitUnwrappedAssign(out, g.emitLValue(s.Target), g.chk.ExprTypes[s.Value], call, indent, fnRet)
+				return
+			}
+			if ownsHeap && s.Op == token.TokAssign {
+				// Element stores always go to the heap. Evaluate the new value FIRST (it may
+				// read the element being replaced), then release the old element.
+				elemLValue := g.emitLValue(s.Target)
+				tmpNew := g.nextTmp("new_elem")
+				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(targetType), tmpNew,
+					g.emitStoredValue(s.Value, targetType, s.MoveValue, true)))
+				g.emitFreeLValueStmt(out, indent, targetType, elemLValue)
+				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, elemLValue, tmpNew))
+				return
 			}
 		}
 		if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
@@ -1675,38 +1826,37 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			g.emitUnwrappedAssign(out, targetLValue, valType, call, indent, fnRet)
 			return
 		}
+		targetLValue := g.emitLValue(s.Target)
+		if _, isIdx := s.Target.(*ast.IndexExpr); !isIdx && ownsHeap && s.Op == token.TokAssign {
+			// Overwriting an owner: bind the new value (cloned when it comes from another
+			// place, heap-allocated when the target outlives the current arena), then release
+			// the value that was there before.
+			rhsOwned := g.emitStoredValue(s.Value, targetType, s.MoveValue, s.HeapValue)
+			_, isTensor := targetType.(*checker.TensorType)
+			if isTensor && isTensorViewOp(s.Value) {
+				// The new value may be a view over the old buffer; keep that buffer alive.
+				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsOwned))
+				return
+			}
+			tmpOld := g.nextTmp("old_val")
+			out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(targetType), tmpOld, targetLValue))
+			out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsOwned))
+			g.emitFreeLValueStmt(out, indent, targetType, tmpOld)
+			return
+		}
 		rhsExpr := g.emitExpr(s.Value)
 		if ident, ok := s.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
-			targetType := g.chk.ExprTypes[s.Target]
 			if _, isStruct := targetType.(*checker.StructType); isStruct {
 				rhsExpr = "*" + rhsExpr
 			}
 		}
-		targetLValue := g.emitLValue(s.Target)
-		targetType := g.chk.ExprTypes[s.Target]
-		if _, isIdx := s.Target.(*ast.IndexExpr); !isIdx {
-			if targetType != nil && targetType.Equals(checker.TypeString) && s.Op == token.TokAssign {
-				if g.typeOwnsHeap(targetType) {
-					if _, isIdxVal := s.Value.(*ast.IndexExpr); isIdxVal {
-						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
-					} else if _, isSelVal := s.Value.(*ast.SelectorExpr); isSelVal {
-						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
-					} else if _, isIdentVal := s.Value.(*ast.IdentExpr); isIdentVal {
-						rhsExpr = g.emitCloneExpr(targetType, rhsExpr)
-					}
-				}
-				tmpOld := g.nextTmp("old_str")
-				out.WriteString(fmt.Sprintf("%svira_string %s = %s;\n", indent, tmpOld, targetLValue))
-				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsExpr))
-				out.WriteString(fmt.Sprintf("%svira_str_free(&%s);\n", indent, tmpOld))
-				return
+		if s.Op == token.TokDivAssign || s.Op == token.TokModAssign {
+			binOp := token.TokSlash
+			if s.Op == token.TokModAssign {
+				binOp = token.TokPercent
 			}
-			if sl, isSlice := targetType.(*checker.SliceType); isSlice && s.Op == token.TokAssign {
-				tmpOld := g.nextTmp("old_slice")
-				sliceName := g.cSliceName(sl.Elem)
-				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, sliceName, tmpOld, targetLValue))
-				out.WriteString(fmt.Sprintf("%s%s = %s;\n", indent, targetLValue, rhsExpr))
-				out.WriteString(fmt.Sprintf("%s%s_free(&%s);\n", indent, sliceName, tmpOld))
+			if helper := g.checkedIntDivHelper(binOp, targetType, g.chk.ExprTypes[s.Value], s.Value); helper != "" {
+				out.WriteString(fmt.Sprintf("%s%s = %s(%s, %s);\n", indent, targetLValue, helper, targetLValue, rhsExpr))
 				return
 			}
 		}
@@ -1746,6 +1896,15 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			if s.Post != nil {
 				if assign, ok := s.Post.(*ast.AssignStmt); ok {
 					postStr = fmt.Sprintf("%s %s %s", g.emitLValue(assign.Target), assign.Op.String(), g.emitExpr(assign.Value))
+					if assign.Op == token.TokDivAssign || assign.Op == token.TokModAssign {
+						binOp := token.TokSlash
+						if assign.Op == token.TokModAssign {
+							binOp = token.TokPercent
+						}
+						if helper := g.checkedIntDivHelper(binOp, g.chk.ExprTypes[assign.Target], g.chk.ExprTypes[assign.Value], assign.Value); helper != "" {
+							postStr = fmt.Sprintf("%s = %s(%s, %s)", g.emitLValue(assign.Target), helper, g.emitLValue(assign.Target), g.emitExpr(assign.Value))
+						}
+					}
 				} else if exprStmt, ok := s.Post.(*ast.ExprStmt); ok {
 					postStr = g.emitExpr(exprStmt.Expr)
 				}
@@ -1871,15 +2030,43 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 
 	case *ast.DeferStmt:
 		if s.Body != nil {
+			// Evaluate the body in the arena it was written in (see ast.DeferStmt): at an early
+			// `return` from a nested `arena { }` the exit point's own slab is already destroyed.
+			prevArena := g.activeArena
+			if s.ArenaScoped {
+				if s.ArenaVar != "" {
+					g.activeArena = "&" + s.ArenaVar
+				} else {
+					g.activeArena = g.fnBaseArena
+				}
+			}
 			out.WriteString(fmt.Sprintf("%s{\n", indent))
 			g.emitBlockStmts(out, s.Body, indent+"    ", fnRet)
 			out.WriteString(fmt.Sprintf("%s}\n", indent))
+			g.activeArena = prevArena
 		}
 
 	case *ast.ReturnStmt:
 		skipErrName := ""
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			skipErrName = ident.Ident.Name
+		}
+		// retValue emits a returned expression. When the analyzer flagged the return as
+		// CloneValue the variable is not owned by this function (a parameter, receiver, loop
+		// variable, `err` binding or arena-backed local), so the caller gets a deep copy and
+		// the original keeps its owner.
+		retValue := func(v ast.Expr) string {
+			if s.CloneValue {
+				if ident, ok := v.(*ast.IdentExpr); ok {
+					if t := g.chk.ExprTypes[v]; g.typeOwnsHeap(t) {
+						return g.emitCloneExpr(t, g.identValueExpr(ident))
+					}
+				}
+			}
+			return g.emitExpr(v)
+		}
+		if s.CloneValue {
+			skipErrName = "" // nothing is transferred: every active `err` binding is still freed
 		}
 		if g.inMainFn {
 			for i := len(g.activeErrVars) - 1; i >= 0; i-- {
@@ -1908,10 +2095,10 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			cRes := g.cResultName(resRet.Inner)
 			if call, isCall := s.Value.(*ast.CallExpr); isCall {
 				if ident, isId := call.Callee.(*ast.IdentExpr); isId && ident.Ident.Name == "error" {
-					if identArg, ok := call.Args[0].Expr.(*ast.IdentExpr); ok {
+					if identArg, ok := call.Args[0].Expr.(*ast.IdentExpr); ok && !s.CloneValue {
 						skipErrName = identArg.Ident.Name
 					}
-					errMsg := g.emitExpr(call.Args[0].Expr)
+					errMsg := retValue(call.Args[0].Expr)
 					if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
 						tmpErr := g.nextTmp("ret_err")
 						out.WriteString(fmt.Sprintf("%svira_string %s = %s;\n", indent, tmpErr, errMsg))
@@ -1930,7 +2117,7 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 					return
 				}
 			}
-			valExpr := g.emitExpr(s.Value)
+			valExpr := retValue(s.Value)
 			if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
 				tmpVal := g.nextTmp("ret_ok")
 				out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(resRet.Inner), tmpVal, valExpr))
@@ -1949,7 +2136,7 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 				indent, cRes, valExpr))
 			return
 		}
-		valExpr := g.emitExpr(s.Value)
+		valExpr := retValue(s.Value)
 		if len(g.activeErrVars) > 0 || g.hasFnDeferBase {
 			tmpRet := g.nextTmp("ret")
 			out.WriteString(fmt.Sprintf("%s%s %s = %s;\n", indent, g.cType(fnRet), tmpRet, valExpr))
@@ -2154,7 +2341,8 @@ func (g *Generator) emitUnwrappedCall(
 			if exprSt, ok := st.(*ast.ExprStmt); ok && varName != "" && !valType.Equals(checker.TypeVoid) {
 				isDivergent := checker.IsDivergentExpr(exprSt.Expr)
 				if !isDivergent {
-					out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, varName, g.emitExpr(exprSt.Expr)))
+					out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, varName,
+						g.emitStoredValue(exprSt.Expr, valType, !exprSt.YieldClone, false)))
 					continue
 				}
 			}
@@ -2220,10 +2408,12 @@ func (g *Generator) emitUnwrappedAssign(
 					if valType.Equals(checker.TypeString) {
 						tmpOld := g.nextTmp("old_str")
 						out.WriteString(fmt.Sprintf("%s    vira_string %s = %s;\n", indent, tmpOld, targetLValue))
-						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue,
+							g.emitStoredValue(exprSt.Expr, valType, !exprSt.YieldClone, true)))
 						out.WriteString(fmt.Sprintf("%s    vira_str_free(&%s);\n", indent, tmpOld))
 					} else {
-						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue, g.emitExpr(exprSt.Expr)))
+						out.WriteString(fmt.Sprintf("%s    %s = %s;\n", indent, targetLValue,
+							g.emitStoredValue(exprSt.Expr, valType, !exprSt.YieldClone, true)))
 					}
 					continue
 				}
@@ -2351,6 +2541,22 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 					}
 				}
 			}
+			// A struct owns its fields: a field initialized from another place is cloned
+			// (unless the analyzer moved it), and a freshly computed string is made owned.
+			if ft := g.chk.ExprTypes[f.Value]; g.typeOwnsHeap(ft) {
+				switch v := f.Value.(type) {
+				case *ast.IdentExpr:
+					if !f.MoveValue {
+						valStr = g.emitCloneExpr(ft, g.identValueExpr(v))
+					}
+				case *ast.SelectorExpr, *ast.IndexExpr:
+					valStr = g.emitCloneExpr(ft, valStr)
+				case *ast.CallExpr:
+					if ft.Equals(checker.TypeString) {
+						valStr = fmt.Sprintf("vira_str_own(%s)", valStr)
+					}
+				}
+			}
 			inits = append(inits, fmt.Sprintf(".%s = %s", f.Name.Name, valStr))
 		}
 		if st != nil && st.IsActor {
@@ -2406,6 +2612,11 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 				case token.TokGte:
 					return fmt.Sprintf("(vira_str_cmp(%s, %s) >= 0)", g.emitExpr(e.Left), g.emitExpr(e.Right))
 				}
+			}
+		}
+		if e.Op == token.TokSlash || e.Op == token.TokPercent {
+			if helper := g.checkedIntDivHelper(e.Op, g.chk.ExprTypes[e.Left], g.chk.ExprTypes[e.Right], e.Right); helper != "" {
+				return fmt.Sprintf("%s(%s, %s)", helper, g.emitExpr(e.Left), g.emitExpr(e.Right))
 			}
 		}
 		return fmt.Sprintf("(%s %s %s)", g.emitExpr(e.Left), e.Op.String(), g.emitExpr(e.Right))
@@ -2464,6 +2675,57 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		}
 	}
 	return "0"
+}
+
+// intDivRank classifies an integer type for checked division: 1 = 32-bit signed (after C integer
+// promotion), 2 = 64-bit signed, 3 = unsigned (computed in 64 bits). 0 = not an integer type.
+func intDivRank(t checker.Type) int {
+	p, ok := t.(*checker.PrimitiveType)
+	if !ok {
+		return 0
+	}
+	switch p.Kind {
+	case checker.PrimInt, checker.PrimU8, checker.PrimCChar, checker.PrimCUChar,
+		checker.PrimCShort, checker.PrimCUShort, checker.PrimCInt:
+		return 1
+	case checker.PrimI64, checker.PrimCLong, checker.PrimCLongLong, checker.PrimCSSize:
+		return 2
+	case checker.PrimCUInt, checker.PrimCULong, checker.PrimCULongLong, checker.PrimCSize:
+		return 3
+	}
+	return 0
+}
+
+// checkedIntDivHelper returns the runtime helper that implements integer `/` or `%` with a
+// zero-divisor check (a supervised runtime fault instead of SIGFPE) and defined MIN / -1
+// behaviour. It returns "" when the plain C operator is already safe: floating-point operands,
+// unknown types, or a non-zero integer literal divisor.
+func (g *Generator) checkedIntDivHelper(op token.Kind, leftType, rightType checker.Type, right ast.Expr) string {
+	lr, rr := intDivRank(leftType), intDivRank(rightType)
+	if lr == 0 || rr == 0 {
+		return ""
+	}
+	if lit, ok := right.(*ast.LiteralExpr); ok && lit.Kind == token.TokInt {
+		digits := strings.TrimSuffix(strings.ReplaceAll(lit.Value, "_", ""), "i64")
+		if v, err := strconv.ParseUint(digits, 0, 64); err == nil && v != 0 {
+			return ""
+		}
+	}
+	rank := lr
+	if rr > rank {
+		rank = rr
+	}
+	name := "div"
+	if op == token.TokPercent {
+		name = "mod"
+	}
+	switch rank {
+	case 2:
+		return "vira_" + name + "_i64"
+	case 3:
+		return "vira_" + name + "_u64"
+	}
+	return "vira_" + name + "_i32"
 }
 
 func (g *Generator) emitActorInitExpr(st *checker.StructType, fieldInits []string) string {
@@ -2536,7 +2798,91 @@ func (g *Generator) emitLValue(expr ast.Expr) string {
 	}
 }
 
+// emitOrderedArgsCall guarantees left-to-right evaluation of call arguments. C leaves the
+// evaluation order of function arguments unspecified (GCC commonly evaluates right to left), so
+// when two or more arguments can have side effects they are first bound to temporaries, in
+// source order, inside a GNU statement expression.
+func (g *Generator) emitOrderedArgsCall(call *ast.CallExpr) (string, bool) {
+	if g.orderingArgs[call] || len(call.Args) < 2 {
+		return "", false
+	}
+	unsupported := false
+	var effectful []int
+	for i, a := range call.Args {
+		if a.Expr == nil || a.IsMut {
+			continue
+		}
+		if ast.ExprMayHaveSideEffects(a.Expr, &unsupported) {
+			effectful = append(effectful, i)
+		}
+	}
+	if unsupported || len(effectful) < 2 {
+		return "", false
+	}
+	// Everything from the first effectful argument onward is sequenced, so a later plain
+	// variable read cannot be reordered ahead of an earlier call that might modify it.
+	first := effectful[0]
+	type saved struct {
+		idx  int
+		expr ast.Expr
+	}
+	var restore []saved
+	var decls []string
+	for i := first; i < len(call.Args); i++ {
+		a := call.Args[i]
+		if a.Expr == nil || a.IsMut {
+			continue
+		}
+		if _, isLit := a.Expr.(*ast.LiteralExpr); isLit {
+			continue
+		}
+		t := g.chk.ExprTypes[a.Expr]
+		if t == nil || t.Equals(checker.TypeVoid) {
+			for _, r := range restore {
+				call.Args[r.idx].Expr = r.expr
+			}
+			return "", false
+		}
+		_, isRes := t.(*checker.ResultType)
+		if isRes || g.typeOwnsHeap(t) {
+			// Owning temporaries are sequenced (and freed) by the autofree pass instead.
+			for _, r := range restore {
+				call.Args[r.idx].Expr = r.expr
+			}
+			return "", false
+		}
+		tmp := g.nextTmp("arg")
+		valStr := g.emitExpr(a.Expr)
+		if ident, ok := a.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
+			// Pointer-backed variables keep their original spelling; they are plain reads.
+			continue
+		}
+		decls = append(decls, fmt.Sprintf("%s %s = %s;", g.cType(t), tmp, valStr))
+		tmpIdent := &ast.IdentExpr{Ident: ast.Ident{Name: tmp, NamePos: a.Expr.Span()}}
+		g.chk.ExprTypes[tmpIdent] = t
+		restore = append(restore, saved{idx: i, expr: a.Expr})
+		call.Args[i].Expr = tmpIdent
+	}
+	if g.orderingArgs == nil {
+		g.orderingArgs = make(map[*ast.CallExpr]bool)
+	}
+	g.orderingArgs[call] = true
+	inner := g.emitRawCall(call)
+	delete(g.orderingArgs, call)
+	for _, r := range restore {
+		delete(g.chk.ExprTypes, call.Args[r.idx].Expr)
+		call.Args[r.idx].Expr = r.expr
+	}
+	if len(decls) == 0 {
+		return inner, true
+	}
+	return fmt.Sprintf("({ %s %s; })", strings.Join(decls, " "), inner), true
+}
+
 func (g *Generator) emitRawCall(call *ast.CallExpr) string {
+	if ordered, ok := g.emitOrderedArgsCall(call); ok {
+		return ordered
+	}
 	var externSig *checker.FnSig
 	switch callee := call.Callee.(type) {
 	case *ast.IdentExpr:
@@ -3254,20 +3600,16 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			switch callee.Field.Name {
 			case "push", "append":
 				valExpr := argStrs[0]
-				if g.typeOwnsHeap(sl.Elem) && len(call.Args) > 0 && !isFreshOwningRValue(call.Args[0].Expr) {
-					if _, isLit := call.Args[0].Expr.(*ast.LiteralExpr); !isLit {
-						valExpr = g.emitCloneExpr(sl.Elem, valExpr)
-					}
+				if g.typeOwnsHeap(sl.Elem) && len(call.Args) > 0 {
+					valExpr = g.emitSliceStoreArg(call.Args[0].Expr, sl.Elem, valExpr)
 				}
 				return fmt.Sprintf("%s_push(%s, %s)", sliceTypeName, recvPtr, valExpr)
 			case "pop":
 				return fmt.Sprintf("%s_pop(%s)", sliceTypeName, recvPtr)
 			case "set":
 				valExpr := argStrs[1]
-				if g.typeOwnsHeap(sl.Elem) && len(call.Args) > 1 && !isFreshOwningRValue(call.Args[1].Expr) {
-					if _, isLit := call.Args[1].Expr.(*ast.LiteralExpr); !isLit {
-						valExpr = g.emitCloneExpr(sl.Elem, valExpr)
-					}
+				if g.typeOwnsHeap(sl.Elem) && len(call.Args) > 1 {
+					valExpr = g.emitSliceStoreArg(call.Args[1].Expr, sl.Elem, valExpr)
 				}
 				return fmt.Sprintf("%s_set(%s, %s, %s)", sliceTypeName, recvPtr, argStrs[0], valExpr)
 			case "slice":

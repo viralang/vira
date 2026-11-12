@@ -1,0 +1,113 @@
+// OUT: item-22
+// OUT: renamed-5 renamed-5 renamed-5
+// OUT: 8 9 t-3 copy-5
+// OUT: t-3 no tag zzz
+// OUT: item-0,item-0,|renamed-5,item-3,
+// OUT: 15 renamed-5 item-0
+// OUT: [vira_rt] active_leaks=0
+
+// Structs, slices and nested slices: copies are deep, stores never alias their source.
+struct Item {
+pub mut:
+    name string
+    tags []string
+}
+struct Bag {
+pub mut:
+    owner string
+    items []Item
+    top Item
+}
+fn make_item(n int) Item {
+    mut it := Item{ name: 'item-${n}', tags: []string{} }
+    it.tags.push('t-${n}')
+    it.tags.push('u-${n}')
+    return it
+}
+fn longest(a Item, b Item) Item {
+    if a.name.len >= b.name.len {
+        return a
+    }
+    return b
+}
+fn rename(mut it Item, s string) {
+    it.name = s
+    it.tags.push(s)
+}
+fn swap_names(mut a Item, mut b Item) {
+    tmp := a.name
+    a.name = b.name
+    b.name = tmp
+}
+fn collect(n int) []Item {
+    mut out := []Item{}
+    for mut i := 0; i < n; i += 1 {
+        it := make_item(i)
+        if i % 2 == 0 {
+            out.push(it)
+            continue
+        }
+        other := it
+        out.push(other)
+        if i > 100 {
+            break
+        }
+    }
+    return out
+}
+fn find_tag(b Bag, want string) !string {
+    for it in b.items {
+        for t in it.tags {
+            if t == want {
+                return t
+            }
+        }
+    }
+    return error('no tag ${want}')
+}
+fn main() {
+    n := 5
+    mut a := make_item(1)
+    mut b := make_item(22)
+    c := longest(a, b)
+    println(c.name)
+    label := 'renamed-${n}'
+    rename(mut a, label)
+    rename(mut b, label)
+    println('${a.name} ${b.name} ${label}')
+    swap_names(mut a, mut b)
+    mut bag := Bag{ owner: label, items: collect(6), top: a }
+    bag.items.push(a)
+    bag.items.push(b)
+    bag.top = b
+    bag.top.name = bag.items[0].name
+    bag.items[1] = bag.items[0]
+    bag.items[2].name = bag.owner
+    bag.owner = bag.items[3].tags[0]
+    mut copy := bag
+    copy.owner = 'copy-${n}'
+    copy.items.push(make_item(77))
+    println('${bag.items.len} ${copy.items.len} ${bag.owner} ${copy.owner}')
+    t := find_tag(bag, 't-3') or { 'missing' }
+    u := find_tag(bag, 'zzz') or { err }
+    println('${t} ${u}')
+    mut acc := ''
+    for mut i := 0; i < 4; i += 1 {
+        acc = '${acc}${bag.items[i].name},'
+        if i == 1 {
+            keep := acc
+            acc = '${keep}|'
+        }
+    }
+    println(acc)
+    mut names := []string{}
+    for it in bag.items {
+        names.push(it.name)
+        nm := it.name
+        names.push(nm)
+    }
+    last := names.pop()
+    names[0] = last
+    names[1] = names[2]
+    println('${names.len} ${names[0]} ${names[1]}')
+}

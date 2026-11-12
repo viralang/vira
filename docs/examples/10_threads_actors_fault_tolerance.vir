@@ -8,6 +8,11 @@ mut:
 	is_degraded bool = false
 }
 
+// Actor state is private: outside code asks for it with a message.
+pub fn (mut node ComputeNode) completed() int {
+	return node.batches_completed
+}
+
 pub fn (mut node ComputeNode) compute_batch(multiplier f32, force_fault bool) f32 {
 	node.batches_completed = node.batches_completed + 1
 
@@ -90,7 +95,8 @@ fn main() {
 	s1 := f_seq1.await() or { 0.0 }
 	s2 := f_seq2.await() or { 0.0 }
 	println('Sequential Mailbox for Node 1: run1=${s1}, run2=${s2}')
-	println('Total batches completed on Node 1: ${n1.batches_completed}')
+	n1_completed := n1 <- completed() or { 0 }
+	println('Total batches completed on Node 1: ${n1_completed}')
 
 	println('=================================================================')
 	println('   END OF CONCURRENCY DEMO (Review [vira_rt] Telemetry Below)     ')

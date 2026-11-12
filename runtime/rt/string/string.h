@@ -5,10 +5,20 @@
 // 1. VEX STRING (16 BYTES: ZERO-ALLOC LITERALS + HEAP STRINGS)
 // ============================================================================
 
+// Ownership of the bytes behind `data`:
+//   is_lit == false                 -> OWNED: a malloc'd buffer, released by `vira_str_free`.
+//   is_lit == true, !is_borrowed    -> STATIC: a string literal that lives for the whole program.
+//   is_lit == true,  is_borrowed    -> BORROWED: a view into memory owned by something else (an
+//                                      arena slab, another string, a widget buffer). It is only
+//                                      valid while that owner is; `vira_str_clone` and
+//                                      `vira_str_own` copy it to the heap before it can escape.
+// `is_lit` therefore means "vira_str_free must not release this", which holds for both STATIC
+// and BORROWED strings. The struct is still 16 bytes (the flag lives in existing padding).
 typedef struct {
   const uint8_t *data;
   int32_t len;
   bool is_lit;
+  bool is_borrowed;
 } vira_string;
 
 /**
@@ -98,8 +108,11 @@ static inline vira_string vira_str_format(const char *fmt, ...) {
  * Usage: Converts temporary or literal strings into owned heap instances.
  */
 static inline vira_string vira_str_clone(vira_string s) {
-  if (s.is_lit || s.data == NULL || s.len <= 0) {
-    return s;
+  if (s.data == NULL || s.len <= 0) {
+    return (vira_string){.data = (const uint8_t *)"", .len = 0, .is_lit = true};
+  }
+  if (s.is_lit && !s.is_borrowed) {
+    return s; // static literal: shared safely forever
   }
   uint8_t *copy = (uint8_t *)malloc((size_t)s.len + 1);
   if (!copy) {
@@ -113,6 +126,21 @@ static inline vira_string vira_str_clone(vira_string s) {
 }
 
 /**
+ * Ensures a string owns its bytes (or is a static literal) before it is stored or returned.
+ * @param s Any string value.
+ * @return `s` unchanged when it is owned or static; a heap copy when it is a borrowed view.
+ * Usage: Emitted by the compiler where a freshly computed string escapes (function returns,
+ * struct fields, slice elements), so views such as `s.trim_left()` or arena-formatted strings
+ * can never outlive the memory they point into.
+ */
+static inline vira_string vira_str_own(vira_string s) {
+  if (s.is_lit && s.is_borrowed) {
+    return vira_str_clone(s);
+  }
+  return s;
+}
+
+/**
  * Frees the backing heap buffer of a dynamic `vira_string` and zeroes its fields.
  * @param s Pointer to `vira_string` to release.
  * Usage: Safe destructor for owned strings; no-op if string is an immutable literal.
@@ -123,6 +151,7 @@ static inline void vira_str_free(vira_string *s) {
     s->data = NULL;
     s->len = 0;
     s->is_lit = true;
+    s->is_borrowed = false;
     _vira_record_free();
   }
 }

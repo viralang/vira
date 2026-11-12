@@ -37,6 +37,14 @@ type TrackedVar struct {
 	CleanupKind ast.CleanupKind
 	State       EscapeState
 	DeclSpan    token.Span
+
+	// LoopCarried: declared in a `for init; cond; post` header. It lives across iterations, so
+	// ownership must never be moved out of it from inside the loop body.
+	LoopCarried bool
+	// ArenaBacked: a tensor local inside an actor method, allocated from the actor's scratch
+	// arena (wiped after every message). Its destructor is a no-op, and it must be cloned to
+	// the heap whenever it is stored somewhere that outlives the handler.
+	ArenaBacked bool
 }
 
 type LexicalScope struct {
@@ -45,6 +53,52 @@ type LexicalScope struct {
 	IsLoop  bool
 	Vars    []*TrackedVar
 	Defers  []*ast.BlockStmt
+
+	// ImplicitArena is set on the root scope of an actor `mut` method: codegen allocates tensor
+	// temporaries there from the actor's scratch arena without an explicit `arena { }` block.
+	ImplicitArena bool
+
+	// ArenaVar names the slab of the `arena { }` block this scope is the body of ("" otherwise).
+	ArenaVar string
+}
+
+// enclosingArenaVar returns the slab variable of the innermost `arena { }` block around this
+// scope, or "" when the scope is not inside one.
+func (ls *LexicalScope) enclosingArenaVar() string {
+	for cur := ls; cur != nil; cur = cur.Parent {
+		if cur.ArenaVar != "" {
+			return cur.ArenaVar
+		}
+	}
+	return ""
+}
+
+func (ls *LexicalScope) inImplicitArena() bool {
+	for cur := ls; cur != nil; cur = cur.Parent {
+		if cur.ImplicitArena {
+			return true
+		}
+	}
+	return false
+}
+
+// stmtCtx describes the statement currently being rewritten. It is what lets the analyzer prove
+// that a variable is never used again and can therefore be moved instead of cloned.
+type stmtCtx struct {
+	scope      *LexicalScope  // scope of the block that directly contains the statement
+	counts     map[string]int // identifier uses inside the statement itself
+	rest       []ast.Stmt     // statements that follow it in the same block
+	restCounts map[string]int // lazily computed identifier uses in `rest`
+}
+
+func (c *stmtCtx) usedLater(name string) bool {
+	if c.restCounts == nil {
+		c.restCounts = make(map[string]int)
+		for _, st := range c.rest {
+			ast.CountIdentUses(st, c.restCounts)
+		}
+	}
+	return c.restCounts[name] > 0
 }
 
 func (ls *LexicalScope) Find(name string) *TrackedVar {
@@ -71,6 +125,8 @@ type Analyzer struct {
 	Reports         []*FnReport
 	arenaCounter    int
 	tmpCounter      int
+	ctx             *stmtCtx // statement currently being rewritten (nil outside rewriteBlock)
+	pendingTail     ast.Stmt // extra statement that follows the next rewritten block (or-block yield)
 }
 
 func New(chk *checker.Checker) *Analyzer {
@@ -193,11 +249,114 @@ func (a *Analyzer) AnalyzeFile(file *ast.File) {
 				continue
 			}
 			report := &FnReport{FnName: a.formatFnName(fn)}
-			rootScope := &LexicalScope{}
+			rootScope := &LexicalScope{ImplicitArena: a.isActorMutMethod(fn)}
 			a.rewriteBlock(fn.Body, rootScope, true, report)
 			a.Reports = append(a.Reports, report)
 		}
 	}
+}
+
+// isActorMutMethod reports whether fn is a `mut` receiver method of an actor. Codegen binds the
+// actor's scratch arena for the whole body of such methods.
+func (a *Analyzer) isActorMutMethod(fn *ast.FnDecl) bool {
+	if fn.Receiver == nil || !fn.Receiver.IsMut {
+		return false
+	}
+	identType, ok := fn.Receiver.Type.(*ast.IdentType)
+	if !ok {
+		return false
+	}
+	st := a.chk.LookupStruct(identType.Name.Name)
+	return st != nil && st.IsActor
+}
+
+// isCloneable reports whether values of type t can be deep-cloned by codegen. Futures, boxed
+// interfaces and actors cannot; binding one of those from a variable keeps move semantics.
+func (a *Analyzer) isCloneable(t checker.Type) bool {
+	switch v := t.(type) {
+	case *checker.FutureType, *checker.InterfaceType:
+		return false
+	case *checker.StructType:
+		return !v.IsActor
+	}
+	return true
+}
+
+// canMove reports whether ownership of the variable `name` may be transferred by the current
+// statement instead of cloning it. This is only proven in the simplest sound case:
+//   - the variable owns heap memory and is declared directly in the block being rewritten, so
+//     the statement runs at most once per lifetime of the variable (no branch or loop between
+//     the declaration and the move);
+//   - the statement mentions it exactly once;
+//   - no later statement in the block and no pending `defer` mentions it.
+// Everything else is cloned, which is always safe.
+func (a *Analyzer) canMove(tv *TrackedVar, name string) bool {
+	if a.ctx == nil || tv == nil || tv.State != StateScopedLocal || tv.LoopCarried || tv.ArenaBacked {
+		return false
+	}
+	declaredHere := false
+	for _, v := range a.ctx.scope.Vars {
+		if v == tv {
+			declaredHere = true
+			break
+		}
+	}
+	if !declaredHere {
+		return false
+	}
+	if a.ctx.counts[name] != 1 || a.ctx.usedLater(name) {
+		return false
+	}
+	for cur := a.ctx.scope; cur != nil; cur = cur.Parent {
+		for _, d := range cur.Defers {
+			counts := make(map[string]int)
+			ast.CountIdentUses(d, counts)
+			if counts[name] > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// resolveIdentTransfer decides what happens when the variable `ident` is stored somewhere new
+// (bound to another name, assigned, or placed in a struct field). It returns true when the
+// store is a MOVE (the source is marked as no longer owning its memory) and false when codegen
+// must deep-clone the value so both sides own independent memory.
+func (a *Analyzer) resolveIdentTransfer(ident *ast.IdentExpr, scope *LexicalScope, t checker.Type) bool {
+	srcVar := scope.Find(ident.Ident.Name)
+	if !a.isCloneable(t) {
+		if srcVar != nil && srcVar.State == StateScopedLocal {
+			srcVar.State = StateMovedToContainer
+		}
+		return true
+	}
+	if needsFree, _ := a.typeNeedsCleanup(t); !needsFree {
+		return true // plain value copy; nothing to own
+	}
+	if a.canMove(srcVar, ident.Ident.Name) {
+		srcVar.State = StateMovedToContainer
+		return true
+	}
+	return false
+}
+
+// isArenaLocalTarget reports whether an assignment target is a local whose storage belongs to
+// the surrounding arena, so that an arena-allocated value may be assigned to it directly.
+// Every other target (outer variables, fields, slice elements) outlives the arena.
+func (a *Analyzer) isArenaLocalTarget(target ast.Expr, value ast.Expr, scope *LexicalScope) bool {
+	ident, ok := target.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	tv := scope.Find(ident.Ident.Name)
+	if tv == nil {
+		return false
+	}
+	if tv.State == StateManagedByArena {
+		return true
+	}
+	return tv.ArenaBacked && a.isAllocatedOnArena(tv.CleanupKind, value)
 }
 
 func (a *Analyzer) formatFnName(fn *ast.FnDecl) string {
@@ -229,7 +388,23 @@ func (a *Analyzer) rewriteBlock(
 	var rewritten []ast.Stmt
 	diverged := false
 
-	for _, stmt := range block.Stmts {
+	prevCtx := a.ctx
+	defer func() { a.ctx = prevCtx }()
+	origStmts := block.Stmts
+	tailStmt := a.pendingTail
+	a.pendingTail = nil
+
+	for stmtIdx, stmt := range origStmts {
+		// Record the statement's identifier uses BEFORE any rewriting below replaces
+		// sub-expressions with hoisted temporaries.
+		rest := origStmts[stmtIdx+1:]
+		if tailStmt != nil {
+			rest = append(append([]ast.Stmt(nil), rest...), tailStmt)
+		}
+		ctx := &stmtCtx{scope: scope, counts: make(map[string]int), rest: rest}
+		ast.CountIdentUses(stmt, ctx.counts)
+		a.ctx = ctx
+
 		switch s := stmt.(type) {
 		case *ast.VarDeclStmt:
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
@@ -239,21 +414,24 @@ func (a *Analyzer) rewriteBlock(
 			// 1. Check if the RHS expression contains an `or { ... }` block or transfers ownership
 			a.inspectExprMovesAndOrBlocksWithMode(s.Value, stmtScope, report, s.Name.Name != "_")
 
-			// If initialized from an existing local variable `b := a`, transfer ownership
+			// 2. Register variable in current scope if its type owns heap memory
+			valType := a.chk.ExprTypes[s.Value]
+
+			// Initialized from an existing variable (`b := a`): move when `a` is provably dead
+			// afterwards, otherwise codegen deep-clones so `a` and `b` never share memory.
 			if s.Name.Name != "_" {
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
-					if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
-						srcVar.State = StateMovedToContainer
-					}
+					s.MoveValue = a.resolveIdentTransfer(ident, scope, valType)
 				}
 			}
 
-			// 2. Register variable in current scope if its type owns heap memory
-			valType := a.chk.ExprTypes[s.Value]
 			if needsFree, kind := a.typeNeedsCleanup(valType); needsFree && s.Name.Name != "_" {
 				state := StateScopedLocal
+				arenaBacked := false
 				if scope.InArena && a.isAllocatedOnArena(kind, s.Value) {
 					state = StateManagedByArena
+				} else if kind == ast.CleanupTensor && scope.inImplicitArena() && a.isAllocatedOnArena(kind, s.Value) {
+					arenaBacked = true
 				}
 				tv := &TrackedVar{
 					Name:        s.Name.Name,
@@ -261,6 +439,7 @@ func (a *Analyzer) rewriteBlock(
 					CleanupKind: kind,
 					State:       state,
 					DeclSpan:    s.StmtSpan,
+					ArenaBacked: arenaBacked,
 				}
 				scope.Vars = append(scope.Vars, tv)
 				report.TrackedVars = append(report.TrackedVars, tv)
@@ -277,11 +456,11 @@ func (a *Analyzer) rewriteBlock(
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
 			stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
 			a.inspectExprMovesAndOrBlocksWithMode(s.Value, stmtScope, report, !isBlankTarget)
-			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				if srcVar := scope.Find(ident.Ident.Name); srcVar != nil && srcVar.State == StateScopedLocal {
-					srcVar.State = StateMovedToContainer
-				}
+			if ident, ok := s.Value.(*ast.IdentExpr); ok && !isBlankTarget {
+				s.MoveValue = a.resolveIdentTransfer(ident, scope, a.chk.ExprTypes[s.Value])
 			}
+			// A value stored anywhere other than an arena-owned local outlives the arena.
+			s.HeapValue = !a.isArenaLocalTarget(s.Target, s.Value, scope)
 			rewritten = append(rewritten, preStmts...)
 			rewritten = append(rewritten, s)
 			a.retireHoistedTemps(stmtScope, postStmts)
@@ -358,6 +537,7 @@ func (a *Analyzer) rewriteBlock(
 							CleanupKind: kind,
 							State:       state,
 							DeclSpan:    vdecl.StmtSpan,
+							LoopCarried: true,
 						}
 						loopScope.Vars = append(loopScope.Vars, tv)
 						report.TrackedVars = append(report.TrackedVars, tv)
@@ -394,93 +574,106 @@ func (a *Analyzer) rewriteBlock(
 		case *ast.ArenaStmt:
 			a.arenaCounter++
 			s.ArenaVar = fmt.Sprintf("_vira_arena_%d", a.arenaCounter)
-			arenaScope := &LexicalScope{Parent: scope, InArena: true}
+			arenaScope := &LexicalScope{Parent: scope, InArena: true, ArenaVar: s.ArenaVar}
+			// The slab itself is the first tracked variable of the arena scope, so its O(1)
+			// teardown is emitted last (LIFO) on EVERY exit path: falling off the end of the
+			// block, and also `return`, `break` and `continue` from inside it.
+			arenaScope.Vars = append(arenaScope.Vars, &TrackedVar{
+				Name:        s.ArenaVar,
+				CleanupKind: ast.CleanupArena,
+				State:       StateScopedLocal,
+				DeclSpan:    s.StmtSpan,
+			})
 			a.rewriteBlock(s.Body, arenaScope, false, report)
-
-			// Inject O(1) slab teardown at the end of the `arena { ... }` block
-			arenaFree := &ast.DeferFreeStmt{
-				VarName:  s.ArenaVar,
-				TypeName: "vira_arena",
-				Kind:     ast.CleanupArena,
-				Reason:   "arena block exit (O(1) slab deallocation)",
-				StmtSpan: s.StmtSpan,
-			}
-			s.Body.Stmts = append(s.Body.Stmts, arenaFree)
-			report.InjectedFrees = append(report.InjectedFrees, arenaFree)
 			rewritten = append(rewritten, s)
 
 		case *ast.ReturnStmt:
 			skipVar := ""
-			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				skipVar = ident.Ident.Name
-				if isFnRoot {
-					if tv := scope.Find(ident.Ident.Name); tv != nil {
-						tv.State = StateEscapesViaReturn
-					}
-				}
-			} else if s.Value != nil {
-				a.inspectExprMovesAndOrBlocks(s.Value, scope, report)
 
-				// If returning a non-literal expression (e.g. `return slice.to_string()` or `return "hello ${x}"`),
-				// hoist it into a temporary variable so it is evaluated BEFORE unwinding scope destructors,
-				// preventing any use-after-free of local variables!
+			// ownedLocal reports whether `expr` names a heap-owning local of this function whose
+			// ownership can simply be handed to the caller.
+			ownedLocal := func(expr ast.Expr) *TrackedVar {
+				ident, ok := expr.(*ast.IdentExpr)
+				if !ok {
+					return nil
+				}
+				tv := scope.Find(ident.Ident.Name)
+				if tv == nil || tv.State == StateManagedByArena || tv.ArenaBacked {
+					return nil
+				}
+				return tv
+			}
+			// plainIdent reports a returned variable that owns no heap memory (ints, bools, ...):
+			// it is returned as-is.
+			plainIdent := func(expr ast.Expr) bool {
+				if _, ok := expr.(*ast.IdentExpr); !ok {
+					return false
+				}
+				needsFree, _ := a.typeNeedsCleanup(a.chk.ExprTypes[expr])
+				return !needsFree
+			}
+			// hoistReturned binds a returned expression to a temporary BEFORE any scope is
+			// unwound. The temporary owns its value on the heap: variables this function does
+			// not own (parameters, receivers, loop variables, `err`, arena-backed locals) are
+			// deep-cloned into it, and heap temporaries used to compute it are freed right
+			// after. Nothing that the return value needs can therefore be released early.
+			hoistReturned := func(expr ast.Expr, prefix string, fallback checker.Type) *ast.IdentExpr {
+				preStmts, postStmts := a.hoistTemporaryStrings(expr, scope, report, true)
+				stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
+				a.inspectExprMovesAndOrBlocks(expr, stmtScope, report)
+
+				a.tmpCounter++
+				exprType := a.chk.ExprTypes[expr]
+				if exprType == nil {
+					exprType = fallback
+				}
+				tmpName := fmt.Sprintf("_vira_%s_%d", prefix, a.tmpCounter)
+				tmpIdent := ast.Ident{Name: tmpName, NamePos: expr.Span()}
+				varDecl := &ast.VarDeclStmt{
+					Name:      tmpIdent,
+					Value:     expr,
+					IsMut:     false,
+					StmtSpan:  expr.Span(),
+					HeapValue: true, // a returned value outlives any enclosing arena
+				}
+				a.chk.ExprTypes[varDecl.Value] = exprType
+				identExpr := &ast.IdentExpr{Ident: tmpIdent}
+				a.chk.ExprTypes[identExpr] = exprType
+
+				rewritten = append(rewritten, preStmts...)
+				rewritten = append(rewritten, varDecl)
+				a.retireHoistedTemps(stmtScope, postStmts)
+				rewritten = append(rewritten, postStmts...)
+				skipVar = tmpName
+				return identExpr
+			}
+
+			if tv := ownedLocal(s.Value); tv != nil {
+				skipVar = tv.Name
+				if isFnRoot {
+					tv.State = StateEscapesViaReturn
+				}
+			} else if s.Value != nil && !plainIdent(s.Value) {
 				isErrorCall := false
 				if call, isCall := s.Value.(*ast.CallExpr); isCall {
 					if id, isId := call.Callee.(*ast.IdentExpr); isId && id.Ident.Name == "error" {
 						isErrorCall = true
 						if len(call.Args) > 0 {
 							argExpr := call.Args[0].Expr
-							if identArg, isIdent := argExpr.(*ast.IdentExpr); isIdent {
-								skipVar = identArg.Ident.Name
+							if tv := ownedLocal(argExpr); tv != nil {
+								skipVar = tv.Name
 								if isFnRoot {
-									if tv := scope.Find(identArg.Ident.Name); tv != nil {
-										tv.State = StateEscapesViaReturn
-									}
+									tv.State = StateEscapesViaReturn
 								}
 							} else if _, isLit := argExpr.(*ast.LiteralExpr); !isLit {
-								a.tmpCounter++
-								argType := a.chk.ExprTypes[argExpr]
-								if argType == nil {
-									argType = checker.TypeString
-								}
-								tmpName := fmt.Sprintf("_vira_ret_err_%d", a.tmpCounter)
-								tmpIdent := ast.Ident{Name: tmpName, NamePos: argExpr.Span()}
-								varDecl := &ast.VarDeclStmt{
-									Name:     tmpIdent,
-									Value:    argExpr,
-									IsMut:    false,
-									StmtSpan: argExpr.Span(),
-								}
-								a.chk.ExprTypes[varDecl.Value] = argType
-								identExpr := &ast.IdentExpr{Ident: tmpIdent}
-								a.chk.ExprTypes[identExpr] = argType
-
-								rewritten = append(rewritten, varDecl)
-								call.Args[0].Expr = identExpr
-								skipVar = tmpName
+								call.Args[0].Expr = hoistReturned(argExpr, "ret_err", checker.TypeString)
 							}
 						}
 					}
 				}
 				if !isErrorCall {
 					if _, isLit := s.Value.(*ast.LiteralExpr); !isLit {
-						a.tmpCounter++
-						retType := a.chk.ExprTypes[s.Value]
-						tmpName := fmt.Sprintf("_vira_ret_val_%d", a.tmpCounter)
-						tmpIdent := ast.Ident{Name: tmpName, NamePos: s.Value.Span()}
-						varDecl := &ast.VarDeclStmt{
-							Name:     tmpIdent,
-							Value:    s.Value,
-							IsMut:    false,
-							StmtSpan: s.Value.Span(),
-						}
-						a.chk.ExprTypes[varDecl.Value] = retType
-						identExpr := &ast.IdentExpr{Ident: tmpIdent}
-						a.chk.ExprTypes[identExpr] = retType
-
-						rewritten = append(rewritten, varDecl)
-						s.Value = identExpr
-						skipVar = tmpName
+						s.Value = hoistReturned(s.Value, "ret_val", nil)
 					}
 				}
 			}
@@ -583,16 +776,29 @@ func (a *Analyzer) rewriteOrBlock(orBlock *ast.BlockStmt, yieldsVal bool, parent
 		BlockSpan: orBlock.BlockSpan,
 	}
 	// Run statement rewrites on prefixBlock, then strip prefixBlock's trailing scope-exit frees so we can place them AFTER tailExprStmt
+	a.pendingTail = tailExprStmt // the yielded expression still uses the prefix's variables
 	a.rewriteOrPrefixStmts(prefixBlock, orScope, report)
+	a.pendingTail = nil
 
 	a.inspectExprMovesAndOrBlocksWithMode(tailExprStmt.Expr, orScope, report, false)
 	preStmts, postStmts := a.hoistTemporaryStrings(tailExprStmt.Expr, orScope, report, true)
 
 	skipVar := ""
 	if ident, ok := tailExprStmt.Expr.(*ast.IdentExpr); ok {
-		if tv := orScope.Find(ident.Ident.Name); tv != nil && tv.State == StateScopedLocal {
-			tv.State = StateEscapesViaReturn
+		// Only a variable declared INSIDE the or-block may be yielded by transferring
+		// ownership. Anything else (`err`, an outer local, a parameter) stays owned where it
+		// is, so the yielded value must be a clone.
+		var owned *TrackedVar
+		for _, v := range orScope.Vars {
+			if v.Name == ident.Ident.Name {
+				owned = v
+			}
+		}
+		if owned != nil && owned.State == StateScopedLocal {
+			owned.State = StateEscapesViaReturn
 			skipVar = ident.Ident.Name
+		} else {
+			tailExprStmt.YieldClone = true
 		}
 	}
 
@@ -641,11 +847,12 @@ func (a *Analyzer) inspectExprMovesAndOrBlocksWithMode(expr ast.Expr, scope *Lex
 	switch e := expr.(type) {
 	case *ast.StructInitExpr:
 		// Any local variable passed into a struct field (`Invoice{ id: local_id }`) transfers ownership
-		for _, f := range e.Fields {
+		for i := range e.Fields {
+			f := &e.Fields[i]
 			if ident, ok := f.Value.(*ast.IdentExpr); ok {
-				if tv := scope.Find(ident.Ident.Name); tv != nil && tv.State == StateScopedLocal {
-					tv.State = StateMovedToContainer
-				}
+				// `Invoice{ id: local_id }`: move when `local_id` is provably dead afterwards,
+				// otherwise codegen deep-clones it into the field.
+				f.MoveValue = a.resolveIdentTransfer(ident, scope, a.chk.ExprTypes[f.Value])
 			} else {
 				a.inspectExprMovesAndOrBlocks(f.Value, scope, report)
 			}
@@ -903,6 +1110,67 @@ func (a *Analyzer) maybeHoistSubExpr(
 	return expr
 }
 
+// wouldHoistSubExpr mirrors the decisions of maybeHoistSubExpr without modifying anything.
+func (a *Analyzer) wouldHoistSubExpr(expr ast.Expr, inArena bool) bool {
+	switch e := expr.(type) {
+	case *ast.StringInterpExpr:
+		return !inArena
+	case *ast.StructInitExpr:
+		needsFree, _ := a.typeNeedsCleanup(a.chk.ExprTypes[e])
+		return needsFree
+	case *ast.ArrayLitExpr:
+		_, isSlice := a.chk.ExprTypes[e].(*checker.SliceType)
+		return isSlice
+	case *ast.BinaryExpr:
+		_, isTensor := a.chk.ExprTypes[e].(*checker.TensorType)
+		return isTensor && !inArena
+	case *ast.CallExpr:
+		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
+			return false
+		}
+		if e.OrBlock != nil {
+			return true
+		}
+		if needsFree, kind := a.typeNeedsCleanup(a.chk.ExprTypes[e]); needsFree {
+			return !(inArena && a.isAllocatedOnArena(kind, e))
+		}
+	}
+	return false
+}
+
+// hoistForEvaluationOrder binds a side-effecting, non-owning argument to a temporary so it is
+// evaluated before the hoisted arguments that follow it. No cleanup is injected: only values
+// that do not own heap memory reach this point (owning ones are hoisted by maybeHoistSubExpr).
+func (a *Analyzer) hoistForEvaluationOrder(expr ast.Expr, preStmts *[]ast.Stmt) ast.Expr {
+	unsupported := false
+	if !ast.ExprMayHaveSideEffects(expr, &unsupported) || unsupported {
+		return expr
+	}
+	exprType := a.chk.ExprTypes[expr]
+	if exprType == nil || exprType.Equals(checker.TypeVoid) {
+		return expr
+	}
+	if _, isRes := exprType.(*checker.ResultType); isRes {
+		return expr
+	}
+	if needsFree, _ := a.typeNeedsCleanup(exprType); needsFree {
+		return expr
+	}
+	a.tmpCounter++
+	tmpName := fmt.Sprintf("_vira_tmp_ord_%d", a.tmpCounter)
+	tmpIdent := ast.Ident{Name: tmpName, NamePos: expr.Span()}
+	varDecl := &ast.VarDeclStmt{
+		Name:     tmpIdent,
+		Value:    expr,
+		IsMut:    false,
+		StmtSpan: expr.Span(),
+	}
+	identExpr := &ast.IdentExpr{Ident: tmpIdent}
+	a.chk.ExprTypes[identExpr] = exprType
+	*preStmts = append(*preStmts, varDecl)
+	return identExpr
+}
+
 func (a *Analyzer) walkAndHoistCallArgs(
 	expr ast.Expr,
 	inArena bool,
@@ -915,25 +1183,39 @@ func (a *Analyzer) walkAndHoistCallArgs(
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
+		// Calling convention: arguments are BORROWED. A callee that keeps an argument clones it
+		// (codegen does this for every store of a parameter), so temporaries built for a call
+		// always belong to the caller and are freed right after the statement.
+		//
+		// The only callees that take ownership of a fresh temporary are the built-in slice
+		// stores and an interface boxing cast.
 		isContainerStore := false
 		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel {
-			switch sel.Field.Name {
-			case "push", "append", "set", "insert", "add", "set_header", "json", "ok", "text", "html", "with_status", "not_found", "bad_request", "internal_error":
-				isContainerStore = true
+			if _, isSlice := a.chk.ExprTypes[sel.Left].(*checker.SliceType); isSlice {
+				switch sel.Field.Name {
+				case "push", "append", "set", "insert":
+					isContainerStore = true
+				}
 			}
 		}
-		callRetType := a.chk.ExprTypes[e]
-		if resType, isRes := callRetType.(*checker.ResultType); isRes {
-			callRetType = resType.Inner
-		}
-		if _, isStruct := callRetType.(*checker.StructType); isStruct {
-			isContainerStore = true
-		}
-		if _, isIface := callRetType.(*checker.InterfaceType); isIface {
-			isContainerStore = true
+		if id, isIdent := e.Callee.(*ast.IdentExpr); isIdent && len(e.Args) == 1 {
+			if _, isIface := a.chk.ExprTypes[e].(*checker.InterfaceType); isIface {
+				if _, isFn := a.chk.Functions()[id.Ident.Name]; !isFn {
+					isContainerStore = true // `Payable(Invoice{...})` boxes its operand
+				}
+			}
 		}
 		if isContainerStore {
 			return
+		}
+		// Index of the last argument that will be hoisted into a temporary. Hoisting moves that
+		// argument's evaluation ahead of the call, so every side-effecting argument to its LEFT
+		// must be hoisted as well or it would run out of source order.
+		lastHoisted := -1
+		for i := range e.Args {
+			if e.Args[i].Expr != nil && a.wouldHoistSubExpr(e.Args[i].Expr, inArena) {
+				lastHoisted = i
+			}
 		}
 		for i := range e.Args {
 			arg := &e.Args[i]
@@ -944,10 +1226,23 @@ func (a *Analyzer) walkAndHoistCallArgs(
 			a.walkAndHoistCallArgs(arg.Expr, inArena, preStmts, postFrees, report)
 
 			// 2. Hoist temporary heap argument if applicable
+			before := arg.Expr
 			arg.Expr = a.maybeHoistSubExpr(arg.Expr, inArena, preStmts, postFrees, report)
+
+			// 3. Keep left-to-right evaluation order relative to later hoisted arguments
+			if arg.Expr == before && i < lastHoisted && !arg.IsMut {
+				arg.Expr = a.hoistForEvaluationOrder(arg.Expr, preStmts)
+			}
 		}
 		if sel, ok := e.Callee.(*ast.SelectorExpr); ok {
 			a.walkAndHoistCallArgs(sel.Left, inArena, preStmts, postFrees, report)
+			// `make_name().to_upper()`: the receiver is a fresh heap string nobody else owns.
+			// Bind it to a temporary so it is freed after the statement instead of leaking.
+			if recvCall, isCall := sel.Left.(*ast.CallExpr); isCall && recvCall.OrBlock == nil {
+				if rt := a.chk.ExprTypes[recvCall]; rt != nil && rt.Equals(checker.TypeString) {
+					sel.Left = a.maybeHoistSubExpr(sel.Left, inArena, preStmts, postFrees, report)
+				}
+			}
 		}
 
 	case *ast.BinaryExpr:
@@ -980,6 +1275,16 @@ func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar st
 			continue
 		}
 		if tv.State == StateScopedLocal {
+			if tv.CleanupKind == ast.CleanupArena {
+				frees = append(frees, &ast.DeferFreeStmt{
+					VarName:  tv.Name,
+					TypeName: "vira_arena",
+					Kind:     ast.CleanupArena,
+					Reason:   "arena block exit (O(1) slab deallocation)",
+					StmtSpan: tv.DeclSpan,
+				})
+				continue
+			}
 			frees = append(frees, &ast.DeferFreeStmt{
 				VarName:  tv.Name,
 				TypeName: a.formatCleanupTypeName(tv.Type),
@@ -996,9 +1301,14 @@ func (a *Analyzer) collectSingleScopeFreesExcept(scope *LexicalScope, skipVar st
 func (a *Analyzer) collectSingleScopeExitsExcept(scope *LexicalScope, skipVar string, reason string, report *FnReport) []ast.Stmt {
 	var exits []ast.Stmt
 	for i := len(scope.Defers) - 1; i >= 0; i-- {
+		// A defer body runs at every exit of its scope, possibly from inside a nested
+		// `arena { }` whose slab is already gone. Record the arena it was WRITTEN in so codegen
+		// allocates its temporaries there and not in the arena of the exit point.
 		exits = append(exits, &ast.DeferStmt{
-			Body:     scope.Defers[i],
-			StmtSpan: scope.Defers[i].Span(),
+			Body:        scope.Defers[i],
+			StmtSpan:    scope.Defers[i].Span(),
+			ArenaScoped: true,
+			ArenaVar:    scope.enclosingArenaVar(),
 		})
 	}
 	frees := a.collectSingleScopeFreesExcept(scope, skipVar, reason)

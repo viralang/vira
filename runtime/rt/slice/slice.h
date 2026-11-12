@@ -16,10 +16,9 @@
 static inline void vira_bounds_check(int32_t index, int32_t len,
                                      const char *file, int line) {
   if (index < 0 || index >= len) {
-    fprintf(stderr,
-            "%s:%d: vira panic: index out of bounds: index %d with len %d\n",
-            file, line, index, len);
-    exit(1);
+    // Supervised inside actors (trapped like `panic(...)`); fatal elsewhere.
+    _vira_rt_fault("%s:%d: vira panic: index out of bounds: index %d with len %d",
+                   file, line, index, len);
   }
 }
 
@@ -120,8 +119,7 @@ static inline void _vira_slice_free_raw(void **data_ptr, int32_t *len_ptr,
   static inline C_TYPE vira_slice_##TYPE_NAME##_pop(                           \
       vira_slice_##TYPE_NAME *s) {                                             \
     if (s->len <= 0) {                                                         \
-      fprintf(stderr, "vira panic: pop from empty slice\n");                   \
-      exit(1);                                                                 \
+      _vira_rt_fault("vira panic: pop from empty slice");                      \
     }                                                                          \
     return s->data[--s->len];                                                  \
   }                                                                            \
@@ -214,7 +212,9 @@ VIRA_DEFINE_SLICE_TYPE(bool, bool)
  */
 static inline vira_string vira_str_char_at(vira_string s, int32_t idx) {
   vira_bounds_check(idx, s.len, __FILE__, __LINE__);
-  return (vira_string){.data = &s.data[idx], .len = 1, .is_lit = true};
+  // A view into `s`: borrowed unless `s` itself is a static literal.
+  return (vira_string){.data = &s.data[idx], .len = 1, .is_lit = true,
+                       .is_borrowed = !s.is_lit || s.is_borrowed};
 }
 
 #ifndef _vira_slice_string_DEFINED
@@ -269,8 +269,7 @@ static inline void vira_slice_string_push(vira_slice_string *s,
  */
 static inline vira_string vira_slice_string_pop(vira_slice_string *s) {
   if (s->len <= 0) {
-    fprintf(stderr, "vira panic: pop from empty slice\n");
-    exit(1);
+    _vira_rt_fault("vira panic: pop from empty slice");
   }
   return s->data[--s->len];
 }
@@ -430,8 +429,7 @@ static inline void vira_slice_vira_slice_string_push(vira_slice_vira_slice_strin
  */
 static inline vira_slice_string vira_slice_vira_slice_string_pop(vira_slice_vira_slice_string *s) {
   if (s->len <= 0) {
-    fprintf(stderr, "vira panic: pop from empty slice\n");
-    exit(1);
+    _vira_rt_fault("vira panic: pop from empty slice");
   }
   return s->data[--s->len];
 }
@@ -964,7 +962,8 @@ static inline vira_string vira_str_trim_left(vira_string s) {
   while (start < s.len && (s.data[start] == ' ' || s.data[start] == '\t' || s.data[start] == '\n' || s.data[start] == '\r')) {
     start++;
   }
-  return (vira_string){.data = s.data + start, .len = s.len - start, .is_lit = true};
+  return (vira_string){.data = s.data + start, .len = s.len - start, .is_lit = true,
+                       .is_borrowed = !s.is_lit || s.is_borrowed};
 }
 
 /**
@@ -979,7 +978,8 @@ static inline vira_string vira_str_trim_right(vira_string s) {
   while (end > 0 && (s.data[end - 1] == ' ' || s.data[end - 1] == '\t' || s.data[end - 1] == '\n' || s.data[end - 1] == '\r')) {
     end--;
   }
-  return (vira_string){.data = s.data, .len = end, .is_lit = true};
+  return (vira_string){.data = s.data, .len = end, .is_lit = true,
+                       .is_borrowed = !s.is_lit || s.is_borrowed};
 }
 
 /**

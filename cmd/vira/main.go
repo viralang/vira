@@ -1307,15 +1307,17 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		*targetFlags = append(*targetFlags, extraLibs...)
 	}
 
+	// -fwrapv: Vira integer arithmetic wraps on overflow. Without it signed overflow is undefined
+	// behaviour in C and the optimizer may miscompile overflowing code at -O2/-O3.
 	if opts.prod {
 		modeDesc = "prod (-O3 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O3", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append([]string{"-std=c99", "-O3", "-fwrapv", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
 		appendCFile(&cFlags)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
-		cFlags = append([]string{"-std=c99", "-O1", "-g", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
+		cFlags = append([]string{"-std=c99", "-O1", "-g", "-fwrapv", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
 		appendCFile(&cFlags)
@@ -1326,7 +1328,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append(cFlags, extraLibs...)
 	} else {
 		modeDesc = "dev (-O2 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O2", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append([]string{"-std=c99", "-O2", "-fwrapv", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
 		appendCFile(&cFlags)

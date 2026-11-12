@@ -1,0 +1,119 @@
+module main
+
+// OUT: c1 user-7
+// OUT: c1 user-7 user-7
+// OUT: c2 alpha-7
+// OUT: c2 4
+// OUT: c2 5 4 1
+// OUT: c3 p-3 p-3 p-3
+// OUT: c4 loop-3 0
+// OUT: c4 loop-3 1
+// OUT: c5 prefix-1ok-1 | too big 5
+// OUT: c6 30
+// OUT: c6 arena-42
+// OUT: [vira_rt] active_leaks=0
+
+// Regression corpus for the ownership bugs found in the v0.7.7 runtime/compiler review
+// (C1-C6). Every block below used to end in a use-after-free, a double free or a leak.
+
+struct Holder {
+pub mut:
+	name string
+}
+
+fn ident(s string) string {
+	return s
+}
+
+fn wrap(s string) Holder {
+	return Holder{ name: s }
+}
+
+fn risky(n int) !string {
+	if n > 2 {
+		return error('too big ${n}')
+	}
+	return 'ok-${n}'
+}
+
+fn run(n int) !string {
+	a := 'prefix-${n}'
+	b := risky(n)!
+	return '${a}${b}'
+}
+
+fn c1_move_in_branch(n int) {
+	s := 'user-${n}'
+	if n > 100 {
+		h := Holder{ name: s }
+		println(h.name)
+	}
+	t := 'user-${n}'
+	if n > 1 {
+		h := Holder{ name: t }
+		println('c1 ${h.name}')
+	}
+	println('c1 ${s} ${t}')
+}
+
+fn c2_alias(n int) {
+	a := 'alpha-${n}'
+	if n > 1 {
+		b := a
+		println('c2 ${b}')
+	}
+	println('c2 ${a}')
+
+	mut xs := [1, 2, 3]
+	xs.push(4)
+	if xs.len > 1 {
+		ys := xs
+		println('c2 ${ys.len}')
+	}
+	zs := xs
+	xs.push(5)
+	println('c2 ${xs.len} ${zs.len} ${xs[0]}')
+}
+
+fn c3_params(n int) {
+	a := 'p-${n}'
+	b := ident(a)
+	h := wrap(a)
+	println('c3 ${a} ${b} ${h.name}')
+}
+
+fn c4_loop(n int) {
+	s := 'loop-${n}'
+	for mut i := 0; i < 2; i += 1 {
+		h := Holder{ name: s }
+		println('c4 ${h.name} ${i}')
+	}
+}
+
+fn c5_or_err() {
+	x := run(1) or { 'fallback' }
+	y := run(5) or { err }
+	println('c5 ${x} | ${y}')
+}
+
+fn c6_arena() {
+	mut outer := 'init'
+	arena {
+		n := 42
+		outer = 'arena-${n}'
+	}
+	arena {
+		z := 'zzzzzzzzzzzzzzzzzzzzzzzzzzzz-${7}'
+		println('c6 ${z.len}')
+	}
+	println('c6 ${outer}')
+}
+
+fn main() {
+	c1_move_in_branch(7)
+	c2_alias(7)
+	c3_params(3)
+	c4_loop(3)
+	c5_or_err()
+	c6_arena()
+}

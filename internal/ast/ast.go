@@ -268,6 +268,16 @@ type VarDeclStmt struct {
 	IsMut    bool
 	Value    Expr
 	StmtSpan token.Span
+
+	// Ownership annotations set by internal/autofree and consumed by internal/cgen.
+	//
+	// MoveValue: Value is a variable whose ownership is transferred to this binding (the source
+	// is never used again and is not freed). When false, binding from another variable deep-
+	// clones it, so both names own independent memory.
+	// HeapValue: Value must be allocated on the heap even inside an `arena { }` block or an
+	// actor's scratch arena, because it outlives that arena (e.g. a hoisted return value).
+	MoveValue bool
+	HeapValue bool
 }
 
 func (s *VarDeclStmt) Span() token.Span { return s.StmtSpan }
@@ -278,6 +288,10 @@ type AssignStmt struct {
 	Op       token.Kind
 	Value    Expr
 	StmtSpan token.Span
+
+	// Ownership annotations set by internal/autofree (see VarDeclStmt).
+	MoveValue bool
+	HeapValue bool
 }
 
 func (s *AssignStmt) Span() token.Span { return s.StmtSpan }
@@ -286,6 +300,10 @@ func (s *AssignStmt) stmtNode()        {}
 type ReturnStmt struct {
 	Value    Expr
 	StmtSpan token.Span
+
+	// CloneValue: the returned variable is not owned by this function (a parameter, receiver,
+	// loop variable or arena-backed local), so the caller must receive an independent copy.
+	CloneValue bool
 }
 
 func (s *ReturnStmt) Span() token.Span { return s.StmtSpan }
@@ -293,6 +311,10 @@ func (s *ReturnStmt) stmtNode()        {}
 
 type ExprStmt struct {
 	Expr Expr
+
+	// YieldClone: this statement is the value yielded by an `or { ... }` block and names a
+	// variable the block does not own (`err`, an outer local, a parameter), so it is cloned.
+	YieldClone bool
 }
 
 func (s *ExprStmt) Span() token.Span { return s.Expr.Span() }
@@ -375,6 +397,12 @@ func (s *ArenaStmt) stmtNode()        {}
 type DeferStmt struct {
 	Body     *BlockStmt
 	StmtSpan token.Span
+
+	// Set by internal/autofree on the copies it emits at scope exits. ArenaVar is the slab of
+	// the `arena { }` block the defer was written in ("" = none): codegen evaluates the body
+	// against that arena rather than whichever arena surrounds the exit point.
+	ArenaScoped bool
+	ArenaVar    string
 }
 
 func (s *DeferStmt) Span() token.Span { return s.StmtSpan }
@@ -473,6 +501,10 @@ type StructInitField struct {
 	Name      Ident
 	Value     Expr
 	FieldSpan token.Span
+
+	// MoveValue: Value is a variable whose ownership moves into the struct (see VarDeclStmt).
+	// When false, initializing a field from a variable deep-clones it.
+	MoveValue bool
 }
 
 // StructInitExpr represents `Invoice{ id: '123', amount_cents: 5000 }`.

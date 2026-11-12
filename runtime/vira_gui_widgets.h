@@ -773,7 +773,8 @@ static inline vira_string vira_gui_text_input(int32_t x, int32_t y, int32_t widt
 
     vira_gui_reset_clip();
 
-    return (vira_string){ .data = (const uint8_t*)state->buffer, .len = state->len, .is_lit = true };
+    // A view of the widget's live edit buffer: BORROWED, so storing it copies the text.
+    return (vira_string){ .data = (const uint8_t*)state->buffer, .len = state->len, .is_lit = true, .is_borrowed = true };
 }
 
 /**

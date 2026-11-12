@@ -1,0 +1,88 @@
+// OUT: built rec-2
+// OUT: built rec-3
+// OUT: rec-2+scratch-3
+// OUT: neg -1
+// OUT: fallback
+// OUT: v-3
+// OUT: built rec-0
+// OUT: built rec-1
+// OUT: built rec-4
+// OUT: 4 rec-1 rec-0 rec-0
+// OUT: [vira_rt] active_leaks=0
+
+// Early returns, break and continue out of `arena { }`, defers that run after an arena is
+// gone, and temporaries inside returned expressions.
+struct Rec {
+pub mut:
+    id string
+}
+interface Named {
+    title() string
+}
+fn (r Rec) title() string {
+    return r.id
+}
+fn build(n int) !Rec {
+    if n < 0 {
+        return error('neg ${n}')
+    }
+    s := 'rec-${n}'
+    defer println('built ${s}')
+    arena {
+        tmp := 'scratch-${n}'
+        if n == 3 {
+            return Rec{ id: tmp }
+        }
+        t := tensor_fill(4, 4, 1.0)
+        if tensor_sum(t) > 100.0 {
+            return error(tmp)
+        }
+    }
+    return Rec{ id: s }
+}
+fn loop_arena(n int) string {
+    mut best := 'none'
+    for mut i := 0; i < n; i += 1 {
+        arena {
+            cur := 'v-${i}'
+            if i == 1 {
+                continue
+            }
+            if i == 3 {
+                best = cur
+                break
+            }
+            best = cur
+        }
+    }
+    return best
+}
+fn chain(n int) !string {
+    a := build(n)!
+    b := build(n + 1) or {
+        return error('second failed: ${err}')
+    }
+    nm := Named(b)
+    return '${a.id}+${nm.title()}'
+}
+fn main() {
+    x := chain(2) or { err }
+    println(x)
+    y := chain(-1) or { err }
+    println(y)
+    z := chain(-2) or { 'fallback' }
+    println(z)
+    println(loop_arena(6))
+    mut recs := []Rec{}
+    for mut i := 0; i < 5; i += 1 {
+        r := build(i) or { Rec{ id: 'bad' } }
+        if i == 2 {
+            continue
+        }
+        recs.push(r)
+    }
+    first := recs[0]
+    recs[0] = recs[1]
+    recs[1] = first
+    println('${recs.len} ${recs[0].id} ${recs[1].id} ${first.id}')
+}

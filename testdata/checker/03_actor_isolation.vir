@@ -1,0 +1,36 @@
+module main
+
+pub actor Counter {
+pub:
+	id int
+mut:
+	n int = 0
+}
+
+pub fn (mut c Counter) bump(by int) int {
+	c.n += by
+	return c.helper()
+}
+
+// Inside the actor its own state and methods are used directly.
+pub fn (mut c Counter) helper() int {
+	return c.n
+}
+
+fn main() {
+	mut c := Counter{ id: 1, n: 0 }
+	f := c <- bump(2)
+	r := f.await() or { 0 }
+	println('${r} ${c.id}')
+
+	println('${c.n}') // ERROR: cannot access mutable field 'Counter.n' from outside the actor
+	d := c.bump(1) // ERROR: cannot call method 'bump()' directly on actor 'Counter'
+	println('${d}')
+
+	mut pool := []Counter{}
+	pool.push(Counter{ id: 2, n: 0 })
+	other := pool[0] // ERROR: actor 'Counter' cannot be copied or moved
+	_ := other
+	dup := pool.clone() // ERROR: cannot call '.clone()' on a slice of actor 'Counter'
+	_ := dup
+}
