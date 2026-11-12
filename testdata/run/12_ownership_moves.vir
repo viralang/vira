@@ -1,0 +1,154 @@
+// OUT: branch: [a-1] [] keep-1
+// OUT: else: [] [b-2]
+// OUT: switch: two-3
+// OUT: block: blk-4 blk-4
+// OUT: used later: [late-5] late-5
+// OUT: loop: r0,r1,r2,r3,r4 | outer-6 outer-6 outer-6
+// OUT: fields: n-7 [t-7] n-7
+// OUT: nested: deep-8
+// OUT: set: [x-9, y-9]
+// OUT: [vira_rt] active_leaks=0
+
+// A value stored somewhere new (another variable, a struct field, a slice) is MOVED instead of
+// deep-copied when the source is a local that no path reads again. A move out of a variable
+// declared in an enclosing block (inside `if` or `switch`) resets that variable, so its
+// destructor at scope exit has nothing to free. Anything read again, or moved inside a loop,
+// is still copied.
+struct Box {
+pub mut:
+    name string
+    tags []string
+}
+fn show(xs []string) string {
+    mut out := '['
+    for mut i := 0; i < xs.len; i += 1 {
+        if i > 0 {
+            out += ', '
+        }
+        out += xs[i]
+    }
+    return out + ']'
+}
+fn branch(n int, take bool) string {
+    s := 'a-${n}'
+    k := 'keep-${n}'
+    mut xs := []string{}
+    mut ys := []string{}
+    if take {
+        xs.push(s)
+    } else {
+        ys.push(s)
+    }
+    return '${show(xs)} ${show(ys)} ${k}'
+}
+fn else_branch(n int) string {
+    s := 'b-${n}'
+    mut xs := []string{}
+    mut ys := []string{}
+    if n > 100 {
+        xs.push(s)
+    } else {
+        ys.push(s)
+    }
+    return '${show(xs)} ${show(ys)}'
+}
+fn pick(n int) string {
+    s := 'two-${n}'
+    mut out := 'none'
+    switch n {
+        case 1:
+            out = 'one'
+        case 3:
+            out = s
+        default:
+            out = 'other'
+    }
+    return out
+}
+fn block(n int) string {
+    s := 'blk-${n}'
+    mut copy := ''
+    if true {
+        copy = s
+    }
+    t := copy
+    return '${t} ${copy}'
+}
+fn used_later(n int) string {
+    s := 'late-${n}'
+    mut xs := []string{}
+    if n > 0 {
+        xs.push(s)
+    }
+    return '${show(xs)} ${s}'
+}
+fn in_loop(n int) string {
+    outer := 'outer-${n}'
+    mut xs := []string{}
+    mut ys := []string{}
+    for mut i := 0; i < 5; i += 1 {
+        r := 'r${i}'
+        xs.push(r)
+        if i < 3 {
+            ys.push(outer)
+        }
+    }
+    mut joined := ''
+    for mut i := 0; i < xs.len; i += 1 {
+        if i > 0 {
+            joined += ','
+        }
+        joined += xs[i]
+    }
+    return '${joined} | ${ys[0]} ${ys[1]} ${ys[2]}'
+}
+fn fields(n int) string {
+    name := 'n-${n}'
+    mut tags := []string{}
+    tags.push('t-${n}')
+    mut keep := ''
+    if n > 0 {
+        b := Box{ name: name, tags: tags }
+        keep = b.name
+        return '${b.name} ${show(b.tags)} ${keep}'
+    }
+    return 'none'
+}
+fn nested(n int) string {
+    s := 'deep-${n}'
+    mut out := ''
+    if n > 0 {
+        if n > 1 {
+            switch n {
+                case 8:
+                    out = s
+                default:
+                    out = 'other'
+            }
+        }
+    }
+    return out
+}
+fn set_elems(n int) string {
+    x := 'x-${n}'
+    y := 'y-${n}'
+    mut xs := []string{}
+    xs.push('a')
+    xs.push('b')
+    xs.set(0, x)
+    if n > 0 {
+        xs.set(1, y)
+    }
+    return show(xs)
+}
+fn main() {
+    println('branch: ${branch(1, true)}')
+    println('else: ${else_branch(2)}')
+    println('switch: ${pick(3)}')
+    println('block: ${block(4)}')
+    println('used later: ${used_later(5)}')
+    println('loop: ${in_loop(6)}')
+    println('fields: ${fields(7)}')
+    println('nested: ${nested(8)}')
+    println('set: ${set_elems(9)}')
+}

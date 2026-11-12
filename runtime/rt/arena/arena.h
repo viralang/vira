@@ -167,6 +167,26 @@ static inline vira_string vira_arena_str_format(vira_arena *a, const char *fmt,
 }
 
 /**
+ * Concatenates `n` strings into arena-managed memory.
+ * @param a Pointer to arena.
+ * @param parts Array of `n` strings, in order.
+ * @param n Number of parts.
+ * @return `vira_string` BORROWED from the arena slab (cloned if stored outside the arena).
+ * Usage: Emitted for string `+` inside `arena { }` blocks, mirroring `vira_arena_str_format`.
+ */
+static inline vira_string vira_arena_str_concat_n(vira_arena *a, const vira_string *parts,
+                                                  int32_t n) {
+  int32_t total = _vira_str_concat_len(parts, n);
+  if (total == 0) {
+    return vira_str_lit("", 0);
+  }
+  uint8_t *buf = (uint8_t *)vira_arena_alloc(a, (size_t)total + 1);
+  _vira_str_concat_copy(buf, parts, n);
+  return (vira_string){
+      .data = buf, .len = total, .is_lit = true, .is_borrowed = true};
+}
+
+/**
  * Releases all memory chunks and system allocations belonging to an arena.
  * @param a Pointer to arena.
  * Usage: Invoked automatically at the end of an `arena` block scope.

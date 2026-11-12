@@ -1,5 +1,7 @@
 # Vira Language Runtime & Compiler Improvement Plan
 
+> **Status (after the v0.7.7 review):** the actor scheduler, supervision, memory-safety, ownership, string and operator work listed in [ROADMAP section 14](../ROADMAP.md#14-runtime--compiler-hardening-after-the-v077-review-unreleased) is done. The rules that changed for users are collected in [Tutorial 42](tutorials/42_ownership_strings_and_actor_handles.md). The remaining items below are still open.
+
 Based on comprehensive analysis of the Vira language runtime and compiler, this document outlines key areas for enhancement across memory management, concurrency, GPU integration, type system, code generation, GUI, standard library, tooling, performance, and security.
 
 ---

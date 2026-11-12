@@ -1,0 +1,85 @@
+// OUT: two-way future: 99
+// OUT: two-way sync: 99
+// OUT: three-way: 99
+// OUT: chain ok: 300 300
+// OUT: abandoned messages ran: 3 200
+// OUT: [vira_rt] active_leaks=0
+
+// Actors that wait on each other: A's handler awaits B, and B's handler awaits A (directly or
+// through more actors). Without detection this hangs forever. The waiter whose message has not
+// started gets `deadlock avoided: actors are waiting on each other`; its message still runs
+// later as a detached send, and the rest of the cycle completes. Chains without a cycle are
+// never interrupted.
+pub actor Node {
+pub:
+    id int
+mut:
+    hits int = 0
+}
+// Answers directly.
+pub fn (mut n Node) value() int {
+    n.hits += 1
+    return n.id
+}
+// Awaits `next.value()` through a future.
+pub fn (mut n Node) ask(mut next Node) int {
+    f := next <- value()
+    v := f.await() or { -1 }
+    return v + 100
+}
+// Awaits `next.value()` with a synchronous call.
+pub fn (mut n Node) ask_sync(mut next Node) int {
+    v := next <- value() or { -1 }
+    return v + 100
+}
+// Asks `next` to ask `back`.
+pub fn (mut n Node) relay(mut next Node, mut back Node) int {
+    f := next <- ask(mut back)
+    return f.await() or { -1000 }
+}
+pub fn (mut n Node) relay_sync(mut next Node, mut back Node) int {
+    return next <- ask_sync(mut back) or { -1000 }
+}
+// Three actors: n -> next -> third -> n.
+pub fn (mut n Node) relay3(mut next Node, mut third Node, mut back Node) int {
+    f := next <- relay(mut third, mut back)
+    return f.await() or { -1000 }
+}
+pub fn (mut n Node) hit_count() int {
+    return n.hits
+}
+fn main() {
+    mut a := Node{ id: 1, hits: 0 }
+    mut b := Node{ id: 2, hits: 0 }
+    mut c := Node{ id: 3, hits: 0 }
+
+    // a.relay awaits b.ask, which awaits a.value: a cycle of two.
+    f1 := a <- relay(mut b, mut a)
+    r1 := f1.await() or { -5 }
+    println('two-way future: ${r1}')
+
+    r2 := a <- relay_sync(mut b, mut a) or { -5 }
+    println('two-way sync: ${r2}')
+
+    // a.relay3 awaits b.relay, which awaits c.ask, which awaits a.value: a cycle of three.
+    f3 := a <- relay3(mut b, mut c, mut a)
+    r3 := f3.await() or { -5 }
+    println('three-way: ${r3}')
+
+    // No cycle: a awaits b awaits c, many times and concurrently; nothing may be interrupted.
+    mut sum_a := 0
+    mut sum_b := 0
+    for mut i := 0; i < 100; i += 1 {
+        fa := a <- ask(mut c)
+        fb := b <- ask(mut c)
+        sum_a += (fa.await() or { -1 }) - 100
+        sum_b += (fb.await() or { -1 }) - 100
+    }
+    println('chain ok: ${sum_a} ${sum_b}')
+
+    // Each broken cycle left one abandoned `value()` queued for `a`; all three ran once the
+    // cycle cleared (the mailbox is FIFO, so they ran before this query). `c` answered 200 asks.
+    ha := a <- hit_count() or { -1 }
+    hc := c <- hit_count() or { -1 }
+    println('abandoned messages ran: ${ha} ${hc}')
+}

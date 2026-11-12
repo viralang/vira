@@ -114,7 +114,7 @@ fn main() {
 
 ## 3. The Application Shell & Window Lifecycle (`App` & `Scaffold`)
 
-Instead of juggling manual window initializations and frame state, [`App`](file:///mnt/flutter_drive/vira/packages/widget/src/navigation.vir) handles the entire native OS lifecycle:
+Instead of juggling manual window initializations and frame state, [`App`](../../packages/widget/src/navigation.vir) handles the entire native OS lifecycle:
 
 ```v
 pub struct App {
@@ -143,7 +143,7 @@ Like Flutter's `Scaffold`, `w.Scaffold.begin(theme)` establishes the root visual
 
 ## 4. Design System, Themes & Tokens
 
-The [`theme.vir`](file:///mnt/flutter_drive/vira/packages/widget/src/theme.vir) module gives you a curated color palette and layout models out of the box.
+The [`theme.vir`](../../packages/widget/src/theme.vir) module gives you a curated color palette and layout models out of the box.
 
 ### 4.1 Theme Modes
 ```v
@@ -200,7 +200,7 @@ zero := w.EdgeInsets.zero()
 
 Unlike mobile apps with fixed screen dimensions, desktop applications can be resized to any width or height at any moment.
 
-The [`responsive.vir`](file:///mnt/flutter_drive/vira/packages/widget/src/responsive.vir) module provides dynamic viewport inspection:
+The [`responsive.vir`](../../packages/widget/src/responsive.vir) module provides dynamic viewport inspection:
 
 ```v
 // Real-time window dimensions

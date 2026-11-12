@@ -23,6 +23,9 @@ type VarSymbol struct {
 	Type  Type
 	IsMut bool
 	Span  token.Span
+	// IsBorrowed marks bindings that do not own their value: parameters, receivers and
+	// `for x in xs` loop variables. An actor bound this way cannot be returned.
+	IsBorrowed bool
 }
 
 type Scope struct {
@@ -1680,6 +1683,41 @@ func (c *Checker) rejectActorCopy(value ast.Expr, t Type) {
 	}
 }
 
+// rejectActorStore reports storing an EXISTING actor somewhere new (a struct field, a slice
+// element). An actor has exactly one owner, which destroys it; a second place holding the same
+// actor would destroy it twice or use it after it is gone. A new actor built in place
+// (`Holder{ w: Worker{...} }`, `pool.push(Worker{...})`) or returned by a call is fine.
+func (c *Checker) rejectActorStore(value ast.Expr, elem Type, where string) {
+	st, ok := elem.(*StructType)
+	if !ok || !st.IsActor || value == nil {
+		return
+	}
+	switch value.(type) {
+	case *ast.IdentExpr, *ast.IndexExpr, *ast.SelectorExpr:
+		c.errorf(value.Span(),
+			"actor '%s' cannot be stored in %s: it already has an owner (construct a new actor in place instead)",
+			st.Name, where)
+	}
+}
+
+// rejectActorReturn reports returning an actor the function does not own: a parameter,
+// receiver or loop variable (the caller or the slice still owns it), or a field or element of
+// something else. A local actor is moved to the caller.
+func (c *Checker) rejectActorReturn(value ast.Expr, t Type, scope *Scope) {
+	st, ok := t.(*StructType)
+	if !ok || !st.IsActor {
+		return
+	}
+	switch v := value.(type) {
+	case *ast.IndexExpr, *ast.SelectorExpr:
+		c.errorf(value.Span(), "cannot return actor '%s' from a field or element: its container owns it", st.Name)
+	case *ast.IdentExpr:
+		if sym, found := scope.Lookup(v.Ident.Name); found && sym != nil && sym.IsBorrowed {
+			c.errorf(value.Span(), "cannot return actor '%s' through '%s': it is borrowed, the caller still owns it", st.Name, v.Ident.Name)
+		}
+	}
+}
+
 // rejectActorSliceCopy reports slice operations that would duplicate the actors they hold.
 func (c *Checker) rejectActorSliceCopy(sl *SliceType, method string, span token.Span) {
 	if st, ok := sl.Elem.(*StructType); ok && st.IsActor {
@@ -1711,19 +1749,21 @@ func (c *Checker) checkFnBody(d *ast.FnDecl) {
 			c.curActor = rst // the actor's own methods may touch its state directly
 		}
 		scope.Define(&VarSymbol{
-			Name:  d.Receiver.Name.Name,
-			Type:  recvType,
-			IsMut: d.Receiver.IsMut,
-			Span:  d.Receiver.RecvSpan,
+			Name:       d.Receiver.Name.Name,
+			Type:       recvType,
+			IsMut:      d.Receiver.IsMut,
+			Span:       d.Receiver.RecvSpan,
+			IsBorrowed: true,
 		})
 	}
 
 	for _, p := range d.Params {
 		scope.Define(&VarSymbol{
-			Name:  p.Name.Name,
-			Type:  c.resolveTypeExpr(p.Type),
-			IsMut: p.IsMut,
-			Span:  p.ParamSpan,
+			Name:       p.Name.Name,
+			Type:       c.resolveTypeExpr(p.Type),
+			IsMut:      p.IsMut,
+			Span:       p.ParamSpan,
+			IsBorrowed: true,
 		})
 	}
 
@@ -1783,6 +1823,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 		// 2. Verify type compatibility
 		if !lhsType.Equals(rhsType) {
 			c.errorf(s.StmtSpan, "cannot assign value of type '%s' to target of type '%s'", rhsType, lhsType)
+		} else if binOp, isCompound := compoundAssignBinaryOp(s.Op); isCompound {
+			// `x op= y` needs `op` to be defined for x's type, exactly like `x op y`.
+			c.checkBinaryOperator(&ast.BinaryExpr{Left: s.Target, Op: binOp, Right: s.Value, BinSpan: s.StmtSpan}, lhsType)
 		}
 
 	case *ast.IfStmt:
@@ -1863,7 +1906,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 			c.errorf(s.Iter.Span(), "cannot iterate over type '%s' in for-in loop", iterType)
 		}
 		loopScope := NewScope(scope)
-		loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: elemType, IsMut: false, Span: s.Var.NamePos})
+		loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: elemType, IsMut: false, Span: s.Var.NamePos, IsBorrowed: true})
 		c.checkBlock(s.Body, loopScope)
 
 	case *ast.BranchStmt:
@@ -1898,6 +1941,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 			return
 		}
 		valType := c.checkExpr(s.Value, scope)
+		c.rejectActorReturn(s.Value, valType, scope)
 		// If function returns `!T` and body returns `T`, automatically wrap `T` into `!T`
 		if resRet, ok := c.curFnReturn.(*ResultType); ok {
 			if valType.Equals(resRet.Inner) || valType.Equals(resRet) {
@@ -2065,6 +2109,7 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		for _, initField := range e.Fields {
 			valType := c.checkExpr(initField.Value, scope)
 			if finfo, _, ambig := st.LookupField(initField.Name.Name); finfo != nil {
+				c.rejectActorStore(initField.Value, finfo.Type, "field '"+st.Name+"."+initField.Name.Name+"'")
 				if ambig {
 					c.errorf(initField.FieldSpan, "ambiguous promoted field '%s' in struct '%s'", initField.Name.Name, st.Name)
 				}
@@ -2243,6 +2288,8 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		}
 		if !l.Equals(r) {
 			c.errorf(e.BinSpan, "mismatched types in binary operation '%s': '%s' and '%s'", e.Op, l, r)
+		} else {
+			c.checkBinaryOperator(e, l)
 		}
 		switch e.Op {
 		case token.TokEq, token.TokNeq, token.TokLt, token.TokLte, token.TokGt, token.TokGte, token.TokAnd, token.TokOrLogical:
@@ -2288,6 +2335,83 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 	default:
 		return TypeVoid
 	}
+}
+
+// checkBinaryOperator reports a binary operator applied to a type it is not defined for. The
+// operands already have matching types; `t` is the left operand's type. Without this check the
+// operator reaches the C backend as-is, where `string + string` or `struct == struct` produce C
+// that does not compile.
+func (c *Checker) checkBinaryOperator(e *ast.BinaryExpr, t Type) {
+	if t == nil || t.Equals(TypeVoid) {
+		return // the operand already failed to type-check; don't pile on
+	}
+	prim, isPrim := t.(*PrimitiveType)
+	_, isRef := t.(*RefType)
+	isInt := isPrim && isIntLike(prim.Kind)
+	isFloat := isPrim && isFloatLike(prim.Kind)
+	isNumeric := isInt || isFloat
+	isString := isPrim && prim.Kind == PrimString
+	isBool := isPrim && prim.Kind == PrimBool
+	isPtr := isRef || (isPrim && prim.Kind == PrimVoidPtr)
+
+	ok := true
+	switch e.Op {
+	case token.TokPlus:
+		ok = isNumeric || isString || isPtr
+	case token.TokMinus:
+		ok = isNumeric || isPtr
+	case token.TokStar, token.TokSlash:
+		ok = isNumeric
+	case token.TokPercent:
+		ok = isInt
+	case token.TokAmp, token.TokPipe, token.TokCaret:
+		ok = isInt || isBool
+	case token.TokShl, token.TokShr:
+		ok = isInt
+	case token.TokLt, token.TokLte, token.TokGt, token.TokGte:
+		ok = isNumeric || isString || isPtr
+	case token.TokEq, token.TokNeq:
+		// Strings compare by content (vira_str_eq); every other primitive and pointers compare
+		// by value in C. Structs, slices, tensors, interfaces and actors have no `==`.
+		ok = isPrim || isRef
+	case token.TokAnd, token.TokOrLogical:
+		ok = isBool
+	case token.TokAt:
+		ok = false // tensor @ tensor returned earlier
+	}
+	if !ok {
+		c.errorf(e.BinSpan, "operator '%s' is not defined for type '%s'", e.Op, t)
+	}
+}
+
+// compoundAssignBinaryOp maps `+=`, `-=`, `*=`, `/=`, `%=` to the binary operator they apply.
+func compoundAssignBinaryOp(op token.Kind) (token.Kind, bool) {
+	switch op {
+	case token.TokPlusAssign:
+		return token.TokPlus, true
+	case token.TokSubAssign:
+		return token.TokMinus, true
+	case token.TokMulAssign:
+		return token.TokStar, true
+	case token.TokDivAssign:
+		return token.TokSlash, true
+	case token.TokModAssign:
+		return token.TokPercent, true
+	}
+	return 0, false
+}
+
+// IsStringConcat reports whether expr is a string concatenation `a + b`. The checker must
+// already have run over expr. Codegen lowers it to one vira_str_concat_n call per chain, and
+// autofree treats it like an interpolated string: a fresh owned value (or arena-allocated
+// inside `arena { }`).
+func (c *Checker) IsStringConcat(expr ast.Expr) bool {
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.TokPlus {
+		return false
+	}
+	lt := c.ExprTypes[bin.Left]
+	return lt != nil && ExactEquals(lt, TypeString)
 }
 
 func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
@@ -2495,6 +2619,9 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "slice." + callee.Field.Name
+					if len(call.Args) > 0 {
+						c.rejectActorStore(call.Args[0].Expr, sl.Elem, "a slice")
+					}
 				case "pop":
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
@@ -2509,6 +2636,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					}
 					callName = "slice.pop"
 				case "get":
+					c.rejectActorSliceCopy(sl, "get", call.CallSpan)
 					sig = &FnSig{
 						Name:       "get",
 						Params:     []ParamInfo{{Name: "index", Type: TypeInt}},
@@ -2529,6 +2657,9 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						Span:       callee.SelSpan,
 					}
 					callName = "slice.set"
+					if len(call.Args) > 1 {
+						c.rejectActorStore(call.Args[1].Expr, sl.Elem, "a slice")
+					}
 				case "clear":
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {

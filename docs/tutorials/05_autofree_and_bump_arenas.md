@@ -48,8 +48,32 @@ Every tracked variable is placed into one of four states:
 | :--- | :--- | :--- |
 | `StateScopedLocal` | Variable does not escape its lexical block | Injected with deterministic `free` at scope exit |
 | `StateEscapesViaReturn` | Variable is returned to the calling function | Caller inherits ownership; current scope skips cleanup |
-| `StateMovedToContainer` | Variable is boxed into an interface or struct | Outer container inherits ownership; skipped locally |
+| `StateMovedToContainer` | Variable is moved into another variable, a struct, a slice or an interface box | The new owner inherits it; skipped locally |
 | `StateManagedByArena` | Allocated inside an `arena { ... }` block | Managed by the arena slab; individual frees skipped |
+
+---
+
+## 3.1 Copies and Moves
+
+Each heap value has exactly **one owner**, so two variables never share the same memory. When you store a value somewhere new (`b := a`, `x = y`, a struct field, `xs.push(s)`), the compiler decides between two outcomes:
+
+- **Move**, when no path reads the source again: the new owner takes the value, nothing is copied.
+- **Copy**, otherwise: the new owner gets an independent deep copy, and changing one never changes the other.
+
+```v
+fn build_tags(n int) []string {
+	mut tags := []string{}
+	for mut i := 0; i < n; i += 1 {
+		tag := 'tag-${i}'
+		tags.push(tag)      // last use of `tag`: moved into the slice
+	}
+	first := tags[0]        // an element: copied (the slice still owns it)
+	println(first)
+	return tags             // a local: moved to the caller
+}
+```
+
+Function arguments are **borrowed**: the function sees the caller's value without a copy, and copies only what it stores. The full rule table is in [Tutorial 42](./42_ownership_strings_and_actor_handles.md#3-ownership-copies-moves-and-borrowed-arguments).
 
 ---
 

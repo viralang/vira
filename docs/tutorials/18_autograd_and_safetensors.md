@@ -81,7 +81,7 @@ tensor_sgd_step(mut w, grad_w, 0.05)
 
 ## 4. Complete Runnable Implementation
 
-Here is the source code from [docs/examples/18_autograd_and_safetensors.vir](file:///c:/Users/hp/vex/docs/examples/18_autograd_and_safetensors.vir):
+Here is the source code from [docs/examples/18_autograd_and_safetensors.vir](../examples/18_autograd_and_safetensors.vir):
 
 ```v
 module main

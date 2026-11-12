@@ -1,8 +1,8 @@
 # Tutorial 31: Basic CLI Application Development
 
 > **Language Version:** Vira `v0.5.9-dev`+  
-> **Reference Example:** [`docs/examples/34_basic_cli_app.vir`](file:///mnt/flutter_drive/vira/docs/examples/34_basic_cli_app.vir)  
-> **Standard Packages:** [`packages/os`](file:///mnt/flutter_drive/vira/packages/os), [`packages/io`](file:///mnt/flutter_drive/vira/packages/io), [`packages/strings`](file:///mnt/flutter_drive/vira/packages/strings)
+> **Reference Example:** [`docs/examples/34_basic_cli_app.vir`](../examples/34_basic_cli_app.vir)  
+> **Standard Packages:** [`packages/os`](../../packages/os), [`packages/io`](../../packages/io), [`packages/strings`](../../packages/strings)
 
 ---
 
@@ -193,7 +193,7 @@ fn main() {
 
 ## 7. Running Example 34
 
-The complete runnable implementation is located at [`docs/examples/34_basic_cli_app.vir`](file:///mnt/flutter_drive/vira/docs/examples/34_basic_cli_app.vir).
+The complete runnable implementation is located at [`docs/examples/34_basic_cli_app.vir`](../examples/34_basic_cli_app.vir).
 
 Execute directly via:
 ```bash

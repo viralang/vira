@@ -68,7 +68,8 @@ Vira is engineered from the ground up for modern systems development, numerical 
 - **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored. Failure to unwrap via `or { ... }` or propagate with `!` is a compile-time semantic error. No unhandled runtime exceptions.
 - **First-Class AI Tensors & Multi-Threaded CPU SIMD:** 1D–4D strided tensors (`tensor[f32]`) are language primitives with batched & broadcast `@` matrix multiplication vectorized via AVX2+FMA / SSE2 on x86_64 and ARM NEON on Apple Silicon/AArch64, auto-parallelized across the work-stealing thread pool, and 64-byte aligned for zero-copy C99 FFI interop.
 - **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights with Q4_0/Q8_0 SIMD dequantization, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
-- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries, LIFO `defer_stack` unwinding, deep-cloned async envelopes, and `OneForOne` supervisor restarts.
+- **Single-Owner Memory Model:** Every heap value has exactly one owner. Storing a value copies it unless the source is never read again, in which case it moves; function arguments are borrowed. Two variables never share memory, and each value is freed exactly once by its owner.
+- **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries, LIFO `defer_stack` unwinding, deep-cloned async envelopes, and `OneForOne` supervisor restarts. Actors are heap objects behind a handle that never move; the compiler enforces that only messages reach them from outside, and actors that wait on each other in a cycle get an error instead of hanging.
 - **Native C & Python FFI (Shared Library Export):** First-class foreign function interop via `extern "C" { ... }`, `#include` / `#flag` directives, typed raw pointers (`&x`, `&mut x`, `*ptr`, `voidptr`), strict `unsafe { ... }` boundaries, and zero-overhead C-ABI shared library export (`vira build -shared` / `@[export]`) callable directly from Python `ctypes`, C, C++, and Rust.
 - **Native Desktop GUI, Flutter-Style Widgets, Web Networking & Pure-Vira JSON:** Built-in lightweight Canvas/Win32/X11 GUI framework, Flutter-inspired declarative UI kit (`packages/widget`), HTTP/1.1 asynchronous request processing (`packages/http`, `packages/viraserve`), and a 100% pure-Vira RFC 8259 JSON parser & $O(N)$ `JsonBuilder` (`packages/json`).
 - **Clean C99 Backend:** Lowers directly into portable, readable C99, compiled via GCC, Clang, MinGW-w64, or TCC with `-O3 -flto -march=native` optimizations.
@@ -197,7 +198,7 @@ vira bundle -target windows -prod
 ---
 
 ## 4. Master Catalog: Tutorials & Runnable Examples Table
-The repository includes 39 comprehensive step-by-step tutorials paired directly with 43 standalone, self-contained runnable `.vir` example programs and benchmark suites.
+The repository includes 42 step-by-step tutorials paired with 48 runnable `.vir` example programs in [`docs/examples/`](docs/examples/), plus the demos and benchmarks in [`examples/`](examples/).
 
 | # | Topic & Domain | Level | Runnable Code Example | Complete Tutorial Guide | Key Features & Concepts |
 | :-: | :--- | :--- | :--- | :--- | :--- |
@@ -240,6 +241,9 @@ The repository includes 39 comprehensive step-by-step tutorials paired directly 
 | **37** | **Real-World GUI Apps: HTTP, Images & Widget Suite** | Advanced | [`39_gui_realworld_cloud_ai_hub.vir`](docs/examples/39_gui_realworld_cloud_ai_hub.vir)<br>[`cloud_ai_hub.vir`](examples/cloud_ai_hub.vir) | [`37_realworld_gui_http_images_and_complete_widget_suite.md`](docs/tutorials/37_realworld_gui_http_images_and_complete_widget_suite.md) | Production Cloud AI Hub desktop app: live decoupled HTTP REST API querying over TLS, zero-alloc SIMD JSON parsing, GPU image texture caching & rendering (`w.LoadImage`, `w.Image`, `w.FreeImage`), complete widget catalog (`w.App`, `w.Scaffold`, `w.Theme` switching, `w.Tab`, `w.Modal`, `w.DataTable`, `w.ProgressBar`), responsive dual-column layout, and 0 leaks. |
 | **38** | **Native C & Python FFI: Shared Libraries & ctypes** | Advanced/Systems | [`40_native_c_and_python_ffi.vir`](docs/examples/40_native_c_and_python_ffi.vir)<br>[`40_python_ffi_caller.py`](docs/examples/40_python_ffi_caller.py) | [`38_native_c_and_python_ffi.md`](docs/tutorials/38_native_c_and_python_ffi.md) | Direct C-ABI interop, `#include` and `#flag` directives, `extern "C"` declarations, mandatory `unsafe { ... }` safety boundary, C-ABI scalar types (`c_int`, `c_double`, `voidptr`), raw pointer operations (`&`, `&mut`, `*`), `@[c_layout]` and `@[opaque]` structs, exporting shared libraries (`@[export]` & `vira build -shared`), and zero-boilerplate Python `ctypes` bindings with 0 leaks. |
 | **39** | **Pure-Vira CLI & GUI LLM Chat Engines, Pretrained HF LLaMA & Qwen 2.5 GGUF (Zero FFI)** | Advanced/AI | [`41_cli_llm_chat_engine.vir`](docs/examples/41_cli_llm_chat_engine.vir)<br>[`42_huggingface_gguf_llm_inference.vir`](docs/examples/42_huggingface_gguf_llm_inference.vir)<br>[`43_qwen2_5_gguf_chat_inference.vir`](docs/examples/43_qwen2_5_gguf_chat_inference.vir)<br>[`45_gui_qwen2_5_gguf_chat_studio.vir`](docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir) | [`39_pure_vira_cli_llm_chat_engine.md`](docs/tutorials/39_pure_vira_cli_llm_chat_engine.md) | 100% pure-Vira (Zero-FFI) CLI & Native GUI LLM engines for LLaMA (`stories260K.gguf`) and Qwen 2.5 (`qwen2_5_instruct.gguf`): binary GGUF v3 header, SentencePiece BPE & GPT-2 ChatML (`<\|im_start\|>`/`<\|im_end\|>`) tokenizers, QKV attention biases (`attn_q/k/v.bias`), 1M NeoX & interleaved RoPE, Grouped-Query Attention (GQA), `Q4_0`/`Q8_0` SIMD dequantization, stateful KV cache, non-blocking 60 FPS GUI token streaming, and interactive REPL (`io.prompt`) with 0 leaks. |
+| **40** | **Cross-Platform GPU Compute & Actor OOM Supervision** | Advanced/Systems | [`44_gpu_compute_acceleration.vir`](docs/examples/44_gpu_compute_acceleration.vir) | [`40_cross_platform_gpu_compute_acceleration.md`](docs/tutorials/40_cross_platform_gpu_compute_acceleration.md) | Zero-SDK GPU compute runtime, unified DMA, persistent weight caching, fused transformer blocks in bump arenas, and OOM supervision with CPU-SIMD fallback. |
+| **41** | **GPU-Accelerated LLM Chat Apps (CLI & Desktop Studio)** | Advanced/AI | [`43_qwen2_5_gguf_chat_inference.vir`](docs/examples/43_qwen2_5_gguf_chat_inference.vir)<br>[`45_gui_qwen2_5_gguf_chat_studio.vir`](docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir) | [`41_building_gpu_accelerated_llm_chat_apps.md`](docs/tutorials/41_building_gpu_accelerated_llm_chat_apps.md) | CUDA Driver API, Tensor Core specialization, OpenCL/CPU fallbacks, GGUF block offloading, and frame-by-frame layer streaming in a 60 FPS GUI. |
+| **42** | **Ownership, Strings & Actor Handles** | Intermediate/Adv | [`47_ownership_strings_and_actor_handles.vir`](docs/examples/47_ownership_strings_and_actor_handles.vir) | [`42_ownership_strings_and_actor_handles.md`](docs/tutorials/42_ownership_strings_and_actor_handles.md) | String `+`/`+=`, operator type rules, copies vs moves, borrowed arguments, actor handles and isolation, single-owner actors, deadlock avoidance, and migrating code from v0.7.7. |
 
 ---
 
@@ -298,19 +302,25 @@ Multiple assignments to `_` in the same scope are valid and never trigger variab
 | `f64` | Double-precision IEEE 754 float | 64-bit | Scientific computing & high-precision math |
 | `bf16` | Brain Floating Point | 16-bit | Modern LLM and Transformer weights |
 | `bool` | Boolean (`true` or `false`) | 8-bit | Conditionals, state flags |
-| `string` | Immutable UTF-8 slice | 16 bytes | Strings (`data*`, `len`, `is_lit` flag) |
+| `string` | Immutable UTF-8 string | 16 bytes | Strings (`data*`, `len`, `is_lit` and `is_borrowed` flags) |
 
 ---
 
-### String Interpolation
+### Strings & Operators
 
-Strings support zero-cost `${...}` expression interpolation:
+Strings support `${...}` interpolation, `+` concatenation and `+=`:
 
 ```v
 name := 'Alice'
 score := 98.5
 println('Player ${name} scored ${score}%!')
+
+full := 'Ada' + ' ' + 'Lovelace'   // a `+` chain makes one allocation
+mut log := ''
+log += 'step-1;'
 ```
+
+Each operator works only on the types it is defined for (for example `-` is not defined for strings and `==` is not defined for structs); anything else is a compile error. Integer division by zero panics with a message, signed overflow wraps, and arguments are evaluated left to right. See [Operators & Type Rules](docs/LANGUAGE_GUIDE.md#operators--type-rules).
 
 ---
 
@@ -516,10 +526,24 @@ Vira delivers automatic memory safety **without a garbage collector** and withou
 | :--- | :--- | :--- |
 | `StateScopedLocal` | Variable does not outlive its enclosing block | Destructor injected at scope exit |
 | `StateEscapesViaReturn` | Variable is returned to the caller | Ownership transferred; cleanup skipped in current scope |
-| `StateMovedToContainer` | Variable is moved into a struct or interface box | Container takes ownership; cleanup transferred |
+| `StateMovedToContainer` | Variable is moved into another variable, a struct, a slice or an interface box | New owner takes it; cleanup transferred |
 | `StateManagedByArena` | Allocated within an `arena { ... }` block | Lifetime tied to arena slab; individual frees skipped |
 
 Run `vira check <file.vir>` to inspect the complete autofree escape analysis audit log.
+
+#### Ownership: Copies, Moves & Borrowed Arguments
+
+Every heap value has exactly one owner. Storing a value somewhere new (`b := a`, a struct field, `xs.push(s)`) **copies** it, unless no path reads the source again; then it **moves** at no cost. Function arguments are **borrowed**: the callee copies only what it stores, and returning a local moves it to the caller.
+
+```v
+for mut i := 0; i < 3; i += 1 {
+    title := 'job-${i}'
+    titles.push(title)   // last use: moved into the slice
+}
+copy := ticket           // `ticket` is used again later: independent deep copy
+```
+
+See [Tutorial 42](docs/tutorials/42_ownership_strings_and_actor_handles.md#3-ownership-copies-moves-and-borrowed-arguments) for the full rules.
 
 #### Bump Arenas (`arena { ... }`)
 
@@ -638,6 +662,10 @@ pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
 }
 ```
 
+#### Actors Are Handles
+
+`mut w1 := AIWorker{ id: 1 }` creates the actor on the heap; `w1` holds a handle. The actor never moves, has exactly one owner, and finishes its queued messages before it is destroyed. From outside, only messages (`<-`) and immutable `pub:` fields (`w1.id`) can reach it: reading `w1.batches_run` or calling `w1.predict(...)` directly is a compile error. Actors cannot be copied or stored in a second place; build them where they live (`pool.push(AIWorker{ id: 2 })`). See [Tutorial 42](docs/tutorials/42_ownership_strings_and_actor_handles.md#4-actors-are-handles).
+
 #### Message Passing (`<-`) & Futures
 
 Messages are sent to actors asynchronously using the `<-` operator, immediately returning a `Future[T]`:
@@ -660,22 +688,30 @@ res2 := fut2.await() or {
 
 #### Lock-Free Chase-Lev Work-Stealing Pool
 
-- Tasks are submitted to a pool of worker threads sized to `min(CPU cores, 16)`.
+- Tasks are submitted to a pool with one worker thread per logical core, clamped to 2–16 (override with `VIRA_WORKERS`).
 - Each worker maintains a lock-free **Chase-Lev deque**.
 - Idle workers automatically steal tasks from overloaded workers using atomic compare-and-swap operations.
 
 #### Erlang-Style Fault Boundaries (`panic` & `OneForOne`)
 
-When an actor encounters a `panic('...')`:
+When an actor encounters a `panic('...')`, an out-of-bounds index, `pop()` on an empty slice or an integer division by zero:
 1. The per-thread TLS fault boundary (`setjmp`/`longjmp`) intercepts the panic before it can crash the process.
 2. The actor's isolated scratch arena is wiped in **O(1)** time.
-3. The supervisor applies a `OneForOne` restart strategy, resetting internal state and logging the trapped error.
+3. The supervisor applies a `OneForOne` restart strategy, resetting the actor's mutable fields (immutable fields are kept) and logging the trapped error.
 4. The awaiting `Future[T]` receives the error via Result unwrapping, allowing the caller to retry or fail gracefully.
 
 ```text
 [vira_supervisor | worker_thread=1] Actor 'AIWorker' (#2) trapped fault ('CUDA/NaN anomaly') -> O(1) arena wipe & OneForOne restart [1/3]
 Future #2 caught parallel Worker #2 fault: CUDA/NaN anomaly
 ```
+
+#### Deadlock Avoidance
+
+An actor that awaits a message it sent to itself, or actors that await each other in a cycle, would wait forever. Vira detects both and returns `deadlock avoided: ...` to one waiter's `or { }` block; its message still runs later and the rest of the cycle completes.
+
+#### Measuring Actor Performance
+
+`bash scripts/bench_actors.sh` runs a fixed actor benchmark repeatedly with a pinned worker count and prints the median and spread of each metric, so two builds can be compared on the same machine.
 
 ---
 
@@ -789,7 +825,7 @@ gui_stack_end()
 ### Native Package Management & Air-Gapped Vendoring
 
 Vira features a built-in decentralized, Git-first package management system:
-- **`vira add <package[@version]>`**: Adds dependencies from Git (e.g. `github.com/user/pkg@v1.0.0`) or local directories (e.g. `C:/Users/hp/vira_test`).
+- **`vira add <package[@version]>`**: Adds dependencies from Git (e.g. `github.com/user/pkg@v1.0.0`) or local directories (e.g. `../vira_test`).
 - **Cryptographic Lockfiles (`vira.lock`):** Generates deterministic SHA-256 tree hashes for all dependencies, guaranteeing supply-chain security and bit-exact reproducibility.
 - **Air-Gapped Vendoring (`vira vendor`):** Deep-copies all dependencies into `./vendor/` for 100% offline, zero-network production builds.
 - **`vira install` / `vira remove`**: Deterministic dependency verification and clean unlinking.

@@ -1,0 +1,113 @@
+module main
+
+// ==============================================================================
+// Example 47: Ownership, Strings & Actor Handles
+//
+// Companion to docs/tutorials/42_ownership_strings_and_actor_handles.md.
+//
+// 1. Strings: `+`, `+=` and interpolation; a `+` chain makes one allocation.
+// 2. Ownership: storing a value copies it, unless the source is never read again
+//    (then it moves). Function arguments are borrowed.
+// 3. Actors: heap objects behind a handle. Only messages reach them from outside,
+//    each actor has exactly one owner, and actors that wait on each other in a
+//    cycle get an error instead of hanging.
+// ==============================================================================
+
+struct Ticket {
+pub mut:
+	title string
+	labels []string
+}
+
+// Arguments are borrowed: `t` still belongs to the caller. Storing part of it
+// somewhere new (here, the returned string) makes a copy.
+fn headline(t Ticket) string {
+	return t.title + ' (' + '${t.labels.len}' + ' labels)'
+}
+
+// A local that is returned moves to the caller: no copy.
+fn make_ticket(n int) Ticket {
+	mut labels := []string{}
+	label := 'area-' + '${n % 3}'
+	labels.push(label) // `label` is never read again: the slice takes it, no copy
+	return Ticket{ title: 'Ticket #' + '${n}', labels: labels }
+}
+
+pub actor Counter {
+pub:
+	name string
+mut:
+	total int = 0
+}
+
+pub fn (mut c Counter) add(n int) int {
+	c.total += n
+	return c.total
+}
+
+// Waits on `other` while `other` may be waiting on this actor.
+pub fn (mut c Counter) ask(mut other Counter) int {
+	v := other <- add(1) or { -1 }
+	return v
+}
+
+pub fn (mut c Counter) relay(mut other Counter, mut back Counter) int {
+	f := other <- ask(mut back)
+	return f.await() or { -100 }
+}
+
+// Building an actor in a function and returning it is safe, even with
+// messages still queued: actors live on the heap and never move.
+fn make_counter(name string) Counter {
+	mut c := Counter{ name: name, total: 0 }
+	c <- add(10)
+	return c
+}
+
+fn main() {
+	println('--- 1. Strings ---')
+	first := 'Ada'
+	last := 'Lovelace'
+	full := first + ' ' + last // one allocation for the whole chain
+	mut log := ''
+	for mut i := 1; i <= 3; i += 1 {
+		log += 'step-${i};'
+	}
+	println(full)
+	println(log)
+	println('same: ${full == 'Ada Lovelace'}')
+
+	println('--- 2. Ownership ---')
+	t := make_ticket(7)
+	copy := t // `t` is read again below, so this is an independent copy
+	println(headline(t))
+	println(copy.title)
+
+	mut titles := []string{}
+	for mut i := 0; i < 3; i += 1 {
+		title := 'job-' + '${i}'
+		titles.push(title) // last use of `title`: moved into the slice
+	}
+	println('${titles.len} titles, first ${titles[0]}')
+
+	println('--- 3. Actors ---')
+	mut a := make_counter('a') // returned with a message still queued
+	mut b := Counter{ name: 'b', total: 0 }
+	ta := a <- add(5) or { -1 }
+	println('${a.name} total ${ta}') // immutable `pub:` fields are readable
+
+	mut pool := []Counter{}
+	for mut i := 0; i < 100; i += 1 {
+		pool.push(Counter{ name: 'w-${i}', total: 0 }) // built in place
+		pool[i] <- add(i)
+	}
+	last_total := pool[99] <- add(0) or { -1 }
+	println('pool of ${pool.len}, last total ${last_total}')
+
+	// a.relay awaits b.ask, and b.ask awaits a: a cycle. b gets the error,
+	// its message to `a` still runs later, and the relay completes.
+	r := a <- relay(mut b, mut a) or { -2 }
+	println('cycle broken: b answered ${r}')
+	after := a <- add(0) or { -1 }
+	println('a total after the cycle: ${after}')
+}

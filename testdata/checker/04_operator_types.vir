@@ -1,0 +1,33 @@
+module main
+
+struct Point {
+pub mut:
+	x int
+	y int
+}
+
+fn main() {
+	a := 'ab'
+	b := 'cd'
+	ok := a + b
+	mut s := 'x'
+	s += b
+	n := 7 % 3
+	f := 1.5 * 2.0
+	same := a == b && a < b
+	println('${ok} ${s} ${n} ${f} ${same}')
+
+	bad1 := a - b // ERROR: operator '-' is not defined for type 'string'
+	bad2 := a * b // ERROR: operator '*' is not defined for type 'string'
+	bad3 := true + false // ERROR: operator '+' is not defined for type 'bool'
+	bad4 := 1.5 % 2.0 // ERROR: operator '%' is not defined for type 'f64'
+	bad5 := 1 && 0 // ERROR: operator '&&' is not defined for type 'int'
+	p := Point{ x: 1, y: 2 }
+	q := Point{ x: 1, y: 2 }
+	bad6 := p == q // ERROR: operator '==' is not defined for type 'Point'
+	bad7 := p + q // ERROR: operator '+' is not defined for type 'Point'
+	mut flag := true
+	flag += false // ERROR: operator '+' is not defined for type 'bool'
+	s -= b // ERROR: operator '-' is not defined for type 'string'
+	println('${bad1} ${bad2} ${bad3} ${bad4} ${bad5} ${bad6} ${bad7} ${flag}')
+}

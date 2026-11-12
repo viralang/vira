@@ -42,6 +42,8 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.8] Cross-Platform GPU Compute Acceleration ✅ COMPLETED
        │
+ [post-v0.7.7] Runtime & Compiler Hardening     ✅ COMPLETED (unreleased)
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
  [v0.9] Generics & Pattern Matching Expressiveness ⏳ NEXT MILESTONE
@@ -104,7 +106,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 ### 7. Zero-Leak Temporary String Autofree & High-Concurrency Actor Stress Testing (v0.5.8)
 - [x] **Zero-Leak Temporary String Autofree:** Static AST hoist pass in `internal/autofree/autofree.go` (`hoistTemporaryStrings`, `walkAndHoistCallArgs`) capturing unassigned interpolated strings and call returns passed to functions/methods into synthetic variables (`_vira_tmp_str_N`) with immediate post-statement `DeferFreeStmt` cleanup. Eliminates intermediate string leaks (`active_leaks=0`).
 - [x] **Lazy Bump Arena for Actors:** Optimized actor memory initialization in `runtime/vira_rt.h` (`vira_actor_ctx_init`), allocating isolated heaps lazily on demand. Drops idle actor memory footprint from 256 KB to **~64 bytes per actor**, enabling 100,000+ lightweight actors without RAM exhaustion.
-- [x] **Chase-Lev Work-Stealing Capacity Expansion:** Scaled deque ring buffer capacity `VIRA_WS_CAP` to 65,536 tasks across up to 32 worker threads, eliminating thread contention and lock spins during massive message bursts.
+- [x] **Chase-Lev Work-Stealing Capacity Expansion:** Per-worker Chase-Lev deques (`VIRA_WS_CAP` = 4,096 tasks, with a shared overflow queue beyond that) across up to 32 worker threads, eliminating thread contention and lock spins during massive message bursts.
 - [x] **High-Precision Monotonic Telemetry Timers:** Builtin `time_now_us()` and `time_now_ms()` delivering sub-microsecond timing accuracy via Win32 `QueryPerformanceCounter` and POSIX `clock_gettime(CLOCK_MONOTONIC)`.
 - [x] **Comprehensive Actor Example Suite:**
   - [25_actors_banking_fault_tolerance.vir](docs/examples/25_actors_banking_fault_tolerance.vir): State isolation, `setjmp`/`longjmp` panic isolation, and `OneForOne` supervisor state rollback.
@@ -208,6 +210,19 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Tutorials & Examples:**
   - [Tutorial 40: Cross-Platform GPU Compute Acceleration & Actor OOM Supervision](docs/tutorials/40_cross_platform_gpu_compute_acceleration.md).
   - Runnable example [44_gpu_compute_acceleration.vir](docs/examples/44_gpu_compute_acceleration.vir) and `--gpu` / `/gpu` offload controls in [43_qwen2_5_gguf_chat_inference.vir](docs/examples/43_qwen2_5_gguf_chat_inference.vir).
+
+### 14. Runtime & Compiler Hardening (after the v0.7.7 review, unreleased)
+- [x] **Scheduler correctness:** fixed a mailbox race that wedged actors under concurrent senders, a teardown race, park timeouts that never fired and a lost wake-up; the worker pool now follows the core count (2–16, `VIRA_WORKERS` override).
+- [x] **Supervised faults:** out-of-bounds indexing, `pop()` on an empty slice and integer division by zero are caught by the actor supervisor instead of killing the process; restarts reset only mutable fields.
+- [x] **Defined C semantics:** signed overflow wraps (`-fwrapv`), arguments are evaluated left to right, each interpolated expression is evaluated once.
+- [x] **Memory safety:** fixed the autofree use-after-free, double-free and leak cases from the review; temporaries inside struct literals and array literals are freed.
+- [x] **Single-owner ownership with moves:** storing a value copies it unless the source is never read again (including from inside `if`/`switch` branches and into slices), then it moves; arguments are borrowed.
+- [x] **Strings & operators:** `+` and `+=` on strings (one allocation per chain); the checker rejects operators on types they are not defined for.
+- [x] **Actors as handles:** actors live on the heap and never move; message-only access from outside; single owner enforced by the checker; slices of actors grow without draining mailboxes.
+- [x] **Deadlock avoidance:** an actor awaiting itself, or actors awaiting each other in a cycle, get an error instead of hanging.
+- [x] **Tests & tooling:** 10 new run tests and 3 new checker tests under ASan/UBSan, a C scheduler harness, and `scripts/bench_actors.sh` for repeatable before/after actor benchmarks.
+- [x] **Tutorials & Examples:** [Tutorial 42: Ownership, Strings & Actor Handles](docs/tutorials/42_ownership_strings_and_actor_handles.md) and [47_ownership_strings_and_actor_handles.vir](docs/examples/47_ownership_strings_and_actor_handles.vir).
+- [ ] **Still open:** an actor passed inside a message is borrowed (its owner must outlive the message); `return error(err)` still copies the error string; the GGUF loader's global directory cache is not thread-safe; nothing has been executed on Windows since these changes.
 
 ---
 

@@ -1,0 +1,107 @@
+// OUT: hello world
+// OUT: a-b-c-d!
+// OUT: [x=1][x=2][x=3]
+// OUT: same true false false
+// OUT: pre-mid-post|pre-mid-post
+// OUT: user:ada
+// OUT: k-0|k-1|k-2
+// OUT: name-7 tagged
+// OUT: arena:in-1 arena:in-2
+// OUT: echo:echo:
+// OUT: |empty|
+// OUT: w-1:ping w-1:ping
+// OUT: [vira_rt] active_leaks=0
+
+// String `+` and `+=`: locals, literals, chains, call results, loops, arenas, fields,
+// slice elements, actor handlers, empty operands, and a value appended to itself.
+struct Label {
+pub mut:
+    name string
+    tags []string
+}
+pub actor Greeter {
+pub:
+    prefix string
+mut:
+    count int = 0
+}
+pub fn (mut g Greeter) greet(who string) string {
+    g.count += 1
+    return g.prefix + ':' + who
+}
+fn tag(n int) string {
+    return 'x=${n}'
+}
+fn wrap(s string) string {
+    return '[' + s + ']'
+}
+fn join_keys(n int) string {
+    mut out := ''
+    for mut i := 0; i < n; i += 1 {
+        if i > 0 {
+            out += '|'
+        }
+        out += 'k-' + '${i}'
+    }
+    return out
+}
+fn in_arena(n int) string {
+    mut kept := ''
+    arena {
+        local := 'in-' + '${n}'
+        kept = 'arena:' + local
+        if n == 2 {
+            return 'arena:' + local
+        }
+    }
+    return kept
+}
+fn main() {
+    a := 'hello'
+    b := ' world'
+    c := a + b
+    println(c)
+
+    // A chain of literals, locals and a call result is one allocation.
+    d := 'a' + '-' + 'b' + '-c-' + 'd' + wrap('!').trim_left()
+    println(d.replace('[', '').replace(']', ''))
+
+    // Fresh call results as operands, inside a loop.
+    mut acc := ''
+    for mut i := 1; i <= 3; i += 1 {
+        acc += wrap(tag(i))
+    }
+    println(acc)
+
+    // Comparisons on a concatenation, and a concatenation inside interpolation.
+    println('same ${(a + b) == c} ${c < a + b} ${c == a}')
+    mid := 'mid'
+    e := 'pre-' + mid + '-post'
+    println('${e}|${'pre-' + mid + '-post'}')
+
+    // Struct field initialisation and field `+=`.
+    mut lbl := Label{ name: 'user:' + 'ada', tags: []string{} }
+    println(lbl.name)
+    println(join_keys(3))
+    lbl.name = 'name-' + '7'
+    lbl.tags.push('t' + 'agged')
+    lbl.tags[0] += ''
+    println(lbl.name + ' ' + lbl.tags[0])
+
+    // Arena: assigned out of the arena, and returned from inside it.
+    println(in_arena(1) + ' ' + in_arena(2))
+
+    // A value appended to itself, and empty operands.
+    mut echo := 'echo:'
+    echo += echo
+    println(echo)
+    mut empty := ''
+    empty += ''
+    println('|' + empty + 'empty|')
+
+    // Concatenation inside an actor handler (allocated on the actor's heap, not an arena).
+    mut gr := Greeter{ prefix: 'w-1', count: 0 }
+    r1 := gr <- greet('ping') or { err }
+    r2 := gr <- greet('ping') or { err }
+    println(r1 + ' ' + r2)
+}

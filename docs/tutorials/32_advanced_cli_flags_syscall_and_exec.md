@@ -2,9 +2,9 @@
 
 > **Language Version:** Vira `v0.5.9-dev`+  
 > **Reference Examples:**  
-> - [`docs/examples/35_advanced_cli_flags_syscall_exec.vir`](file:///mnt/flutter_drive/vira/docs/examples/35_advanced_cli_flags_syscall_exec.vir)  
-> - [`docs/examples/36_linux_container_runtime_reference.vir`](file:///mnt/flutter_drive/vira/docs/examples/36_linux_container_runtime_reference.vir)  
-> **Standard Packages:** [`packages/flag`](file:///mnt/flutter_drive/vira/packages/flag), [`packages/log`](file:///mnt/flutter_drive/vira/packages/log), [`packages/exec`](file:///mnt/flutter_drive/vira/packages/exec), [`packages/syscall`](file:///mnt/flutter_drive/vira/packages/syscall), [`packages/os`](file:///mnt/flutter_drive/vira/packages/os)
+> - [`docs/examples/35_advanced_cli_flags_syscall_exec.vir`](../examples/35_advanced_cli_flags_syscall_exec.vir)  
+> - [`docs/examples/36_linux_container_runtime_reference.vir`](../examples/36_linux_container_runtime_reference.vir)  
+> **Standard Packages:** [`packages/flag`](../../packages/flag), [`packages/log`](../../packages/log), [`packages/exec`](../../packages/exec), [`packages/syscall`](../../packages/syscall), [`packages/os`](../../packages/os)
 
 ---
 
@@ -178,7 +178,7 @@ Vira supports native octal integer literals (`0o755`, `0o644`):
 
 ## 6. Deep Dive: Linux Container Runtime Reference
 
-[`docs/examples/36_linux_container_runtime_reference.vir`](file:///mnt/flutter_drive/vira/docs/examples/36_linux_container_runtime_reference.vir) implements a complete, native Linux container runtime in pure Vira:
+[`docs/examples/36_linux_container_runtime_reference.vir`](../examples/36_linux_container_runtime_reference.vir) implements a complete, native Linux container runtime in pure Vira:
 
 ### 6.1 The Child Re-Exec Pattern
 To spawn a container with new namespaces, the parent process invokes `/proc/self/exe child` with clone flags:

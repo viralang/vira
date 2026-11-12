@@ -104,7 +104,7 @@ sequenceDiagram
 
 ## 4. Complete Runnable Implementation
 
-Here is the complete source code from [docs/examples/17_http_web_server_and_json.vir](file:///c:/Users/hp/vex/docs/examples/17_http_web_server_and_json.vir):
+Here is the complete source code from [docs/examples/17_http_web_server_and_json.vir](../examples/17_http_web_server_and_json.vir):
 
 ```v
 module main

@@ -1,0 +1,48 @@
+// OUT: x v1|a-v2|v3,v4-y
+// OUT: calls 4
+// OUT: [b-v5, v6]
+// OUT: calls 6
+// OUT: ret v7+v8
+// OUT: calls 8
+// OUT: pushed p-v9 q-v10 v11
+// OUT: calls 11
+// OUT: [vira_rt] active_leaks=0
+
+// Fresh strings created INSIDE a struct field, an array element or a value pushed into a
+// slice (an interpolated call, a `+` operand) are freed after the statement, and each call
+// runs exactly once.
+struct Gen {
+pub mut:
+    n int
+}
+struct Rec {
+pub mut:
+    title string
+    sub string
+    tail string
+}
+fn next(mut g Gen) string {
+    g.n += 1
+    return 'v${g.n}'
+}
+fn build(mut g Gen) Rec {
+    return Rec{ title: next(mut g) + '+' + next(mut g), sub: '', tail: '' }
+}
+fn main() {
+    mut g := Gen{ n: 0 }
+    r := Rec{ title: 'x ${next(mut g)}', sub: 'a-' + next(mut g), tail: '${next(mut g)},${next(mut g)}-y' }
+    println('${r.title}|${r.sub}|${r.tail}')
+    println('calls ${g.n}')
+    xs := ['b-' + next(mut g), '${next(mut g)}']
+    println('[${xs[0]}, ${xs[1]}]')
+    println('calls ${g.n}')
+    q := build(mut g)
+    println('ret ${q.title}')
+    println('calls ${g.n}')
+    mut ys := []string{}
+    ys.push('p-' + next(mut g))
+    ys.push('q-${next(mut g)}')
+    ys.push(next(mut g))
+    println('pushed ${ys[0]} ${ys[1]} ${ys[2]}')
+    println('calls ${g.n}')
+}

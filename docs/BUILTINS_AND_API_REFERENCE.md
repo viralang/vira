@@ -74,6 +74,8 @@ defer f.close()
 Triggers an immediate fault.
 - **Inside an Actor:** Trapped safely by the worker thread's `setjmp`/`longjmp` fault boundary. Increments the actor's restart count, wipes its isolated bump arena in $O(1)$, resets mutable fields, and informs the supervisor.
 - **Outside an Actor:** Prints the error message to `stderr` and aborts the process with exit code 1.
+
+The runtime raises the same kind of fault for an out-of-bounds index (`index out of bounds: index 12 with len 3`), `pop()` on an empty slice (`pop from empty slice`) and integer division or modulo by zero (`integer division by zero`).
 ```v
 if divisor == 0 {
     panic('division by zero')
@@ -352,16 +354,22 @@ _ := gw <- handle_request(100) // Discarded binding
 ```
 Both forms compile to `_send_detached_` (`done = -1`). The runtime worker thread automatically frees the task envelope upon completion without creating a `Future[T]` handle or leaking memory (`active_leaks = 0`).
 
-### Zero-Alloc Synchronous Shorthand
-When an actor message is directly unwrapped with `or { ... }`, the compiler eliminates heap envelope allocation, executing synchronously with a stack-allocated envelope:
+### Synchronous Shorthand
+When an actor message is directly unwrapped with `or { ... }`, the call waits for the result. From non-actor code the envelope lives on the caller's stack (no heap allocation); from inside another actor's handler it goes through a future so a wait cycle can be broken:
 ```v
 res := gw <- handle_request(101) or { 'fallback' }
 ```
 
+### Access, Ownership & Deadlock Rules
+- From outside an actor, only `<-` messages and immutable (`pub:`) fields are allowed; reading a mutable field or calling a method directly is a compile error.
+- An actor is a heap object reached through a handle. It cannot be copied (`b := a`, `.clone()`, `.slice()`, `.get()` on `[]Actor`) or stored in a second place; construct it where it lives (`pool.push(Gateway{...})`). Returning a local actor from a function is allowed.
+- Awaiting a message sent to yourself fails with `deadlock avoided: an actor cannot wait on a message it sent to itself`; actors awaiting each other in a cycle get `deadlock avoided: actors are waiting on each other`.
+- Worker threads: one per logical core, clamped to 2–16; `VIRA_WORKERS=<n>` overrides (1–32).
+
 ### Actor Lifecycle & Fault Containment
 - **`VIRA_ACTOR_RUNNING`**: Default operational state.
 - **Intermittent Fault Recovery**: Panics trigger $O(1)$ isolated scratch arena wipes and `OneForOne` state resets. A subsequent successful message execution resets consecutive `restarts = 0`.
-- **`VIRA_ACTOR_STOPPED`**: If consecutive faults exceed `max_restarts` (default: 3), the actor stops permanently. Subsequent message sends are rejected with `"Actor has stopped due to unhandled faults"`.
+- **`VIRA_ACTOR_STOPPED`**: If consecutive faults exceed `max_restarts` (default: 3), the actor stops permanently. (A restart resets mutable fields to their defaults; immutable fields are kept.) Subsequent message sends are rejected with `"Actor has stopped due to unhandled faults"`.
 
 ---
 

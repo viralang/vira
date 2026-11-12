@@ -15,7 +15,8 @@
    - [Variables & Immutability](#variables--immutability)
    - [Blank Identifier (`_`)](#blank-identifier-_)
    - [Primitive Types](#primitive-types)
-   - [String Interpolation](#string-interpolation)
+   - [Strings: Interpolation & Concatenation](#strings-interpolation--concatenation)
+   - [Operators & Type Rules](#operators--type-rules)
 4. [4-Quadrant Struct Encapsulation & OOP](#4-4-quadrant-struct-encapsulation--oop)
    - [Access Quadrants](#access-quadrants)
    - [Struct Embedding & Composition](#struct-embedding--composition)
@@ -32,6 +33,7 @@
 7. [Memory Management: Deterministic Autofree & Arenas](#7-memory-management-deterministic-autofree--arenas)
    - [How Autofree Works (No GC)](#how-autofree-works-no-gc)
    - [Static Escape Analysis Classification](#static-escape-analysis-classification)
+   - [Ownership: Copies, Moves & Borrowed Arguments](#ownership-copies-moves--borrowed-arguments)
    - [Bump Arenas (`arena { ... }`)](#bump-arenas-arena----)
 8. [First-Class AI Tensors & SIMD Acceleration](#8-first-class-ai-tensors--simd-acceleration)
    - [Tensor Types & Construction](#tensor-types--construction)
@@ -39,7 +41,9 @@
    - [SIMD Hardware Backends (AVX2 / NEON)](#simd-hardware-backends-avx2--neon)
 9. [Actor Concurrency & Fault Supervision](#9-actor-concurrency--fault-supervision)
    - [Actor Definition](#actor-definition)
+   - [Actors Are Handles: Isolation & Ownership](#actors-are-handles-isolation--ownership)
    - [Message Passing (`<-`) & Futures](#message-passing----futures)
+   - [Deadlock Avoidance](#deadlock-avoidance)
    - [Lock-Free Work-Stealing Pool](#lock-free-work-stealing-pool)
    - [Erlang-Style Fault Boundaries (`panic` & `OneForOne`)](#erlang-style-fault-boundaries-panic--oneforone)
 10. [Native File I/O & Buffer Operations](#10-native-file-io--buffer-operations)
@@ -200,7 +204,7 @@ Multiple assignments to `_` in the same scope are valid and do not cause variabl
 | `f64` | Double-precision IEEE 754 float | 64-bit |
 | `bf16`| Brain Floating Point (AI weights) | 16-bit |
 | `bool`| Boolean (`true` or `false`) | 8-bit |
-| `string`| Immutable UTF-8 string slice (16 bytes: `data`, `len`, `is_lit`) | 16 bytes |
+| `string`| Immutable UTF-8 string (16 bytes: `data`, `len`, `is_lit`, `is_borrowed`) | 16 bytes |
 
 ---
 
@@ -246,15 +250,50 @@ defer f.close()
 
 ---
 
-### String Interpolation
+### Strings: Interpolation & Concatenation
 
-Strings support zero-cost `${...}` expression interpolation:
+Strings support `${...}` interpolation, `+` concatenation and `+=`:
 
 ```v
 name := 'Alice'
 score := 98.5
 println('Player ${name} scored ${score}%!')
+
+full := 'Ada' + ' ' + 'Lovelace'   // a `+` chain makes ONE allocation
+mut log := ''
+log += 'step-1;'                    // new string; the old value is freed
 ```
+
+- Each `${...}` expression is evaluated exactly once.
+- `==`, `!=`, `<`, `<=`, `>`, `>=` compare strings by content.
+- Methods such as `trim_left()` and indexing return a **view** into the original string; storing a view copies it, so it cannot outlive its source.
+- Inside `arena { }`, interpolated and concatenated strings live on the arena.
+
+---
+
+### Operators & Type Rules
+
+Both operands must have the same type, and the operator must be defined for it. Anything else is a compile error such as `operator '-' is not defined for type 'string'`.
+
+| Operators | Defined for |
+| :--- | :--- |
+| `+` | numbers, strings, tensors, pointers |
+| `-` | numbers, tensors, pointers |
+| `*`, `/` | numbers |
+| `%` | integers |
+| `&`, `\|`, `^` | integers, `bool` |
+| `<<`, `>>` | integers |
+| `<`, `<=`, `>`, `>=` | numbers, strings, pointers |
+| `==`, `!=` | primitives (strings by content) and pointers; not structs, slices, tensors or actors |
+| `&&`, `\|\|` | `bool` |
+| `@` | tensors |
+
+Compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`) follow the same table.
+
+Arithmetic has defined behaviour on every optimisation level:
+- Integer `/` and `%` by zero panic with `vira panic: integer division by zero` (supervised inside actors).
+- Signed integer overflow wraps around.
+- Function arguments are evaluated left to right.
 
 ---
 
@@ -293,6 +332,8 @@ cloned := items.clone()
 items.clear()
 println("is_empty = ${items.is_empty()}") // true
 ```
+
+A slice owns its elements. `push`, `set` and `insert` store a copy of a variable, or take the value itself when that variable is never read again (see [Ownership](#ownership-copies-moves--borrowed-arguments)).
 
 #### Iteration (`for ... in`)
 Iterate cleanly through any array, slice, or string:
@@ -544,10 +585,43 @@ Vira delivers automatic memory safety **without a garbage collector** and withou
 | :--- | :--- | :--- |
 | `StateScopedLocal` | Variable does not outlive its enclosing block | Destructor injected at scope exit |
 | `StateEscapesViaReturn` | Variable is returned to the caller | Ownership transferred; cleanup skipped in current scope |
-| `StateMovedToContainer` | Variable is moved into a struct or interface box | Container takes ownership; cleanup transferred |
+| `StateMovedToContainer` | Variable is moved into another variable, a struct, a slice or an interface box | New owner takes it; cleanup transferred |
 | `StateManagedByArena` | Allocated within an `arena { ... }` block | Lifetime tied to arena slab; individual frees skipped |
 
 Run `vira check <file.vir>` to inspect the complete autofree escape analysis audit log.
+
+---
+
+### Ownership: Copies, Moves & Borrowed Arguments
+
+Every heap value has exactly one owner (a variable, struct field, slice element or actor), which frees it. Two owners never share memory.
+
+**Storing a value copies it, unless the source is never read again.** Storing means `b := a`, `x = y`, a struct field (`Box{ name: s }`) or a slice element (`xs.push(s)`). When the compiler can prove that no path reads the source again, it moves the value instead of copying:
+
+| Situation | Result |
+| :--- | :--- |
+| Source not used after the store, same block | move |
+| Source declared in an enclosing block, store inside an `if`/`switch` branch, not used afterwards | move (the source is reset, so its cleanup frees nothing) |
+| Source used again later | independent deep copy |
+| Store inside a loop, source declared outside it | copy |
+| Source is a parameter, receiver, `for ... in` variable, field or element | copy |
+
+```v
+t := make_ticket(7)
+copy := t                 // `t` is used below: independent copy
+println(t.title)
+
+for mut i := 0; i < 3; i += 1 {
+    title := 'job-${i}'
+    titles.push(title)    // last use of `title`: moved into the slice
+}
+```
+
+**Arguments are borrowed.** A function receives its arguments without a copy; they still belong to the caller. Storing an argument (in a struct, a slice or the return value) makes a copy. Returning a local moves it to the caller.
+
+**Arenas:** a value assigned from inside `arena { }` to a variable declared outside it is allocated on the heap, so it survives the block.
+
+Every program prints `[vira_rt] active_leaks=0 | total_freed=N` on exit; a lower `total_freed` for the same work means fewer copies. See [Tutorial 42](tutorials/42_ownership_strings_and_actor_handles.md) for a walkthrough.
 
 ---
 
@@ -647,6 +721,34 @@ pub fn (mut w AIWorker) predict(scale f32, simulate_fault bool) f32 {
 
 ---
 
+### Actors Are Handles: Isolation & Ownership
+
+Constructing an actor (`mut w := AIWorker{ id: 1 }`) creates it on the heap; the variable holds a **handle**. The actor never moves, so it can be returned from a function, kept in a struct field or stored in a growing slice while messages to it are queued. When its owner goes out of scope it finishes its queued messages and is destroyed. Each actor takes about 370 bytes plus its fields.
+
+**From outside, an actor is reached only by messages.** Reading an immutable (`pub:`) field is allowed; reading a mutable field or calling a method directly is a compile error:
+
+```v
+println('${w.id}')         // OK: immutable field
+f := w <- predict(1.0, false)
+// w.batches_run           // error: cannot access mutable field 'AIWorker.batches_run' from outside the actor
+// w.predict(1.0, false)   // error: cannot call method 'predict()' directly on actor 'AIWorker'
+```
+
+Sending requires a `mut` binding. Inside its own methods an actor uses its fields and methods directly.
+
+**Each actor has one owner.** An actor cannot be copied (`b := a`, `x := pool[0]`, `.clone()`, `.slice()`, `.get()` on a slice of actors), and an existing actor cannot be stored in a second place (a struct field or `push`). Build it where it will live instead:
+
+```v
+mut pool := []AIWorker{}
+pool.push(AIWorker{ id: 1 })       // built in place
+pool[0] <- predict(1.0, false)     // used in place
+mut last := pool.pop()             // moved out of the slice
+```
+
+A function may return a local actor (it moves to the caller), and may borrow one: `fn report(w AIWorker)` reads immutable fields, `fn feed(mut w AIWorker)` can also send messages. An actor passed as an argument **inside a message** is lent to that message; its owner must keep it alive until the message has run.
+
+---
+
 ### Message Passing Modes (`<-`)
 
 Vira supports three execution modes for message passing:
@@ -676,21 +778,36 @@ _ := w2 <- predict(1.5, false)  // Discarded binding
 
 The compiler routes both forms to `_send_detached_` (`done = -1`). The background worker thread automatically frees the task envelope upon completion without creating or tracking a `Future[T]`, delivering maximum throughput with zero memory leaks (`active_leaks = 0`).
 
-#### 3. Zero-Alloc Synchronous Calls (`res := actor <- method() or { ... }`)
-When the caller immediately unwraps an actor call with `or { ... }`, the compiler optimizes the dispatch into a zero-allocation synchronous call. The envelope is allocated on the caller's stack frame, eliminating heap `malloc`/`free` overhead while maintaining supervisor fault containment.
+#### 3. Synchronous Calls (`res := actor <- method() or { ... }`)
+When the caller immediately unwraps an actor call with `or { ... }`, the call waits for the result. From `main` and other non-actor code the envelope lives on the caller's stack (no heap allocation). From inside another actor's handler the call goes through a future, so a deadlock can be broken (see below).
 
 ```v
 sync_res := w1 <- predict(2.5, false) or { 0.0 }
 ```
 
+Messages from one sender to one actor run in the order they were sent.
+
+---
+
+### Deadlock Avoidance
+
+Waiting that can never finish returns an error to one waiter instead of hanging:
+
+| Situation | Error |
+| :--- | :--- |
+| An actor awaits a message it sent to itself | `deadlock avoided: an actor cannot wait on a message it sent to itself` |
+| Actors await each other in a cycle (A waits on B, B waits on A, or longer) | `deadlock avoided: actors are waiting on each other` |
+
+The waiter that gets the error is the one whose message has not started. That message still runs later, as if it had been sent without waiting, and the rest of the cycle completes. Waits that do not form a cycle are never interrupted.
+
 ---
 
 ### Lock-Free Work-Stealing Pool & Cache Optimization
 
-- Tasks are submitted to a multicore pool of worker threads sized to `min(CPU cores, 16)`.
+- Tasks are submitted to a pool with one worker thread per logical core, clamped to 2–16. Set `VIRA_WORKERS=<n>` (1–32) to override.
 - **Chase-Lev Deques with Cacheline Separation:** Worker deques place `top` and `bottom` pointers on separate 64-byte cachelines (`_Alignas(64)`), eliminating false sharing under high concurrency.
 - **Round-Robin Task Distribution:** External submissions utilize an isolated cacheline round-robin cursor to balance queue pressure across all workers.
-- **Monotonic Clocks:** Condition variables synchronize using `CLOCK_MONOTONIC` to ensure deterministic parking and wake-ups immune to system clock shifts.
+- **Monotonic Clocks:** On Linux, idle workers park on a `CLOCK_MONOTONIC` condition variable, so parking timeouts are immune to system clock changes; other platforms use the default realtime clock.
 - **Work-Helping Await:** Calling `fut.await()` causes the awaiting thread to steal and execute pending tasks from victim deques instead of sleeping.
 
 ---
@@ -709,9 +826,9 @@ Actors follow an Erlang-inspired supervision lifecycle:
                                                 [Dead-Letter Rejection]
 ```
 
-1. **Panic Interception & Stack Defer Unwinding:** Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process. Before `longjmp`, the runtime unwinds the actor's LIFO stack-frame `defer_stack`, deterministically freeing any live local heap strings, slices, tensors, structs, or nested arenas (`active_leaks = 0`).
+1. **Panic Interception & Stack Defer Unwinding:** `panic(...)`, out-of-bounds indexing, `pop()` on an empty slice and integer division by zero are all trapped. Per-thread TLS fault boundaries (`setjmp`/`longjmp`) intercept panics before they can crash the worker thread or host process. Before `longjmp`, the runtime unwinds the actor's LIFO stack-frame `defer_stack`, deterministically freeing any live local heap strings, slices, tensors, structs, or nested arenas (`active_leaks = 0`).
 2. **O(1) Arena Wipe & Deep Envelope Isolation:** The actor's private scratch arena slab is cleared in $O(1)$ time (`isolated_heap.offset = 0`), and heap-owning message arguments/unconsumed results on async (`<-`) or detached sends are deep-cloned and cleaned up automatically.
-3. **OneForOne Restart:** If consecutive restarts are below `max_restarts` (default: 3), the supervisor increments the restart counter, executes `_supervisor_reset(&self)`, and restores the actor to `VIRA_ACTOR_RUNNING`.
+3. **OneForOne Restart:** If consecutive restarts are below `max_restarts` (default: 3), the supervisor increments the restart counter, executes `_supervisor_reset(&self)`, and restores the actor to `VIRA_ACTOR_RUNNING`. The reset returns **mutable** fields to their declared default (or zero); immutable fields (ids, configuration, loaded weights) and actors stored in fields are kept.
 4. **Consecutive Fault Reset:** A successful message execution resets consecutive `restarts = 0`, ensuring intermittent faults across long-running services do not accumulate toward the limit.
 5. **Dead-Letter Containment (`VIRA_ACTOR_STOPPED`):** If an actor suffers consecutive faults exceeding `max_restarts`, it transitions to `VIRA_ACTOR_STOPPED`. Subsequent message attempts are immediately rejected with error `"Actor has stopped due to unhandled faults"`, protecting downstream queues from cascade failures.
 
@@ -753,7 +870,7 @@ println(data) // Buffer freed automatically at scope exit!
 
 ### Standard Library Packages (`packages/`)
 
-Vira's compiler resolves built-in pure-Vira standard library packages automatically under [`packages/`](file:///mnt/flutter_drive/vira/packages) (Tier 0 resolution):
+Vira's compiler resolves built-in pure-Vira standard library packages automatically under [`packages/`](../packages) (Tier 0 resolution):
 - `import os` — Operating system platform queries, process IDs, command-line arguments (`os.args()`), environment variables, filesystem operations, and path manipulation.
 - `import exec` — Child process spawning (`exec.Command`), stdio pipe redirection, `CLONE_*` namespace flags, and split async execution (`cmd.start()`, `cmd.wait()`).
 - `import syscall` — Low-level kernel system calls, raw file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux container isolation (`mount`, `chroot`, `mknod`, namespaces), and signal trapping.
@@ -769,7 +886,7 @@ Vira's compiler resolves built-in pure-Vira standard library packages automatica
 - `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
 - `import viraserve` — Work-stealing actor HTTP microframework with route dispatch and zero memory leaks.
 
-For complete API signatures and runnable examples, see the [**Standard Library Manual**](file:///mnt/flutter_drive/vira/docs/STANDARD_LIBRARY.md).
+For complete API signatures and runnable examples, see the [**Standard Library Manual**](STANDARD_LIBRARY.md).
 
 ---
 

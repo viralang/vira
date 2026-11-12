@@ -217,7 +217,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
 
 ## 7. Step-by-Step Hands-on Walkthrough
 
-Let's compile and run the companion example [`docs/examples/16_compilation_and_build_modes.vir`](file:///c:/Users/hp/vex/docs/examples/16_compilation_and_build_modes.vir):
+Let's compile and run the companion example [`docs/examples/16_compilation_and_build_modes.vir`](../examples/16_compilation_and_build_modes.vir):
 
 ### Step 1: Type & Memory Audit
 ```powershell

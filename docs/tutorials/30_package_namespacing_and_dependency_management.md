@@ -1,8 +1,8 @@
 # Tutorial 30: Package Namespacing, Modules & Dependency Management
 
 > **Language Version:** Vira `v0.5.9-dev`+  
-> **Reference Example:** [`docs/examples/31_package_namespacing_and_modules.vir`](file:///mnt/flutter_drive/vira/docs/examples/31_package_namespacing_and_modules.vir)  
-> **Standard Packages:** [`packages/io`](file:///mnt/flutter_drive/vira/packages/io), [`packages/net`](file:///mnt/flutter_drive/vira/packages/net), [`packages/http`](file:///mnt/flutter_drive/vira/packages/http), [`packages/viraserve`](file:///mnt/flutter_drive/vira/packages/viraserve)
+> **Reference Example:** [`docs/examples/31_package_namespacing_and_modules.vir`](../examples/31_package_namespacing_and_modules.vir)  
+> **Standard Packages:** [`packages/io`](../../packages/io), [`packages/net`](../../packages/net), [`packages/http`](../../packages/http), [`packages/viraserve`](../../packages/viraserve)
 
 ---
 

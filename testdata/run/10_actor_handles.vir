@@ -1,0 +1,87 @@
+// OUT: returned 1 w-1 50
+// OUT: borrowed 61 w-1#1
+// OUT: team 2 1
+// OUT: pool 199 201 199 1 900 0
+// OUT: reassigned 3 1
+// OUT: cleared 0
+// OUT: [vira_rt] active_leaks=0
+
+// Actors are heap objects behind a handle: they never move, so an actor can be returned
+// from a function while messages to it are still queued, a slice of actors can grow while
+// its actors are busy, and popping or replacing an element needs no draining.
+pub actor Worker {
+pub:
+    id int
+    name string
+mut:
+    count int = 0
+    log []string
+}
+pub fn (mut w Worker) bump(tag string) int {
+    w.count += 1
+    w.log.push(tag)
+    return w.count
+}
+pub fn (mut w Worker) total() int {
+    return w.count
+}
+struct Team {
+pub mut:
+    lead Worker
+    size int
+}
+// Built in a callee and returned with 50 detached messages still queued.
+fn make_worker(id int) Worker {
+    mut w := Worker{ id: id, name: 'w-${id}', count: 0, log: []string{} }
+    for mut i := 0; i < 50; i += 1 {
+        w <- bump('pre')
+    }
+    return w
+}
+// Borrowed by value (immutable fields only) and as `mut` (messages reach the caller's actor).
+fn ident(w Worker) string {
+    return '${w.name}#${w.id}'
+}
+fn poke(mut w Worker, n int) {
+    for mut i := 0; i < n; i += 1 {
+        w <- bump('poke')
+    }
+}
+fn poke_mut(mut w Worker) int {
+    f := w <- bump('mut')
+    return f.await() or { -1 }
+}
+fn main() {
+    mut a := make_worker(1)
+    t := a <- total() or { -1 }
+    println('returned ${a.id} ${a.name} ${t}')
+
+    poke(mut a, 10)
+    r := poke_mut(mut a)
+    println('borrowed ${r} ${ident(a)}')
+
+    mut team := Team{ lead: Worker{ id: 2, name: 'lead', count: 0, log: []string{} }, size: 3 }
+    l := team.lead <- bump('x') or { -1 }
+    println('team ${team.lead.id} ${l}')
+
+    mut pool := []Worker{}
+    for mut i := 0; i < 200; i += 1 {
+        pool.push(Worker{ id: i, name: 'p', count: 0, log: []string{} })
+        pool[i] <- bump('a')
+        pool[0] <- bump('b')
+    }
+    z := pool[0] <- total() or { -1 }
+    mut last := pool.pop()
+    lt := last <- total() or { -1 }
+    pool.set(0, Worker{ id: 900, name: 'swap', count: 0, log: []string{} })
+    s0 := pool[0] <- total() or { -1 }
+    println('pool ${pool.len} ${z} ${last.id} ${lt} ${pool[0].id} ${s0}')
+
+    a = Worker{ id: 3, name: 'again', count: 0, log: []string{} }
+    a <- bump('fresh')
+    ta := a <- total() or { -1 }
+    println('reassigned ${a.id} ${ta}')
+
+    pool.clear()
+    println('cleared ${pool.len}')
+}

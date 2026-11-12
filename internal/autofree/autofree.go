@@ -85,6 +85,8 @@ func (ls *LexicalScope) inImplicitArena() bool {
 // stmtCtx describes the statement currently being rewritten. It is what lets the analyzer prove
 // that a variable is never used again and can therefore be moved instead of cloned.
 type stmtCtx struct {
+	parent     *stmtCtx       // statement of the enclosing block whose body is being rewritten
+	stmt       ast.Stmt       // the statement itself
 	scope      *LexicalScope  // scope of the block that directly contains the statement
 	counts     map[string]int // identifier uses inside the statement itself
 	rest       []ast.Stmt     // statements that follow it in the same block
@@ -127,12 +129,22 @@ type Analyzer struct {
 	tmpCounter      int
 	ctx             *stmtCtx // statement currently being rewritten (nil outside rewriteBlock)
 	pendingTail     ast.Stmt // extra statement that follows the next rewritten block (or-block yield)
+
+	// ZeroOnMove marks variable reads that MOVE out of a local declared in an enclosing block
+	// (see canMoveOuter). The variable still gets its scope-exit destructor, so codegen resets
+	// it to zero after the move; destroying a zero value is a no-op.
+	ZeroOnMove map[*ast.IdentExpr]bool
+	// MovedStoreArgs marks `xs.push(v)` / `xs.set(i, v)` / `xs.insert(i, v)` arguments whose
+	// variable is not used again: the slice takes the value instead of a deep copy.
+	MovedStoreArgs map[*ast.IdentExpr]bool
 }
 
 func New(chk *checker.Checker) *Analyzer {
 	a := &Analyzer{
 		chk:             chk,
 		StructNeedsFree: make(map[string]bool),
+		ZeroOnMove:      make(map[*ast.IdentExpr]bool),
+		MovedStoreArgs:  make(map[*ast.IdentExpr]bool),
 	}
 	a.computeStructDestructors()
 	return a
@@ -319,6 +331,80 @@ func (a *Analyzer) canMove(tv *TrackedVar, name string) bool {
 	return true
 }
 
+// canMoveOuter extends canMove to a variable declared in an ENCLOSING block. The move is
+// allowed when no path can read the variable again:
+//   - the current statement mentions it once and nothing after it in this block does;
+//   - every block between the statement and the declaration is the body of an `if`, `switch`
+//     or plain `{ }` block (no loop: its next iteration would read the moved value; no
+//     `arena`, `defer` or `or` block), and nothing after any of those statements reads it;
+//   - no `defer` in scope mentions it.
+// The move happens on one path only, so the variable keeps its scope-exit destructor and is
+// reset to zero by codegen (ZeroOnMove). A branch that does not move leaves it intact.
+func (a *Analyzer) canMoveOuter(tv *TrackedVar, name string) bool {
+	if a.ctx == nil || tv == nil || tv.State != StateScopedLocal || tv.LoopCarried || tv.ArenaBacked {
+		return false
+	}
+	if a.ctx.counts[name] != 1 || a.ctx.usedLater(name) {
+		return false
+	}
+	for cur := a.ctx.scope; cur != nil; cur = cur.Parent {
+		for _, d := range cur.Defers {
+			counts := make(map[string]int)
+			ast.CountIdentUses(d, counts)
+			if counts[name] > 0 {
+				return false
+			}
+		}
+	}
+	declares := func(sc *LexicalScope) bool {
+		for _, v := range sc.Vars {
+			if v == tv {
+				return true
+			}
+		}
+		return false
+	}
+	for c := a.ctx; c != nil; c = c.parent {
+		if declares(c.scope) {
+			return c != a.ctx // same block: handled by canMove
+		}
+		p := c.parent
+		if p == nil {
+			return false
+		}
+		for sc := c.scope; sc != nil && sc != p.scope; sc = sc.Parent {
+			if sc.IsLoop || sc.InArena {
+				return false
+			}
+		}
+		switch p.stmt.(type) {
+		case *ast.IfStmt, *ast.SwitchStmt, *ast.BlockStmt:
+		default:
+			return false
+		}
+		if p.usedLater(name) {
+			return false
+		}
+	}
+	return false
+}
+
+// tryMove decides whether storing `ident` somewhere new can take its value instead of a deep
+// copy, and records how: a same-block move retires the variable (no destructor), an
+// outer-block move keeps the destructor and zeroes the variable (ZeroOnMove).
+func (a *Analyzer) tryMove(ident *ast.IdentExpr, scope *LexicalScope) bool {
+	srcVar := scope.Find(ident.Ident.Name)
+	if a.canMove(srcVar, ident.Ident.Name) {
+		srcVar.State = StateMovedToContainer
+		return true
+	}
+	if a.canMoveOuter(srcVar, ident.Ident.Name) {
+		a.ZeroOnMove[ident] = true
+		return true
+	}
+	return false
+}
+
 // resolveIdentTransfer decides what happens when the variable `ident` is stored somewhere new
 // (bound to another name, assigned, or placed in a struct field). It returns true when the
 // store is a MOVE (the source is marked as no longer owning its memory) and false when codegen
@@ -334,11 +420,7 @@ func (a *Analyzer) resolveIdentTransfer(ident *ast.IdentExpr, scope *LexicalScop
 	if needsFree, _ := a.typeNeedsCleanup(t); !needsFree {
 		return true // plain value copy; nothing to own
 	}
-	if a.canMove(srcVar, ident.Ident.Name) {
-		srcVar.State = StateMovedToContainer
-		return true
-	}
-	return false
+	return a.tryMove(ident, scope)
 }
 
 // isArenaLocalTarget reports whether an assignment target is a local whose storage belongs to
@@ -401,7 +483,7 @@ func (a *Analyzer) rewriteBlock(
 		if tailStmt != nil {
 			rest = append(append([]ast.Stmt(nil), rest...), tailStmt)
 		}
-		ctx := &stmtCtx{scope: scope, counts: make(map[string]int), rest: rest}
+		ctx := &stmtCtx{parent: prevCtx, stmt: stmt, scope: scope, counts: make(map[string]int), rest: rest}
 		ast.CountIdentUses(stmt, ctx.counts)
 		a.ctx = ctx
 
@@ -454,6 +536,16 @@ func (a *Analyzer) rewriteBlock(
 				isBlankTarget = true
 			}
 			preStmts, postStmts := a.hoistTemporaryStrings(s.Value, scope, report, true)
+			if s.Op == token.TokPlusAssign && a.chk.IsStringConcat(&ast.BinaryExpr{Left: s.Target, Op: token.TokPlus, Right: s.Value}) &&
+				!a.chk.IsStringConcat(s.Value) {
+				// `s += t` only READS t (its bytes are copied into the new string), so a fresh
+				// heap t (`s += name()`, `s += '${x}'`) is bound to a temporary and freed after.
+				var extraFrees []*ast.DeferFreeStmt
+				s.Value = a.maybeHoistSubExpr(s.Value, scope.InArena, &preStmts, &extraFrees, report)
+				for i := len(extraFrees) - 1; i >= 0; i-- {
+					postStmts = append([]ast.Stmt{extraFrees[i]}, postStmts...)
+				}
+			}
 			stmtScope := a.scopeWithHoistedTemps(scope, preStmts, report)
 			a.inspectExprMovesAndOrBlocksWithMode(s.Value, stmtScope, report, !isBlankTarget)
 			if ident, ok := s.Value.(*ast.IdentExpr); ok && !isBlankTarget {
@@ -870,6 +962,26 @@ func (a *Analyzer) inspectExprMovesAndOrBlocksWithMode(expr ast.Expr, scope *Lex
 				}
 			}
 		}
+		// `xs.push(v)`, `xs.set(i, v)`, `xs.insert(i, v)`: the slice owns its elements, so v is
+		// deep-copied unless it is a local that is never read again; then the slice takes it.
+		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel {
+			if sl, isSlice := a.chk.ExprTypes[sel.Left].(*checker.SliceType); isSlice {
+				valIdx := -1
+				switch sel.Field.Name {
+				case "push", "append":
+					valIdx = 0
+				case "set", "insert":
+					valIdx = 1
+				}
+				if valIdx >= 0 && valIdx < len(e.Args) {
+					if id, isId := e.Args[valIdx].Expr.(*ast.IdentExpr); isId && a.isCloneable(sl.Elem) {
+						if needsFree, _ := a.typeNeedsCleanup(sl.Elem); needsFree && a.tryMove(id, scope) {
+							a.MovedStoreArgs[id] = true
+						}
+					}
+				}
+			}
+		}
 		for _, arg := range e.Args {
 			a.inspectExprMovesAndOrBlocks(arg.Expr, scope, report)
 		}
@@ -921,6 +1033,9 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 		if _, isInterp := rhs.(*ast.StringInterpExpr); isInterp {
 			return true
 		}
+		if a.chk.IsStringConcat(rhs) {
+			return true // vira_arena_str_concat_n
+		}
 	}
 	return false
 }
@@ -941,9 +1056,12 @@ func (a *Analyzer) hoistTemporaryStrings(
 	var preStmts []ast.Stmt
 	var postFrees []*ast.DeferFreeStmt
 
-	// If root expr itself is an unassigned StringInterpExpr (e.g. in ExprStmt: `'hello ${x}'`)
+	// If root expr itself is an unassigned fresh string (e.g. in ExprStmt: `'hello ${x}'` or `a + b`)
 	if !isRootAssigned && !scope.InArena {
-		if interp, ok := expr.(*ast.StringInterpExpr); ok {
+		_, isInterp := expr.(*ast.StringInterpExpr)
+		if isInterp || a.chk.IsStringConcat(expr) {
+			interp := expr
+			a.walkAndHoistCallArgs(expr, scope.InArena, &preStmts, &postFrees, report)
 			a.tmpCounter++
 			tmpName := fmt.Sprintf("_vira_tmp_str_%d", a.tmpCounter)
 			tmpIdent := ast.Ident{Name: tmpName, NamePos: interp.Span()}
@@ -967,7 +1085,11 @@ func (a *Analyzer) hoistTemporaryStrings(
 			preStmts = append(preStmts, varDecl)
 			postFrees = append(postFrees, freeStmt)
 			report.InjectedFrees = append(report.InjectedFrees, freeStmt)
-			return preStmts, []ast.Stmt{freeStmt}
+			var postStmts []ast.Stmt
+			for i := len(postFrees) - 1; i >= 0; i-- {
+				postStmts = append(postStmts, postFrees[i])
+			}
+			return preStmts, postStmts
 		}
 	}
 
@@ -1042,6 +1164,12 @@ func (a *Analyzer) maybeHoistSubExpr(
 			return expr
 		}
 		return a.hoistExprToTemp(interp, checker.TypeString, ast.CleanupString, "vira_tmp_str", "zero-leak temporary string operand cleanup", preStmts, postFrees, report)
+	}
+	if a.chk.IsStringConcat(expr) {
+		if inArena {
+			return expr
+		}
+		return a.hoistExprToTemp(expr, checker.TypeString, ast.CleanupString, "vira_tmp_str", "zero-leak temporary string concatenation cleanup", preStmts, postFrees, report)
 	}
 
 	if stInit, ok := expr.(*ast.StructInitExpr); ok {
@@ -1123,7 +1251,7 @@ func (a *Analyzer) wouldHoistSubExpr(expr ast.Expr, inArena bool) bool {
 		return isSlice
 	case *ast.BinaryExpr:
 		_, isTensor := a.chk.ExprTypes[e].(*checker.TensorType)
-		return isTensor && !inArena
+		return (isTensor || a.chk.IsStringConcat(e)) && !inArena
 	case *ast.CallExpr:
 		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
 			return false
@@ -1206,6 +1334,11 @@ func (a *Analyzer) walkAndHoistCallArgs(
 			}
 		}
 		if isContainerStore {
+			// The stored value itself becomes the container's, so it is not hoisted; fresh
+			// temporaries INSIDE it (`xs.push('a-' + '${n}')`) still are.
+			for i := range e.Args {
+				a.walkAndHoistCallArgs(e.Args[i].Expr, inArena, preStmts, postFrees, report)
+			}
 			return
 		}
 		// Index of the last argument that will be hoisted into a temporary. Hoisting moves that
@@ -1246,6 +1379,21 @@ func (a *Analyzer) walkAndHoistCallArgs(
 		}
 
 	case *ast.BinaryExpr:
+		if a.chk.IsStringConcat(e) {
+			// `a + b + c` is emitted as ONE concatenation over its leaves, so a nested concat
+			// operand is walked in place rather than hoisted into an intermediate string.
+			// Leaves that are fresh heap strings (`name() + '!'`) are hoisted and freed after
+			// the statement, in left-to-right order.
+			for _, side := range []*ast.Expr{&e.Left, &e.Right} {
+				if a.chk.IsStringConcat(*side) {
+					a.walkAndHoistCallArgs(*side, inArena, preStmts, postFrees, report)
+					continue
+				}
+				a.walkAndHoistCallArgs(*side, inArena, preStmts, postFrees, report)
+				*side = a.maybeHoistSubExpr(*side, inArena, preStmts, postFrees, report)
+			}
+			return
+		}
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
 		a.walkAndHoistCallArgs(e.Right, inArena, preStmts, postFrees, report)
 		e.Left = a.maybeHoistSubExpr(e.Left, inArena, preStmts, postFrees, report)
@@ -1262,6 +1410,19 @@ func (a *Analyzer) walkAndHoistCallArgs(
 		for i := range e.Exprs {
 			a.walkAndHoistCallArgs(e.Exprs[i], inArena, preStmts, postFrees, report)
 			e.Exprs[i] = a.maybeHoistSubExpr(e.Exprs[i], inArena, preStmts, postFrees, report)
+		}
+
+	case *ast.StructInitExpr:
+		// A field value is stored in the struct, so it is not hoisted itself; temporaries
+		// INSIDE it (`T{ title: 'x ${name()}' }`, `T{ title: a + name() }`) are, so they are
+		// freed after the statement instead of leaking.
+		for i := range e.Fields {
+			a.walkAndHoistCallArgs(e.Fields[i].Value, inArena, preStmts, postFrees, report)
+		}
+
+	case *ast.ArrayLitExpr:
+		for i := range e.Elems {
+			a.walkAndHoistCallArgs(e.Elems[i], inArena, preStmts, postFrees, report)
 		}
 	}
 }

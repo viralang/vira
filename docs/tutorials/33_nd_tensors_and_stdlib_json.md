@@ -1,8 +1,8 @@
 # Tutorial 33: 1D-4D Strided Tensors, Batched Attention & Pure-Vira JSON
 
 > **Language Version:** Vira `v0.5.9-dev`+  
-> **Matching Code Example:** [`docs/examples/33_nd_tensors_and_stdlib_json.vir`](file:///mnt/flutter_drive/vira/docs/examples/33_nd_tensors_and_stdlib_json.vir)  
-> **Standard Packages:** [`packages/json`](file:///mnt/flutter_drive/vira/packages/json)
+> **Matching Code Example:** [`docs/examples/33_nd_tensors_and_stdlib_json.vir`](../examples/33_nd_tensors_and_stdlib_json.vir)  
+> **Standard Packages:** [`packages/json`](../../packages/json)
 
 ---
 
@@ -72,7 +72,7 @@ arena {
 
 ## 4. Pure-Vira RFC 8259 JSON Parsing (`packages/json`)
 
-The standard [`packages/json`](file:///mnt/flutter_drive/vira/packages/json) library provides zero-allocation JSON extraction directly from UTF-8 strings:
+The standard [`packages/json`](../../packages/json) library provides zero-allocation JSON extraction directly from UTF-8 strings:
 
 ```vira
 import json

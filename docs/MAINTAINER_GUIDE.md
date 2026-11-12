@@ -141,6 +141,21 @@ flowchart LR
     Analysis -->|Inside arena block| Arena["BumpArena<br>0 individual frees; O(1) bulk wipe"]
 ```
 
+### The Ownership Rule
+
+Every heap value has exactly one owner. **Storing a value somewhere new copies it, unless the analyzer proves the source is never read again; then it moves.** Function arguments are borrowed (the callee clones whatever it stores). The pieces in `internal/autofree/autofree.go`:
+
+| Function / field | What it decides |
+| :--- | :--- |
+| `canMove` | Same-block move: the source is declared in the current block, mentioned once in the statement, not used later or in a `defer`. The variable is retired (`StateMovedToContainer`, no destructor). |
+| `canMoveOuter` | Move out of a variable declared in an **enclosing** block, through `if` / `switch` bodies only (no loop, arena, defer or or-block in between), with no later use at any level. Recorded in `ZeroOnMove`: the variable keeps its destructor and cgen zeroes it at the move (`movedIdentExpr`), so the destructor frees nothing. |
+| `tryMove` | Tries `canMove`, then `canMoveOuter`. Used for `b := a`, `x = y`, struct fields, and slice stores. |
+| `MovedStoreArgs` | `xs.push(v)` / `set` / `insert` arguments that move instead of being cloned by `emitSliceStoreArg`. |
+| `hoistTemporaryStrings` / `walkAndHoistCallArgs` | Bind fresh temporaries (interpolations, string calls, `+` chains, struct literals, slices) to `_vira_tmp_*` variables freed right after the statement. They descend into call arguments, `+` operands (a nested `+` is flattened, not hoisted), interpolations, struct-literal fields and array literals. |
+| `isAllocatedOnArena` | Which values live on the arena slab inside `arena { }` (tensor ops, interpolations, `+` chains). |
+
+When adding an expression form that can produce a fresh heap value, teach `walkAndHoistCallArgs`, `maybeHoistSubExpr` and `wouldHoistSubExpr` about it, and add a run test that counts calls and checks `active_leaks=0` under `-sanitize` (see `testdata/run/13_temporaries_in_initializers.vir`).
+
 ### The Autofree Invariant
 - **Rule:** If memory is allocated locally and does not escape, `cgen` **must** insert the matching destructor before every return path and at the end of the enclosing block.
 - **Verification:** The runtime tracks all allocations when compiled without `-prod` via `_vira_active_heap_allocs` and prints diagnostics via `vira_report_mem_stats()`. At process exit or test teardown, `_vira_active_heap_allocs` (`active_leaks`) must be `0`.
@@ -156,6 +171,9 @@ The code generator (`internal/cgen/cgen.go`) transforms the validated AST into c
 3. **Temporary String Hoisting:**
    - When expressions like `'User: ${name}'` are passed directly into functions (`println`, `gui_lbl`), `cgen` hoists them to temporary variables or calls the `_temp` variant (`vira_gui_lbl_temp`), ensuring the temporary string is freed immediately after execution.
 4. **Header Emission:** Emits `#include "vira_rt.h"` and conditionally `#include "vira_gui.h"` whenever GUI builtins are referenced.
+5. **String `+`:** `emitStringConcat` flattens a chain into one `vira_str_concat_n` call (or `vira_arena_str_concat_n` inside an arena); each leaf is evaluated once, left to right, into a local array. `s += t` is emitted in the `AssignStmt` case and frees the old value last. `emitStringInterp` binds string sub-expressions to temporaries so `%.*s` never evaluates a call twice.
+6. **Actor Handles:** `cType` of an actor is `T*`. `emitActorInitExpr` mallocs the actor and initializes its context; `T_release(T**)` destroys it (waits for queued messages, frees fields and the object). Every actor-typed expression is already a pointer, so sends, field reads (`->`) and `mut` arguments never take an address. `emitActorSliceDefinition` emits `[]Actor` as a slice of handles: growth needs no quiescing, `pop` hands a handle to the caller, `set`/`clear`/`free` release.
+7. **Operator Checks:** `checker.checkBinaryOperator` rejects operators on types they are not defined for, so cgen's final `(a op b)` fallback is only reached for C-compatible operands.
 
 ---
 
@@ -164,14 +182,17 @@ The code generator (`internal/cgen/cgen.go`) transforms the validated AST into c
 `runtime/vira_rt.h` is a self-contained, header-only C99 runtime library providing:
 
 ### Memory Architecture
-- **`vira_string`**: Immutable UTF-8 slice `{ const uint8_t *data; int64_t len; bool is_lit; }`.
-- **`vira_slice_<T>`**: Growable dynamic slice `{ T *data; int64_t len; int64_t cap; }`.
+- **`vira_string`**: 16 bytes, `{ const uint8_t *data; int32_t len; bool is_lit; bool is_borrowed; }`. `is_lit` means "do not free": a static literal, or a borrowed view (`is_borrowed`) into an arena or another string, which `vira_str_own` copies before it is stored.
+- **`vira_slice_<T>`**: Growable dynamic slice `{ T *data; int32_t len; int32_t cap; bool is_arena; }`.
 - **Bump Arena (`arena { ... }`)**: 64-byte cache-line aligned memory pool with instant $O(1)$ pointer reset.
 
-### Actor Work-Stealing Concurrency
-- **Chase-Lev Deque:** Lock-free multicore work-stealing pool.
-- **Isolated Heaps:** Each actor allocates in its private arena; cross-actor messaging is deep-copied over channels (`<-`).
-- **Fault Supervision (`OneForOne`):** If an actor panics (e.g. division by zero, GPU out of memory), the runtime catches it via `setjmp`/`longjmp`, wipes the actor's private arena, and restarts the actor without crashing the server.
+### Actor Work-Stealing Concurrency (`rt/scheduler/scheduler.h`)
+- **Pool:** one worker per logical core, clamped to 2–16; `VIRA_WORKERS` overrides (1–32). Each worker owns a lock-free Chase-Lev deque of `VIRA_WS_CAP` (4,096) tasks; extra tasks go to a shared overflow queue.
+- **Mailbox:** a lock-free MPSC queue per actor. `scheduled` is a three-state machine (`IDLE`, `SCHEDULED`, `NOTIFIED`); the drain task's last access to the actor is the CAS that releases it, so `vira_actor_ctx_destroy` (via `vira_actor_quiesce`) can trust `IDLE`.
+- **Message states (`vira_task.done`):** `0` queued, `VIRA_TASK_RUNNING` claimed by the drain loop with a CAS, `1` finished, `VIRA_TASK_DETACHED` fire-and-forget (the drain loop frees the envelope), `VIRA_TASK_SELF_MANAGED` drain tasks. A waiter can abandon a message only with a successful CAS `0 -> DETACHED`, which proves it never started.
+- **Wait-for graph:** an actor that awaits another actor publishes an edge (`vira_actor_await_msg`) in a slot table that is never freed. While waiting it walks the edges from its target; a cycle back to itself, or to an actor suspended beneath it on the same thread, seen identically on two walks, is a deadlock, and the waiter whose message has not started gets `deadlock avoided: actors are waiting on each other`. Synchronous calls from inside an actor go through a future so they can be abandoned.
+- **Isolated Heaps:** Each actor allocates scratch memory in its private arena (wiped after every message); message arguments are deep-copied into the envelope.
+- **Fault Supervision (`OneForOne`):** A panic, bounds error, empty `pop` or integer division by zero inside a handler is caught via `setjmp`/`longjmp`; the arena is wiped and `T_supervisor_reset` resets mutable fields (immutable fields and child actors are kept).
 
 ---
 
@@ -336,6 +357,8 @@ Vira ships with 16 self-contained packages under `packages/`:
   ```bash
   ./vira build -keep-c my_app.vir
   cat build/my_app.c
+  # or print it directly
+  ./vira cgen my_app.vir
   ```
 - **Check C compiler error:** Compile the generated `.c` file directly with `gcc -std=c99 -I./runtime build/my_app.c` to see raw compiler warnings.
 
@@ -346,8 +369,19 @@ Vira ships with 16 self-contained packages under `packages/`:
    ./my_app
    ```
    AddressSanitizer (ASan) will pinpoint the exact line allocating unreleased memory.
-2. **Check String Interpolation Hoisting:** Ensure dynamic strings passed to builtins call the `_temp` wrapper or are freed before returning.
+2. **Check Temporary Hoisting:** A fresh value created inside another expression (a call argument, a `+` operand, an interpolation, a struct-literal field) must be hoisted by `walkAndHoistCallArgs`; if a new expression form leaks, that function is the usual place to fix.
 3. **Check Container Destructors:** Verify that custom slices invoke `vira_slice_<T>_free` on scope exit.
+4. **Count calls:** a value computed twice (once leaked) shows up as a call that runs twice; `testdata/run/13_temporaries_in_initializers.vir` shows how to test for it.
+
+### When an Actor Program Hangs
+1. Build with `-sanitize` and run with `VIRA_WORKERS=1` and with a larger count; a hang that depends on the count usually involves work-helping.
+2. A wait cycle between actors should return `deadlock avoided: actors are waiting on each other`. If it hangs instead, check that every await path goes through `vira_actor_await_msg` / `_vira_future_wait_or_detach`.
+3. Build the generated C with ThreadSanitizer:
+   ```bash
+   ./vira cgen app.vir > app.c
+   gcc -std=c99 -O1 -g -fwrapv -fsanitize=thread -pthread -Iruntime app.c -o app -lm
+   ./app
+   ```
 
 ### When GPU Compute Fails or Falls Back to CPU
 - **Check driver library:** Verify `libcuda.so.1` (Linux) or `nvcuda.dll` (Windows) is located in standard dynamic linker search paths.
@@ -365,6 +399,8 @@ Before committing any major changes or tagging a new Vira release, execute the f
 go build -o vira ./cmd/vira
 
 # 2. Run Compiler Go Unit Tests (Uncached)
+#    Includes every testdata/run program under ASan+UBSan with an active_leaks=0 check,
+#    and every testdata/checker program against its `// ERROR:` annotations.
 go test -count=1 ./...
 
 # 3. Test GPU Subsystem (Zero Leaks)
@@ -385,7 +421,29 @@ go test -count=1 ./...
 # 8. Build Standalone Production Binaries
 ./vira build -prod -o test_gui docs/examples/21_declarative_gui.vir
 rm -f test_gui
+
+# 9. Actor runtime changes: ThreadSanitizer on the actor tests, and a before/after benchmark
+for f in testdata/run/03_actor_high_concurrency_stress.vir testdata/run/07_actor_supervision_and_identity.vir \
+         testdata/run/10_actor_handles.vir testdata/run/11_actor_await_cycles.vir; do
+  ./vira cgen $f > /tmp/t.c && gcc -std=c99 -O1 -g -fwrapv -fsanitize=thread -pthread -Iruntime /tmp/t.c -o /tmp/t -lm && /tmp/t
+done
+VIRA=./vira-old bash scripts/bench_actors.sh && bash scripts/bench_actors.sh
 ```
+
+### Regression Tests by Area
+
+| Area | Tests |
+| :--- | :--- |
+| Ownership, aliasing, moves | `testdata/run/04_*`, `05_*`, `08_*`, `12_ownership_moves.vir` |
+| Arenas, defers, early returns | `testdata/run/06_*` |
+| Strings `+` / `+=` | `testdata/run/09_string_concat.vir` |
+| Temporaries inside initializers | `testdata/run/13_temporaries_in_initializers.vir` |
+| Actor supervision, faults | `testdata/run/07_*` |
+| Actor handles, slices of actors | `testdata/run/10_actor_handles.vir` |
+| Actor wait cycles | `testdata/run/11_actor_await_cycles.vir` |
+| Checker: actor isolation and ownership | `testdata/checker/03_*`, `05_actor_ownership.vir` |
+| Checker: operator types | `testdata/checker/04_operator_types.vir` |
+| Scheduler internals (C harness) | `TestSchedulerMailboxConcurrentSendersAndParkTimeout` in `compiler_test.go` |
 
 ---
 

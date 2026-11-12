@@ -2,7 +2,7 @@
 
 > **Difficulty:** Intermediate to Advanced  
 > **Matching Code Example:** [`docs/examples/24_package_management_consumer.vir`](../examples/24_package_management_consumer.vir)  
-> **Reference Package Template:** [`C:\Users\hp\vira_test`](file:///C:/Users/hp/vira_test)
+> **Reference Package Template:** [`vendor/vira_test`](../../vendor/vira_test)
 
 ---
 

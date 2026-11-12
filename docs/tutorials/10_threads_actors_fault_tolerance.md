@@ -54,13 +54,16 @@ mut:
 ```
 
 ### What the Compiler Generates Under the Hood
-When you declare `actor ComputeNode`, the C99 backend emits:
+When you declare `actor ComputeNode`, the C99 backend emits a struct with:
 1. The user fields (`node_id`, `batches_completed`, `is_degraded`).
-2. An embedded `VexActorContext _ctx` containing:
-   - `atomic_flag mailbox_lock`: A lock-free spinlock ensuring sequential message processing.
-   - `VexArena isolated_heap`: A private 64-byte aligned memory slab allocated exclusively for this actor.
-   - `int restarts`: Supervisor fault restart counter.
-   - `jmp_buf fault_env`: The `setjmp`/`longjmp` unwinding checkpoint for crash containment.
+2. An embedded `vira_actor_ctx _ctx` (about 370 bytes) containing:
+   - A lock-free multi-producer mailbox (`mbox_head` / `mbox_tail`) and a scheduling state, so the actor runs one message at a time.
+   - `isolated_heap`: a private scratch arena, allocated the first time a handler uses it and wiped after every message.
+   - `restarts` / `max_restarts`: the supervisor's consecutive-fault counter.
+   - `fault_boundary`: the `setjmp`/`longjmp` checkpoint that contains a crash.
+   - A growable defer stack and the actor's entry in the deadlock-detection table.
+
+`mut n1 := ComputeNode{ ... }` allocates this struct on the heap and gives `n1` a **handle** to it. The actor never moves and is destroyed, after its queued messages finish, when `n1` goes out of scope. From outside, only messages and immutable fields (`n1.node_id`) can reach it; see [Tutorial 42](./42_ownership_strings_and_actor_handles.md#4-actors-are-handles).
 
 ---
 
@@ -182,7 +185,7 @@ Supervisor trapped fault on Node 3 -> "Node #3 thermal throttling / NaN anomaly"
 
 ## 7. Self-Healing & Post-Restart Recovery
 
-Because the supervisor wiped the actor's scratch memory in **O(1)** and reset its mailbox spinlock, the actor is immediately healthy and ready to accept new messages:
+Because the supervisor wiped the actor's scratch memory in **O(1)** and reset its mutable fields to their declared defaults, the actor is immediately healthy and ready to accept new messages:
 
 ```v
 // Node 3 is fully operational; send a retry batch
@@ -213,11 +216,23 @@ s1 := f_seq1.await() or { 0.0 }
 s2 := f_seq2.await() or { 0.0 }
 
 println('Sequential Mailbox for Node 1: run1=${s1}, run2=${s2}')
-println('Total batches completed on Node 1: ${n1.batches_completed}')
+
+// `batches_completed` is mutable actor state: read it with a message, not `n1.batches_completed`.
+n1_completed := n1 <- completed() or { 0 }
+println('Total batches completed on Node 1: ${n1_completed}')
 ```
 
-- Each actor processes messages sequentially through its atomic spinlock (`__atomic_test_and_set`).
-- State updates like `node.batches_completed = node.batches_completed + 1` are guaranteed to be serialized without races.
+with the accessor method
+
+```v
+pub fn (mut node ComputeNode) completed() int {
+	return node.batches_completed
+}
+```
+
+- Each actor processes one message at a time, and messages from one sender run in the order they were sent.
+- State updates like `node.batches_completed = node.batches_completed + 1` are therefore serialized without races.
+- Reading `n1.batches_completed` directly from `main` is a compile error (`cannot access mutable field 'ComputeNode.batches_completed' from outside the actor`): it would race with a message in flight.
 - Different actors (`n1`, `n2`, `n3`, `n4`) execute in parallel across different OS threads.
 
 ---
@@ -226,8 +241,8 @@ println('Total batches completed on Node 1: ${n1.batches_completed}')
 
 Run the verified standalone program:
 
-```powershell
-.\vira.exe run docs/examples/10_threads_actors_fault_tolerance.vir
+```bash
+VIRA_WORKERS=4 vira run docs/examples/10_threads_actors_fault_tolerance.vir
 ```
 
 ### Terminal Output
@@ -240,6 +255,7 @@ Nodes initialized with isolated mailboxes and private arena slabs
 --- 2. ASYNCHRONOUS FAN-OUT (<-) ACROSS CHASE-LEV WORK-STEALING POOL ---
 Dispatched 4 asynchronous jobs returning Future[f32] handles
 --- 3. SYNCHRONIZING & AWAITING RESULTS (.await) ---
+[vira_supervisor | worker_thread=-1] Actor 'ComputeNode' (#1) trapped fault ('Node #3 thermal throttling / NaN anomaly') -> O(1) arena wipe & OneForOne restart [1/3]
 Supervisor trapped fault on Node 3 -> "Node #3 thermal throttling / NaN anomaly"
 Parallel Fan-In Sync Complete:
   Node 1 Result: 8192.00
@@ -254,13 +270,17 @@ Total batches completed on Node 1: 3
 =================================================================
    END OF CONCURRENCY DEMO (Review [vira_rt] Telemetry Below)     
 =================================================================
-[vira_rt] pool_workers=4 | actor_tasks_run=7 | work_steals=7 | active_leaks=0 | total_freed=19
+[vira_rt] simd=x86_64 AVX2 + FMA (256-bit / 8x f32 per cycle, Multi-Threaded)
+[vira_rt] pool_workers=4 | actor_tasks_run=8 | work_steals=6
+[vira_rt] active_leaks=0 | total_freed=25
 ```
 
+`worker_thread=-1` means the faulting message ran on the main thread while it was helping during `.await()`. The steal count varies from run to run.
+
 ### Key Telemetry Takeaways
-- `pool_workers=4`: Automatically spawned 4 OS native worker threads matched to system CPU cores.
-- `actor_tasks_run=7`: Successfully scheduled and completed 7 actor method invocations.
-- `work_steals=7`: Idle worker threads dynamically stole tasks from busy workers' deques, proving multicore load balancing.
+- `pool_workers=4`: 4 worker threads, as set by `VIRA_WORKERS=4`. Without it the pool has one thread per logical core, clamped to 2–16.
+- `actor_tasks_run=8`: 8 actor messages ran (including the `completed()` query).
+- `work_steals=6`: Idle threads took tasks from busy workers' queues.
 - `active_leaks=0`: Zero memory leaks despite dynamic string allocations, tensor matrix multiplications, and simulated panics.
 
 ---

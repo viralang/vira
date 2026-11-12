@@ -6,7 +6,7 @@ All examples can be executed directly using the `vira` compiler CLI:
 
 ```powershell
 # Run directly
-.\vira.exe run docs/examples/<filename>.vir
+vira run docs/examples/<filename>.vir
 
 # Or build to an optimized native binary
 .\vira.exe build -prod -o app.exe docs/examples/<filename>.vir
@@ -65,6 +65,7 @@ All examples can be executed directly using the `vira` compiler CLI:
 | **[`44_gpu_compute_acceleration.vir`](./44_gpu_compute_acceleration.vir)** | Cross-Platform GPU Compute Acceleration & OOM Supervision | Dynamic GPU backend discovery (`gpu.info()`, `gpu.vram_mb()`, `gpu.allocated_kb()`), persistent GPU weight caching (`x.gpu_linear(w)`), GPU transformer ops (`rmsnorm`, `rope`, `softmax`, `silu`), and actor-supervised VRAM OOM fallback (`gpu.simulate_oom`) to CPU SIMD. |
 | **[`45_gui_qwen2_5_gguf_chat_studio.vir`](./45_gui_qwen2_5_gguf_chat_studio.vir)** | Native GUI Qwen 2.5 GGUF Chat Studio | Non-blocking 1-layer-per-frame GGUF streaming loader (`Q4_0`/`Q8_0`/`F32` + QKV biases), live token-by-token 60 FPS GUI ChatML streaming with `tok/s` telemetry, interactive temperature/max-tokens sliders, live CPU/GPU toggle, and KV cache reset. |
 | **[`46_qwen2_5_t4_large_ctx_benchmark.vir`](./46_qwen2_5_t4_large_ctx_benchmark.vir)** | Qwen 2.5 (3B / 7B) Large-Context NVIDIA Tesla T4 GPU Benchmark | Resumable Hugging Face GGUF download (`.part` + `io.rename`), `7B`/`3B`/`1.5B` (`Q4_K_M`/`Q4_0`/`Q8_0`) presets, chunked batched prefill scaling (`pp` up to `4096+`, WMMA TFLOPS), long-context incremental KV decode sweeps (`ctx` `8192`–`32768`, GDDR6 GB/s), `--verify` ChatML check, CUDA/OpenCL/CPU flags, and 0 leaks. |
+| **[`47_ownership_strings_and_actor_handles.vir`](./47_ownership_strings_and_actor_handles.vir)** | Ownership, Strings & Actor Handles | String `+` / `+=`, copies vs moves, borrowed arguments, an actor returned from a function with a message still queued, a growing slice of 100 actors, and a two-actor wait cycle broken with `deadlock avoided: actors are waiting on each other`. Companion to [Tutorial 42](../tutorials/42_ownership_strings_and_actor_handles.md). |
 
 ---
 
@@ -73,52 +74,52 @@ All examples can be executed directly using the `vira` compiler CLI:
 You can run each example in sequence from your shell:
 
 ```powershell
-.\vira.exe run docs/examples/01_basics.vir
-.\vira.exe run docs/examples/02_oop_composition.vir
-.\vira.exe run docs/examples/03_interfaces.vir
-.\vira.exe run docs/examples/04_result_handling.vir
-.\vira.exe run docs/examples/05_arenas_and_autofree.vir
-.\vira.exe run docs/examples/06_simd_tensors.vir
-.\vira.exe run docs/examples/07_actors_and_supervisors.vir
-.\vira.exe run docs/examples/08_production_pipeline.vir
-.\vira.exe run docs/examples/09_file_io.vir
-.\vira.exe run docs/examples/10_threads_actors_fault_tolerance.vir
-.\vira.exe run docs/examples/11_control_flow_loops_operators.vir
-.\vira.exe run docs/examples/12_deep_dive_tensors.vir
-.\vira.exe run docs/examples/13_hardware_acceleration_gpu.vir
-.\vira.exe run docs/examples/14_neural_network_cpu_gpu.vir
-.\vira.exe run docs/examples/15_pretrained_weights_loader.vir
-.\vira.exe run docs/examples/16_compilation_and_build_modes.vir
-.\vira.exe run docs/examples/17_http_web_server_and_json.vir
-.\vira.exe run docs/examples/18_autograd_and_safetensors.vir
-.\vira.exe run docs/examples/19_local_llm_inference.vir
-.\vira.exe run docs/examples/20_native_gui.vir
-.\vira.exe run docs/examples/21_declarative_gui.vir
-.\vira.exe run docs/examples/22_gui_navigation_lifecycle.vir
-.\vira.exe run docs/examples/23_multi_package_architecture.vir
-.\vira.exe run docs/examples/24_package_management_consumer.vir
-.\vira.exe run docs/examples/25_actors_banking_fault_tolerance.vir
-.\vira.exe run docs/examples/26_actors_worker_pool_fanout.vir
-.\vira.exe run docs/examples/27_actors_ring_pipeline.vir
-.\vira.exe run docs/examples/28_native_collections.vir
-.\vira.exe run docs/examples/29_stdlib_net_http_server.vir
-.\vira.exe run docs/examples/30_switch_statement.vir
-.\vira.exe run docs/examples/31_package_namespacing_and_modules.vir
-.\vira.exe run docs/examples/32_actor_detached_and_lifecycle.vir
-.\vira.exe run docs/examples/33_nd_tensors_and_stdlib_json.vir
-.\vira.exe run docs/examples/34_basic_cli_app.vir
-.\vira.exe run docs/examples/35_advanced_cli_flags_syscall_exec.vir
-.\vira.exe run docs/examples/36_linux_container_runtime_reference.vir
-.\vira.exe run docs/examples/37_gui_image_and_asset_loading.vir
-.\vira.exe run docs/examples/38_gui_remote_url_image_loading.vir
-.\vira.exe run docs/examples/39_gui_realworld_cloud_ai_hub.vir
-.\vira.exe run docs/examples/40_native_c_and_python_ffi.vir
+vira run docs/examples/01_basics.vir
+vira run docs/examples/02_oop_composition.vir
+vira run docs/examples/03_interfaces.vir
+vira run docs/examples/04_result_handling.vir
+vira run docs/examples/05_arenas_and_autofree.vir
+vira run docs/examples/06_simd_tensors.vir
+vira run docs/examples/07_actors_and_supervisors.vir
+vira run docs/examples/08_production_pipeline.vir
+vira run docs/examples/09_file_io.vir
+vira run docs/examples/10_threads_actors_fault_tolerance.vir
+vira run docs/examples/11_control_flow_loops_operators.vir
+vira run docs/examples/12_deep_dive_tensors.vir
+vira run docs/examples/13_hardware_acceleration_gpu.vir
+vira run docs/examples/14_neural_network_cpu_gpu.vir
+vira run docs/examples/15_pretrained_weights_loader.vir
+vira run docs/examples/16_compilation_and_build_modes.vir
+vira run docs/examples/17_http_web_server_and_json.vir
+vira run docs/examples/18_autograd_and_safetensors.vir
+vira run docs/examples/19_local_llm_inference.vir
+vira run docs/examples/20_native_gui.vir
+vira run docs/examples/21_declarative_gui.vir
+vira run docs/examples/22_gui_navigation_lifecycle.vir
+vira run docs/examples/23_multi_package_architecture.vir
+vira run docs/examples/24_package_management_consumer.vir
+vira run docs/examples/25_actors_banking_fault_tolerance.vir
+vira run docs/examples/26_actors_worker_pool_fanout.vir
+vira run docs/examples/27_actors_ring_pipeline.vir
+vira run docs/examples/28_native_collections.vir
+vira run docs/examples/29_stdlib_net_http_server.vir
+vira run docs/examples/30_switch_statement.vir
+vira run docs/examples/31_package_namespacing_and_modules.vir
+vira run docs/examples/32_actor_detached_and_lifecycle.vir
+vira run docs/examples/33_nd_tensors_and_stdlib_json.vir
+vira run docs/examples/34_basic_cli_app.vir
+vira run docs/examples/35_advanced_cli_flags_syscall_exec.vir
+vira run docs/examples/36_linux_container_runtime_reference.vir
+vira run docs/examples/37_gui_image_and_asset_loading.vir
+vira run docs/examples/38_gui_remote_url_image_loading.vir
+vira run docs/examples/39_gui_realworld_cloud_ai_hub.vir
+vira run docs/examples/40_native_c_and_python_ffi.vir
 python docs/examples/40_python_ffi_caller.py
-.\vira.exe run docs/examples/41_cli_llm_chat_engine.vir
-.\vira.exe run docs/examples/42_huggingface_gguf_llm_inference.vir
-.\vira.exe run docs/examples/43_qwen2_5_gguf_chat_inference.vir
-.\vira.exe run docs/examples/44_gpu_compute_acceleration.vir
-.\vira.exe run docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir
+vira run docs/examples/41_cli_llm_chat_engine.vir
+vira run docs/examples/42_huggingface_gguf_llm_inference.vir
+vira run docs/examples/43_qwen2_5_gguf_chat_inference.vir
+vira run docs/examples/44_gpu_compute_acceleration.vir
+vira run docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir
 .\vira.exe build -prod -o bench46.exe docs/examples/46_qwen2_5_t4_large_ctx_benchmark.vir
 .\bench46.exe
 ```

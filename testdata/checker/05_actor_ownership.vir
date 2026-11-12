@@ -1,0 +1,50 @@
+module main
+
+pub actor Worker {
+pub:
+	id int
+mut:
+	n int = 0
+}
+
+pub fn (mut w Worker) bump() int {
+	w.n += 1
+	return w.n
+}
+
+struct Holder {
+pub mut:
+	w Worker
+}
+
+// A local actor is moved to the caller.
+fn make(id int) Worker {
+	w := Worker{ id: id, n: 0 }
+	return w
+}
+
+fn give_back(w Worker) Worker {
+	return w // ERROR: cannot return actor 'Worker' through 'w': it is borrowed
+}
+
+fn from_holder(h Holder) Worker {
+	return h.w // ERROR: cannot return actor 'Worker' from a field or element
+}
+
+fn main() {
+	mut a := make(1)
+	ok := Holder{ w: Worker{ id: 2, n: 0 } }
+	mut pool := []Worker{}
+	pool.push(Worker{ id: 3, n: 0 })
+	pool.push(make(4))
+	pool.set(0, Worker{ id: 5, n: 0 })
+	println('${a.id} ${ok.w.id} ${pool.len}')
+
+	h := Holder{ w: a } // ERROR: actor 'Worker' cannot be stored in field 'Holder.w'
+	pool.push(a) // ERROR: actor 'Worker' cannot be stored in a slice
+	pool.set(0, pool[1]) // ERROR: actor 'Worker' cannot be stored in a slice
+	g := pool.get(0) or { Worker{ id: 0, n: 0 } } // ERROR: cannot call '.get()' on a slice of actor 'Worker'
+	println('${h.w.id} ${g.id}')
+	_ := give_back(a)
+	_ := from_holder(ok)
+}

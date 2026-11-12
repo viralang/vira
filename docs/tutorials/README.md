@@ -31,7 +31,9 @@ Beginner                           Intermediate                               Ad
                                                                                   │
                                                                                   ├── [40. GPU Acceleration & OOM]
                                                                                   │
-                                                                                  └── [41. GPU LLM Chat & GUI Studio]
+                                                                                  ├── [41. GPU LLM Chat & GUI Studio]
+                                                                                  │
+                                                                                  └── [42. Ownership, Strings & Actor Handles]
 ```
 
 ---
@@ -81,6 +83,7 @@ Beginner                           Intermediate                               Ad
 | **39** | [**Pure-Vira CLI LLM Chat Engine, Pretrained Hugging Face LLaMA & Qwen 2.5 GGUF Inference**](./39_pure_vira_cli_llm_chat_engine.md) | Advanced / AI | [`41_cli_llm_chat_engine.vir`](../examples/41_cli_llm_chat_engine.vir)<br>[`42_huggingface_gguf_llm_inference.vir`](../examples/42_huggingface_gguf_llm_inference.vir)<br>[`43_qwen2_5_gguf_chat_inference.vir`](../examples/43_qwen2_5_gguf_chat_inference.vir) | 100% pure-Vira (Zero-FFI) CLI LLM engines for LLaMA (`stories260K.gguf`) and Qwen 2.5 (`qwen2_5_instruct.gguf`): binary GGUF v3 header, SentencePiece BPE & GPT-2 ChatML (`<\|im_start\|>`/`<\|im_end\|>`) tokenizers, QKV attention biases (`attn_q/k/v.bias`), 1M NeoX & interleaved RoPE, Grouped-Query Attention (GQA), `Q4_0`/`Q8_0` SIMD dequantization, stateful KV cache, CLI flags (`flag.FlagSet`), and interactive REPL (`io.prompt`) with 0 leaks. |
 | **40** | [**Cross-Platform GPU Compute Acceleration & Actor OOM Supervision**](./40_cross_platform_gpu_compute_acceleration.md) | Advanced / Systems | [`44_gpu_compute_acceleration.vir`](../examples/44_gpu_compute_acceleration.vir) | Zero-SDK GPU compute runtime ([`vira_gpu.h`](../../runtime/vira_gpu.h)), unified DMA, 4096-entry persistent weight caching, fused transformer blocks inside bump arenas, Chase-Lev actor work-stealing pool, and fault-tolerant OOM supervision with CPU-SIMD fallback. |
 | **41** | [**Building GPU-Accelerated LLM Chat Applications (CLI & Native 60 FPS Desktop Studio)**](./41_building_gpu_accelerated_llm_chat_apps.md) | Advanced / AI & GUI | [`43_qwen2_5_gguf_chat_inference.vir`](../examples/43_qwen2_5_gguf_chat_inference.vir)<br>[`45_gui_qwen2_5_gguf_chat_studio.vir`](../examples/45_gui_qwen2_5_gguf_chat_studio.vir) | Production-grade LLM applications: Zero-SDK NVIDIA CUDA Driver API, sm_70+ Tensor Core (WMMA) hardware specialization, OpenCL/CPU fallbacks, direct GGUF quantized block offloading, non-blocking frame-by-frame layer streaming, live autoregressive canvas drawing, and real-time hardware telemetry. |
+| **42** | [**Ownership, Strings & Actor Handles**](./42_ownership_strings_and_actor_handles.md) | Intermediate / Advanced | [`47_ownership_strings_and_actor_handles.vir`](../examples/47_ownership_strings_and_actor_handles.vir) | String `+` and `+=`, which types each operator accepts, copies vs moves, borrowed arguments, actors as handles, message-only access to actors, single-owner actors, deadlock avoidance, defined arithmetic (division by zero, overflow), worker pool size, and how to migrate code written for v0.7.7. **Read this if you wrote Vira code for v0.7.7 or earlier.** |
 
 
 
@@ -88,25 +91,25 @@ Beginner                           Intermediate                               Ad
 
 ## 🏛️ Standard Library Packages Guide
 
-Vira ships with 15 first-party standard library packages located under [`packages/`](file:///mnt/flutter_drive/vira/packages), resolved automatically by the compiler at compile-time:
+Vira ships with 15 first-party standard library packages located under [`packages/`](../../packages), resolved automatically by the compiler at compile-time:
 
 | Package | Import Path | Primary Responsibilities |
 | :--- | :--- | :--- |
-| **`os`** | [`import os`](file:///mnt/flutter_drive/vira/packages/os) | CLI arguments (`os.args()`), process ID (`os.getpid()`), environment variables, filesystem operations, platform detection (`os.is_windows()`). |
-| **`exec`** | [`import exec`](file:///mnt/flutter_drive/vira/packages/exec) | Subprocess execution, pipe redirection, `CLONE_*` namespace flags, split async lifecycle (`cmd.start()`, `cmd.wait()`), and `combined_output`. |
-| **`syscall`** | [`import syscall`](file:///mnt/flutter_drive/vira/packages/syscall) | Low-level kernel calls: file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux namespaces, mounts, `chroot`, `mknod`, signal queue. |
-| **`flag`** | [`import flag`](file:///mnt/flutter_drive/vira/packages/flag) | Declarative CLI flag parsing (`bool_flag`, `int_flag`, `string_flag`, `f64_flag`), short `-p` / long `--port` options, `--help` formatter. |
-| **`log`** | [`import log`](file:///mnt/flutter_drive/vira/packages/log) | Leveled stderr logging (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) with timestamping, custom prefixes, and process termination. |
-| **`strings`** | [`import strings`](file:///mnt/flutter_drive/vira/packages/strings) | String utilities: `fields` (like Go `strings.Fields`), `join`, `split`, `replace`, `trim_prefix`, `trim_suffix`, `pad_left`, `pad_right`, `sort`, `StringBuilder`. |
-| **`math`** | [`import math`](file:///mnt/flutter_drive/vira/packages/math) | High-performance C99 math intrinsics: trigonometry (`sin`, `cos`, `tan`), exponential, log, `pow`, `sqrt`, `hypot`, `clamp`, `PI`, `E`, `TAU`. |
-| **`time`** | [`import time`](file:///mnt/flutter_drive/vira/packages/time) | Wall-clock time (`now_unix()`, `now_ns()`), monotonic clock, high-precision sleep (`sleep_ms`, `sleep_us`), `strftime` formatting, and `Duration`. |
-| **`ctype`** | [`import ctype`](file:///mnt/flutter_drive/vira/packages/ctype) | Fast ASCII character classification (`is_alpha`, `is_digit`, `is_space`, `is_upper`, `is_lower`) and case conversion (`to_lower`, `to_upper`). |
-| **`io`** | [`import io`](file:///mnt/flutter_drive/vira/packages/io) | Stream traits (`Reader`, `Writer`, `Closer`), `File`, `BufReader`, interactive console input (`io.prompt()`, `io.read_line()`), temporary files. |
-| **`net`** | [`import net`](file:///mnt/flutter_drive/vira/packages/net) | Cross-platform networking: `TcpListener`, `TcpStream`, `UdpSocket`, non-blocking `Poller`, and `SocketAddr`. |
-| **`http`** | [`import http`](file:///mnt/flutter_drive/vira/packages/http) | HTTP/1.1 request parser, response builder, `HeaderMap`, server loops, and Server-Sent Events (`SseStream`). |
-| **`json`** | [`import json`](file:///mnt/flutter_drive/vira/packages/json) | Pure-Vira RFC 8259 JSON parser (`json.get_str`, `json.get_int`), validator (`json.is_valid`), array extractors, and $O(N)$ `JsonBuilder`. |
-| **`viraserve`**| [`import viraserve`](file:///mnt/flutter_drive/vira/packages/viraserve) | Actor-backed asynchronous web microframework and routing engine with zero memory leaks. |
-| **`widget`** | [`import widget as w`](file:///mnt/flutter_drive/vira/packages/widget) | Flutter-inspired declarative UI kit, responsive layouts (`Column`, `Row`, `Card`, `Padding`), `MediaQuery`, buttons, inputs, data tables, and Catppuccin theme tokens. |
+| **`os`** | [`import os`](../../packages/os) | CLI arguments (`os.args()`), process ID (`os.getpid()`), environment variables, filesystem operations, platform detection (`os.is_windows()`). |
+| **`exec`** | [`import exec`](../../packages/exec) | Subprocess execution, pipe redirection, `CLONE_*` namespace flags, split async lifecycle (`cmd.start()`, `cmd.wait()`), and `combined_output`. |
+| **`syscall`** | [`import syscall`](../../packages/syscall) | Low-level kernel calls: file descriptors (`open`, `read`, `write`, `close`, `pipe`, `dup2`), Linux namespaces, mounts, `chroot`, `mknod`, signal queue. |
+| **`flag`** | [`import flag`](../../packages/flag) | Declarative CLI flag parsing (`bool_flag`, `int_flag`, `string_flag`, `f64_flag`), short `-p` / long `--port` options, `--help` formatter. |
+| **`log`** | [`import log`](../../packages/log) | Leveled stderr logging (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) with timestamping, custom prefixes, and process termination. |
+| **`strings`** | [`import strings`](../../packages/strings) | String utilities: `fields` (like Go `strings.Fields`), `join`, `split`, `replace`, `trim_prefix`, `trim_suffix`, `pad_left`, `pad_right`, `sort`, `StringBuilder`. |
+| **`math`** | [`import math`](../../packages/math) | High-performance C99 math intrinsics: trigonometry (`sin`, `cos`, `tan`), exponential, log, `pow`, `sqrt`, `hypot`, `clamp`, `PI`, `E`, `TAU`. |
+| **`time`** | [`import time`](../../packages/time) | Wall-clock time (`now_unix()`, `now_ns()`), monotonic clock, high-precision sleep (`sleep_ms`, `sleep_us`), `strftime` formatting, and `Duration`. |
+| **`ctype`** | [`import ctype`](../../packages/ctype) | Fast ASCII character classification (`is_alpha`, `is_digit`, `is_space`, `is_upper`, `is_lower`) and case conversion (`to_lower`, `to_upper`). |
+| **`io`** | [`import io`](../../packages/io) | Stream traits (`Reader`, `Writer`, `Closer`), `File`, `BufReader`, interactive console input (`io.prompt()`, `io.read_line()`), temporary files. |
+| **`net`** | [`import net`](../../packages/net) | Cross-platform networking: `TcpListener`, `TcpStream`, `UdpSocket`, non-blocking `Poller`, and `SocketAddr`. |
+| **`http`** | [`import http`](../../packages/http) | HTTP/1.1 request parser, response builder, `HeaderMap`, server loops, and Server-Sent Events (`SseStream`). |
+| **`json`** | [`import json`](../../packages/json) | Pure-Vira RFC 8259 JSON parser (`json.get_str`, `json.get_int`), validator (`json.is_valid`), array extractors, and $O(N)$ `JsonBuilder`. |
+| **`viraserve`**| [`import viraserve`](../../packages/viraserve) | Actor-backed asynchronous web microframework and routing engine with zero memory leaks. |
+| **`widget`** | [`import widget as w`](../../packages/widget) | Flutter-inspired declarative UI kit, responsive layouts (`Column`, `Row`, `Card`, `Padding`), `MediaQuery`, buttons, inputs, data tables, and Catppuccin theme tokens. |
 
 For detailed API documentation, code examples, and best practices, see the comprehensive [**Standard Library Manual**](../STANDARD_LIBRARY.md).
 

@@ -141,6 +141,63 @@ static inline vira_string vira_str_own(vira_string s) {
 }
 
 /**
+ * Sums the lengths of `n` string parts for concatenation, faulting if the total does not fit a
+ * `vira_string` length.
+ * @param parts Array of `n` strings.
+ * @param n Number of parts.
+ * @return Total byte length of all parts.
+ */
+static inline int32_t _vira_str_concat_len(const vira_string *parts, int32_t n) {
+  int64_t total = 0;
+  for (int32_t i = 0; i < n; i++) {
+    if (parts[i].len > 0 && parts[i].data != NULL) {
+      total += parts[i].len;
+    }
+  }
+  if (total > INT32_MAX) {
+    _vira_rt_fault("vira panic: string concatenation exceeds maximum string length");
+  }
+  return (int32_t)total;
+}
+
+/**
+ * Copies `n` string parts back to back into `buf` (which holds at least their total length + 1).
+ */
+static inline void _vira_str_concat_copy(uint8_t *buf, const vira_string *parts, int32_t n) {
+  size_t off = 0;
+  for (int32_t i = 0; i < n; i++) {
+    if (parts[i].len > 0 && parts[i].data != NULL) {
+      memcpy(buf + off, parts[i].data, (size_t)parts[i].len);
+      off += (size_t)parts[i].len;
+    }
+  }
+  buf[off] = '\0';
+}
+
+/**
+ * Concatenates `n` strings into one newly allocated heap string.
+ * @param parts Array of `n` strings, in order. They are only read; ownership is unchanged.
+ * @param n Number of parts.
+ * @return Owned heap `vira_string` (or the empty literal when the result is empty).
+ * Usage: Emitted by the compiler for `a + b` (and chains `a + b + c`) on strings, and for `s += t`.
+ * A chain is flattened into one call, so it costs one allocation however long it is.
+ */
+static inline vira_string vira_str_concat_n(const vira_string *parts, int32_t n) {
+  int32_t total = _vira_str_concat_len(parts, n);
+  if (total == 0) {
+    return vira_str_lit("", 0);
+  }
+  uint8_t *buf = (uint8_t *)malloc((size_t)total + 1);
+  if (!buf) {
+    fprintf(stderr, "vira panic: out of memory in vira_str_concat_n\n");
+    exit(1);
+  }
+  _vira_str_concat_copy(buf, parts, n);
+  _vira_record_alloc();
+  return (vira_string){.data = buf, .len = total, .is_lit = false};
+}
+
+/**
  * Frees the backing heap buffer of a dynamic `vira_string` and zeroes its fields.
  * @param s Pointer to `vira_string` to release.
  * Usage: Safe destructor for owned strings; no-op if string is an immutable literal.

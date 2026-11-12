@@ -145,12 +145,12 @@ vira lsp
 
 ## 6. VS Code & Cursor Extension
 
-The official Vira VS Code extension is located in [editors/vscode](file:///c:/Users/hp/vex/editors/vscode):
+The official Vira VS Code extension is located in [editors/vscode](../../editors/vscode):
 
 ### Files
-- [package.json](file:///c:/Users/hp/vex/editors/vscode/package.json): Extension manifest declaring language `vira` and command bindings.
-- [language-configuration.json](file:///c:/Users/hp/vex/editors/vscode/language-configuration.json): Bracket matching, comment toggling (`//`), and auto-closing pairs.
-- [syntaxes/vira.tmLanguage.json](file:///c:/Users/hp/vex/editors/vscode/syntaxes/vira.tmLanguage.json): TextMate syntax grammar highlighting keywords (`actor`, `arena`, `tensor`), quadrants (`pub:`, `mut:`), operators (`@`, `<-`), and built-ins.
+- [package.json](../../editors/vscode/package.json): Extension manifest declaring language `vira` and command bindings.
+- [language-configuration.json](../../editors/vscode/language-configuration.json): Bracket matching, comment toggling (`//`), and auto-closing pairs.
+- [syntaxes/vira.tmLanguage.json](../../editors/vscode/syntaxes/vira.tmLanguage.json): TextMate syntax grammar highlighting keywords (`actor`, `arena`, `tensor`), quadrants (`pub:`, `mut:`), operators (`@`, `<-`), and built-ins.
 
 ### Installing in VS Code
 Copy or symlink the folder to your VS Code extensions directory:

@@ -1,0 +1,139 @@
+module actor_baseline
+
+// Actor micro-benchmarks used as the before/after baseline for runtime changes.
+// Prints one machine-readable line; scripts/bench_actors.sh runs it repeatedly and
+// reports the median and spread of each metric.
+//
+//   spawn_us  create and drop 10,000 actors
+//   fanout_us 10,000 rounds of one awaited message to each of 4 actors
+//   chaos_us  5,000 awaited messages to one actor, 1 in 7 panicking and restarted
+//   ring_us   10,000 sequential awaited hops around 4 actors
+//   pool_us   push 2,000 actors into a slice (it grows) and message each one
+
+pub actor Node {
+pub:
+	id int
+mut:
+	ops int = 0
+}
+
+pub fn (mut n Node) ping(v int) int {
+	n.ops = n.ops + 1
+	return v + 1
+}
+
+pub fn (mut n Node) job(v int, fault bool) int {
+	n.ops = n.ops + 1
+	if fault {
+		panic('injected fault')
+	}
+	return v * 2
+}
+
+pub fn (mut n Node) hop(token int) int {
+	n.ops = n.ops + 1
+	return token + n.id
+}
+
+fn bench_spawn(n int) i64 {
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		mut a := Node{ id: i, ops: 0 }
+		_ := a
+	}
+	return time_now_us() - t0
+}
+
+fn bench_fanout(rounds int) i64 {
+	mut w0 := Node{ id: 0, ops: 0 }
+	mut w1 := Node{ id: 1, ops: 0 }
+	mut w2 := Node{ id: 2, ops: 0 }
+	mut w3 := Node{ id: 3, ops: 0 }
+	t0 := time_now_us()
+	mut ok := 0
+	for mut b := 0; b < rounds; b = b + 1 {
+		f0 := w0 <- ping(b)
+		f1 := w1 <- ping(b)
+		f2 := w2 <- ping(b)
+		f3 := w3 <- ping(b)
+		v0 := f0.await() or { 0 }
+		v1 := f1.await() or { 0 }
+		v2 := f2.await() or { 0 }
+		v3 := f3.await() or { 0 }
+		if v0 > 0 && v1 > 0 && v2 > 0 && v3 > 0 {
+			ok = ok + 4
+		}
+	}
+	elapsed := time_now_us() - t0
+	if ok != rounds * 4 {
+		println('BENCH_ERROR fanout ok=${ok}')
+	}
+	return elapsed
+}
+
+fn bench_chaos(n int) i64 {
+	mut node := Node{ id: 7, ops: 0 }
+	mut trapped := 0
+	t0 := time_now_us()
+	for mut c := 0; c < n; c = c + 1 {
+		fut := node <- job(c, c % 7 == 0)
+		_ := fut.await() or {
+			trapped = trapped + 1
+			0
+		}
+	}
+	elapsed := time_now_us() - t0
+	if trapped != (n + 6) / 7 {
+		println('BENCH_ERROR chaos trapped=${trapped}')
+	}
+	return elapsed
+}
+
+fn bench_ring(rounds int) i64 {
+	mut r1 := Node{ id: 1, ops: 0 }
+	mut r2 := Node{ id: 2, ops: 0 }
+	mut r3 := Node{ id: 3, ops: 0 }
+	mut r4 := Node{ id: 4, ops: 0 }
+	mut token := 1
+	t0 := time_now_us()
+	for mut r := 0; r < rounds; r = r + 1 {
+		f1 := r1 <- hop(token)
+		v1 := f1.await() or { token }
+		f2 := r2 <- hop(v1)
+		v2 := f2.await() or { v1 }
+		f3 := r3 <- hop(v2)
+		v3 := f3.await() or { v2 }
+		f4 := r4 <- hop(v3)
+		v4 := f4.await() or { v3 }
+		token = v4
+	}
+	elapsed := time_now_us() - t0
+	if token != 1 + rounds * 10 {
+		println('BENCH_ERROR ring token=${token}')
+	}
+	return elapsed
+}
+
+fn bench_pool(n int) i64 {
+	t0 := time_now_us()
+	mut pool := []Node{}
+	for mut i := 0; i < n; i = i + 1 {
+		pool.push(Node{ id: i, ops: 0 })
+		pool[i] <- ping(i)
+	}
+	last := pool[n - 1] <- ping(1) or { 0 }
+	elapsed := time_now_us() - t0
+	if last != 2 {
+		println('BENCH_ERROR pool last=${last}')
+	}
+	return elapsed
+}
+
+fn main() {
+	spawn_us := bench_spawn(10000)
+	fanout_us := bench_fanout(10000)
+	chaos_us := bench_chaos(5000)
+	ring_us := bench_ring(2500)
+	pool_us := bench_pool(2000)
+	println('BENCH spawn_us=${spawn_us} fanout_us=${fanout_us} chaos_us=${chaos_us} ring_us=${ring_us} pool_us=${pool_us}')
+}

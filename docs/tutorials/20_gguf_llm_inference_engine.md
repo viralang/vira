@@ -111,7 +111,7 @@ ffn_out := ffn_mid @ w_down
 
 ## 3. Complete Runnable Implementation
 
-Here is the complete source code from [docs/examples/19_local_llm_inference.vir](file:///c:/Users/hp/vex/docs/examples/19_local_llm_inference.vir):
+Here is the complete source code from [docs/examples/19_local_llm_inference.vir](../examples/19_local_llm_inference.vir):
 
 ```v
 module main

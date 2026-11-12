@@ -17,7 +17,7 @@ Welcome to the Vira programming language! In this tutorial, you will learn the f
 - Deterministic cleanup with `defer`
 - Conditional expressions (`if`/`else`)
 - The blank identifier `_`
-- Importing standard library packages from [`packages/`](file:///mnt/flutter_drive/vira/packages)
+- Importing standard library packages from [`packages/`](../../packages)
 
 ---
 
@@ -201,7 +201,7 @@ You can assign to `_` multiple times in the same scope without redeclaration err
 
 ## 10. Using Standard Library Packages (`packages/*`)
 
-Vira includes a rich, high-performance standard library directly under [`packages/`](file:///mnt/flutter_drive/vira/packages). You can import any standard library package by name without extra configuration:
+Vira includes a rich, high-performance standard library directly under [`packages/`](../../packages). You can import any standard library package by name without extra configuration:
 
 ```v
 import os

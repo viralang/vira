@@ -2,7 +2,7 @@
 
 Welcome to the **Vira Standard Library**! This directory houses the 14 first-party standard library packages distributed with Vira.
 
-Every package is implemented in idiomatic, pure Vira code backed by lightweight C99 shims in [`runtime/vira_rt.h`](file:///mnt/flutter_drive/vira/runtime/vira_rt.h), providing zero-GC execution, compile-time Autofree safety, and zero memory leaks.
+Every package is implemented in idiomatic, pure Vira code backed by lightweight C99 shims in [`runtime/vira_rt.h`](../runtime/vira_rt.h), providing zero-GC execution, compile-time Autofree safety, and zero memory leaks.
 
 ---
 

@@ -27,8 +27,13 @@ typedef struct _vira_task {
 //  VIRA_TASK_SELF_MANAGED: the task owns its own lifetime (actor drain tasks). The scheduler must
 //                          NOT write `done` after running it, because the owning actor may already
 //                          have been destroyed by the time the task function returns.
+//  VIRA_TASK_RUNNING:      an actor message whose handler has started. The drain loop moves a
+//                          message from 0 to RUNNING with a CAS, so a waiter that gives up on a
+//                          message (deadlock between actors) can CAS 0 -> DETACHED and know
+//                          whether it won: only a message that has not started can be abandoned.
 #define VIRA_TASK_DETACHED (-1)
 #define VIRA_TASK_SELF_MANAGED (-2)
+#define VIRA_TASK_RUNNING (-3)
 
 // Actor scheduling states (`vira_actor_ctx.scheduled`).
 #define VIRA_ACTOR_IDLE 0      // no drain task queued or running
@@ -72,11 +77,139 @@ struct _vira_actor_ctx {
   vira_defer_entry *defer_stack; // Lazily allocated, grows on demand (never silently drops entries)
   int32_t defer_cap;
   int32_t defer_top;
+  uint32_t wf_slot; // this actor's entry in the wait-for graph (VIRA_WF_NONE if unavailable)
 };
 
 // Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!
 static __thread vira_actor_ctx *_vira_tls_actor = NULL;
 static __thread int32_t _vira_tls_worker_id = -1;
+
+// ----------------------------------------------------------------------------
+// WAIT-FOR GRAPH: detects actors that await each other (A waits on B, B waits on A).
+//
+// An actor handler that awaits a message to another actor publishes an EDGE "I wait on that
+// actor" in a global slot table. The table lives in chunks that are never freed, so a check
+// can follow edges without touching actor memory that may already be gone. An edge packs the
+// waiter's wait sequence number (upper 32 bits) with the target's slot + 1 (lower 32 bits, 0 =
+// not waiting); the sequence number changes on every new wait.
+//
+// A thread also records the actors suspended in an await on its own stack (work-helping runs
+// other handlers on top of them); such an actor cannot resume before the handlers above it
+// return, so reaching it counts as reaching the waiter itself.
+//
+// While a waiter spins it periodically walks the edges from its target. A cycle back to itself
+// (or to an actor suspended beneath it) is reported only if two walks, taken apart, see exactly
+// the same edges: each edge then existed continuously between the walks, so at one instant
+// they all held at once, and a cycle of blocked waits never resolves. A transient chain seen
+// while waits are starting and finishing does not repeat.
+// ----------------------------------------------------------------------------
+#define VIRA_WF_NONE 0xFFFFFFFFu
+#define VIRA_WF_CHUNK_BITS 12
+#define VIRA_WF_CHUNK (1u << VIRA_WF_CHUNK_BITS)
+#define VIRA_WF_MAX_CHUNKS 1024 // 4M live actors
+#define VIRA_WF_MAX_HOPS 64
+#define VIRA_WF_STACK 40 // > VIRA_MAX_HELP_DEPTH: one entry per await nested on a thread
+
+typedef struct {
+  volatile uint64_t edge;
+  uint32_t next_free; // free-list link (slot + 1), guarded by _vira_wf_lock
+} _vira_wf_slot;
+
+static _vira_wf_slot *volatile _vira_wf_chunks[VIRA_WF_MAX_CHUNKS];
+static volatile int32_t _vira_wf_lock = 0;
+static uint32_t _vira_wf_free_head = 0; // slot + 1; 0 = empty
+static uint32_t _vira_wf_next = 0;      // next never-used slot
+
+static __thread uint32_t _vira_tls_wf_stack[VIRA_WF_STACK];
+static __thread int32_t _vira_tls_wf_depth = 0;
+
+static inline _vira_wf_slot *_vira_wf_at(uint32_t s) {
+  _vira_wf_slot *chunk = __atomic_load_n(&_vira_wf_chunks[s >> VIRA_WF_CHUNK_BITS], __ATOMIC_ACQUIRE);
+  return &chunk[s & (VIRA_WF_CHUNK - 1)];
+}
+
+static inline void _vira_wf_lock_acquire(void) {
+  while (__atomic_exchange_n(&_vira_wf_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+    while (__atomic_load_n(&_vira_wf_lock, __ATOMIC_RELAXED) != 0) {
+    }
+  }
+}
+
+static inline void _vira_wf_lock_release(void) { __atomic_store_n(&_vira_wf_lock, 0, __ATOMIC_RELEASE); }
+
+/** Assigns a wait-for slot to a new actor; VIRA_WF_NONE if the table is full (detection off). */
+static inline uint32_t _vira_wf_alloc(void) {
+  _vira_wf_lock_acquire();
+  uint32_t s;
+  if (_vira_wf_free_head != 0) {
+    s = _vira_wf_free_head - 1;
+    _vira_wf_free_head = _vira_wf_at(s)->next_free;
+  } else {
+    s = _vira_wf_next;
+    uint32_t ci = s >> VIRA_WF_CHUNK_BITS;
+    if (ci >= VIRA_WF_MAX_CHUNKS) {
+      _vira_wf_lock_release();
+      return VIRA_WF_NONE;
+    }
+    if ((s & (VIRA_WF_CHUNK - 1)) == 0) {
+      _vira_wf_slot *chunk = (_vira_wf_slot *)calloc(VIRA_WF_CHUNK, sizeof(_vira_wf_slot));
+      if (chunk == NULL) {
+        _vira_wf_lock_release();
+        return VIRA_WF_NONE;
+      }
+      __atomic_store_n(&_vira_wf_chunks[ci], chunk, __ATOMIC_RELEASE);
+    }
+    _vira_wf_next++;
+  }
+  _vira_wf_lock_release();
+  // Keep the sequence number of a reused slot so an old edge value never repeats.
+  _vira_wf_slot *slot = _vira_wf_at(s);
+  uint64_t e = __atomic_load_n(&slot->edge, __ATOMIC_RELAXED);
+  __atomic_store_n(&slot->edge, e & 0xFFFFFFFF00000000ull, __ATOMIC_SEQ_CST);
+  return s;
+}
+
+static inline void _vira_wf_free(uint32_t s) {
+  if (s == VIRA_WF_NONE)
+    return;
+  _vira_wf_slot *slot = _vira_wf_at(s);
+  uint64_t e = __atomic_load_n(&slot->edge, __ATOMIC_RELAXED);
+  __atomic_store_n(&slot->edge, e & 0xFFFFFFFF00000000ull, __ATOMIC_SEQ_CST);
+  _vira_wf_lock_acquire();
+  slot->next_free = _vira_wf_free_head;
+  _vira_wf_free_head = s + 1;
+  _vira_wf_lock_release();
+}
+
+typedef struct {
+  uint32_t slot;
+  uint64_t edge;
+} _vira_wf_hop;
+
+/**
+ * Follows wait-for edges from `target`.
+ * @return True if the chain reaches an actor suspended on this thread (the waiter included).
+ * `hops`/`n` receive the edges read, for comparison with a later walk.
+ */
+static inline bool _vira_wf_walk(uint32_t target, _vira_wf_hop *hops, int32_t *n) {
+  uint32_t cur = target;
+  *n = 0;
+  for (int32_t i = 0; i < VIRA_WF_MAX_HOPS; i++) {
+    for (int32_t j = 0; j < _vira_tls_wf_depth; j++) {
+      if (_vira_tls_wf_stack[j] == cur)
+        return true;
+    }
+    uint64_t e = __atomic_load_n(&_vira_wf_at(cur)->edge, __ATOMIC_SEQ_CST);
+    hops[i].slot = cur;
+    hops[i].edge = e;
+    *n = i + 1;
+    uint32_t next = (uint32_t)(e & 0xFFFFFFFFu);
+    if (next == 0)
+      return false;
+    cur = next - 1;
+  }
+  return false;
+}
 
 /**
  * Checks whether the current thread is actively executing within an actor message handler.
@@ -242,6 +375,7 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->defer_stack = NULL;
   ctx->defer_cap = 0;
   ctx->defer_top = 0;
+  ctx->wf_slot = _vira_wf_alloc();
 }
 
 /**
@@ -287,6 +421,8 @@ static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
   free(ctx->defer_stack);
   ctx->defer_stack = NULL;
   vira_arena_destroy(&ctx->isolated_heap);
+  _vira_wf_free(ctx->wf_slot);
+  ctx->wf_slot = VIRA_WF_NONE;
 }
 
 /**
@@ -1234,8 +1370,11 @@ static void _vira_actor_drain_task(void *env) {
       quota--;
       vira_task_fn fn = msg->fn;
       void *menv = msg->env;
-      bool is_detached =
-          (__atomic_load_n(&msg->done, __ATOMIC_RELAXED) == VIRA_TASK_DETACHED);
+      // Claim the message: 0 -> RUNNING. If that fails it is DETACHED, either sent that way or
+      // abandoned by a waiter that broke a deadlock; then this loop frees the envelope.
+      int32_t expected_pending = 0;
+      bool is_detached = !__atomic_compare_exchange_n(&msg->done, &expected_pending, VIRA_TASK_RUNNING,
+                                                      false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
       fn(menv);
       count++;
       if (is_detached) {
@@ -1368,7 +1507,10 @@ static inline void vira_scheduler_await(vira_task *task) {
     return;
   uint32_t rng = 0x85EBCA6Bu;
   int32_t idle = 0;
-  while (__atomic_load_n(&task->done, __ATOMIC_ACQUIRE) == 0) {
+  for (;;) {
+    int32_t d = __atomic_load_n(&task->done, __ATOMIC_ACQUIRE);
+    if (d != 0 && d != VIRA_TASK_RUNNING)
+      break;
     if (_vira_sched_help_one(&rng)) {
       idle = 0;
       continue;
@@ -1417,13 +1559,98 @@ static inline bool _vira_future_detach_if_self(vira_future *f) {
     return false;
   if (!vira_actor_is_current(f->actor))
     return false;
-  if (__atomic_load_n(&f->task->done, __ATOMIC_ACQUIRE) != 0)
-    return false; // already completed (or already detached)
-  __atomic_store_n(&f->task->done, VIRA_TASK_DETACHED, __ATOMIC_RELEASE);
+  int32_t expected = 0;
+  if (!__atomic_compare_exchange_n(&f->task->done, &expected, VIRA_TASK_DETACHED, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    return false; // already running, completed or detached
   f->env = NULL;
   f->task = NULL;
   f->drop_fn = NULL;
   return true;
+}
+
+/**
+ * Waits for an actor message like `vira_scheduler_await`, but from inside an actor handler it
+ * also watches the wait-for graph (see the comment at VIRA_WF_NONE). If waiting would deadlock,
+ * and the message has not started yet, the message is converted into a detached send (it still
+ * runs later and the drain loop frees its envelope) and the wait is abandoned.
+ * @param task The message being waited on.
+ * @param target The actor the message was sent to.
+ * @return True if the wait was abandoned because of a deadlock; the caller must then treat the
+ * envelope as no longer its own.
+ */
+static inline bool vira_actor_await_msg(vira_task *task, const vira_actor_ctx *target) {
+  vira_actor_ctx *me = (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) ? _vira_tls_actor : NULL;
+  if (task == NULL || me == NULL || target == NULL || me->wf_slot == VIRA_WF_NONE ||
+      target->wf_slot == VIRA_WF_NONE || _vira_tls_wf_depth >= VIRA_WF_STACK) {
+    vira_scheduler_await(task);
+    return false;
+  }
+  _vira_wf_slot *my_slot = _vira_wf_at(me->wf_slot);
+  uint64_t seq = (__atomic_load_n(&my_slot->edge, __ATOMIC_RELAXED) >> 32) + 1;
+  __atomic_store_n(&my_slot->edge, (seq << 32) | ((uint64_t)target->wf_slot + 1), __ATOMIC_SEQ_CST);
+  _vira_tls_wf_stack[_vira_tls_wf_depth++] = me->wf_slot;
+
+  _vira_wf_hop prev[VIRA_WF_MAX_HOPS];
+  _vira_wf_hop cur[VIRA_WF_MAX_HOPS];
+  int32_t prev_n = -1;
+  bool abandoned = false;
+  uint32_t rng = 0x27D4EB2Fu;
+  int32_t idle = 0;
+  uint32_t iter = 0;
+  for (;;) {
+    int32_t d = __atomic_load_n(&task->done, __ATOMIC_ACQUIRE);
+    if (d != 0 && d != VIRA_TASK_RUNNING)
+      break;
+    if ((iter++ & 255u) == 0) {
+      int32_t cur_n = 0;
+      if (_vira_wf_walk(target->wf_slot, cur, &cur_n)) {
+        if (prev_n == cur_n && memcmp(prev, cur, sizeof(_vira_wf_hop) * (size_t)cur_n) == 0) {
+          int32_t expected = 0;
+          if (__atomic_compare_exchange_n(&task->done, &expected, VIRA_TASK_DETACHED, false,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            abandoned = true;
+            break;
+          }
+          // The message is already running: another actor in the cycle is waiting on a message
+          // that has not started, and it will break the cycle instead.
+        }
+        memcpy(prev, cur, sizeof(_vira_wf_hop) * (size_t)cur_n);
+        prev_n = cur_n;
+      } else {
+        prev_n = -1;
+      }
+    }
+    if (_vira_sched_help_one(&rng)) {
+      idle = 0;
+      continue;
+    }
+    if (idle < 32) {
+      vira_cpu_relax();
+    } else {
+      sched_yield();
+    }
+    idle++;
+  }
+
+  _vira_tls_wf_depth--;
+  __atomic_store_n(&my_slot->edge, seq << 32, __ATOMIC_SEQ_CST);
+  return abandoned;
+}
+
+/**
+ * Waits for a future's message (deadlock-aware, see vira_actor_await_msg).
+ * @return True if the wait was abandoned; the future has then been emptied and its envelope
+ * belongs to the drain loop.
+ */
+static inline bool _vira_future_wait_or_detach(vira_future *f) {
+  if (vira_actor_await_msg(f->task, f->actor)) {
+    f->env = NULL;
+    f->task = NULL;
+    f->drop_fn = NULL;
+    return true;
+  }
+  return false;
 }
 
 // Idempotent scope-exit cleanup injected by `internal/autofree` for Future[T]
@@ -1439,8 +1666,8 @@ static inline void vira_future_free(vira_future *f) {
     }
     // If an early return skipped `.await()`, wait for the worker thread to
     // finish before freeing unconsumed result and envelope
-    if (f->task != NULL) {
-      vira_scheduler_await(f->task);
+    if (f->task != NULL && _vira_future_wait_or_detach(f)) {
+      return;
     }
     if (f->drop_fn != NULL) {
       f->drop_fn(f->env);

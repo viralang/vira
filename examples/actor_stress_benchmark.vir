@@ -4,8 +4,9 @@ module actor_stress_benchmark
 // VIRA HIGH-CONCURRENCY ACTOR & FAULT TOLERANCE BENCHMARK
 //
 // Stresses all concurrency, memory, and fault tolerance trade-offs:
-// 1. High Concurrent Actors: Spawning 10,000 lightweight actors (~64B/actor).
-// 2. Lock-Free Work-Stealing: Chase-Lev deques across multicore worker threads.
+// 1. High Concurrent Actors: Creating and destroying 10,000 heap actors (~370 B + fields each).
+// 2. Lock-Free Work-Stealing: Chase-Lev deques across multicore worker threads
+//    (one per logical core, 2-16; set VIRA_WORKERS to pin the count).
 // 3. Chaos Fault Tolerance: Trapping worker panics in O(1) via setjmp/longjmp.
 // 4. OneForOne Supervision: Automatic actor state recovery without process crash.
 // 5. Zero-Leak Autofree: Statement-exit temporary string and future disposal.
@@ -89,7 +90,7 @@ fn main() {
 
 	println('✓ Spawned ${num_actors} lightweight actors in ${elapsed_spawn_us} µs')
 	println('✓ Spawn Throughput: ${spawn_rate} actors/sec')
-	println('✓ Memory Overhead: ~64 bytes/actor (Zero pre-allocated arena slabs)')
+	println('✓ Memory Overhead: ~370 bytes/actor + fields (scratch arena allocated on first use)')
 
 	// --------------------------------------------------------------------------
 	// BENCHMARK 2: High-Throughput Concurrent Fan-Out / Fan-In Across Worker Pool
@@ -224,21 +225,22 @@ fn main() {
 
 	crunch_iters := 600
 
-	// 1. Sequential Execution Baseline (1 core at a time)
+	// 1. Sequential baseline: the same four jobs, each awaited before the next is sent,
+	//    so only one actor runs at a time.
 	t0_seq := time_now_us()
-	f_s0 := p0 <- heavy_crunch(9008)
-
-	f_s1 := p1 <- heavy_crunch(56765)
-
-	f_s2 := p2 <- heavy_crunch(6689)
-
-	f_s3 := p3 <- heavy_crunch(8777)
-
+	f_s0 := p0 <- heavy_crunch(crunch_iters)
+	_ := f_s0.await() or { 0 }
+	f_s1 := p1 <- heavy_crunch(crunch_iters)
+	_ := f_s1.await() or { 0 }
+	f_s2 := p2 <- heavy_crunch(crunch_iters)
+	_ := f_s2.await() or { 0 }
+	f_s3 := p3 <- heavy_crunch(crunch_iters)
+	_ := f_s3.await() or { 0 }
 	elapsed_seq_us := time_now_us() - t0_seq
 
-	println('✓ Sequential Execution Time (1 core): ${elapsed_seq_us} µs')
+	println('✓ Sequential Execution Time (one actor at a time): ${elapsed_seq_us} µs')
 
-	// 2. Parallel Multicore Execution (All 4 actors running simultaneously)
+	// 2. Parallel: all four actors at once, spread over the worker pool
 	t0_par := time_now_us()
 	f_p0 := p0 <- heavy_crunch(crunch_iters)
 	f_p1 := p1 <- heavy_crunch(crunch_iters)
@@ -251,7 +253,7 @@ fn main() {
 	_ := f_p3.await() or { 0 }
 	elapsed_par_us := time_now_us() - t0_par
 
-	println('✓ Parallel Execution Time (4 cores):   ${elapsed_par_us} µs')
+	println('✓ Parallel Execution Time (4 actors at once): ${elapsed_par_us} µs')
 
 	speedup_x10 := (elapsed_seq_us * 10) / elapsed_par_us
 	println('✓ Multicore Parallel Speedup: ${speedup_x10 / 10}.${speedup_x10 % 10}x')

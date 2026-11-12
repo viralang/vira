@@ -150,7 +150,7 @@ The `widget` (`w`) package provides a complete Flutter-inspired declarative UI k
 
 ## 5. Building & Running the Application
 
-The full code is located in [`examples/cloud_ai_hub.vir`](file:///mnt/flutter_drive/vira/examples/cloud_ai_hub.vir) and [`docs/examples/39_gui_realworld_cloud_ai_hub.vir`](file:///mnt/flutter_drive/vira/docs/examples/39_gui_realworld_cloud_ai_hub.vir).
+The full code is located in [`examples/cloud_ai_hub.vir`](../../examples/cloud_ai_hub.vir) and [`docs/examples/39_gui_realworld_cloud_ai_hub.vir`](../examples/39_gui_realworld_cloud_ai_hub.vir).
 
 ### Check Syntax & Verify Zero Leaks
 

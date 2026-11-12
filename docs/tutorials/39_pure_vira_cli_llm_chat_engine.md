@@ -604,7 +604,7 @@ Because Grouped-Query Attention (GQA) reduces $N_{\text{kv\_heads}}$ relative to
 
 ### 12.2 Configuring `max_context` via CLI Flags (`-c` / `--ctx`)
 
-In [43_qwen2_5_gguf_chat_inference.vir](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir), `max_context` is configurable at startup via `-c` / `--ctx` / `--context` and directly controls the row capacity of `k_caches` and `v_caches`:
+In [43_qwen2_5_gguf_chat_inference.vir](../examples/43_qwen2_5_gguf_chat_inference.vir), `max_context` is configurable at startup via `-c` / `--ctx` / `--context` and directly controls the row capacity of `k_caches` and `v_caches`:
 
 ```powershell
 # Run with a 2048-token context window and generate up to 256 tokens per turn
@@ -650,7 +650,7 @@ This keeps per-token attention complexity strictly $O(\text{kv\_pos})$ instead o
 #### Strategy 2: Sliding-Window Context Shifting with Pinned System-Prompt "Attention Sinks"
 In long multi-turn REPL sessions, `kv_pos` will eventually approach `max_context`. If you simply reset `kv_pos = 0`, the model loses all conversation memory; if you shift all rows uniformly (`[shift_by .. kv_pos) -> [0 .. kv_pos - shift_by)`), the model loses its initial `<|im_start|>system...` instructions and "attention sink" tokens.
 
-The production solution implemented in [`shift_kv_cache_window`](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir#L357-L387) pins the first `keep_prefix` rows (`[0 .. keep_prefix)`, containing the system prompt) and shifts only the rolling conversation window `[keep_prefix + shift_by .. kv_pos)` left into `[keep_prefix .. kv_pos - shift_by)`:
+The production solution implemented in [`shift_kv_cache_window`](../examples/43_qwen2_5_gguf_chat_inference.vir#L357-L387) pins the first `keep_prefix` rows (`[0 .. keep_prefix)`, containing the system prompt) and shifts only the rolling conversation window `[keep_prefix + shift_by .. kv_pos)` left into `[keep_prefix .. kv_pos - shift_by)`:
 
 ```vira
 // Preserves rows `[0 .. keep_prefix)` (the pinned system prompt / attention sinks)
@@ -686,7 +686,7 @@ fn shift_kv_cache_window(
 }
 ```
 
-Before each turn in [`generate_reply`](file:///c:/Users/hp/vex/docs/examples/43_qwen2_5_gguf_chat_inference.vir#L542-L555), Vira checks if `kv_pos + turn_tokens.len + max_new_tokens` would exceed `max_context` and automatically slides the KV-cache window:
+Before each turn in [`generate_reply`](../examples/43_qwen2_5_gguf_chat_inference.vir#L542-L555), Vira checks if `kv_pos + turn_tokens.len + max_new_tokens` would exceed `max_context` and automatically slides the KV-cache window:
 
 ```vira
 needed := turn_tokens.len + max_new_tokens + 4

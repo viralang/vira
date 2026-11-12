@@ -1,14 +1,14 @@
 # Vira Standard Library Manual (`packages/`)
 
 > **Version:** Vira `v0.5.13`+  
-> **Package Root:** [`packages/`](file:///mnt/flutter_drive/vira/packages)  
+> **Package Root:** [`packages/`](../packages)  
 > **Guarantees:** Zero Garbage Collection, Compile-Time Autofree, 100% Deterministic Cleanup (`active_leaks=0`), Strict Result Monad Error Handling (`!T`).
 
 ---
 
 ## 1. Overview & Automatic Package Resolution
 
-Vira provides 15 first-party standard library packages implemented in pure Vira code backed by lean C99 intrinsics ([runtime/vira_rt.h](file:///mnt/flutter_drive/vira/runtime/vira_rt.h)).
+Vira provides 15 first-party standard library packages implemented in pure Vira code backed by lean C99 intrinsics ([runtime/vira_rt.h](../runtime/vira_rt.h)).
 
 Standard packages are stored directly in the `packages/` directory of the Vira distribution:
 ```
@@ -47,7 +47,7 @@ The Vira compiler automatically resolves standard library packages from the bund
 ## 2. Package Catalog & Quick Reference
 
 ### 2.1 `packages/os` — System & Process Primitives
-The [`os`](file:///mnt/flutter_drive/vira/packages/os) package gives direct, cross-platform access to process metadata, command-line arguments, environment variables, and the host filesystem:
+The [`os`](../packages/os) package gives direct, cross-platform access to process metadata, command-line arguments, environment variables, and the host filesystem:
 
 - **CLI Arguments**: `os.args() []string` (returns program invocation and parameters).
 - **Process Info**: `os.getpid() int`, `os.getppid() int`, `os.getuid() int`, `os.getgid() int`, `os.hostname() !string`.
@@ -76,7 +76,7 @@ fn main() {
 ---
 
 ### 2.2 `packages/exec` — Subprocess Execution & Supervision
-The [`exec`](file:///mnt/flutter_drive/vira/packages/exec) package manages child processes with support for pipe redirection, clone flags, and asynchronous tracking:
+The [`exec`](../packages/exec) package manages child processes with support for pipe redirection, clone flags, and asynchronous tracking:
 
 - **Command Builder**: `exec.Command.new(prog string, args []string) Command`
 - **Configuration**: `cmd.set_dir(dir)`, `cmd.set_stdin(text)`, `cmd.set_inherit_stdio(bool)`, `cmd.set_clone_flags(flags)`.
@@ -109,7 +109,7 @@ fn main() {
 ---
 
 ### 2.3 `packages/syscall` — Kernel System Calls & Linux Containers
-The [`syscall`](file:///mnt/flutter_drive/vira/packages/syscall) package provides direct access to operating system kernel calls, low-level file descriptors, and Linux isolation primitives:
+The [`syscall`](../packages/syscall) package provides direct access to operating system kernel calls, low-level file descriptors, and Linux isolation primitives:
 
 - **File Descriptors**: `open(path, flags, mode) !int`, `read(fd, mut buf, count) !int`, `write(fd, buf, count) !int`, `close(fd) !bool`, `lseek(fd, offset, whence) !i64`.
 - **Pipes & Redirection**: `pipe(mut fds []int) !bool`, `dup(fd) !int`, `dup2(old_fd, new_fd) !int`, `isatty(fd) bool`.
@@ -147,7 +147,7 @@ fn main() {
 ---
 
 ### 2.4 `packages/flag` — POSIX & GNU CLI Argument Parsing
-The [`flag`](file:///mnt/flutter_drive/vira/packages/flag) package allows you to declare and parse flags with type safety, defaults, and auto-generated manuals:
+The [`flag`](../packages/flag) package allows you to declare and parse flags with type safety, defaults, and auto-generated manuals:
 
 ```v
 import flag
@@ -179,7 +179,7 @@ fn main() {
 ---
 
 ### 2.5 `packages/log` — Leveled Structured Logging
-The [`log`](file:///mnt/flutter_drive/vira/packages/log) package formats diagnostic logs to `stderr` with timestamps, severity levels, and optional prefixes:
+The [`log`](../packages/log) package formats diagnostic logs to `stderr` with timestamps, severity levels, and optional prefixes:
 
 - **Levels**: `LEVEL_DEBUG (0)`, `LEVEL_INFO (1)`, `LEVEL_WARN (2)`, `LEVEL_ERROR (3)`, `LEVEL_FATAL (4)`.
 - **Package Helpers**: `log.debug(msg)`, `log.info(msg)`, `log.warn(msg)`, `log.error(msg)`, `log.fatal(msg)` (terminates process with exit code 1).
@@ -201,7 +201,7 @@ fn main() {
 ---
 
 ### 2.6 `packages/strings` — String Utilities
-The [`strings`](file:///mnt/flutter_drive/vira/packages/strings) package provides functions for slice manipulation, whitespace splitting, joining, and dynamic string building:
+The [`strings`](../packages/strings) package provides functions for slice manipulation, whitespace splitting, joining, and dynamic string building:
 
 - **Splitting & Joining**:
   - `strings.fields(s string) []string`: Splits by whitespace, matching Go `strings.Fields`.
@@ -234,7 +234,7 @@ fn main() {
 ---
 
 ### 2.7 `packages/math` — High-Performance Math
-The [`math`](file:///mnt/flutter_drive/vira/packages/math) package exposes C99 floating-point operations:
+The [`math`](../packages/math) package exposes C99 floating-point operations:
 
 - **Constants**: `math.PI`, `math.TAU`, `math.E`, `math.SQRT2`.
 - **Trigonometry**: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`.
@@ -263,7 +263,7 @@ fn main() {
 ---
 
 ### 2.8 `packages/time` — High-Precision Clocks & Durations
-The [`time`](file:///mnt/flutter_drive/vira/packages/time) package provides nanosecond wall-clock, monotonic timers, microsecond sleep, and `strftime` formatting:
+The [`time`](../packages/time) package provides nanosecond wall-clock, monotonic timers, microsecond sleep, and `strftime` formatting:
 
 - **Current Time**: `time.now_unix() i64`, `time.now_ms() i64`, `time.now_ns() i64`, `time.monotonic_ns() i64`.
 - **Sleep**: `time.sleep_ms(ms int)`, `time.sleep_us(us int)`.
@@ -288,7 +288,7 @@ fn main() {
 ---
 
 ### 2.9 `packages/ctype` — Fast ASCII Character Classification
-The [`ctype`](file:///mnt/flutter_drive/vira/packages/ctype) package provides zero-overhead character inspection:
+The [`ctype`](../packages/ctype) package provides zero-overhead character inspection:
 
 - **Classifiers**: `is_alpha(c u8) bool`, `is_digit(c u8) bool`, `is_alnum(c u8) bool`, `is_space(c u8) bool`, `is_upper(c u8) bool`, `is_lower(c u8) bool`, `is_hex_digit(c u8) bool`, `is_print(c u8) bool`, `is_punct(c u8) bool`, `is_cntrl(c u8) bool`.
 - **Converters**: `to_lower(c u8) u8`, `to_upper(c u8) u8`.
@@ -306,7 +306,7 @@ fn main() {
 ---
 
 ### 2.10 `packages/io` — Unified I/O & Streams
-The [`io`](file:///mnt/flutter_drive/vira/packages/io) package provides stream abstractions, buffered I/O, and interactive console readers:
+The [`io`](../packages/io) package provides stream abstractions, buffered I/O, and interactive console readers:
 
 - **Traits**: `Reader`, `Writer`, `Closer`.
 - **File Handles**: `io.File.open(path, mode) !File`, `io.File.create(path) !File`, `f.read(mut buf)`, `f.write(buf)`, `f.write_string(s)`, `f.close()`.
@@ -339,7 +339,7 @@ fn main() {
 ---
 
 ### 2.12 `packages/widget` — Flutter-Inspired Declarative UI Kit
-The [`widget`](file:///mnt/flutter_drive/vira/packages/widget) package provides high-level Flutter-like ergonomics, responsive layout engine, Catppuccin design tokens, and a full component library on top of Vira's hardware-accelerated Immediate-Mode GUI:
+The [`widget`](../packages/widget) package provides high-level Flutter-like ergonomics, responsive layout engine, Catppuccin design tokens, and a full component library on top of Vira's hardware-accelerated Immediate-Mode GUI:
 
 - **Layout**: `w.Column.begin(width, spacing)`, `w.Row.begin(height, spacing)`, `w.Card.begin(title, width)`, `w.Padding.begin(insets, width, spacing)`, `w.Center.begin(width, spacing)`, `w.Spacer(px)`, `w.Divider()`.
 - **Responsive**: `w.window_width()`, `w.window_height()`, `w.pct_w(50.0)`, `w.pct_h(25.0)`, `w.content_width(padding)`, `w.is_mobile()`, `w.is_tablet()`, `w.is_desktop()`, `w.screen()`.

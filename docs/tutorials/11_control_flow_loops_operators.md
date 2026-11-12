@@ -112,15 +112,45 @@ for {
 ## 4. Operator Catalog
 
 ### Arithmetic Operators
-Operate on `int`, `f32`, and `f64`:
+Operate on numbers (`int`, `i64`, `u8`, `f32`, `f64` and the C types). Both operands must have the same type.
 
 | Operator | Description | Example |
 | :---: | :--- | :--- |
-| `+` | Addition | `a + b` |
+| `+` | Addition; also joins two strings | `a + b`, `'Hi ' + name` |
 | `-` | Subtraction or Unary Negation | `a - b`, `-x` |
 | `*` | Multiplication | `a * b` |
 | `/` | Division | `a / b` |
-| `%` | Modulo (Remainder) | `a % b` |
+| `%` | Modulo (Remainder), integers only | `a % b` |
+
+Arithmetic behaves the same on every build mode:
+- Integer `/` or `%` by zero stops with `vira panic: integer division by zero`. Inside an actor the supervisor catches it and restarts the actor.
+- Signed overflow wraps around: `2147483647 + 1` is `-2147483648`.
+- Function arguments are evaluated left to right.
+
+### String Concatenation
+`+` joins strings and `+=` appends to a `mut` string. A chain such as `first + ' ' + last` makes a single allocation:
+
+```v
+full := first + ' ' + last
+mut csv := ''
+csv += 'id,name'
+```
+
+### Which Types Each Operator Accepts
+
+| Operators | Defined for |
+| :--- | :--- |
+| `+` | numbers, strings, tensors, pointers |
+| `-` | numbers, tensors, pointers |
+| `*`, `/` | numbers |
+| `%`, `<<`, `>>` | integers |
+| `&`, `\|`, `^` | integers, `bool` |
+| `<`, `<=`, `>`, `>=` | numbers, strings (by content), pointers |
+| `==`, `!=` | primitives and pointers (strings by content); not structs, slices, tensors or actors |
+| `&&`, `\|\|` | `bool` |
+| `@` | tensors |
+
+Any other combination is a compile error, for example `operator '-' is not defined for type 'string'` or `operator '==' is not defined for type 'Point'`. Compound assignments follow the same table.
 
 ### Compound Assignment Operators
 Modify a mutable variable in-place:
@@ -221,8 +251,8 @@ Vira utilizes a Pratt precedence-climbing parser with unambiguous precedence tie
 
 Execute the verified example:
 
-```powershell
-.\vira.exe run docs/examples/11_control_flow_loops_operators.vir
+```bash
+vira run docs/examples/11_control_flow_loops_operators.vir
 ```
 
 ### Execution Output
