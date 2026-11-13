@@ -142,20 +142,33 @@ static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
     }
     t->dims[d] = dims[d];
   }
-  int32_t st = 1;
+  /* Per-axis sizes, strides and the flattened row count stay 32-bit; only their
+     products (element counts) may exceed 2^31. Compute in 64 bits and refuse a
+     shape whose row count or stride would not fit, instead of wrapping. */
+  int64_t st = 1;
   for (int32_t d = n_dims - 1; d >= 0; d--) {
-    t->strides[d] = st;
+    if (st > INT32_MAX) {
+      fprintf(stderr, "vira tensor error: stride of axis %d exceeds 2^31-1 (rank %d)\n",
+              d, n_dims);
+      exit(1);
+    }
+    t->strides[d] = (int32_t)st;
     st *= dims[d];
   }
   if (n_dims == 1) {
     t->rows = 1;
     t->cols = dims[0];
   } else {
-    int32_t outer = 1;
+    int64_t outer = 1;
     for (int32_t d = 0; d < n_dims - 1; d++) {
       outer *= dims[d];
     }
-    t->rows = outer;
+    if (outer > INT32_MAX) {
+      fprintf(stderr, "vira tensor error: %lld rows exceed 2^31-1 (rank %d)\n",
+              (long long)outer, n_dims);
+      exit(1);
+    }
+    t->rows = (int32_t)outer;
     t->cols = dims[n_dims - 1];
   }
 }
@@ -179,8 +192,21 @@ static inline void _vira_tensor_norm_shape(vira_tensor_f32 *t) {
  * Usage: Element count query (`tensor.numel()`).
  */
 static inline int32_t vira_tensor_numel(vira_tensor_f32 t) {
+  /* The compiler types numel() as a 32-bit int (and formats it with %d), so this
+     keeps its old return type; it wraps above 2^31-1 elements. Runtime code and
+     anything that may see large tensors uses vira_tensor_numel64. */
   _vira_tensor_norm_shape(&t);
-  return t.rows * t.cols;
+  return (int32_t)((int64_t)t.rows * t.cols);
+}
+
+/**
+ * 64-bit element count; correct for tensors above 2^31-1 elements.
+ * @param t Tensor instance.
+ * @return Total element count.
+ */
+static inline int64_t vira_tensor_numel64(vira_tensor_f32 t) {
+  _vira_tensor_norm_shape(&t);
+  return (int64_t)t.rows * t.cols;
 }
 
 /**
@@ -386,9 +412,9 @@ vira_tensor_f32_arena_alloc(vira_arena *a, int32_t rows, int32_t cols) {
  * @param val Value to write into every element.
  * Usage: Internal vectorized fill helper for tensor initialization.
  */
-static inline void _vira_tensor_fill_data(vira_f32 *data, int32_t total,
+static inline void _vira_tensor_fill_data(vira_f32 *data, int64_t total,
                                           vira_f32 val) {
-  int32_t i = 0;
+  int64_t i = 0;
 #if defined(__AVX2__)
   __m256 vval = _mm256_set1_ps(val);
   for (; i + 8 <= total; i += 8) {
@@ -420,7 +446,7 @@ static inline vira_tensor_f32 vira_tensor_f32_fill(vira_arena *opt_arena,
   vira_tensor_f32 t = opt_arena
                           ? vira_tensor_f32_arena_alloc(opt_arena, rows, cols)
                           : vira_tensor_f32_alloc(rows, cols);
-  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
+  _vira_tensor_fill_data(t.data, (int64_t)t.rows * t.cols, val);
   return t;
 }
 
@@ -442,7 +468,7 @@ static inline vira_tensor_f32 vira_tensor_f32_fill_3d(vira_arena *opt_arena,
   vira_tensor_f32 t =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 3, dims)
                 : vira_tensor_f32_alloc_nd(3, dims);
-  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
+  _vira_tensor_fill_data(t.data, (int64_t)t.rows * t.cols, val);
   return t;
 }
 
@@ -465,7 +491,7 @@ static inline vira_tensor_f32 vira_tensor_f32_fill_4d(vira_arena *opt_arena,
   vira_tensor_f32 t =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 4, dims)
                 : vira_tensor_f32_alloc_nd(4, dims);
-  _vira_tensor_fill_data(t.data, t.rows * t.cols, val);
+  _vira_tensor_fill_data(t.data, (int64_t)t.rows * t.cols, val);
   return t;
 }
 
@@ -484,10 +510,10 @@ static inline vira_tensor_f32 vira_tensor_view_nd(vira_tensor_f32 t,
   _vira_tensor_norm_shape(&t);
   vira_tensor_f32 v = {0};
   _vira_tensor_init_shape(&v, n_dims, dims);
-  if (v.rows * v.cols != t.rows * t.cols) {
+  if ((int64_t)v.rows * v.cols != (int64_t)t.rows * t.cols) {
     fprintf(stderr,
-            "vira tensor error: reshape element count mismatch (%d -> %d)\n",
-            t.rows * t.cols, v.rows * v.cols);
+            "vira tensor error: reshape element count mismatch (%lld -> %lld)\n",
+            (long long)t.rows * t.cols, (long long)v.rows * v.cols);
     exit(1);
   }
   v.data = t.data;

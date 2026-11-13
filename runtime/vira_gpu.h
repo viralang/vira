@@ -6339,8 +6339,9 @@ static inline vira_tensor_f32 vira_gpu_silu(vira_arena *opt_arena,
     return res;
   }
 
-  int32_t total = x.rows * x.cols;
-  if (total <= 0) {
+  int64_t total64 = (int64_t)x.rows * x.cols;
+  int32_t total = (int32_t)total64; /* GPU kernels take a 32-bit count */
+  if (total64 <= 0 || total64 > INT32_MAX) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 res = vira_tensor_silu(opt_arena, x);
     _vira_tls_gpu_fallback = false;
@@ -6442,31 +6443,33 @@ static inline vira_tensor_f32 _vira_gpu_binary_elemwise(
 
   int32_t mode = -1;
   int32_t cols = 0;
-  int32_t total = 0;
+  int64_t total64 = 0;
   const vira_tensor_f32 *out_sh = NULL;
   if (a.rows == b.rows && a.cols == b.cols) {
     mode = 0;
     cols = a.cols;
-    total = a.rows * a.cols;
+    total64 = (int64_t)a.rows * a.cols;
     out_sh = (a.n_dims >= b.n_dims) ? &a : &b;
   } else if (a.rows == 1 && a.cols == b.cols) {
     mode = 1;
     cols = b.cols;
-    total = b.rows * b.cols;
+    total64 = (int64_t)b.rows * b.cols;
     out_sh = &b;
   } else if (b.rows == 1 && b.cols == a.cols) {
     mode = 2;
     cols = a.cols;
-    total = a.rows * a.cols;
+    total64 = (int64_t)a.rows * a.cols;
     out_sh = &a;
   }
-  if (mode < 0 || cols <= 0 || total <= 0) {
+  /* GPU kernels take a 32-bit count; larger tensors use the CPU path */
+  if (mode < 0 || cols <= 0 || total64 <= 0 || total64 > INT32_MAX) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 res = is_mul ? vira_tensor_elemwise_mul(opt_arena, a, b)
                                  : vira_tensor_add(opt_arena, a, b);
     _vira_tls_gpu_fallback = false;
     return res;
   }
+  int32_t total = (int32_t)total64;
 
   pthread_mutex_lock(&_vira_gpu.lock);
   bool has_k = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
@@ -6666,8 +6669,9 @@ static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
     return res;
   }
 
-  int32_t total = t.rows * t.cols;
-  if (total <= 0) {
+  int64_t total64 = (int64_t)t.rows * t.cols;
+  int32_t total = (int32_t)total64; /* GPU kernels take a 32-bit count */
+  if (total64 <= 0 || total64 > INT32_MAX) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 res = vira_tensor_scale(opt_arena, t, scale);
     _vira_tls_gpu_fallback = false;
@@ -7459,10 +7463,11 @@ static inline bool _vira_gpu_slice_rows(vira_arena *opt_arena,
 
 static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits) {
   _vira_tensor_norm_shape(&logits);
-  int32_t total = logits.rows * logits.cols;
+  int64_t total64 = (int64_t)logits.rows * logits.cols;
+  int32_t total = (int32_t)total64; /* GPU kernels take a 32-bit count */
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
       !_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
-      logits.data == NULL || total <= 0) {
+      logits.data == NULL || total64 <= 0 || total64 > INT32_MAX) {
     return -1;
   }
   if (total < 4096 && !_vira_gpu_is_ptr_dirty(logits.data)) {

@@ -25,12 +25,14 @@ static inline float _vira_fp16_to_fp32(uint16_t h) {
       memcpy(&res, &bits, sizeof(float));
       return res;
     }
+    /* Subnormal: normalise. 2^-14 has biased exponent 127 - 14 = 113 in fp32;
+       each left shift of the mantissa lowers it by one (V1). */
+    exp = 113;
     while ((mant & 0x0400) == 0) {
       mant <<= 1;
       exp--;
     }
-    exp++;
-    mant &= ~0x0400;
+    mant &= 0x03FF;
   } else if (exp == 31) {
     exp = 255;
   } else {

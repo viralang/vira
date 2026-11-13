@@ -251,8 +251,11 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       uint32_t clamped_nd = (n_dims == 0) ? 1 : ((n_dims > 4) ? 4 : n_dims);
       ent->ndims = (int32_t)clamped_nd;
       for (uint32_t d = 0; d < clamped_nd; ++d) {
-        int32_t dv = (int32_t)dims[clamped_nd - 1 - d];
-        ent->dims[d] = (dv > 0) ? dv : 1;
+        uint64_t dv = dims[clamped_nd - 1 - d];
+        /* A single axis above 2^31-1 cannot be represented (axes stay 32-bit; only
+           element counts are 64-bit). Mark it with -1 so the lookup reports it,
+           instead of the old cast that turned it negative and then silently into 1. */
+        ent->dims[d] = (dv == 0) ? 1 : (dv > (uint64_t)INT32_MAX ? -1 : (int32_t)dv);
       }
       ent->file_pos = (int64_t)offset;
     }
@@ -297,6 +300,19 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
     vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
         .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+  }
+
+  for (int32_t d = 0; d < matched_ndims; ++d) {
+    if (matched_dims[d] < 0) {
+      fclose(f);
+      vira_string err = vira_str_format(
+          "tensor '%s' in GGUF file '%s' has an axis longer than 2^31-1 elements",
+          nbuf.ptr, pbuf.ptr);
+      vira_cstr_buf_free(&nbuf);
+      vira_cstr_buf_free(&pbuf);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
   }
 
   vira_cstr_buf_free(&nbuf);

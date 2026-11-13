@@ -24,10 +24,10 @@ _vira_tensor_reshape_safe(vira_arena *opt_arena, vira_tensor_f32 t,
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, n_dims, dims)
                 : vira_tensor_f32_alloc_nd(n_dims, dims);
-  if (out.rows * out.cols != t.rows * t.cols) {
+  if ((int64_t)out.rows * out.cols != (int64_t)t.rows * t.cols) {
     fprintf(stderr,
-            "vira tensor error: reshape element count mismatch (%d -> %d)\n",
-            t.rows * t.cols, out.rows * out.cols);
+            "vira tensor error: reshape element count mismatch (%lld -> %lld)\n",
+            (long long)t.rows * t.cols, (long long)out.rows * out.cols);
     exit(1);
   }
   _vira_tensor_sync_host_f32(t.data);
@@ -965,8 +965,8 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
 static inline vira_f32 vira_tensor_sum(vira_tensor_f32 t) {
   _vira_tensor_norm_shape(&t);
   _vira_tensor_sync_host_f32(t.data);
-  int32_t total = t.rows * t.cols;
-  int32_t i = 0;
+  int64_t total = (int64_t)t.rows * t.cols;
+  int64_t i = 0;
   vira_f32 sum = 0.0f;
 
 #if defined(__AVX2__)
@@ -1003,8 +1003,8 @@ static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
-  int32_t total = t.rows * t.cols;
-  int32_t i = 0;
+  int64_t total = (int64_t)t.rows * t.cols;
+  int64_t i = 0;
 
 #if defined(__AVX2__)
   __m256 vzero = _mm256_setzero_ps();
@@ -1043,8 +1043,8 @@ static inline vira_tensor_f32 vira_tensor_relu(vira_arena *opt_arena,
  * Usage: Internal SIMD helper for elementwise tensor addition.
  */
 static inline void _vira_vec_add_f32(vira_f32 *dst, const vira_f32 *pa,
-                                     const vira_f32 *pb, int32_t count) {
-  int32_t i = 0;
+                                     const vira_f32 *pb, int64_t count) {
+  int64_t i = 0;
 #if defined(__AVX2__)
   for (; i + 8 <= count; i += 8) {
     __m256 va = _mm256_loadu_ps(&pa[i]);
@@ -1070,8 +1070,8 @@ static inline void _vira_vec_add_f32(vira_f32 *dst, const vira_f32 *pa,
 }
 
 static inline void _vira_vec_add_inplace_f32(vira_f32 *dst, const vira_f32 *src,
-                                             int32_t count) {
-  int32_t i = 0;
+                                             int64_t count) {
+  int64_t i = 0;
 #if defined(__AVX2__)
   for (; i + 8 <= count; i += 8) {
     __m256 vd = _mm256_loadu_ps(&dst[i]);
@@ -1105,8 +1105,8 @@ static inline void _vira_vec_add_inplace_f32(vira_f32 *dst, const vira_f32 *src,
  * Usage: Internal SIMD helper for elementwise tensor subtraction.
  */
 static inline void _vira_vec_sub_f32(vira_f32 *dst, const vira_f32 *pa,
-                                     const vira_f32 *pb, int32_t count) {
-  int32_t i = 0;
+                                     const vira_f32 *pb, int64_t count) {
+  int64_t i = 0;
 #if defined(__AVX2__)
   for (; i + 8 <= count; i += 8) {
     __m256 va = _mm256_loadu_ps(&pa[i]);
@@ -1163,7 +1163,7 @@ vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     vira_tensor_f32 out =
         opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
                   : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
-    _vira_vec_add_f32(out.data, a.data, b.data, a.rows * a.cols);
+    _vira_vec_add_f32(out.data, a.data, b.data, (int64_t)a.rows * a.cols);
     return out;
   }
   if (b.rows == 1 && b.cols == a.cols) {
@@ -1211,7 +1211,7 @@ vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     vira_tensor_f32 out =
         opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
                   : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
-    _vira_vec_sub_f32(out.data, a.data, b.data, a.rows * a.cols);
+    _vira_vec_sub_f32(out.data, a.data, b.data, (int64_t)a.rows * a.cols);
     return out;
   }
   if (b.rows == 1 && b.cols == a.cols) {
@@ -1251,7 +1251,7 @@ vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
 static inline vira_tensor_f32
 vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   _vira_tensor_norm_shape(&t);
-  int32_t total = t.rows * t.cols;
+  int64_t total = (int64_t)t.rows * t.cols;
   if (!_vira_tls_gpu_fallback &&
       (total >= 16384 || _vira_gpu_is_ptr_dirty(t.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
@@ -1264,7 +1264,7 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, t.n_dims, t.dims)
                 : vira_tensor_f32_alloc_nd(t.n_dims, t.dims);
-  int32_t i = 0;
+  int64_t i = 0;
 
 #if defined(__AVX2__)
   __m256 vs = _mm256_set1_ps(scale);

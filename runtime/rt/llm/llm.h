@@ -33,8 +33,8 @@ vira_tensor_rmsnorm(vira_arena *opt_arena, vira_tensor_f32 x,
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
                 : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
   for (int32_t r = 0; r < x.rows; ++r) {
-    float *x_row = &x.data[r * x.cols];
-    float *out_row = &out.data[r * x.cols];
+    float *x_row = &x.data[(size_t)r * (size_t)x.cols];
+    float *out_row = &out.data[(size_t)r * (size_t)x.cols];
     float sum_sq = 0.0f;
 
 #if defined(__AVX2__)
@@ -150,8 +150,8 @@ static inline vira_tensor_f32 vira_tensor_rope(vira_arena *opt_arena,
   }
 
   for (int32_t r = 0; r < q.rows; ++r) {
-    const float *q_row = &q.data[r * q.cols];
-    float *out_row = &out.data[r * q.cols];
+    const float *q_row = &q.data[(size_t)r * (size_t)q.cols];
+    float *out_row = &out.data[(size_t)r * (size_t)q.cols];
     for (int32_t i = 0; i < half_dim; ++i) {
       float cos_a = cos_tab[i];
       float sin_a = sin_tab[i];
@@ -211,8 +211,8 @@ static inline vira_tensor_f32 vira_tensor_rope_norm(vira_arena *opt_arena,
   }
 
   for (int32_t r = 0; r < q.rows; ++r) {
-    const float *q_row = &q.data[r * q.cols];
-    float *out_row = &out.data[r * q.cols];
+    const float *q_row = &q.data[(size_t)r * (size_t)q.cols];
+    float *out_row = &out.data[(size_t)r * (size_t)q.cols];
     for (int32_t i = 0; i < half_dim; ++i) {
       float cos_a = cos_tab[i];
       float sin_a = sin_tab[i];
@@ -239,7 +239,7 @@ static inline vira_tensor_f32 vira_tensor_rope_norm(vira_arena *opt_arena,
 static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
                                                vira_tensor_f32 x) {
   _vira_tensor_norm_shape(&x);
-  int32_t total = x.rows * x.cols;
+  int64_t total = (int64_t)x.rows * x.cols;
   if (!_vira_tls_gpu_fallback &&
       (total >= 16384 || _vira_gpu_is_ptr_dirty(x.data)) &&
       vira_gpu_is_available() && vira_gpu_is_enabled()) {
@@ -252,7 +252,7 @@ static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
                 : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
-  for (int32_t i = 0; i < total; ++i) {
+  for (int64_t i = 0; i < total; ++i) {
     float v = x.data[i];
     out.data[i] = v / (1.0f + expf(-v));
   }
@@ -268,8 +268,8 @@ static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
  * Usage: Internal vectorized helper for Hadamard product.
  */
 static inline void _vira_vec_mul_f32(vira_f32 *dst, const vira_f32 *pa,
-                                     const vira_f32 *pb, int32_t count) {
-  int32_t i = 0;
+                                     const vira_f32 *pb, int64_t count) {
+  int64_t i = 0;
 #if defined(__AVX2__)
   for (; i + 8 <= count; i += 8) {
     __m256 va = _mm256_loadu_ps(&pa[i]);
@@ -325,7 +325,7 @@ vira_tensor_elemwise_mul(vira_arena *opt_arena, vira_tensor_f32 a,
     vira_tensor_f32 out =
         opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, sh->n_dims, sh->dims)
                   : vira_tensor_f32_alloc_nd(sh->n_dims, sh->dims);
-    _vira_vec_mul_f32(out.data, a.data, b.data, a.rows * a.cols);
+    _vira_vec_mul_f32(out.data, a.data, b.data, (int64_t)a.rows * a.cols);
     return out;
   }
   if (b.rows == 1 && b.cols == a.cols) {
@@ -378,8 +378,8 @@ static inline vira_tensor_f32 vira_tensor_softmax(vira_arena *opt_arena,
           ? vira_tensor_f32_arena_alloc_nd(opt_arena, logits.n_dims, logits.dims)
           : vira_tensor_f32_alloc_nd(logits.n_dims, logits.dims);
   for (int32_t r = 0; r < logits.rows; ++r) {
-    float *in_row = &logits.data[r * logits.cols];
-    float *out_row = &out.data[r * logits.cols];
+    float *in_row = &logits.data[(size_t)r * (size_t)logits.cols];
+    float *out_row = &out.data[(size_t)r * (size_t)logits.cols];
 
     float max_val = in_row[0];
     for (int32_t c = 1; c < logits.cols; ++c) {
@@ -411,7 +411,7 @@ static inline vira_tensor_f32 vira_tensor_softmax(vira_arena *opt_arena,
 static inline int64_t vira_sample_token(vira_tensor_f32 logits,
                                         float temperature) {
   _vira_tensor_norm_shape(&logits);
-  int32_t total = logits.rows * logits.cols;
+  int64_t total = (int64_t)logits.rows * logits.cols;
   if (total == 0)
     return 0;
 
@@ -423,7 +423,7 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
     _vira_tensor_sync_host_f32(logits.data);
     int64_t best_idx = 0;
     float best_val = logits.data[0];
-    for (int32_t i = 1; i < total; ++i) {
+    for (int64_t i = 1; i < total; ++i) {
       if (logits.data[i] > best_val) {
         best_val = logits.data[i];
         best_idx = (int64_t)i;
@@ -440,7 +440,7 @@ static inline int64_t vira_sample_token(vira_tensor_f32 logits,
   float r = (float)rand() / (float)RAND_MAX;
   float cdf = 0.0f;
   int64_t chosen = total - 1;
-  for (int32_t i = 0; i < total; ++i) {
+  for (int64_t i = 0; i < total; ++i) {
     cdf += probs.data[i];
     if (r <= cdf) {
       chosen = (int64_t)i;
@@ -497,7 +497,7 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_arena *opt_arena,
   vira_tensor_f32 out =
       opt_arena ? vira_tensor_f32_arena_alloc(opt_arena, 1, table.cols)
                 : vira_tensor_f32_alloc(1, table.cols);
-  memcpy(out.data, &table.data[token_id * table.cols],
+  memcpy(out.data, &table.data[(size_t)token_id * (size_t)table.cols],
          (size_t)table.cols * sizeof(float));
   return out;
 }

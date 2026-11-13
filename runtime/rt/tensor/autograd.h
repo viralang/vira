@@ -58,8 +58,8 @@ vira_tensor_relu_backward(vira_tensor_f32 input, vira_tensor_f32 grad_out) {
   _vira_tensor_sync_host_f32(input.data);
   _vira_tensor_sync_host_f32(grad_out.data);
   vira_tensor_f32 out = vira_tensor_f32_alloc_nd(input.n_dims, input.dims);
-  int total = input.rows * input.cols;
-  int i = 0;
+  int64_t total = (int64_t)input.rows * input.cols;
+  int64_t i = 0;
 
 #if defined(__AVX2__)
   __m256 zero = _mm256_setzero_ps();
@@ -91,8 +91,8 @@ static inline void vira_tensor_sgd_step(vira_tensor_f32 *param,
     return;
   _vira_tensor_sync_host_f32(param->data);
   _vira_tensor_sync_host_f32(grad.data);
-  int total = param->rows * param->cols;
-  int i = 0;
+  int64_t total = (int64_t)param->rows * param->cols;
+  int64_t i = 0;
 
 #if defined(__AVX2__)
   __m256 lr_v = _mm256_set1_ps(lr);
