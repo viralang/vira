@@ -74,7 +74,7 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Autograd Engine:** Tensor gradient backward operators (`tensor_matmul_grad_a`, `tensor_matmul_grad_b`, `tensor_relu_backward`) and in-place SGD optimization (`tensor_sgd_step`).
 - [x] **Native GGUF v2/v3 LLM Inference Engine:**
   - Binary GGUF header, metadata, and tensor info parser.
-  - Q4_0 and Q8_0 SIMD block dequantization kernels.
+  - Q4_0 and Q8_0 SIMD block dequantization kernels (extended in milestone 15 to every llama.cpp K-quant, BF16, MXFP4 and I32).
   - Full Transformer architecture: RMSNorm, Rotary Position Embeddings (RoPE), SwiGLU activations, and Causal Multi-Head Attention.
   - Temperature-scaled token sampling generating autoregressive text.
 
@@ -223,6 +223,12 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Tests & tooling:** 10 new run tests and 3 new checker tests under ASan/UBSan, a C scheduler harness, and `scripts/bench_actors.sh` for repeatable before/after actor benchmarks.
 - [x] **Tutorials & Examples:** [Tutorial 42: Ownership, Strings & Actor Handles](docs/tutorials/42_ownership_strings_and_actor_handles.md) and [47_ownership_strings_and_actor_handles.vir](docs/examples/47_ownership_strings_and_actor_handles.vir).
 - [ ] **Still open:** an actor passed inside a message is borrowed (its owner must outlive the message); `return error(err)` still copies the error string; the GGUF loader's global directory cache is not thread-safe; nothing has been executed on Windows since these changes.
+
+### 15. GGUF Weight Formats for Frontier Models (unreleased, Nov 2026)
+- [x] **Quantized weights stay quantized:** `gguf_load_tensor` keeps the raw blocks in a registry next to the f32 tensor (filled lazily for large tensors, `VIRA_LAZY_HOST_FP32=0` to disable) and `.gpu_linear` multiplies straight from them, quantizing activations to q8_0 / q8_K.
+- [x] **New types:** BF16 (bf16 x f32 dot), Q2_K and Q3_K (q8_K dot), MXFP4 (E8M0-scaled FP4, q8_0 dot; gpt-oss and DeepSeek-V4 experts) and I32 index tables (widened to f32; DeepSeek-V4 hash routing). GPU kernels cover F16, Q4_0-Q8_0 and Q4_K-Q6_K; the other types run on the CPU kernels.
+- [x] **Verified end to end** by ViraLama's reference suite: 64 model cases (Llama ... DeepSeek-V4.1, gpt-oss) against an independent NumPy forward pass, prefill and decode.
+- [ ] **Still open:** fp16 subnormals decode wrongly on builds without F16C (patch in ViraLama `docs/patches/vira-runtime-fp16-subnormal.patch`); `gguf_load_tensor` trusts tensor offsets and sizes (no check against the file size) and reopens the file per tensor; element counts above 2^31 overflow 32-bit `int` / `numel()`; IQ\* types are not supported.
 
 ---
 

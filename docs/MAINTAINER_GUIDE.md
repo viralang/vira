@@ -194,6 +194,20 @@ The code generator (`internal/cgen/cgen.go`) transforms the validated AST into c
 - **Isolated Heaps:** Each actor allocates scratch memory in its private arena (wiped after every message); message arguments are deep-copied into the envelope.
 - **Fault Supervision (`OneForOne`):** A panic, bounds error, empty `pop` or integer division by zero inside a handler is caught via `setjmp`/`longjmp`; the arena is wiped and `T_supervisor_reset` resets mutable fields (immutable fields and child actors are kept).
 
+### GGUF Weights & Quantized Kernels (`rt/weights/gguf.h`, `rt/tensor/quant_registry.h`, `rt/tensor/quant_simd.h`)
+- **Loader (`vira_gguf_load_tensor`):** finds the tensor in a process-global directory cache, reads its bytes and returns a `tensor[f32]`. F32 is read directly and I32 (26) is widened to f32. Every type with a block size in `_vira_gguf_dtype_qk` / `_vira_gguf_dtype_bs` is read as raw blocks and registered with `_vira_rt_quant_register` (and `_vira_gpu_register_quant` for GPU-capable types). Tensors with at least 65,536 elements and 2+ dims get a reserved, lazily filled f32 buffer (`_vira_lazy_host_fp32_enabled`, `VIRA_LAZY_HOST_FP32=0` disables).
+- **Registry:** `_vira_rt_quant_try_get(ptr, &dtype, &raw, &bytes, &elems)` maps a tensor's data pointer to its raw blocks; `_vira_rt_dequant_blocks_to_fp32(dtype, raw, first_block, n_blocks, out)` decodes any range. Native extensions (ViraLama's `viralama_ops.h`) use both to run expert slices and gathers without materializing f32 weights.
+- **Matmul (`_vira_quant_linear_job_fn`):** rows are split across the compute team (`_vira_team_run(fn, ctx, max_threads)`). Activations are quantized once per call to q8_0 (types with 32-value blocks: Q4_0-Q8_0, MXFP4) or q8_K (256-value super-blocks: Q2_K-Q6_K); F16 and BF16 dot against f32 activations.
+- **Host / device coherence:** a C kernel that reads a tensor written by a `gpu_*` builtin must call `_vira_tensor_sync_host_f32(ptr)` first, and one that writes a tensor later read on the GPU must call `_vira_gpu_evict_ptr(ptr)`.
+
+| Type (id) | qk / block bytes | CPU dot | GPU |
+| :--- | :--- | :--- | :--- |
+| F16 (1), BF16 (30) | 1 / 2 | `f16`/`bf16` x f32 | F16 only |
+| Q4_0 (2), Q4_1 (3), Q5_0 (6), Q5_1 (7), Q8_0 (8) | 32 / 18, 20, 22, 24, 34 | x q8_0 | yes |
+| Q2_K (10), Q3_K (11) | 256 / 84, 110 | dequant-row x q8_K | no |
+| Q4_K (12), Q5_K (13), Q6_K (14) | 256 / 144, 176, 210 | x q8_K | yes |
+| MXFP4 (39) | 32 / 17 | x q8_0 | no |
+
 ---
 
 ## 8. The Zero-SDK GPU Subsystem (`runtime/vira_gpu.h` & `packages/gpu`)
@@ -318,6 +332,13 @@ Vira ships with 16 self-contained packages under `packages/`:
 3. **Compiler Builtin:** Register `gpu_my_op` in `checker.go` and `cgen.go`.
 4. **Expose in Standard Package (`packages/gpu/src/gpu.vir`):** Wrap the builtin in idiomatic Vira API.
 5. **Test:** Add verification in `packages/gpu/tests/gpu_test.vir` and verify with `./vira test packages/gpu/tests/gpu_test.vir`.
+
+### Playbook 3b: Adding a GGUF Weight Type
+1. **Block geometry:** add the type id to `_vira_gguf_dtype_qk` and `_vira_gguf_dtype_bs` (`rt/tensor/quant_registry.h`). The loader picks it up from there.
+2. **Decoder:** add a branch to `_vira_rt_dequant_blocks_to_fp32` that matches ggml's `dequantize_row_*` bit for bit.
+3. **Dot kernel:** add `_vira_cpu_dot_<type>_q8_0` or `_q8_K` (or an f32 dot) to `rt/tensor/quant_simd.h`, dispatch it in `_vira_quant_linear_job_fn`, add the id to the two "allowed type" lists, and choose the activation format in the `x_q8` selection.
+4. **GPU (optional):** add a `VIRA_WFMT_*` case to `_vira_gpu_register_quant` and the kernel; types without one fall back to the CPU path automatically.
+5. **Verify:** rebuild the compiler (the runtime headers are embedded with `go:embed`), then run ViraLama's `tests/reference/families.py` with a case that stores weights in the new type (its NumPy reference simulates the activation quantization, so errors should be ~1e-6).
 
 ### Playbook 4: Adding a New Native GUI Widget
 1. **Runtime Implementation (`runtime/vira_gui_widgets.h`):**
@@ -444,6 +465,7 @@ VIRA=./vira-old bash scripts/bench_actors.sh && bash scripts/bench_actors.sh
 | Checker: actor isolation and ownership | `testdata/checker/03_*`, `05_actor_ownership.vir` |
 | Checker: operator types | `testdata/checker/04_operator_types.vir` |
 | Scheduler internals (C harness) | `TestSchedulerMailboxConcurrentSendersAndParkTimeout` in `compiler_test.go` |
+| GGUF types, quantized matmul, MoE / attention kernels | ViraLama `tests/reference/families.py` (64 cases vs NumPy) and `packages/gpu/tests` |
 
 ---
 

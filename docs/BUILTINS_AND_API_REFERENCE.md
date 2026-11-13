@@ -139,7 +139,10 @@ q := tensor_fill_4d(2, 8, 16, 64, 0.125)
 | `.get(row, col int)` | `fn (int, int) f32` | Bounds-checked scalar read at `(row, col)` |
 | `.set(row, col int, val f32)` | `fn (int, int, f32)` | Bounds-checked scalar write at `(row, col)` (for logit masking & repetition penalties) |
 | `.copy_row(dst_row int, src tensor[f32])` | `fn (int, tensor[f32])` | Copies a `1 × D` vector `src` into row `dst_row` of a pre-allocated `[max_seq_len, D]` KV cache |
+| `.copy_rows(dst_row_start int, src tensor[f32])` | `fn (int, tensor[f32])` | Copies all rows of `src` into rows `dst_row_start ..` (batched KV-cache writes, residual updates outside an arena) |
 | `.slice_rows(start, end int)` | `fn (int, int) tensor[f32]` | Extracts rows `[start, end)` as a `(end - start) × D` tensor (arena-allocated inside `arena {}`) |
+| `.linear(w)` / `.gpu_linear(w)` | `fn (tensor[f32]) tensor[f32]` | $x W^T$ with GGUF row-major weights (quantized kernels for GGUF weights) |
+| `.gpu_matmul(b)` | `fn (tensor[f32]) tensor[f32]` | $A B$ on the GPU when available |
 
 ### Matrix Multiplication Operator: `@`
 Computes hardware-accelerated 2D, batched 3D/4D, or broadcast N-D × 2D matrix multiplication $C = A @ B$.
@@ -244,7 +247,7 @@ tensor_sgd_step(mut weights, grad_weights, 0.01)
 
 ## 4. SafeTensors & GGUF Local LLM Inference
 
-Vira features native binary readers for Hugging Face `.safetensors` files and quantized `.gguf` Large Language Models (Q4_0, Q8_0, FP16, FP32).
+Vira features native binary readers for Hugging Face `.safetensors` files and `.gguf` Large Language Models: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4 and I32 tensors (see the format table below).
 
 ### `safetensors_load(path string, tensor_name string) !tensor[f32]`
 Opens a Hugging Face `.safetensors` file, parses its 8-byte length prefix and JSON metadata header, locates `tensor_name`, reads its shape, and loads the tensor data into a 64-byte aligned SIMD buffer with zero intermediate copies.
@@ -255,12 +258,33 @@ w_attn := safetensors_load('model.safetensors', 'model.layers.0.self_attn.q_proj
 ```
 
 ### `gguf_load_tensor(path string, tensor_name string) !tensor[f32]`
-Loads a tensor from a GGUF v2/v3 model file (e.g. LLaMA, Mistral, Qwen). Automatically handles on-the-fly SIMD dequantization from **Q4_0** (4-bit nibbles + FP16 scale) and **Q8_0** (8-bit quantized blocks + FP16 scale) into native FP32 tensors.
+Loads one tensor from a GGUF v2/v3 model file (LLaMA, Mistral, Qwen, DeepSeek, gpt-oss, ...). The result is always a `tensor[f32]` with the GGUF shape reversed into row-major order (`ne = {in, out}` becomes `[out, in]`; 3-D expert tensors become `[n_expert, out, in]`).
+
+Quantized weights are **not** simply expanded to f32. The raw blocks are kept in the runtime's quant registry next to the tensor, and the matmul builtins (`.gpu_linear(w)`, `.linear(w)`, `gpu_linear`) multiply straight from them with integer / low-precision dot kernels, quantizing the activations to q8_0 (32-value blocks) or q8_K (256-value blocks) on the fly. For tensors of 65,536 elements or more the f32 view is filled lazily, only if a kernel without a quantized path touches it (`VIRA_LAZY_HOST_FP32=0` dequantizes everything at load).
+
+| GGUF type (id) | How `gguf_load_tensor` keeps it | `.gpu_linear(w)` / `.linear(w)` kernel | GPU upload |
+| :--- | :--- | :--- | :--- |
+| `F32` (0) | plain f32 data | f32 SIMD | yes |
+| `F16` (1) | raw blocks in the quant registry + f32 view | f16 x f32 dot | yes |
+| `BF16` (30) | raw blocks + f32 view | bf16 x f32 dot | no (CPU kernel) |
+| `Q4_0` (2), `Q4_1` (3), `Q5_0` (6), `Q5_1` (7), `Q8_0` (8) | raw 32-value blocks + f32 view | integer dot against q8_0 activations | yes |
+| `Q2_K` (10), `Q3_K` (11) | raw 256-value super-blocks + f32 view | dot against q8_K activations | no (CPU kernel) |
+| `Q4_K` (12), `Q5_K` (13), `Q6_K` (14) | raw 256-value super-blocks + f32 view | integer dot against q8_K activations | yes |
+| `MXFP4` (39) | raw 32-value blocks (E8M0 scale + 16 FP4 bytes) + f32 view | dot against q8_0 activations | no (CPU kernel) |
+| `I32` (26) | widened to f32 values (exact below 2^24), no registry entry | f32 SIMD | yes (as f32) |
+
+Any other type (IQ\*, TQ\*, Q8_K storage, ...) returns `error('unsupported GGUF quantization dtype N')`.
+
+Errors are returned (never panics) for a missing file, bad magic / version, an unknown tensor name, a truncated data section and unsupported types.
 ```v
 token_emb := gguf_load_tensor('llama-3.2-1b.gguf', 'token_embd.weight') or {
     panic('GGUF load failed: ${err}')
 }
+experts := gguf_load_tensor('gpt-oss-20b-mxfp4.gguf', 'blk.0.ffn_up_exps.weight') or { panic(err) }
+println('${experts.dim(0)} experts of ${experts.dim(1)}x${experts.dim(2)}')
 ```
+
+> Known issue (Vira <= 0.7.7, builds without F16C, i.e. every ARM build and x86 builds without `-mf16c`): the scalar `_vira_fp16_to_fp32` decodes fp16 **subnormals** wrongly, which breaks F16 models and the scales of K-quants. The fix is in `docs/patches/vira-runtime-fp16-subnormal.patch` of the ViraLama repo.
 
 ### `tensor_rmsnorm(x tensor[f32], weight tensor[f32], eps f32) tensor[f32]`
 Root Mean Square Layer Normalization used across modern LLMs (LLaMA, Gemma, Mistral):
@@ -294,6 +318,9 @@ $$\text{Softmax}(x)_i = \frac{e^{x_i - \max(x)}}{\sum_j e^{x_j - \max(x)}}$$
 probs := tensor_softmax(attn_scores)
 ```
 
+### `tensor_rope_norm(q tensor[f32], pos int, freq_base f32) tensor[f32]`
+Same as `tensor_rope`, but rotates adjacent pairs `(2i, 2i+1)` (llama.cpp "normal" RoPE, LLaMA / DeepSeek) instead of the NeoX split halves `(i, i + d/2)`.
+
 ### `tensor_embedding(table tensor[f32], token_id int) tensor[f32]`
 Extracts the 1D embedding vector for token ID `token_id` from 2D vocabulary table `table`. Returns a $1 \times D$ tensor.
 ```v
@@ -307,6 +334,47 @@ Samples a discrete token index from probability distribution `logits`.
 ```v
 next_token := sample_token(logits, 0.7)
 ```
+
+### `tensor_embedding_batch(table tensor[f32], token_ids []int) tensor[f32]`
+Gathers the rows of `token_ids` into an `[n, D]` tensor (prompt prefill). Works on quantized tables: only the requested rows are dequantized.
+```v
+x := tensor_embedding_batch(token_embd, [151644, 872, 198])
+```
+
+### GPU-accelerated inference builtins
+
+These run on CUDA (driver API + JIT PTX) or OpenCL when a device is available and fall back to the multi-threaded CPU kernels otherwise, with identical results up to float rounding. Inputs and outputs are ordinary `tensor[f32]` values; weights are uploaded once and cached in VRAM.
+
+| Builtin | Signature | Description |
+| :--- | :--- | :--- |
+| `gpu_linear` / `.gpu_linear(w)` / `.linear(w)` | `(x tensor[f32], w tensor[f32]) tensor[f32]` | $x W^T$ for `x [M, K]`, `w [N, K]` (GGUF row-major, no transpose). Uses the quantized kernels for GGUF weights (table above). |
+| `gpu_matmul` / `.gpu_matmul(b)` | `(a tensor[f32], b tensor[f32]) tensor[f32]` | $A B$ |
+| `gpu_rmsnorm` | `(x tensor[f32], w tensor[f32], eps f32) tensor[f32]` | Row-wise RMSNorm with weight |
+| `gpu_silu`, `gpu_softmax` | `(x tensor[f32]) tensor[f32]` | Element-wise SiLU; row-wise softmax |
+| `gpu_rope`, `gpu_rope_norm` | `(q tensor[f32], pos int, freq_base f32) tensor[f32]` | RoPE of one token's heads (NeoX / adjacent-pair) |
+| `gpu_rope_seq`, `gpu_rope_seq_norm` | `(q tensor[f32], start_pos i64, n_heads int, freq_base f32) tensor[f32]` | RoPE of `[m, n_heads * head_dim]` rows at positions `start_pos ..` |
+| `gpu_gqa_attention` | `(q tensor[f32], k_cache tensor[f32], v_cache tensor[f32], kv_pos i64, scale f32) tensor[f32]` | Single-token grouped-query attention over cache rows `0..kv_pos` |
+| `gpu_gqa_prefill` | `(q tensor[f32], k_cache tensor[f32], v_cache tensor[f32], start_pos i64, seq_len int, n_heads int, scale f32) tensor[f32]` | Causal GQA for a prompt chunk |
+| `gpu_is_available`, `gpu_is_enabled`, `gpu_has_tensor_cores` | `() bool` | Device queries |
+| `gpu_set_enabled(b bool)`, `gpu_set_backend(name string)`, `gpu_set_device(dev string)` | `void` | Select `cuda` / `opencl` / `cpu` / `auto` and the device (index or name) |
+| `gpu_backend_name`, `gpu_device_name` | `() string` | Active backend / device |
+| `gpu_vram_bytes`, `gpu_allocated_bytes`, `gpu_oom_fallbacks` | `() i64` | VRAM size, bytes in use, number of OOM fallbacks to CPU |
+| `gpu_sync()`, `gpu_simulate_oom(b bool)` | `void` | Wait for queued work; force the OOM path (tests) |
+
+Weight types without a GPU kernel (BF16, Q2_K, Q3_K, MXFP4) stay on the CPU kernels even when the GPU is enabled.
+
+### Runtime environment variables
+
+| Variable | Effect |
+| :--- | :--- |
+| `VIRA_THREADS` | Threads of the compute team used by tensor kernels |
+| `VIRA_WORKERS` | Actor worker pool size (1-32) |
+| `VIRA_LAZY_HOST_FP32=0` | Dequantize every GGUF weight to f32 at load instead of on first use |
+| `VIRA_GPU_BACKEND`, `VIRA_GPU_DEVICE`, `VIRA_GPU_PLATFORM` | Backend / device / OpenCL platform selection |
+| `VIRA_GPU_VRAM_BUDGET_MB` | VRAM the weight cache may use (default 88% of the device) |
+| `VIRA_CUDA_LIB`, `VIRA_OPENCL_LIB` | Driver library paths |
+| `VIRA_GPU_ALLOW_CPU_CL` | Allow CPU OpenCL devices |
+| `VIRA_GPU_DEBUG`, `VIRA_RT_STATS` | Diagnostics on stderr |
 
 ---
 

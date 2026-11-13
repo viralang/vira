@@ -67,7 +67,7 @@ Vira is engineered from the ground up for modern systems development, numerical 
 - **Strict 4-Quadrant Mutability:** Variables are immutable by default. Struct fields can be granularly isolated into private/public and read-only/mutable quadrants (`default`, `mut:`, `pub:`, `pub mut:`).
 - **Mandatory Result Handling:** Functions returning `!T` cannot be silently ignored. Failure to unwrap via `or { ... }` or propagate with `!` is a compile-time semantic error. No unhandled runtime exceptions.
 - **First-Class AI Tensors & Multi-Threaded CPU SIMD:** 1D–4D strided tensors (`tensor[f32]`) are language primitives with batched & broadcast `@` matrix multiplication vectorized via AVX2+FMA / SSE2 on x86_64 and ARM NEON on Apple Silicon/AArch64, auto-parallelized across the work-stealing thread pool, and 64-byte aligned for zero-copy C99 FFI interop.
-- **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights with Q4_0/Q8_0 SIMD dequantization, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
+- **Native SafeTensors & GGUF LLM Inference:** Pure Vira loaders for Hugging Face `.safetensors` model weights and binary GGUF v2/v3 LLM weights (F32, F16, BF16, Q4_0-Q8_0, Q2_K-Q6_K, MXFP4, I32) multiplied straight from their quantized blocks, RoPE, RMSNorm, SwiGLU, and token sampling — without requiring Python or external runtime dependencies.
 - **Single-Owner Memory Model:** Every heap value has exactly one owner. Storing a value copies it unless the source is never read again, in which case it moves; function arguments are borrowed. Two variables never share memory, and each value is freed exactly once by its owner.
 - **Supervised Actor Concurrency:** Concurrency is achieved through isolated actors communicating via non-blocking message sends (`<-`), scheduled across a lock-free Chase-Lev work-stealing thread pool with Erlang-style `setjmp`/`longjmp` fault boundaries, LIFO `defer_stack` unwinding, deep-cloned async envelopes, and `OneForOne` supervisor restarts. Actors are heap objects behind a handle that never move; the compiler enforces that only messages reach them from outside, and actors that wait on each other in a cycle get an error instead of hanging.
 - **Native C & Python FFI (Shared Library Export):** First-class foreign function interop via `extern "C" { ... }`, `#include` / `#flag` directives, typed raw pointers (`&x`, `&mut x`, `*ptr`, `voidptr`), strict `unsafe { ... }` boundaries, and zero-overhead C-ABI shared library export (`vira build -shared` / `@[export]`) callable directly from Python `ctypes`, C, C++, and Rust.
@@ -220,7 +220,7 @@ The repository includes 42 step-by-step tutorials paired with 48 runnable `.vir`
 | **16** | **Compilation & Deployment** | Beginner/Adv | [`16_compilation_and_build_modes.vir`](docs/examples/16_compilation_and_build_modes.vir) | [`16_compilation_and_deployment.md`](docs/tutorials/16_compilation_and_deployment.md) | Ahead-Of-Time (AOT) pipeline, build flags (`-prod`, `-sanitize`, `-keep-c`, `-cc`), static linking, standalone binary deployment, and Docker containers. |
 | **17** | **HTTP 1.1 & Fast JSON** | Advanced | [`17_http_web_server_and_json.vir`](docs/examples/17_http_web_server_and_json.vir) | [`17_http_web_service_and_json.md`](docs/tutorials/17_http_web_service_and_json.md) | Fast JSON field parsing (`json_get_str`, `json_get_int`, `json_get_f32`), HTTP 1.1 response generation, actor-based request processing, 0 leaks. |
 | **18** | **Autograd & SafeTensors** | Advanced | [`18_autograd_and_safetensors.vir`](docs/examples/18_autograd_and_safetensors.vir) | [`18_autograd_and_safetensors.md`](docs/tutorials/18_autograd_and_safetensors.md) | Native zero-copy loading of Hugging Face `.safetensors`, SIMD Autograd backpropagation (`tensor_matmul_grad_b`, `tensor_relu_backward`), in-place SGD optimization. |
-| **19** | **Local LLM Engine (GGUF)** | Expert | [`19_local_llm_inference.vir`](docs/examples/19_local_llm_inference.vir) | [`20_gguf_llm_inference_engine.md`](docs/tutorials/20_gguf_llm_inference_engine.md) | Native GGUF v2/v3 binary parser, Q4_0/Q8_0 SIMD dequantization, RMSNorm, RoPE embeddings, SwiGLU activations, Causal Self-Attention, token sampling. |
+| **19** | **Local LLM Engine (GGUF)** | Expert | [`19_local_llm_inference.vir`](docs/examples/19_local_llm_inference.vir) | [`20_gguf_llm_inference_engine.md`](docs/tutorials/20_gguf_llm_inference_engine.md) | Native GGUF v2/v3 binary parser, quantized matmul straight from F16/BF16/Q4_0-Q8_0/Q2_K-Q6_K/MXFP4 blocks, RMSNorm, RoPE embeddings, SwiGLU activations, Causal Self-Attention, token sampling. |
 | **20** | **Tooling, LSP & Packaging** | Beginner/Adv | `vira init`, `vex.mod`, `vira fmt` | [`19_tooling_lsp_and_package_management.md`](docs/tutorials/19_tooling_lsp_and_package_management.md) | Project scaffolding (`vira init`), manifest packages (`vex.mod`), code formatter (`vira fmt`), test runner (`vira test`), and Language Server (`vira lsp`). |
 | **21** | **Native Desktop GUI & Dashboards** | Intermediate/Adv | [`20_native_gui.vir`](docs/examples/20_native_gui.vir) / [`gui_demo.vir`](examples/gui_demo.vir) | [`21_native_gui_desktop_applications.md`](docs/tutorials/21_native_gui_desktop_applications.md) | Immediate-Mode GUI (IMGUI), double-buffered 60 FPS Win32/X11 rendering, interactive widgets (buttons, sliders, checkboxes), and non-blocking background actor dashboards. |
 | **22** | **Declarative GUI Auto-Layout** | Intermediate/Adv | [`21_declarative_gui.vir`](docs/examples/21_declarative_gui.vir) / [`declarative_gui.vir`](examples/declarative_gui.vir) | [`22_declarative_gui_auto_layout.md`](docs/tutorials/22_declarative_gui_auto_layout.md) | Declarative layout cursor stack, vertical columns (`gui_vstack_begin`), horizontal rows (`gui_hstack_begin`), auto-sized cards, text inputs (`gui_input`), progress bars (`gui_progress`), radio buttons (`gui_radio`), separators, badges, and zero-math widgets (`gui_btn`, `gui_slide`, `gui_check`, `gui_lbl`). |
@@ -618,18 +618,20 @@ tensor_sgd_step(weights, grad_b, 0.01)
 
 ### Pure Vira Local LLM Engine & GGUF Parser
 
-Vira includes a native binary parser and execution runtime for quantized GGUF models:
+Vira includes a native GGUF reader and the transformer kernels to run quantized models. Weights stay in their GGUF format (F32, F16, BF16, Q4_0-Q8_0, Q2_K-Q6_K, MXFP4, I32) and `.gpu_linear` multiplies straight from the quantized blocks on CUDA, OpenCL or the CPU:
 
 ```v
-// Initialize GGUF model parser (Q4_0 / Q8_0)
-model := gguf_load('llama-3.2-1b-instruct-q4_0.gguf') or {
-    panic('Failed to open GGUF model: ${err}')
-}
+path := 'llama-3.2-1b-instruct-q4_0.gguf'
+embd := gguf_load_tensor(path, 'token_embd.weight') or { panic(err) }
+norm := gguf_load_tensor(path, 'blk.0.attn_norm.weight') or { panic(err) }
+wq := gguf_load_tensor(path, 'blk.0.attn_q.weight') or { panic(err) }
 
-// Run inference with Rotary Embeddings (RoPE), SwiGLU, and Attention
-logits := model.forward(token_ids)
-next_token := sample_token(logits, temperature=0.7)
+x := tensor_embedding_batch(embd, [128000, 9906, 1917])
+q := gpu_rmsnorm(x, norm, 0.00001).gpu_linear(wq)
+q_rot := gpu_rope_seq_norm(q, 0, 32, 500000.0)
 ```
+
+ViraLama (`vira-example/viralama`) is a complete llama.cpp-style server built this way; it runs 28 GGUF architectures, among them Llama, Qwen, Gemma, Phi, Mistral/Mixtral, DeepSeek V2/V3/V3.2/V4/V4.1, gpt-oss and more. See [Tutorial 20](docs/tutorials/20_gguf_llm_inference_engine.md) and the [API reference](docs/BUILTINS_AND_API_REFERENCE.md#4-safetensors--gguf-local-llm-inference).
 
 ---
 

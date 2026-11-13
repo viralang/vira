@@ -4,7 +4,7 @@ Running large language models (LLMs) locally has become the standard for private
 
 In this tutorial, you will explore **Vira's native, zero-dependency Local LLM Inference Engine**:
 1. **Native GGUF v2/v3 binary parser:** Reads quantized model files directly into 64-byte aligned SIMD memory without external C/C++ or Python dependencies.
-2. **Support for model quantization formats:** F32, F16, Q8_0 (8-bit quantization), and Q4_0 (4-bit quantization).
+2. **Support for model quantization formats:** F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, the K-quants Q2_K-Q6_K, MXFP4 and I32 index tables. Quantized weights stay in their blocks and are multiplied directly (see section 1).
 3. **Hardware SIMD Transformer operators:**
    - Token embedding lookup (`tensor_embedding`)
    - Root Mean Square Layer Normalization (`tensor_rmsnorm`)
@@ -39,7 +39,7 @@ GGUF (GPT-Generated Unified Format) is the open binary format powering modern lo
 | 32-Byte Alignment Padding                                               |
 +-------------------------------------------------------------------------+
 | Raw Binary Weights Buffer:                                              |
-|   Contiguous SIMD-aligned tensors (Q4_0, Q8_0, F16, F32)                |
+|   Tensor data (F32, F16, BF16, Q4_0..Q8_0, Q2_K..Q6_K, MXFP4, I32)      |
 +-------------------------------------------------------------------------+
 ```
 
@@ -48,7 +48,11 @@ In Vira, `gguf_load_tensor(path, tensor_name)`:
 2. Traverses metadata and extracts architecture configuration.
 3. Finds the matching tensor entry in the info table.
 4. Calculates the 32-byte aligned data buffer boundary.
-5. Performs a zero-copy DMA read and dequantizes directly into 64-byte aligned SIMD memory.
+5. Reads the tensor bytes. F32 and I32 become plain f32 data. Every quantized type keeps its raw blocks in the runtime's quant registry next to the returned `tensor[f32]`; large tensors get their f32 view only when a kernel without a quantized path needs it.
+
+`.gpu_linear(w)` then multiplies straight from the blocks: activations are quantized to 8 bits (q8_0 for 32-value blocks, q8_K for the 256-value K-quant super-blocks) and integer dot products run on CUDA, OpenCL or the AVX2 / NEON CPU team. BF16, Q2_K, Q3_K and MXFP4 always use the CPU kernels. The full type table is in the [API reference](../BUILTINS_AND_API_REFERENCE.md#gguf_load_tensorpath-string-tensor_name-string-tensorf32).
+
+> For a production engine built on these builtins (28 architectures, MoE, MLA, DeepSeek-V4, gpt-oss, an OpenAI-compatible server) see ViraLama (`vira-example/viralama`).
 
 ---
 

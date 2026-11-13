@@ -1424,6 +1424,26 @@ static inline float _vira_cpu_dot_kq_dequant_q8_K(uint32_t dt, const uint8_t *w_
   return sum;
 }
 
+/* MXFP4 . Q8_0 (32-wide blocks). */
+static inline float _vira_cpu_dot_mxfp4_q8_0(const uint8_t *w_row, const _vira_block_q8_0 *x, int32_t nb) {
+  static const int8_t kv_fp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+  float sum = 0.0f;
+  for (int32_t b = 0; b < nb; ++b) {
+    const uint8_t *blk = w_row + (size_t)b * 17u;
+    const uint8_t e = blk[0];
+    uint32_t bits = e < 2 ? (0x00200000u << e) : ((uint32_t)(e - 1) << 23);
+    float d;
+    memcpy(&d, &bits, 4);
+    int32_t acc = 0;
+    for (int32_t j = 0; j < 16; ++j) {
+      acc += (int32_t)kv_fp4[blk[1 + j] & 0x0F] * (int32_t)x[b].qs[j];
+      acc += (int32_t)kv_fp4[blk[1 + j] >> 4] * (int32_t)x[b].qs[j + 16];
+    }
+    sum += d * x[b].d * (float)acc;
+  }
+  return sum;
+}
+
 static inline float _vira_cpu_dot_bf16_f32(const uint8_t *w_row, const float *x, int32_t K) {
   float acc = 0.0f;
   for (int32_t k = 0; k < K; ++k) {
@@ -1707,6 +1727,17 @@ static void _vira_quant_linear_job_fn(void *raw_env) {
 
   if (n0 >= n1 || M <= 0) return;
 
+  if (dt == 39) {
+    const _vira_block_q8_0 *xq = (const _vira_block_q8_0 *)j->x_q8;
+    for (int32_t m = 0; m < M; ++m) {
+      const _vira_block_q8_0 *xm = xq + (size_t)m * (size_t)nb;
+      float *yr = j->y_base + (size_t)m * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n)
+        _vira_q_write1(yr, n, _vira_cpu_dot_mxfp4_q8_0(j->w_raw + (size_t)n * rb, xm, nb), bias, accum);
+    }
+    return;
+  }
+
   if (dt == 30) {
     for (int32_t m = 0; m < M; ++m) {
       const float *xr = j->x_f32 + (size_t)m * (size_t)K;
@@ -1928,7 +1959,7 @@ static void _vira_multi_qlinear_team_fn(void *raw_ctx, int32_t tid, int32_t nt) 
       _vira_quant_linear_job job = {
           .gguf_dtype = m->dtype,
           .w_raw = (const uint8_t *)m->raw_q,
-          .x_q8 = (m->dtype <= 8) ? ctx->x_q8_0 : ctx->x_q8_K,
+          .x_q8 = (m->dtype <= 8 || m->dtype == 39) ? ctx->x_q8_0 : ctx->x_q8_K,
           .x_f32 = ctx->x_f32,
           .bias = m->bias,
           .y_base = m->y_base,
@@ -1987,7 +2018,7 @@ static inline bool _vira_rt_quant_cpu_multi_linear_write(
       return false;
     }
     if (!(dtype == 1 || dtype == 2 || dtype == 3 || dtype == 6 || dtype == 7 ||
-          dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30)) {
+          dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30 || dtype == 39)) {
       return false;
     }
     if (dtype != 1 && dtype != 30) {
@@ -2086,7 +2117,7 @@ static inline bool _vira_rt_quant_cpu_linear(vira_arena *opt_arena,
   if ((size_t)N * row_bytes > raw_bytes)
     return false;
   if (!(dtype == 1 || dtype == 2 || dtype == 3 || dtype == 6 || dtype == 7 ||
-        dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30))
+        dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30 || dtype == 39))
     return false;
 
   _vira_tensor_sync_host_f32(x.data);

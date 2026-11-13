@@ -334,6 +334,22 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       return (Result_tensor_f32){
           .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
     }
+  } else if (matched_type == 26) {
+    /* I32 (index tables such as DeepSeek-V4 hash routing): widened to f32,
+     * exact for |v| < 2^24. */
+    int32_t *iv = (int32_t *)malloc(sizeof(int32_t) * (total > 0 ? total : 1u));
+    size_t nr = iv ? fread(iv, sizeof(int32_t), total, f) : 0;
+    if (!iv || nr != total) {
+      free(iv);
+      fclose(f);
+      vira_tensor_f32_free(&t);
+      vira_string err = vira_str_format(
+          "truncated GGUF I32 tensor (expected %zu values, got %zu)", total, nr);
+      return (Result_tensor_f32){
+          .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
+    }
+    for (size_t i = 0; i < total; ++i) t.data[i] = (float)iv[i];
+    free(iv);
   } else if (qk > 0 && bs > 0 && (qk == 1 || (total % qk) == 0)) {
     size_t blocks = (qk == 1) ? total : (total / qk);
     size_t raw_bytes = blocks * bs;

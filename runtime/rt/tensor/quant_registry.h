@@ -72,7 +72,7 @@ static inline size_t _vira_gguf_dtype_qk(uint32_t gguf_dtype) {
   switch (gguf_dtype) {
   case 1: case 30: return 1;
   case 10: case 11: return 256;
-  case 2: case 3: case 6: case 7: case 8: return 32;
+  case 2: case 3: case 6: case 7: case 8: case 39: return 32;
   case 12: case 13: case 14: return 256;
   default: return 0;
   }
@@ -82,6 +82,7 @@ static inline size_t _vira_gguf_dtype_bs(uint32_t gguf_dtype) {
   switch (gguf_dtype) {
   case 1: case 30: return 2;
   case 10: return 84;
+  case 39: return 17;
   case 11: return 110;
   case 2: return 18;
   case 3: return 20;
@@ -278,7 +279,22 @@ static inline void _vira_rt_dequant_blocks_to_fp32(uint32_t gguf_dtype,
         }
       }
     }
-   } else if (gguf_dtype == 30) {
+   } else if (gguf_dtype == 39) {
+    /* MXFP4: e (E8M0 scale) + 16 bytes of FP4 (E2M1) pairs (ggml dequantize_row_mxfp4) */
+    static const int8_t kv_fp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 17u;
+      const uint8_t e = blk[0];
+      uint32_t bits = e < 2 ? (0x00200000u << e) : ((uint32_t)(e - 1) << 23);
+      float d;
+      memcpy(&d, &bits, 4);
+      float *y = dst_out + b * 32u;
+      for (int32_t j = 0; j < 16; ++j) {
+        y[j] = d * (float)kv_fp4[blk[1 + j] & 0x0F];
+        y[j + 16] = d * (float)kv_fp4[blk[1 + j] >> 4];
+      }
+    }
+  } else if (gguf_dtype == 30) {
     /* BF16: upper 16 bits of an IEEE float */
     for (size_t b = 0; b < n_blocks; ++b) {
       uint16_t h = 0;
