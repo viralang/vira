@@ -1407,6 +1407,36 @@ static inline float _vira_cpu_dot_q6_k_q8_K(const uint8_t *w_row,
   return sumf;
 }
 
+/* Q2_K / Q3_K . Q8_K: each 256-wide super-block is dequantized to floats
+ * and dotted with the int8 activations (scalar, auto-vectorized). */
+static inline void _vira_rt_dequant_blocks_to_fp32(uint32_t gguf_dtype, const uint8_t *raw_q,
+                                                   size_t start_block, size_t n_blocks, float *dst_out);
+static inline float _vira_cpu_dot_kq_dequant_q8_K(uint32_t dt, const uint8_t *w_row,
+                                                  const _vira_block_q8_K *x, int32_t nb) {
+  float w[256];
+  float sum = 0.0f;
+  for (int32_t b = 0; b < nb; ++b) {
+    _vira_rt_dequant_blocks_to_fp32(dt, w_row, (size_t)b, 1, w);
+    float acc = 0.0f;
+    for (int32_t i = 0; i < 256; ++i) acc += w[i] * (float)x[b].qs[i];
+    sum += acc * x[b].d;
+  }
+  return sum;
+}
+
+static inline float _vira_cpu_dot_bf16_f32(const uint8_t *w_row, const float *x, int32_t K) {
+  float acc = 0.0f;
+  for (int32_t k = 0; k < K; ++k) {
+    uint16_t h;
+    memcpy(&h, w_row + (size_t)k * 2u, 2);
+    uint32_t bits = (uint32_t)h << 16;
+    float wf;
+    memcpy(&wf, &bits, 4);
+    acc += wf * x[k];
+  }
+  return acc;
+}
+
 static inline void _vira_cpu_dot_4rows_q6_k_q8_K(
     const uint8_t *w_row, const _vira_block_q8_K *x0,
     const _vira_block_q8_K *x1, const _vira_block_q8_K *x2,
@@ -1677,6 +1707,16 @@ static void _vira_quant_linear_job_fn(void *raw_env) {
 
   if (n0 >= n1 || M <= 0) return;
 
+  if (dt == 30) {
+    for (int32_t m = 0; m < M; ++m) {
+      const float *xr = j->x_f32 + (size_t)m * (size_t)K;
+      float *yr = j->y_base + (size_t)m * (size_t)N;
+      for (int32_t n = n0; n < n1; ++n)
+        _vira_q_write1(yr, n, _vira_cpu_dot_bf16_f32(j->w_raw + (size_t)n * rb, xr, K), bias, accum);
+    }
+    return;
+  }
+
   if (dt == 1) {
     int32_t m = 0;
     for (; m + 4 <= M; m += 4) {
@@ -1832,7 +1872,8 @@ static void _vira_quant_linear_job_fn(void *raw_env) {
         float v = 0.0f;
         if (dt == 12)      v = _vira_cpu_dot_q4_k_q8_K(wr, xm, nb);
         else if (dt == 13) v = _vira_cpu_dot_q5_k_q8_K(wr, xm, nb);
-        else               v = _vira_cpu_dot_q6_k_q8_K(wr, xm, nb);
+        else if (dt == 14) v = _vira_cpu_dot_q6_k_q8_K(wr, xm, nb);
+        else               v = _vira_cpu_dot_kq_dequant_q8_K(dt, wr, xm, nb);
         _vira_q_write1(yr, n, v, bias, accum);
       }
     }
@@ -1946,10 +1987,10 @@ static inline bool _vira_rt_quant_cpu_multi_linear_write(
       return false;
     }
     if (!(dtype == 1 || dtype == 2 || dtype == 3 || dtype == 6 || dtype == 7 ||
-          dtype == 8 || dtype == 12 || dtype == 13 || dtype == 14)) {
+          dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30)) {
       return false;
     }
-    if (dtype != 1) {
+    if (dtype != 1 && dtype != 30) {
       if (qk == 32) need_q8_0 = true;
       else need_q8_K = true;
     }
@@ -2045,7 +2086,7 @@ static inline bool _vira_rt_quant_cpu_linear(vira_arena *opt_arena,
   if ((size_t)N * row_bytes > raw_bytes)
     return false;
   if (!(dtype == 1 || dtype == 2 || dtype == 3 || dtype == 6 || dtype == 7 ||
-        dtype == 8 || dtype == 12 || dtype == 13 || dtype == 14))
+        dtype == 8 || dtype == 10 || dtype == 11 || dtype == 12 || dtype == 13 || dtype == 14 || dtype == 30))
     return false;
 
   _vira_tensor_sync_host_f32(x.data);

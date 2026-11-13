@@ -70,7 +70,8 @@ static inline bool _vira_lazy_host_fp32_enabled(void) {
 
 static inline size_t _vira_gguf_dtype_qk(uint32_t gguf_dtype) {
   switch (gguf_dtype) {
-  case 1: return 1;
+  case 1: case 30: return 1;
+  case 10: case 11: return 256;
   case 2: case 3: case 6: case 7: case 8: return 32;
   case 12: case 13: case 14: return 256;
   default: return 0;
@@ -79,7 +80,9 @@ static inline size_t _vira_gguf_dtype_qk(uint32_t gguf_dtype) {
 
 static inline size_t _vira_gguf_dtype_bs(uint32_t gguf_dtype) {
   switch (gguf_dtype) {
-  case 1: return 2;
+  case 1: case 30: return 2;
+  case 10: return 84;
+  case 11: return 110;
   case 2: return 18;
   case 3: return 20;
   case 6: return 22;
@@ -273,6 +276,74 @@ static inline void _vira_rt_dequant_blocks_to_fp32(uint32_t gguf_dtype,
           dst_h[l + 64] = d * (float)sc_h[is + 4] * (float)q3;
           dst_h[l + 96] = d * (float)sc_h[is + 6] * (float)q4;
         }
+      }
+    }
+   } else if (gguf_dtype == 30) {
+    /* BF16: upper 16 bits of an IEEE float */
+    for (size_t b = 0; b < n_blocks; ++b) {
+      uint16_t h = 0;
+      memcpy(&h, raw_q + (start_block + b) * 2u, 2);
+      uint32_t bits = (uint32_t)h << 16;
+      memcpy(&dst_out[b], &bits, 4);
+    }
+  } else if (gguf_dtype == 10) {
+    /* Q2_K: scales[16] qs[64] d dmin (ggml dequantize_row_q2_K) */
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 84u;
+      uint16_t d_h = 0, m_h = 0;
+      memcpy(&d_h, blk + 80, 2);
+      memcpy(&m_h, blk + 82, 2);
+      const float d = _vira_fp16_to_fp32(d_h), mn = _vira_fp16_to_fp32(m_h);
+      const uint8_t *sc = blk, *q = blk + 16;
+      float *y = dst_out + b * 256u;
+      int32_t is = 0;
+      for (int32_t n = 0; n < 256; n += 128) {
+        int32_t shift = 0;
+        for (int32_t j = 0; j < 4; ++j) {
+          uint8_t c = sc[is++];
+          float dl = d * (float)(c & 0xF), ml = mn * (float)(c >> 4);
+          for (int32_t l = 0; l < 16; ++l) *y++ = dl * (float)((q[l] >> shift) & 3) - ml;
+          c = sc[is++];
+          dl = d * (float)(c & 0xF); ml = mn * (float)(c >> 4);
+          for (int32_t l = 0; l < 16; ++l) *y++ = dl * (float)((q[l + 16] >> shift) & 3) - ml;
+          shift += 2;
+        }
+        q += 32;
+      }
+    }
+  } else if (gguf_dtype == 11) {
+    /* Q3_K: hmask[32] qs[64] scales[12] d (ggml dequantize_row_q3_K) */
+    for (size_t b = 0; b < n_blocks; ++b) {
+      const uint8_t *blk = raw_q + (start_block + b) * 110u;
+      uint16_t d_h = 0;
+      memcpy(&d_h, blk + 108, 2);
+      const float d_all = _vira_fp16_to_fp32(d_h);
+      const uint8_t *hm = blk, *q = blk + 32;
+      uint32_t aux[4];
+      memcpy(aux, blk + 96, 12);
+      const uint32_t kmask1 = 0x03030303u, kmask2 = 0x0f0f0f0fu;
+      uint32_t tmp = aux[2];
+      aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+      aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+      aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+      aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+      const int8_t *scales = (const int8_t *)aux;
+      float *y = dst_out + b * 256u;
+      uint8_t m = 1;
+      int32_t is = 0;
+      for (int32_t n = 0; n < 256; n += 128) {
+        int32_t shift = 0;
+        for (int32_t j = 0; j < 4; ++j) {
+          float dl = d_all * (float)(scales[is++] - 32);
+          for (int32_t l = 0; l < 16; ++l)
+            *y++ = dl * (float)((int8_t)((q[l] >> shift) & 3) - ((hm[l] & m) ? 0 : 4));
+          dl = d_all * (float)(scales[is++] - 32);
+          for (int32_t l = 0; l < 16; ++l)
+            *y++ = dl * (float)((int8_t)((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4));
+          shift += 2;
+          m <<= 1;
+        }
+        q += 32;
       }
     }
   }
