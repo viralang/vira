@@ -1,0 +1,34 @@
+// OUT: 4 2 5 4 2 12
+// OUT: [vira_rt] active_leaks=0
+
+// A fresh string read only for `.len` (call result, interpolation, concatenation)
+// is freed after the statement; it used to leak one string per evaluation.
+fn pick(a int) string {
+    if a > 0 {
+        return ''
+    }
+    return 'n=${a}'
+}
+
+struct Box {
+pub mut:
+    name string
+}
+
+fn main() {
+    if pick(-1).len == 0 {
+        println('empty')
+    }
+    n := pick(-2).len
+    m := '${n}x'.len
+    k := ('a' + pick(-3)).len
+    s := 'keep'
+    j := s.len
+    b := Box{ name: 'bx' }
+    q := b.name.len
+    mut total := 0
+    for i in [1, 2, 3] {
+        total += pick(-i).len
+    }
+    println('${n} ${m} ${k} ${j} ${q} ${total}')
+}

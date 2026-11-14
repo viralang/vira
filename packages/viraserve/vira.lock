@@ -4,17 +4,17 @@
     {
       "path": "http",
       "version": "0.1.0",
-      "checksum": "sha256:1bea3b1a32cd18999c8899372bb79c506af89af9ce10658db889e477707890be"
+      "checksum": "sha256:bd35a28a514130be785019d802acc7daedf161615a49f4ef9bffffb9d6c997b5"
     },
     {
       "path": "io",
       "version": "0.1.0",
-      "checksum": "sha256:bb139e3ec55a11fe9debc48784014425621f0244dd7b78f7102d13ae877510be"
+      "checksum": "sha256:a8e1eb5ede232e17055ffb1c8ec6ca9e5045341a7c0f5bc09576f21ea9336bf0"
     },
     {
       "path": "net",
       "version": "0.1.0",
-      "checksum": "sha256:1e56c8218cb4b566582d9baec7a680c63a1871327a71b29ecb3eb2409e805b87"
+      "checksum": "sha256:15386b70d22184f8d0ba8fd6399180fda040b64220a63c978a8d68ffe609cc3e"
     }
   ]
 }

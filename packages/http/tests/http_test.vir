@@ -186,10 +186,76 @@ fn test_sse_streaming() {
 	println('✓ test_sse_streaming passed')
 }
 
+// Sends `payload` and returns the status line the server answers with, after
+// accept_request fails (body over the limit, or a bad Content-Length).
+fn rejected_status(mut server http.HttpServer, payload string) string {
+	server_addr := server.local_addr() or { panic('failed to get server addr') }
+	addr_str := server_addr.to_string()
+	mut client := net.TcpStream.connect(addr_str) or { panic('failed client connect') }
+	client.write_string(payload) or { panic('failed client write') }
+	server.accept_request() or {
+		line := client.read_line() or { '' }
+		client.close() or { false }
+		return line
+	}
+	client.close() or { false }
+	return 'accepted'
+}
+
+fn test_request_body_limit() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('failed to bind HTTP server') }
+	server.max_body_bytes = 8
+
+	too_big := rejected_status(mut server, 'POST /x HTTP/1.1\r\nContent-Length: 9\r\n\r\n123456789')
+	if too_big != 'HTTP/1.1 413 Payload Too Large' {
+		panic('over-limit body not answered with 413: ${too_big}')
+	}
+	// 2^32 + 1 wraps to 1 in a 32-bit parse; it must be rejected, not read as 1 byte.
+	wrapped := rejected_status(mut server, 'POST /x HTTP/1.1\r\nContent-Length: 4294967297\r\n\r\nA')
+	if wrapped != 'HTTP/1.1 413 Payload Too Large' {
+		panic('wrapping Content-Length not rejected: ${wrapped}')
+	}
+	bad := rejected_status(mut server, 'POST /x HTTP/1.1\r\nContent-Length: -1\r\n\r\n')
+	if bad != 'HTTP/1.1 400 Bad Request' {
+		panic('negative Content-Length not answered with 400: ${bad}')
+	}
+
+	// At the limit the request is read normally.
+	server_addr := server.local_addr() or { panic('failed to get server addr') }
+	addr_str := server_addr.to_string()
+	mut client := net.TcpStream.connect(addr_str) or { panic('failed client connect') }
+	client.write_string('POST /x HTTP/1.1\r\nContent-Length: 8\r\n\r\n12345678') or { panic('failed client write') }
+	mut ctx := server.accept_request() or { panic('body at the limit rejected: ${err}') }
+	if ctx.req.body != '12345678' {
+		panic('body at the limit mismatched: ${ctx.req.body}')
+	}
+	ctx.respond_text('ok') or { panic('respond failed') }
+	client.close() or { false }
+	server.close() or { false }
+	println('✓ test_request_body_limit passed')
+}
+
+// A body holding NUL bytes keeps its length on the wire (interpolation used to
+// stop at the first NUL).
+fn test_binary_body_format() {
+	body := 'A\0B\0C'
+	res := http.Response.text(body)
+	wire := res.format()
+	if !wire.contains('Content-Length: 5\r\n') {
+		panic('binary body content length wrong')
+	}
+	if !wire.ends_with(body) {
+		panic('binary body cut short on the wire (${wire.len} bytes)')
+	}
+	println('✓ test_binary_body_format passed')
+}
+
 fn main() {
 	test_headers()
 	test_response_formatting()
 	test_request_parse_and_server()
 	test_sse_streaming()
+	test_request_body_limit()
+	test_binary_body_format()
 	println('=== All packages/http tests PASSED ===')
 }

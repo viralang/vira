@@ -23,7 +23,24 @@ pub fn Request.new(method string, path string) Request {
 	}
 }
 
+// Largest request body `Request.parse` accepts. A bigger Content-Length is
+// answered with 413 and the request fails before anything is read, so a client
+// cannot make the server allocate an arbitrary amount of memory.
+pub const DEFAULT_MAX_BODY_BYTES = 67108864
+
 pub fn Request.parse(mut stream net.TcpStream) !Request {
+	req := Request.parse_limit(mut stream, DEFAULT_MAX_BODY_BYTES) or {
+		return error(err)
+	}
+	return req
+}
+
+// Like `parse`, with the body limit in bytes (<= 0 means DEFAULT_MAX_BODY_BYTES).
+pub fn Request.parse_limit(mut stream net.TcpStream, max_body int) !Request {
+	mut limit := max_body
+	if limit <= 0 {
+		limit = DEFAULT_MAX_BODY_BYTES
+	}
 	start_line := stream.read_line() or {
 		return error('failed to read HTTP request line: ${err}')
 	}
@@ -79,6 +96,21 @@ pub fn Request.parse(mut stream net.TcpStream) !Request {
 	mut body := ''
 	cl_str := headers.get_or('content-length', '')
 	if cl_str.len > 0 {
+		// Digits only, compared in 64 bits: `to_int` wraps silently, so
+		// "4294967297" would otherwise read as 1 and leave the rest of the
+		// body in the stream as the next request.
+		if !content_length_ok(cl_str) {
+			stream.write_string('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+			return error('invalid Content-Length: ${cl_str}')
+		}
+		mut cl64 := i64(-1)
+		if cl_str.len <= 12 {
+			cl64 = cl_str.to_i64() or { i64(-1) }
+		}
+		if cl64 < i64(0) || cl64 > i64(limit) {
+			stream.write_string('HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+			return error('request body of ${cl_str} bytes exceeds the limit of ${limit} bytes')
+		}
 		cl_num := cl_str.to_int() or { 0 }
 		if cl_num > 0 {
 			body = stream.read_exact(cl_num) or {
@@ -95,4 +127,20 @@ pub fn Request.parse(mut stream net.TcpStream) !Request {
 		headers: headers,
 		body: body,
 	}
+}
+
+// A Content-Length value: one or more ASCII digits and nothing else.
+fn content_length_ok(v string) bool {
+	if v.len == 0 {
+		return false
+	}
+	b := v.bytes()
+	mut i := 0
+	for i < b.len {
+		if b[i] < 48 || b[i] > 57 {
+			return false
+		}
+		i += 1
+	}
+	return true
 }

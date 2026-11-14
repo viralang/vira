@@ -1,0 +1,26 @@
+// OUT: 5 17 3
+// OUT: q5 3.50
+// OUT: arena 8
+// OUT: lit ?? %s \ "q" 100%
+// OUT: [vira_rt] active_leaks=0
+
+// String interpolation copies string values by length: a NUL byte inside one
+// must not cut the result short (it used to: printf's %.*s stops at NUL).
+fn label(n int) string {
+    return 'n=${n}'
+}
+
+fn main() {
+    s := 'A\0B'
+    t := '[${s}]'
+    u := 'x${s}y${t.len}z${label(4)}?${true}%d'
+    v := '${s}'
+    println('${t.len} ${u.len} ${v.len}')
+    println('q${t.len} ${3.5}')
+    arena {
+        w := 'in ${s} ${t.len}'
+        println('arena ${w.len}')
+    }
+    pct := 100
+    println('lit ?? %s \\ "q" ${pct}%')
+}

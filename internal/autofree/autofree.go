@@ -1405,6 +1405,14 @@ func (a *Analyzer) walkAndHoistCallArgs(
 
 	case *ast.SelectorExpr:
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
+		// `make_name().len`, `'${x}'.len`, `(a + b).len`: a fresh heap string read only
+		// for a field (the result is an int) is bound to a temporary and freed after the
+		// statement, the same as a method receiver above.
+		if lt := a.chk.ExprTypes[e.Left]; lt != nil && lt.Equals(checker.TypeString) {
+			if call, isCall := e.Left.(*ast.CallExpr); !isCall || call.OrBlock == nil {
+				e.Left = a.maybeHoistSubExpr(e.Left, inArena, preStmts, postFrees, report)
+			}
+		}
 
 	case *ast.StringInterpExpr:
 		for i := range e.Exprs {

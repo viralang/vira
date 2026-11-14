@@ -1,0 +1,20 @@
+module main
+
+struct Row {
+pub mut:
+	long int // ERROR: field name 'long' is reserved in the generated C
+	width int
+}
+
+fn scale(double int) int { // ERROR: parameter name 'double' is reserved in the generated C
+	return double * 2
+}
+
+fn main() {
+	long := 'a'.repeat(65) // ERROR: variable name 'long' is reserved in the generated C
+	for auto in [1, 2] { // ERROR: loop variable name 'auto' is reserved in the generated C
+		println('${auto}')
+	}
+	ok_name := 1
+	println('${long} ${ok_name} ${scale(2)}')
+}

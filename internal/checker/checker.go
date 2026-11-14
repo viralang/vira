@@ -265,6 +265,27 @@ func (c *Checker) SetFileImports(imports []ast.ImportSpec) {
 	}
 }
 
+// cReserved lists names that are keywords (or the stdbool macro) in the C the
+// compiler emits. Locals, parameters, loop variables and struct fields keep
+// their Vira name in the generated C, so such a name would not compile; it is
+// rejected here with a clear message instead of a gcc error.
+var cReserved = map[string]bool{
+	"auto": true, "char": true, "double": true, "enum": true, "extern": true,
+	"float": true, "goto": true, "inline": true, "int": true, "long": true,
+	"register": true, "restrict": true, "short": true, "signed": true,
+	"sizeof": true, "static": true, "typedef": true, "union": true,
+	"unsigned": true, "void": true, "volatile": true, "bool": true,
+	"_Bool": true, "_Complex": true, "_Imaginary": true, "_Alignas": true,
+	"_Alignof": true, "_Atomic": true, "_Generic": true, "_Noreturn": true,
+	"_Static_assert": true, "_Thread_local": true,
+}
+
+func (c *Checker) checkCName(id ast.Ident, what string) {
+	if cReserved[id.Name] {
+		c.errorf(id.NamePos, "%s name '%s' is reserved in the generated C; choose another name", what, id.Name)
+	}
+}
+
 func (c *Checker) errorf(span token.Span, format string, args ...any) {
 	c.errors = append(c.errors, SemanticError{
 		File: c.curFile,
@@ -1438,6 +1459,7 @@ func (c *Checker) registerStructMembers(d *ast.StructDecl) {
 	}
 
 	for _, f := range d.Fields {
+		c.checkCName(f.Name, "field")
 		if _, exists := st.Fields[f.Name.Name]; exists {
 			c.errorf(f.FieldSpan, "duplicate field '%s' in struct '%s'", f.Name.Name, st.Name)
 			continue
@@ -1748,6 +1770,7 @@ func (c *Checker) checkFnBody(d *ast.FnDecl) {
 		if rst, ok := recvType.(*StructType); ok && rst.IsActor {
 			c.curActor = rst // the actor's own methods may touch its state directly
 		}
+		c.checkCName(d.Receiver.Name, "receiver")
 		scope.Define(&VarSymbol{
 			Name:       d.Receiver.Name.Name,
 			Type:       recvType,
@@ -1758,6 +1781,7 @@ func (c *Checker) checkFnBody(d *ast.FnDecl) {
 	}
 
 	for _, p := range d.Params {
+		c.checkCName(p.Name, "parameter")
 		scope.Define(&VarSymbol{
 			Name:       p.Name.Name,
 			Type:       c.resolveTypeExpr(p.Type),
@@ -1802,6 +1826,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 			c.rejectActorCopy(s.Value, valType)
 		}
 		if s.Name.Name != "_" {
+			c.checkCName(s.Name, "variable")
 			if !scope.Define(&VarSymbol{
 				Name:  s.Name.Name,
 				Type:  valType,
@@ -1906,6 +1931,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 			c.errorf(s.Iter.Span(), "cannot iterate over type '%s' in for-in loop", iterType)
 		}
 		loopScope := NewScope(scope)
+		c.checkCName(s.Var, "loop variable")
 		loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: elemType, IsMut: false, Span: s.Var.NamePos, IsBorrowed: true})
 		c.checkBlock(s.Body, loopScope)
 

@@ -266,6 +266,43 @@ static inline void vira_cstr_buf_free(vira_cstr_buf *b) {
   }
 }
 
+/*
+ * `&c_char` FFI arguments (runtime finding V2). A view (`trim_left()`,
+ * `trim_right()`, a slice of a literal) is not NUL-terminated at its length,
+ * so C would read the rest of the parent string. Owned heap strings always
+ * have a terminator and are passed as they are; anything else (literals,
+ * views, arena strings) is copied into one of a few thread-local buffers.
+ * The pointer stays valid for the call and the next VIRA_FFI_CSTR_SLOTS - 1
+ * conversions on the same thread; C must not keep it longer.
+ */
+#define VIRA_FFI_CSTR_SLOTS 16
+static __thread char *_vira_ffi_cstr_buf[VIRA_FFI_CSTR_SLOTS];
+static __thread size_t _vira_ffi_cstr_cap[VIRA_FFI_CSTR_SLOTS];
+static __thread unsigned _vira_ffi_cstr_next = 0;
+
+static inline const char *vira_str_ffi_cstr(vira_string s) {
+  if (!s.is_lit && s.data != NULL) {
+    return (const char *)s.data;
+  }
+  size_t len = (s.data != NULL && s.len > 0) ? (size_t)s.len : 0;
+  unsigned k = _vira_ffi_cstr_next++ % VIRA_FFI_CSTR_SLOTS;
+  if (_vira_ffi_cstr_cap[k] < len + 1) {
+    size_t cap = len + 1 < 64 ? 64 : len + 1;
+    char *p = (char *)realloc(_vira_ffi_cstr_buf[k], cap);
+    if (!p) {
+      fprintf(stderr, "vira panic: out of memory in vira_str_ffi_cstr\n");
+      exit(1);
+    }
+    _vira_ffi_cstr_buf[k] = p;
+    _vira_ffi_cstr_cap[k] = cap;
+  }
+  if (len > 0) {
+    memcpy(_vira_ffi_cstr_buf[k], s.data, len);
+  }
+  _vira_ffi_cstr_buf[k][len] = '\0';
+  return _vira_ffi_cstr_buf[k];
+}
+
 // Public C FFI helper: allocates a NUL-terminated heap C string copy of `s`.
 // Release with `vira_cstr_free(ptr)`.
 /**

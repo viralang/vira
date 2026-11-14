@@ -46,6 +46,8 @@ pub mut:
 	listener net.TcpListener
 	addr net.SocketAddr
 	is_running bool
+	// Largest request body accept_request reads (see Request.parse_limit).
+	max_body_bytes int
 }
 
 pub fn HttpServer.bind(addr string) !HttpServer {
@@ -59,6 +61,7 @@ pub fn HttpServer.bind(addr string) !HttpServer {
 		listener: l,
 		addr: local,
 		is_running: true,
+		max_body_bytes: DEFAULT_MAX_BODY_BYTES,
 	}
 }
 
@@ -69,7 +72,7 @@ pub fn (mut s HttpServer) accept_request() !RequestContext {
 	mut client := s.listener.accept() or {
 		return error(err)
 	}
-	req := Request.parse(mut client) or {
+	req := Request.parse_limit(mut client, s.max_body_bytes) or {
 		client.close() or { false }
 		return error(err)
 	}

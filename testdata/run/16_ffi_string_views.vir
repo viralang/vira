@@ -1,0 +1,30 @@
+// OUT: 3 2 5 4 0
+// OUT: [vira_rt] active_leaks=0
+
+// `&c_char` arguments are NUL-terminated at the string's length, also for
+// views (`trim_right()`, `trim_left()`, views of literals), which used to hand C
+// the rest of the parent string (runtime finding V2).
+#include <string.h>
+
+extern "C" {
+    fn strlen(s &c_char) c_ulong
+}
+
+fn clen(s string) int {
+    mut n := 0
+    unsafe {
+        n = int(strlen(s))
+    }
+    return n
+}
+
+fn main() {
+    lit := 'abc   '
+    a := lit.trim_right()
+    owned := '  xy${a.len}  '
+    b := owned.trim().trim_right()
+    c := 'hello'
+    d := '  done'.trim_left()
+    e := ''
+    println('${clen(a)} ${clen(b) - 1} ${clen(c)} ${clen(d)} ${clen(e)}')
+}

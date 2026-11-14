@@ -3078,7 +3078,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				paramType := externSig.Params[i].Type
 				if argType != nil {
 					if checker.ExactEquals(argType, checker.TypeString) {
-						if ref, ok := paramType.(*checker.RefType); ok && (checker.ExactEquals(ref.Inner, checker.TypeCChar) || checker.ExactEquals(ref.Inner, checker.TypeU8)) {
+						if ref, ok := paramType.(*checker.RefType); ok && checker.ExactEquals(ref.Inner, checker.TypeCChar) {
+							// NUL-terminated even for views (runtime finding V2)
+							argVal = fmt.Sprintf("vira_str_ffi_cstr(%s)", argVal)
+						} else if ok && checker.ExactEquals(ref.Inner, checker.TypeU8) {
 							argVal = fmt.Sprintf("(const char*)(%s.data)", argVal)
 						} else if checker.ExactEquals(paramType, checker.TypeVoidPtr) {
 							argVal = fmt.Sprintf("(void*)(%s.data)", argVal)
@@ -3998,13 +4001,22 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 	var fmtBuf strings.Builder
 	var cArgs []string
 	var binds []string // string sub-expressions evaluated once, before the format call
+	// With a string argument the result is built by length-based concatenation
+	// (printf's %.*s stops at a NUL byte). pieces mirrors fmtBuf / cArgs, split
+	// at every string argument.
+	var pieces []interpPiece
+	cur := interpPiece{}
+	hasStr := false
 
 	for i, seg := range si.Segments {
 		fmtBuf.WriteString(strings.ReplaceAll(seg, "%", "%%"))
+		cur.fmt += strings.ReplaceAll(seg, "%", "%%")
+		cur.lit += seg
 		if i < len(si.Exprs) {
 			sub := si.Exprs[i]
 			subType := g.chk.ExprTypes[sub]
 			subExpr := g.emitExpr(sub)
+			fmtBefore, argsBefore := fmtBuf.Len(), len(cArgs)
 
 			switch t := subType.(type) {
 			case *checker.PrimitiveType:
@@ -4021,6 +4033,10 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 						subExpr = tmp
 					}
 					cArgs = append(cArgs, fmt.Sprintf("%s.len, (const char*)%s.data", subExpr, subExpr))
+					hasStr = true
+					pieces = append(pieces, cur, interpPiece{str: subExpr})
+					cur = interpPiece{}
+					continue
 				case t.Kind == checker.PrimI64 || t.Kind == checker.PrimCLong || t.Kind == checker.PrimCULong ||
 					t.Kind == checker.PrimCLongLong || t.Kind == checker.PrimCULongLong ||
 					t.Kind == checker.PrimCSize || t.Kind == checker.PrimCSSize:
@@ -4046,9 +4062,15 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 				fmtBuf.WriteString("%d")
 				cArgs = append(cArgs, subExpr)
 			}
+			cur.fmt += fmtBuf.String()[fmtBefore:]
+			cur.args = append(cur.args, cArgs[argsBefore:]...)
 		}
 	}
+	pieces = append(pieces, cur)
 
+	if hasStr {
+		return g.emitStringInterpConcat(pieces, binds)
+	}
 	call := fmt.Sprintf("vira_str_format(%q, %s)", fmtBuf.String(), strings.Join(cArgs, ", "))
 	if g.activeArena != "" && !strings.Contains(g.activeArena, "isolated_heap") {
 		call = fmt.Sprintf("vira_arena_str_format(%s, %q, %s)",
@@ -4058,6 +4080,87 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 		return fmt.Sprintf("({ %s %s; })", strings.Join(binds, " "), call)
 	}
 	return call
+}
+
+// interpPiece is one part of a string interpolation that contains a string
+// argument: either that string (str), or the run of literal text and
+// non-string values between two string arguments (fmt/args, with lit holding
+// the raw text when the run has no values).
+type interpPiece struct {
+	str  string
+	fmt  string
+	lit  string
+	args []string
+}
+
+// cStringLit renders s as a C string literal byte for byte: printable ASCII
+// as is, everything else as a 3-digit octal escape (which, unlike \x, cannot
+// swallow a following hex digit).
+func cStringLit(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' || c == '"':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case c == '?': // avoid trigraphs
+			b.WriteString("\\077")
+		case c >= 0x20 && c < 0x7f:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "\\%03o", c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// emitStringInterpConcat builds an interpolation with a string argument by
+// concatenation, so string values are copied by length and a NUL byte inside
+// one does not cut the result short (printf's %.*s stops at NUL).
+func (g *Generator) emitStringInterpConcat(pieces []interpPiece, binds []string) string {
+	arena := g.activeArena != "" && !strings.Contains(g.activeArena, "isolated_heap")
+	parts := g.nextTmp("ip")
+	var vals []string
+	var owned []int // indexes of heap pieces made here, freed after the copy
+	for _, pc := range pieces {
+		switch {
+		case pc.str != "":
+			vals = append(vals, pc.str)
+		case len(pc.args) == 0:
+			if pc.lit != "" {
+				vals = append(vals, fmt.Sprintf("vira_str_lit(%s, %d)", cStringLit(pc.lit), len(pc.lit)))
+			}
+		case arena:
+			vals = append(vals, fmt.Sprintf("vira_arena_str_format(%s, %s, %s)", g.activeArena, cStringLit(pc.fmt), strings.Join(pc.args, ", ")))
+		default:
+			owned = append(owned, len(vals))
+			vals = append(vals, fmt.Sprintf("vira_str_format(%s, %s)", cStringLit(pc.fmt), strings.Join(pc.args, ", ")))
+		}
+	}
+	res := g.nextTmp("ipr")
+	var b strings.Builder
+	b.WriteString("({ ")
+	for _, bd := range binds {
+		b.WriteString(bd)
+		b.WriteByte(' ')
+	}
+	fmt.Fprintf(&b, "vira_string %s[%d]; ", parts, len(vals))
+	for i, v := range vals {
+		fmt.Fprintf(&b, "%s[%d] = %s; ", parts, i, v)
+	}
+	if arena {
+		fmt.Fprintf(&b, "vira_string %s = vira_arena_str_concat_n(%s, %s, %d); ", res, g.activeArena, parts, len(vals))
+	} else {
+		fmt.Fprintf(&b, "vira_string %s = vira_str_concat_n(%s, %d); ", res, parts, len(vals))
+	}
+	for _, i := range owned {
+		fmt.Fprintf(&b, "vira_str_free(&%s[%d]); ", parts, i)
+	}
+	fmt.Fprintf(&b, "%s; })", res)
+	return b.String()
 }
 
 // --- TYPE MAPPING HELPERS ---
