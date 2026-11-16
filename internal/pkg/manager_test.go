@@ -203,3 +203,97 @@ func TestPackageManager_InstallHonoursLock(t *testing.T) {
 		t.Errorf("IsStandardPackage misclassifies a name")
 	}
 }
+
+func TestPackageManager_TransitiveAndSubpackageResolution(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create leaf package "leaf_pkg" with a sub-package "sub"
+	leafDir := filepath.Join(tempDir, "leaf_pkg")
+	if err := os.MkdirAll(filepath.Join(leafDir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leafDir, "vira.mod"), []byte("module leaf_pkg\nversion 0.1.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leafDir, "leaf.vir"), []byte("module leaf_pkg\n\npub fn val() int {\n\treturn 42\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leafDir, "sub", "helper.vir"), []byte("module sub\n\npub fn hi() string {\n\treturn 'hi'\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create mid package "mid_pkg" that depends on "../leaf_pkg"
+	midDir := filepath.Join(tempDir, "mid_pkg")
+	if err := os.MkdirAll(midDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(midDir, "vira.mod"), []byte("module mid_pkg\nversion 0.1.0\n\ndeps\n\t../leaf_pkg\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(midDir, "mid.vir"), []byte("module mid_pkg\n\nimport leaf_pkg\n\npub fn run() int {\n\treturn leaf_pkg.val()\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create root app that adds "../mid_pkg"
+	appDir := filepath.Join(tempDir, "app")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "vira.mod"), []byte("module app\nversion 0.1.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := pkg.NewManager()
+	relMid, _ := filepath.Rel(appDir, midDir)
+	if _, err := mgr.Add(appDir, relMid, ""); err != nil {
+		t.Fatalf("Add mid_pkg failed: %v", err)
+	}
+
+	// Both mid_pkg and transitive leaf_pkg must exist in .vira/pkg
+	if _, err := os.Stat(filepath.Join(pkg.ProjectCacheDir(appDir), "mid_pkg", "mid.vir")); err != nil {
+		t.Errorf("expected mid_pkg cached: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(pkg.ProjectCacheDir(appDir), "leaf_pkg", "leaf.vir")); err != nil {
+		t.Errorf("expected transitive leaf_pkg cached: %v", err)
+	}
+
+	// ResolveImportCandidates must find both transitive leaf_pkg and sub-package leaf_pkg/sub
+	candsLeaf := pkg.ResolveImportCandidates(appDir, appDir, "leaf_pkg")
+	foundLeaf := false
+	for _, c := range candsLeaf {
+		if strings.HasSuffix(filepath.ToSlash(c), ".vira/pkg/leaf_pkg") {
+			foundLeaf = true
+			break
+		}
+	}
+	if !foundLeaf {
+		t.Errorf("expected ResolveImportCandidates to include transitive leaf_pkg, got: %v", candsLeaf)
+	}
+
+	candsSub := pkg.ResolveImportCandidates(appDir, appDir, "leaf_pkg/sub")
+	foundSub := false
+	for _, c := range candsSub {
+		if strings.HasSuffix(filepath.ToSlash(c), ".vira/pkg/leaf_pkg/sub") {
+			if _, err := os.Stat(c); err == nil {
+				foundSub = true
+				break
+			}
+		}
+	}
+	if !foundSub {
+		t.Errorf("expected ResolveImportCandidates to resolve sub-package leaf_pkg/sub, got: %v", candsSub)
+	}
+
+	// Wipe .vira/pkg and verify Install restores both mid_pkg and transitive leaf_pkg
+	_ = os.RemoveAll(pkg.ProjectCacheDir(appDir))
+	installed, err := mgr.Install(appDir)
+	if err != nil {
+		t.Fatalf("Install failed: %v", err)
+	}
+	if installed != 2 {
+		t.Errorf("expected 2 installed packages (direct + transitive), got %d", installed)
+	}
+	if _, err := os.Stat(filepath.Join(pkg.ProjectCacheDir(appDir), "leaf_pkg", "leaf.vir")); err != nil {
+		t.Errorf("expected transitive leaf_pkg restored by Install: %v", err)
+	}
+}

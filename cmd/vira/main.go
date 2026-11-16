@@ -981,7 +981,7 @@ func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) 
 								return nil
 							}
 							if subInfo.IsDir() {
-								if subInfo.Name() == "tests" || subInfo.Name() == ".git" || subInfo.Name() == "examples" {
+								if subInfo.Name() == "tests" || subInfo.Name() == ".git" || subInfo.Name() == ".vira" || subInfo.Name() == "vendor" || subInfo.Name() == "examples" {
 									return filepath.SkipDir
 								}
 								return nil
