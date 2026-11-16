@@ -1,6 +1,7 @@
 module http
 
 import net
+import time
 
 pub struct Request {
 pub:
@@ -35,13 +36,40 @@ pub fn Request.parse(mut stream net.TcpStream) !Request {
 	return req
 }
 
+// Limits of the blocking parser (the 2026-11-16 review, R2-R4): one header
+// line, the number of header lines, and the time to receive the whole head.
+// Each is answered (431 / 431 / 408) before the request fails.
+pub const MAX_HEADER_LINE = 8192
+pub const MAX_HEADER_COUNT = 100
+pub const HEAD_DEADLINE_MS = 30000
+
 // Like `parse`, with the body limit in bytes (<= 0 means DEFAULT_MAX_BODY_BYTES).
+// Blocks until the request has arrived; event loops use `Conn` instead.
 pub fn Request.parse_limit(mut stream net.TcpStream, max_body int) !Request {
+	req := Request.parse_with(mut stream, max_body, HEAD_DEADLINE_MS) or {
+		return error(err)
+	}
+	return req
+}
+
+// Like `parse_limit`, with the head deadline in ms (<= 0: HEAD_DEADLINE_MS).
+// The deadline only fires between reads: give the socket a read timeout.
+pub fn Request.parse_with(mut stream net.TcpStream, max_body int, head_deadline_ms int) !Request {
+	mut dl := head_deadline_ms
+	if dl <= 0 {
+		dl = HEAD_DEADLINE_MS
+	}
 	mut limit := max_body
 	if limit <= 0 {
 		limit = DEFAULT_MAX_BODY_BYTES
 	}
-	start_line := stream.read_line() or {
+	deadline := time.now_ms() + i64(dl)
+	start_line := stream.read_line_limit(MAX_HEADER_LINE, deadline) or {
+		if err.contains('longer than') {
+			stream.write_string('HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+		} else if err.contains('deadline') {
+			stream.write_string('HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+		}
 		return error('failed to read HTTP request line: ${err}')
 	}
 	if start_line.len == 0 {
@@ -76,8 +104,22 @@ pub fn Request.parse_limit(mut stream net.TcpStream, max_body int) !Request {
 	}
 
 	mut headers := HeaderMap.new()
+	mut n_headers := 0
 	for true {
-		line := stream.read_line() or {
+		n_headers += 1
+		if n_headers > MAX_HEADER_COUNT + 1 {
+			stream.write_string('HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+			return error('more than ${MAX_HEADER_COUNT} header lines')
+		}
+		line := stream.read_line_limit(MAX_HEADER_LINE, deadline) or {
+			if err.contains('longer than') {
+				stream.write_string('HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+				return error('header line longer than ${MAX_HEADER_LINE} bytes')
+			}
+			if err.contains('deadline') {
+				stream.write_string('HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
+				return error('request head not received within ${dl} ms')
+			}
 			break
 		}
 		if line.len == 0 {

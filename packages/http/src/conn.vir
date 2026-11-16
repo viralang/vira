@@ -1,0 +1,348 @@
+module http
+
+import net
+
+// Non-blocking HTTP/1.1 connections for event loops.
+//
+// `Request.parse` and `HttpServer.accept_request` read a whole request with
+// blocking calls, so one slow client holds up everything else. A `Conn`
+// never blocks: the loop polls every socket at once (`net.poll_many`), calls
+// `fill()` on the readable ones, takes complete requests with
+// `next_request()`, queues responses with `queue()` / `queue_response()` and
+// writes them with `flush()` as the socket accepts more. One slow reader or
+// writer only ever delays itself.
+
+// Largest request line plus headers accepted before answering 431.
+pub const MAX_HEAD_BYTES = 65536
+
+// Bytes read from a socket per `fill()` call.
+pub const READ_CHUNK = 65536
+
+pub struct Conn {
+pub mut:
+	stream net.TcpStream
+	// Received bytes not yet consumed by next_request().
+	rx []u8
+	// Where to resume looking for the end of the headers.
+	scan int
+	// Queued output and how much of it is already sent.
+	out []u8
+	out_pos int
+	// Close once everything queued has been sent.
+	close_after_flush bool
+	// Set when the peer closed or the socket failed.
+	closed bool
+	max_body int
+}
+
+// What next_request() found.
+pub struct Incoming {
+pub mut:
+	// A complete request is in `req`.
+	ready bool
+	req Request
+	// Non-zero when the request was refused: the status line is already
+	// queued and the connection will close after it is sent.
+	reject int
+	msg string
+}
+
+// Wraps an accepted socket. Makes it non-blocking; max_body <= 0 means
+// DEFAULT_MAX_BODY_BYTES.
+pub fn Conn.new(stream net.TcpStream, max_body int) Conn {
+	mut s := net.TcpStream{
+		fd: stream.fd,
+		is_open: stream.is_open,
+		rx_buf: []u8{},
+		rx_pos: 0,
+		rx_len: 0,
+	}
+	s.set_nonblocking(true) or { false }
+	s.set_nodelay(true) or { false }
+	mut limit := max_body
+	if limit <= 0 {
+		limit = DEFAULT_MAX_BODY_BYTES
+	}
+	return Conn{
+		stream: s,
+		rx: []u8{},
+		scan: 0,
+		out: []u8{},
+		out_pos: 0,
+		close_after_flush: false,
+		closed: false,
+		max_body: limit,
+	}
+}
+
+pub fn (c Conn) fd() i64 {
+	return c.stream.fd
+}
+
+// Bytes queued but not yet sent.
+pub fn (c Conn) pending_out() int {
+	return c.out.len - c.out_pos
+}
+
+// Most bytes one fill() call takes, so one fast uploader cannot starve the
+// rest of the loop.
+pub const FILL_BUDGET = 4194304
+
+// Reads what the socket has (never waits), until it is empty or
+// FILL_BUDGET bytes were read. Returns the bytes read, 0 when nothing was
+// available. At end of stream or on error `closed` is set.
+pub fn (mut c Conn) fill() int {
+	if c.closed {
+		return 0
+	}
+	mut total := 0
+	for total < FILL_BUDGET {
+		n := c.stream.read_append(mut c.rx, READ_CHUNK) or {
+			c.closed = true
+			return total
+		}
+		if n <= 0 {
+			break
+		}
+		total += n
+	}
+	return total
+}
+
+fn (mut c Conn) refuse(code int, text string, msg string) Incoming {
+	body := '{"error":{"code":${code},"message":"${msg}","type":"invalid_request_error"}}'
+	head := 'HTTP/1.1 ${code} ${text}\r\nContent-Type: application/json\r\nContent-Length: ${body.len}\r\nConnection: close\r\n\r\n'
+	c.queue(head)
+	c.queue(body)
+	c.close_after_flush = true
+	c.rx.clear()
+	c.scan = 0
+	return Incoming{
+		ready: false,
+		req: Request.new('', ''),
+		reject: code,
+		msg: msg,
+	}
+}
+
+fn not_ready() Incoming {
+	return Incoming{
+		ready: false,
+		req: Request.new('', ''),
+		reject: 0,
+		msg: '',
+	}
+}
+
+// Takes the next complete request out of the received bytes, if there is
+// one. Never reads the socket; call fill() first.
+pub fn (mut c Conn) next_request() Incoming {
+	if c.close_after_flush || c.rx.len == 0 {
+		return not_ready()
+	}
+	mut from := c.scan - 3
+	if from < 0 {
+		from = 0
+	}
+	he := net.find_bytes(c.rx, from, '\r\n\r\n')
+	if he < 0 {
+		c.scan = c.rx.len
+		if c.rx.len > MAX_HEAD_BYTES {
+			return c.refuse(431, 'Request Header Fields Too Large', 'request headers exceed ${MAX_HEAD_BYTES} bytes')
+		}
+		return not_ready()
+	}
+	if he > MAX_HEAD_BYTES {
+		return c.refuse(431, 'Request Header Fields Too Large', 'request headers exceed ${MAX_HEAD_BYTES} bytes')
+	}
+	head_bytes := c.rx.slice(0, he)
+	head := head_bytes.to_string()
+	req := parse_head(head, '') or {
+		return c.refuse(400, 'Bad Request', 'malformed request head')
+	}
+	te := req.headers.get_or('transfer-encoding', '')
+	if te.len > 0 {
+		return c.refuse(501, 'Not Implemented', 'Transfer-Encoding request bodies are not supported; send Content-Length')
+	}
+	mut cl := 0
+	cl_str := req.headers.get_or('content-length', '')
+	if cl_str.len > 0 {
+		if !content_length_ok(cl_str) {
+			return c.refuse(400, 'Bad Request', 'invalid Content-Length')
+		}
+		mut cl64 := i64(-1)
+		if cl_str.len <= 12 {
+			cl64 = cl_str.to_i64() or { i64(-1) }
+		}
+		if cl64 < i64(0) || cl64 > i64(c.max_body) {
+			return c.refuse(413, 'Payload Too Large', 'request body exceeds the limit of ${c.max_body} bytes')
+		}
+		cl = int(cl64)
+	}
+	total := he + 4 + cl
+	if c.rx.len < total {
+		c.scan = he
+		return not_ready()
+	}
+	mut body := ''
+	if cl > 0 {
+		body_bytes := c.rx.slice(he + 4, total)
+		body = body_bytes.to_string()
+	}
+	full := parse_head(head, body) or {
+		return c.refuse(400, 'Bad Request', 'malformed request head')
+	}
+	if total >= c.rx.len {
+		c.rx.clear()
+	} else {
+		c.rx = c.rx.slice(total, c.rx.len)
+	}
+	c.scan = 0
+	return Incoming{
+		ready: true,
+		req: full,
+		reject: 0,
+		msg: '',
+	}
+}
+
+// Parses a request line and headers (everything before the blank line) and
+// attaches `body`.
+pub fn parse_head(head string, body string) !Request {
+	lines := head.split('\r\n')
+	if lines.len == 0 || lines[0].len == 0 {
+		return error('empty HTTP request line')
+	}
+	start_line := lines[0]
+	space1 := start_line.index_of(' ')
+	if space1 <= 0 {
+		return error('malformed HTTP request line')
+	}
+	method := start_line.substr(0, space1)
+	rem := start_line.substr(space1 + 1, start_line.len)
+	space2 := rem.index_of(' ')
+	mut target := ''
+	mut version := 'HTTP/1.1'
+	if space2 > 0 {
+		target = rem.substr(0, space2)
+		version = rem.substr(space2 + 1, rem.len)
+	} else {
+		target = rem.clone()
+	}
+	if target.len == 0 {
+		return error('malformed HTTP request line')
+	}
+	mut path := ''
+	mut query := ''
+	qmark := target.index_of('?')
+	if qmark >= 0 {
+		path = target.substr(0, qmark)
+		query = target.substr(qmark + 1, target.len)
+	} else {
+		path = target.clone()
+	}
+	mut headers := HeaderMap.new()
+	mut i := 1
+	for i < lines.len {
+		line := lines[i]
+		colon := line.index_of(':')
+		if colon > 0 {
+			raw_name := line.substr(0, colon)
+			raw_val := line.substr(colon + 1, line.len)
+			h_name := raw_name.trim()
+			h_val := raw_val.trim()
+			headers.set(h_name, h_val)
+		}
+		i += 1
+	}
+	return Request{
+		method: method,
+		path: path,
+		query: query,
+		version: version,
+		headers: headers,
+		body: body,
+	}
+}
+
+// Queues bytes for sending (NUL bytes included). Call flush() to send.
+pub fn (mut c Conn) queue(s string) {
+	if c.closed {
+		return
+	}
+	// Reclaim the sent prefix before the buffer grows further.
+	if c.out_pos > 0 && c.out_pos == c.out.len {
+		c.out.clear()
+		c.out_pos = 0
+	} else if c.out_pos > 65536 && c.out_pos * 2 > c.out.len {
+		c.out = c.out.slice(c.out_pos, c.out.len)
+		c.out_pos = 0
+	}
+	net.append_string(mut c.out, s) or {
+		c.closed = true
+	}
+}
+
+// Queues raw bytes (e.g. a response a handler built in its own buffer).
+pub fn (mut c Conn) queue_bytes(b []u8) {
+	if c.closed || b.len == 0 {
+		return
+	}
+	if c.out_pos > 0 && c.out_pos == c.out.len {
+		c.out.clear()
+		c.out_pos = 0
+	}
+	net.append_bytes(mut c.out, b) or {
+		c.closed = true
+	}
+}
+
+// Queues a whole response. With `close` the connection closes once it is
+// sent (this package does not keep connections alive between requests).
+pub fn (mut c Conn) queue_response(res Response, close bool) {
+	c.queue(res.format())
+	if close {
+		c.close_after_flush = true
+	}
+}
+
+// The response head of a Server-Sent Events stream; follow with sse_frame().
+pub fn sse_head() string {
+	return 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n'
+}
+
+// One SSE event carrying `data`.
+pub fn sse_frame(data string) string {
+	return 'data: ${data}\r\n\r\n'
+}
+
+// Sends as much queued output as the socket takes now. Returns true when
+// nothing is left. Sets `closed` when the peer is gone.
+pub fn (mut c Conn) flush() bool {
+	if c.closed {
+		return true
+	}
+	for c.out_pos < c.out.len {
+		n := c.stream.write_at(c.out, c.out_pos, c.out.len - c.out_pos) or {
+			c.closed = true
+			return true
+		}
+		if n <= 0 {
+			return false
+		}
+		c.out_pos += n
+	}
+	c.out.clear()
+	c.out_pos = 0
+	return true
+}
+
+// True when the loop should close this connection now.
+pub fn (c Conn) done() bool {
+	return c.closed || (c.close_after_flush && c.out_pos >= c.out.len)
+}
+
+pub fn (mut c Conn) close() {
+	c.stream.close() or { false }
+	c.closed = true
+}

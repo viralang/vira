@@ -1,5 +1,7 @@
 module net
 
+import time
+
 @[intrinsic: 'vira_net_tcp_listen']
 fn c_tcp_listen(host string, port int, backlog int) i64
 
@@ -38,6 +40,21 @@ fn c_net_set_reuseaddr(fd i64, reuse bool) int
 
 @[intrinsic: 'vira_net_set_timeout']
 fn c_net_set_timeout(fd i64, read_ms i64, write_ms i64) int
+
+@[intrinsic: 'vira_net_tcp_read_append']
+fn c_tcp_read_append(fd i64, mut dst []u8, max_len int) int
+
+@[intrinsic: 'vira_net_tcp_write_at']
+fn c_tcp_write_at(fd i64, buf []u8, off int, len int) int
+
+@[intrinsic: 'vira_net_buf_append_str']
+fn c_buf_append_str(mut dst []u8, s string) int
+
+@[intrinsic: 'vira_net_buf_append_bytes']
+fn c_buf_append_bytes(mut dst []u8, src []u8) int
+
+@[intrinsic: 'vira_net_buf_find']
+fn c_buf_find(buf []u8, from int, needle string) int
 
 @[intrinsic: 'vira_slice_u8_new']
 fn c_slice_u8_new(cap int) []u8
@@ -123,6 +140,10 @@ pub fn (mut s TcpStream) read_byte() !u8 {
 			s.rx_buf = c_slice_u8_new(4096)
 		}
 		n := c_tcp_read(s.fd, mut s.rx_buf, 4096)
+		if n == -2 {
+			// read timeout (SO_RCVTIMEO) or nothing yet on a non-blocking socket
+			return error('timeout')
+		}
 		if n <= 0 {
 			return error('EOF')
 		}
@@ -148,6 +169,43 @@ pub fn (mut s TcpStream) read_line() !string {
 				line_bytes.pop()
 			}
 			return line_bytes.to_string()
+		}
+		line_bytes.push(b)
+	}
+	return ''
+}
+
+// Like read_line, but fails once the line exceeds max_len bytes (so a peer
+// cannot grow memory without bound by never sending a newline) or, when
+// deadline_ms > 0, once time.now_ms() passes it (so a peer cannot hold the
+// caller by sending one byte just inside each read timeout).
+pub fn (mut s TcpStream) read_line_limit(max_len int, deadline_ms i64) !string {
+	mut line_bytes := []u8{}
+	for true {
+		if deadline_ms > 0 && time.now_ms() > deadline_ms {
+			return error('deadline passed')
+		}
+		b := s.read_byte() or {
+			if deadline_ms > 0 && time.now_ms() > deadline_ms {
+				return error('deadline passed')
+			}
+			if deadline_ms > 0 && err == 'timeout' {
+				// a pause shorter than the deadline: keep waiting
+				continue
+			}
+			if line_bytes.len > 0 {
+				return line_bytes.to_string()
+			}
+			return error(err)
+		}
+		if b == 10 {
+			if line_bytes.len > 0 && line_bytes[line_bytes.len - 1] == 13 {
+				line_bytes.pop()
+			}
+			return line_bytes.to_string()
+		}
+		if line_bytes.len >= max_len {
+			return error('line longer than ${max_len} bytes')
 		}
 		line_bytes.push(b)
 	}
@@ -191,7 +249,53 @@ pub fn (mut s TcpStream) write(buf []u8) !int {
 	if !s.is_open || s.fd < 0 {
 		return error('socket is closed')
 	}
-	n := c_tcp_write(s.fd, buf, buf.len)
+	// send() may take only part of the buffer (a write timeout, a signal, a
+	// non-blocking socket): keep going until all of it is sent.
+	mut off := 0
+	for off < buf.len {
+		n := c_tcp_write_at(s.fd, buf, off, buf.len - off)
+		if n == -2 {
+			return error('socket write timed out after ${off} of ${buf.len} bytes')
+		}
+		if n <= 0 {
+			return error('socket write error')
+		}
+		off += n
+	}
+	return off
+}
+
+// Non-blocking read for event loops: appends what is available (at most
+// max_len bytes) to the end of `dst`. Returns the bytes appended, 0 when
+// nothing is available yet, and an error at end of stream or on failure.
+pub fn (mut s TcpStream) read_append(mut dst []u8, max_len int) !int {
+	if !s.is_open || s.fd < 0 {
+		return error('socket is closed')
+	}
+	n := c_tcp_read_append(s.fd, mut dst, max_len)
+	if n == -2 {
+		return 0
+	}
+	if n == 0 {
+		return error('EOF')
+	}
+	if n < 0 {
+		return error('socket read error')
+	}
+	return n
+}
+
+// Non-blocking write for event loops: sends buf[off..off+len) without
+// copying. Returns the bytes sent, possibly fewer than len and 0 when the
+// socket buffer is full; an error when the connection is gone.
+pub fn (mut s TcpStream) write_at(buf []u8, off int, len int) !int {
+	if !s.is_open || s.fd < 0 {
+		return error('socket is closed')
+	}
+	n := c_tcp_write_at(s.fd, buf, off, len)
+	if n == -2 {
+		return 0
+	}
 	if n < 0 {
 		return error('socket write error')
 	}
@@ -358,4 +462,28 @@ pub fn (mut l TcpListener) close() !bool {
 		return error('failed to close listener')
 	}
 	return true
+}
+
+// Appends the bytes of `s` to `dst` with one copy (NUL bytes included).
+// Returns the new length; an error when the buffer cannot grow.
+pub fn append_string(mut dst []u8, s string) !int {
+	n := c_buf_append_str(mut dst, s)
+	if n < 0 {
+		return error('cannot grow buffer to ${dst.len + s.len} bytes')
+	}
+	return n
+}
+
+// Index of the first `needle` in buf[from..], or -1.
+pub fn find_bytes(buf []u8, from int, needle string) int {
+	return c_buf_find(buf, from, needle)
+}
+
+// Appends the bytes of `src` to `dst` with one copy. Returns the new length.
+pub fn append_bytes(mut dst []u8, src []u8) !int {
+	n := c_buf_append_bytes(mut dst, src)
+	if n < 0 {
+		return error('cannot grow buffer to ${dst.len + src.len} bytes')
+	}
+	return n
 }

@@ -3,6 +3,9 @@ module net
 @[intrinsic: 'vira_net_poll']
 fn c_net_poll(fd i64, events int, timeout_ms int) int
 
+@[intrinsic: 'vira_net_poll_many']
+fn c_net_poll_many(fds []i64, want []int, mut out []int, timeout_ms int) int
+
 pub struct PollEvent {
 pub:
 	fd i64
@@ -55,3 +58,31 @@ pub fn (p Poller) wait_writable(fd i64) !bool {
 	}
 	return ev.writable
 }
+
+// Polls many sockets with one system call: the building block of an event
+// loop. want[i]: 1 = readable, 2 = writable, 3 = both. The result has one
+// entry per fd: bit 1 readable, bit 2 writable, bit 4 error / hang-up.
+// timeout_ms: 0 returns at once, -1 waits until something is ready.
+pub fn poll_many(fds []i64, want []int, timeout_ms int) ![]int {
+	if fds.len != want.len {
+		return error('poll_many: ${fds.len} fds but ${want.len} event masks')
+	}
+	mut out := []int{}
+	mut i := 0
+	for i < fds.len {
+		out.push(0)
+		i += 1
+	}
+	if fds.len == 0 {
+		return out
+	}
+	res := c_net_poll_many(fds, want, mut out, timeout_ms)
+	if res < 0 {
+		return error('poll system call failed')
+	}
+	return out
+}
+
+pub const POLL_READ = 1
+pub const POLL_WRITE = 2
+pub const POLL_ERROR = 4

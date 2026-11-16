@@ -2,6 +2,7 @@ module main
 
 import net
 import http
+import time
 
 fn test_headers() {
 	mut h := http.HeaderMap.new()
@@ -250,6 +251,37 @@ fn test_binary_body_format() {
 	println('✓ test_binary_body_format passed')
 }
 
+// The blocking parser's limits (2026-11-16 review R2-R4): a header line over
+// MAX_HEADER_LINE, more than MAX_HEADER_COUNT headers, and a head that is not
+// complete within the server's deadline are answered and refused.
+fn test_blocking_parser_limits() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('failed to bind HTTP server') }
+	long_line := rejected_status(mut server, 'GET / HTTP/1.1\r\nX-Long: ' + 'a'.repeat(9000) + '\r\n\r\n')
+	if long_line != 'HTTP/1.1 431 Request Header Fields Too Large' {
+		panic('overlong header line not answered with 431: ${long_line}')
+	}
+	mut many := 'GET / HTTP/1.1\r\n'
+	mut i := 0
+	for i < 150 {
+		many += 'X-H${i}: v\r\n'
+		i += 1
+	}
+	many += '\r\n'
+	too_many := rejected_status(mut server, many)
+	if too_many != 'HTTP/1.1 431 Request Header Fields Too Large' {
+		panic('150 headers not answered with 431: ${too_many}')
+	}
+	server.head_deadline_ms = 1500
+	t0 := time.now_ms()
+	slow := rejected_status(mut server, 'GET / HTTP/1.1\r\nX-Slow: a')
+	took := time.now_ms() - t0
+	if slow != 'HTTP/1.1 408 Request Timeout' || took < 1400 || took > 5000 {
+		panic('unfinished head not answered with 408 at the deadline: ${slow} after ${took} ms')
+	}
+	server.close() or { false }
+	println('✓ test_blocking_parser_limits passed')
+}
+
 fn main() {
 	test_headers()
 	test_response_formatting()
@@ -257,5 +289,6 @@ fn main() {
 	test_sse_streaming()
 	test_request_body_limit()
 	test_binary_body_format()
+	test_blocking_parser_limits()
 	println('=== All packages/http tests PASSED ===')
 }

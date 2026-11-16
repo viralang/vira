@@ -48,6 +48,8 @@ pub mut:
 	is_running bool
 	// Largest request body accept_request reads (see Request.parse_limit).
 	max_body_bytes int
+	// Time a client has to send its whole request head (408 after it).
+	head_deadline_ms int
 }
 
 pub fn HttpServer.bind(addr string) !HttpServer {
@@ -62,6 +64,7 @@ pub fn HttpServer.bind(addr string) !HttpServer {
 		addr: local,
 		is_running: true,
 		max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+		head_deadline_ms: HEAD_DEADLINE_MS,
 	}
 }
 
@@ -72,7 +75,11 @@ pub fn (mut s HttpServer) accept_request() !RequestContext {
 	mut client := s.listener.accept() or {
 		return error(err)
 	}
-	req := Request.parse_limit(mut client, s.max_body_bytes) or {
+	// A read timeout, so a client that sends nothing cannot block the
+	// accept loop past the head deadline. This server still handles one
+	// request at a time; use Conn with net.poll_many for concurrency.
+	client.set_timeout(1000, 30000) or { false }
+	req := Request.parse_with(mut client, s.max_body_bytes, s.head_deadline_ms) or {
 		client.close() or { false }
 		return error(err)
 	}

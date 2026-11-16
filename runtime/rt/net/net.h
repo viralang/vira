@@ -606,6 +606,202 @@ static inline int32_t vira_net_poll(int64_t fd, int32_t events,
   return res;
 }
 
+/**
+ * Polls many sockets at once (one system call), for event loops.
+ * @param fds Socket descriptors (negative entries are skipped).
+ * @param want Per descriptor: 1 = readable, 2 = writable, 3 = both.
+ * @param out Must hold at least fds.len entries; receives the ready bits per
+ *        descriptor (1 readable, 2 writable, 4 error / hang-up), 0 if none.
+ * @param timeout_ms 0 = return at once, -1 = wait until something is ready.
+ * @return Number of ready descriptors, 0 on timeout, negative on error.
+ * Usage: `net.poll_many(fds, want, timeout_ms)`.
+ */
+static inline int32_t vira_net_poll_many(vira_slice_i64 fds, vira_slice_int want,
+                                         vira_slice_int *out, int32_t timeout_ms) {
+  int32_t n = fds.len;
+  if (n <= 0 || out == NULL || out->len < n || want.len < n) {
+    return -1;
+  }
+  struct pollfd stack_pfd[64];
+  struct pollfd *pfd = n <= 64 ? stack_pfd : (struct pollfd *)malloc(sizeof(struct pollfd) * (size_t)n);
+  if (pfd == NULL) {
+    return -1;
+  }
+  for (int32_t i = 0; i < n; i++) {
+    pfd[i].fd = (vira_socket_t)(fds.data[i] < 0 ? -1 : fds.data[i]);
+    pfd[i].events = 0;
+    if (want.data[i] & 1)
+      pfd[i].events |= POLLIN;
+    if (want.data[i] & 2)
+      pfd[i].events |= POLLOUT;
+    pfd[i].revents = 0;
+  }
+  int r = vira_poll(pfd, (unsigned long)n, (int)timeout_ms);
+  for (int32_t i = 0; i < n; i++) {
+    int32_t bits = 0;
+    if (r > 0 && fds.data[i] >= 0) {
+      if (pfd[i].revents & POLLIN)
+        bits |= 1;
+      if (pfd[i].revents & POLLOUT)
+        bits |= 2;
+      if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL))
+        bits |= 4;
+    }
+    out->data[i] = bits;
+  }
+  if (pfd != stack_pfd) {
+    free(pfd);
+  }
+  return (int32_t)r;
+}
+
+/**
+ * Reads whatever is available into the end of a growing byte slice.
+ * @param fd Socket descriptor (normally non-blocking).
+ * @param dst Destination slice; grows as needed (heap slices only).
+ * @param max_len Most bytes to read in this call.
+ * @return Bytes appended, 0 at end of stream, -2 if nothing is available
+ *         yet (would block), -1 on error.
+ * Usage: `TcpStream.read_append(mut buf, max)` in event loops; no per-byte copies.
+ */
+static inline int32_t vira_net_tcp_read_append(int64_t fd, vira_slice_u8 *dst,
+                                               int32_t max_len) {
+  if (fd < 0 || dst == NULL || max_len <= 0 || dst->is_arena) {
+    return -1;
+  }
+  if (dst->cap - dst->len < max_len) {
+    int64_t need = (int64_t)dst->len + max_len;
+    int64_t cap = dst->cap > 0 ? dst->cap : 4096;
+    while (cap < need)
+      cap *= 2;
+    if (cap > INT32_MAX)
+      return -1;
+    uint8_t *nb;
+    if (dst->data == NULL || dst->cap == 0) {
+      nb = (uint8_t *)malloc((size_t)cap);
+      if (nb)
+        _vira_record_alloc();
+    } else {
+      nb = (uint8_t *)realloc(dst->data, (size_t)cap);
+    }
+    if (nb == NULL)
+      return -1;
+    dst->data = nb;
+    dst->cap = (int32_t)cap;
+  }
+  int n = recv((vira_socket_t)fd, (char *)dst->data + dst->len, (int)max_len, 0);
+  if (n > 0) {
+    dst->len += (int32_t)n;
+    return (int32_t)n;
+  }
+  if (n == 0)
+    return 0;
+#ifdef _WIN32
+  if (WSAGetLastError() == WSAEWOULDBLOCK)
+    return -2;
+#else
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+    return -2;
+#endif
+  return -1;
+}
+
+/**
+ * Appends the bytes of a string to a byte slice (one memcpy).
+ * @return New length of dst, or -1 when it cannot grow (arena slice, out of memory, > 2 GiB).
+ * Usage: `net.append_string(mut buf, s)`: output buffers of event loops.
+ */
+static inline int32_t vira_net_buf_append_str(vira_slice_u8 *dst, vira_string s) {
+  if (dst == NULL || dst->is_arena)
+    return -1;
+  if (s.len <= 0 || s.data == NULL)
+    return dst->len;
+  if (dst->cap - dst->len < s.len) {
+    int64_t need = (int64_t)dst->len + s.len;
+    int64_t cap = dst->cap > 0 ? dst->cap : 256;
+    while (cap < need)
+      cap *= 2;
+    if (cap > INT32_MAX)
+      return -1;
+    uint8_t *nb;
+    if (dst->data == NULL || dst->cap == 0) {
+      nb = (uint8_t *)malloc((size_t)cap);
+      if (nb)
+        _vira_record_alloc();
+    } else {
+      nb = (uint8_t *)realloc(dst->data, (size_t)cap);
+    }
+    if (nb == NULL)
+      return -1;
+    dst->data = nb;
+    dst->cap = (int32_t)cap;
+  }
+  memcpy(dst->data + dst->len, s.data, (size_t)s.len);
+  dst->len += s.len;
+  return dst->len;
+}
+
+/**
+ * Appends the bytes of one byte slice to another (one memcpy).
+ * @return New length of dst, or -1 when it cannot grow.
+ * Usage: `net.append_bytes(mut dst, src)`.
+ */
+static inline int32_t vira_net_buf_append_bytes(vira_slice_u8 *dst, vira_slice_u8 src) {
+  vira_string s = {.data = src.data, .len = src.len, .is_lit = true, .is_borrowed = true};
+  return vira_net_buf_append_str(dst, s);
+}
+
+/**
+ * Finds `needle` in buf[from..len).
+ * @return Index of the first match, or -1.
+ * Usage: `net.find_bytes(buf, from, needle)`: e.g. the end of HTTP headers.
+ */
+static inline int32_t vira_net_buf_find(vira_slice_u8 buf, int32_t from, vira_string needle) {
+  if (from < 0)
+    from = 0;
+  if (needle.len <= 0 || buf.data == NULL || buf.len - from < needle.len)
+    return -1;
+  int32_t last = buf.len - needle.len;
+  for (int32_t i = from; i <= last; i++) {
+    if (buf.data[i] == needle.data[0] &&
+        memcmp(buf.data + i, needle.data, (size_t)needle.len) == 0)
+      return i;
+  }
+  return -1;
+}
+
+/**
+ * Sends bytes [off, off + len) of a slice without copying it.
+ * @return Bytes sent (may be fewer than len), -2 if the socket buffer is full
+ *         (would block), -1 on error.
+ * Usage: `TcpStream.write_at(buf, off, len)`: partial writes in event loops.
+ */
+static inline int32_t vira_net_tcp_write_at(int64_t fd, vira_slice_u8 buf,
+                                            int32_t off, int32_t len) {
+  if (fd < 0 || off < 0 || len < 0 || off > buf.len) {
+    return -1;
+  }
+  if (len > buf.len - off)
+    len = buf.len - off;
+  if (len == 0 || buf.data == NULL)
+    return 0;
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  int sent = send((vira_socket_t)fd, (const char *)buf.data + off, (int)len, flags);
+  if (sent >= 0)
+    return (int32_t)sent;
+#ifdef _WIN32
+  if (WSAGetLastError() == WSAEWOULDBLOCK)
+    return -2;
+#else
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+    return -2;
+#endif
+  return -1;
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 static __thread struct sockaddr_storage _vira_last_udp_sender;
 static __thread socklen_t _vira_last_udp_sender_len = 0;

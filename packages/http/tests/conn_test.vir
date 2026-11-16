@@ -1,0 +1,214 @@
+module main
+
+import net
+import http
+import time
+
+// Accepts one connection from `server` and wraps it as a non-blocking Conn.
+fn accept_conn(mut server http.HttpServer, max_body int) http.Conn {
+	mut s := server.listener.accept() or { panic('accept failed') }
+	return http.Conn.new(s, max_body)
+}
+
+fn connect(server http.HttpServer) net.TcpStream {
+	a := server.local_addr() or { panic('no addr') }
+	addr := a.to_string()
+	c := net.TcpStream.connect(addr) or { panic('connect failed') }
+	return c
+}
+
+// Fills `c` until a request is ready or the deadline passes.
+fn wait_request(mut c http.Conn, ms int) http.Incoming {
+	t0 := time.now_ms()
+	for time.now_ms() - t0 < i64(ms) {
+		c.fill()
+		got := c.next_request()
+		if got.ready || got.reject != 0 {
+			return got
+		}
+		time.sleep_ms(2)
+	}
+	return c.next_request()
+}
+
+fn test_pieces_and_pipelining() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('bind') }
+	mut client := connect(server)
+	mut c := accept_conn(mut server, 0)
+
+	// Nothing sent yet: never blocks, nothing ready.
+	if c.fill() != 0 || c.next_request().ready {
+		panic('empty connection reported data')
+	}
+	client.write_string('POST /v1/x?a=1 HTTP/1.1\r\nHost: h\r\nContent-') or { panic('w1') }
+	first := wait_request(mut c, 100)
+	if first.ready {
+		panic('half a head parsed as a request')
+	}
+	client.write_string('Length: 5\r\n\r\nhel') or { panic('w2') }
+	second := wait_request(mut c, 100)
+	if second.ready {
+		panic('request ready before its body arrived')
+	}
+	// Rest of the body plus a whole second request in one write.
+	client.write_string('lo' + 'GET /health HTTP/1.1\r\n\r\n') or { panic('w3') }
+	a := wait_request(mut c, 1000)
+	if !a.ready || a.req.method != 'POST' || a.req.path != '/v1/x' || a.req.query != 'a=1' || a.req.body != 'hello' {
+		panic('first request wrong: ${a.req.method} ${a.req.path} ${a.req.body}')
+	}
+	b := c.next_request()
+	if !b.ready || b.req.method != 'GET' || b.req.path != '/health' || b.req.body.len != 0 {
+		panic('pipelined request wrong: ${b.req.method} ${b.req.path}')
+	}
+	client.close() or { false }
+	c.close()
+	server.close() or { false }
+	println('✓ test_pieces_and_pipelining passed')
+}
+
+fn rejected(payload string, max_body int) int {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('bind') }
+	mut client := connect(server)
+	mut c := accept_conn(mut server, max_body)
+	client.write_string(payload) or { panic('write') }
+	client.set_timeout(2000, 2000) or { false }
+	got := wait_request(mut c, 1000)
+	if got.ready {
+		client.close() or { false }
+		c.close()
+		server.close() or { false }
+		return 0
+	}
+	for !c.flush() {
+		time.sleep_ms(1)
+	}
+	line := client.read_line() or { '' }
+	client.close() or { false }
+	c.close()
+	server.close() or { false }
+	if !line.starts_with('HTTP/1.1 ${got.reject} ') {
+		panic('reject ${got.reject} not sent to the client: ${line}')
+	}
+	return got.reject
+}
+
+fn test_limits() {
+	if rejected('POST /x HTTP/1.1\r\nContent-Length: 9\r\n\r\n123456789', 8) != 413 {
+		panic('body over limit not 413')
+	}
+	if rejected('POST /x HTTP/1.1\r\nContent-Length: 4294967297\r\n\r\nA', 8) != 413 {
+		panic('wrapping Content-Length not 413')
+	}
+	if rejected('POST /x HTTP/1.1\r\nContent-Length: 1x\r\n\r\nA', 8) != 400 {
+		panic('bad Content-Length not 400')
+	}
+	if rejected('POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n', 8) != 501 {
+		panic('chunked body not 501')
+	}
+	big_head := 'GET / HTTP/1.1\r\nX: ' + 'a'.repeat(70000) + '\r\n\r\n'
+	if rejected(big_head, 8) != 431 {
+		panic('oversized head not 431')
+	}
+	if rejected('POST /x HTTP/1.1\r\nContent-Length: 8\r\n\r\n12345678', 8) != 0 {
+		panic('body at the limit refused')
+	}
+	println('✓ test_limits passed')
+}
+
+// A client that does not read must not block the server: flush() returns
+// false instead of waiting, and the bytes arrive once the client reads.
+fn test_slow_reader_and_large_bodies() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('bind') }
+	mut client := connect(server)
+	mut c := accept_conn(mut server, 4 * 1024 * 1024)
+
+	payload := 'A\0' + 'b'.repeat(3 * 1024 * 1024) + '\0Z'
+	client.write_string('PUT /f HTTP/1.1\r\nContent-Length: ${payload.len}\r\n\r\n') or { panic('w head') }
+	// The client writes the body from its own side while the server fills.
+	mut sent := 0
+	mut got := http.Incoming{ ready: false, req: http.Request.new('', ''), reject: 0, msg: '' }
+	client.set_nonblocking(true) or { false }
+	pb := payload.bytes()
+	t0 := time.now_ms()
+	for !got.ready && time.now_ms() - t0 < 10000 {
+		if sent < pb.len {
+			n := client.write_at(pb, sent, pb.len - sent) or { panic('client write failed') }
+			sent += n
+		}
+		c.fill()
+		got = c.next_request()
+	}
+	if !got.ready || got.req.body.len != payload.len || got.req.body != payload {
+		panic('3 MB body with NUL bytes not received intact (${got.req.body.len} of ${payload.len})')
+	}
+
+	// Server queues 8 MB to a client that is not reading.
+	res := http.Response.text('x'.repeat(8 * 1024 * 1024))
+	c.queue_response(res, true)
+	f0 := time.now_ms()
+	drained := c.flush()
+	if drained {
+		panic('8 MB flushed at once to a client that is not reading')
+	}
+	if time.now_ms() - f0 > 500 {
+		panic('flush blocked on a slow reader')
+	}
+	// Now the client reads; the server keeps flushing until done.
+	mut rx := []u8{}
+	t1 := time.now_ms()
+	for !c.done() && time.now_ms() - t1 < 10000 {
+		c.flush()
+		client.read_append(mut rx, 65536) or { break }
+	}
+	for time.now_ms() - t1 < 10000 {
+		n := client.read_append(mut rx, 65536) or { break }
+		if n == 0 {
+			time.sleep_ms(1)
+		}
+	}
+	if rx.len != res.format().len {
+		panic('client got ${rx.len} bytes, expected ${res.format().len}')
+	}
+	client.close() or { false }
+	c.close()
+	server.close() or { false }
+	println('✓ test_slow_reader_and_large_bodies passed')
+}
+
+// poll_many reports which of several sockets are ready, in one call.
+fn test_poll_many() {
+	mut server := http.HttpServer.bind('127.0.0.1:0') or { panic('bind') }
+	mut c1 := connect(server)
+	mut c2 := connect(server)
+	mut a := accept_conn(mut server, 0)
+	mut b := accept_conn(mut server, 0)
+	c2.write_string('x') or { panic('w') }
+	time.sleep_ms(20)
+	ready := net.poll_many([a.fd(), b.fd(), server.listener.fd], [1, 1, 1], 100) or { panic('poll_many failed') }
+	if ready.len != 3 || ready[0] != 0 || (ready[1] & 1) == 0 || ready[2] != 0 {
+		panic('poll_many wrong: ${ready[0]} ${ready[1]} ${ready[2]}')
+	}
+	c1.close() or { false }
+	time.sleep_ms(20)
+	r2 := net.poll_many([a.fd()], [1], 100) or { panic('poll_many failed') }
+	if r2[0] == 0 {
+		panic('closed peer not reported')
+	}
+	a.fill()
+	if !a.closed {
+		panic('closed peer not detected by fill()')
+	}
+	c2.close() or { false }
+	a.close()
+	b.close()
+	server.close() or { false }
+	println('✓ test_poll_many passed')
+}
+
+fn main() {
+	test_pieces_and_pipelining()
+	test_limits()
+	test_slow_reader_and_large_bodies()
+	test_poll_many()
+	println('=== All packages/http conn tests PASSED ===')
+}
