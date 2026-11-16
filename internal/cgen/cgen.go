@@ -196,6 +196,9 @@ func (g *Generator) EmitFile(file *ast.File) string {
 		}
 	}
 
+	// 0.7. Enum variant-name helpers (used by string interpolation)
+	g.emitEnumHelpers(&out)
+
 	// 1. Emit Struct & Actor typedefs + _autofree & _reset helpers in topological dependency order
 	out.WriteString("// --- 1. STRUCTS, ACTORS & DETERMINISTIC DESTRUCTORS ---\n")
 	for _, decl := range file.Decls {
@@ -327,6 +330,40 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	}
 
 	return out.String()
+}
+
+// enumNameFn is the C helper that maps an enum value to its variant name.
+func enumNameFn(et *checker.EnumType) string {
+	return fmt.Sprintf("%s__%s__name", sanitizeModName(et.Module), et.Name)
+}
+
+// emitEnumHelpers writes one `<mod>__<Enum>__name(int32_t)` function per enum.
+func (g *Generator) emitEnumHelpers(out *strings.Builder) {
+	seen := map[*checker.EnumType]bool{}
+	var list []*checker.EnumType
+	for _, et := range g.chk.Enums() {
+		if !seen[et] {
+			seen[et] = true
+			list = append(list, et)
+		}
+	}
+	if len(list) == 0 {
+		return
+	}
+	sort.Slice(list, func(i, j int) bool { return enumNameFn(list[i]) < enumNameFn(list[j]) })
+	out.WriteString("// --- 0.7 ENUM VARIANT NAMES ---\n")
+	for _, et := range list {
+		out.WriteString(fmt.Sprintf("static inline const char* %s(int32_t v) {\n    switch (v) {\n", enumNameFn(et)))
+		done := map[int64]bool{}
+		for i, name := range et.Variants {
+			if done[et.Values[i]] {
+				continue // aliases share a value: the first name wins
+			}
+			done[et.Values[i]] = true
+			out.WriteString(fmt.Sprintf("        case %d: return %q;\n", et.Values[i], name))
+		}
+		out.WriteString("        default: return \"?\";\n    }\n}\n\n")
+	}
 }
 
 // --- PRE-PASS: DISCOVER RESULTS, VTABLES, GUI USAGE & ACTOR DISPATCHES ---
@@ -2729,6 +2766,9 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		return fmt.Sprintf("(%s){ %s }", cSt, strings.Join(inits, ", "))
 
 	case *ast.SelectorExpr:
+		if ev, ok := g.chk.EnumValues[e]; ok {
+			return fmt.Sprintf("((int32_t)%d)", ev.Value)
+		}
 		if cSym, ok := g.chk.ResolvedConsts[e]; ok {
 			return g.emitConstValue(cSym)
 		}
@@ -4085,6 +4125,9 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 			case *checker.RefType:
 				fmtBuf.WriteString("%p")
 				cArgs = append(cArgs, fmt.Sprintf("(void*)(%s)", subExpr))
+			case *checker.EnumType:
+				fmtBuf.WriteString("%s")
+				cArgs = append(cArgs, fmt.Sprintf("%s(%s)", enumNameFn(t), subExpr))
 			default:
 				fmtBuf.WriteString("%d")
 				cArgs = append(cArgs, subExpr)
@@ -4291,6 +4334,8 @@ func (g *Generator) cType(t checker.Type) string {
 		return inner + "*"
 	case *checker.TensorType:
 		return "vira_tensor_f32"
+	case *checker.EnumType:
+		return "int32_t"
 	case *checker.FutureType:
 		return "vira_future"
 	case *checker.StructType:
@@ -4342,6 +4387,8 @@ func (g *Generator) cSliceName(elem checker.Type) string {
 		}
 	case *checker.SliceType:
 		return "vira_slice_" + g.cSliceName(v.Elem)
+	case *checker.EnumType:
+		return "vira_slice_int" // enums are int32_t values
 	case *checker.StructType:
 		if v.Module != "" {
 			return fmt.Sprintf("vira_slice_%s__%s", v.Module, v.Name)
@@ -4375,6 +4422,9 @@ func (g *Generator) cSliceNameFromTypeName(tName string) string {
 	case "tensor[f32]":
 		return "vira_slice_tensor_f32"
 	default:
+		if et, ok := g.chk.Enums()[elem]; ok && et != nil {
+			return "vira_slice_int"
+		}
 		if strings.Contains(elem, "[") {
 			// Generic element such as Future[int]: mangle it the way cSliceName
 			// does (vira_slice_Future_int), not as a struct name.

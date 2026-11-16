@@ -75,6 +75,7 @@ type ModuleScope struct {
 	Interfaces map[string]*InterfaceType
 	Functions  map[string]*FnSig
 	Consts     map[string]*ConstSymbol
+	Enums      map[string]*EnumType
 }
 
 func NewModuleScope(name string) *ModuleScope {
@@ -84,6 +85,7 @@ func NewModuleScope(name string) *ModuleScope {
 		Interfaces: make(map[string]*InterfaceType),
 		Functions:  make(map[string]*FnSig),
 		Consts:     make(map[string]*ConstSymbol),
+		Enums:      make(map[string]*EnumType),
 	}
 }
 
@@ -101,6 +103,8 @@ type Checker struct {
 	ExprTypes      map[ast.Expr]Type
 	SelectorPaths  map[*ast.SelectorExpr][]string // records embedded hop path (e.g. ["AuditMeta"])
 	ResolvedConsts map[ast.Expr]*ConstSymbol      // records resolved top-level constant references
+	EnumValues     map[ast.Expr]*EnumValueRef     // records `Color.red` variant references
+	enums          map[string]*EnumType
 
 	// Function context during Pass 3
 	curFile         *ast.File
@@ -121,6 +125,8 @@ func New() *Checker {
 		ExprTypes:      make(map[ast.Expr]Type),
 		SelectorPaths:  make(map[*ast.SelectorExpr][]string),
 		ResolvedConsts: make(map[ast.Expr]*ConstSymbol),
+		EnumValues:     make(map[ast.Expr]*EnumValueRef),
+		enums:          make(map[string]*EnumType),
 	}
 	c.registerBuiltins()
 	return c
@@ -1347,6 +1353,8 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				if _, exists := c.interfaces[d.Name.Name]; !exists || dMod == "main" {
 					c.interfaces[d.Name.Name] = iface
 				}
+			case *ast.EnumDecl:
+				c.registerEnum(d, modName)
 			}
 		}
 	}
@@ -1435,6 +1443,136 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 }
 
 // --- PASS 1: HEADER & MEMBER REGISTRATION ---
+
+// registerEnum records an enum and computes its variant values: each variant is one more
+// than the previous one (starting at 0) unless it gives an explicit constant integer.
+func (c *Checker) registerEnum(d *ast.EnumDecl, fileMod string) {
+	dMod := d.Module
+	if dMod == "" {
+		dMod = fileMod
+	}
+	scope := c.getOrCreateModule(dMod)
+	if _, dup := scope.Enums[d.Name.Name]; dup {
+		c.errorf(d.Name.NamePos, "enum '%s' is declared more than once", d.Name.Name)
+		return
+	}
+	et := &EnumType{Module: dMod, Name: d.Name.Name, IsPub: d.IsPub, Span: d.DeclSpan}
+	next := int64(0)
+	seen := map[string]bool{}
+	for _, v := range d.Variants {
+		if seen[v.Name.Name] {
+			c.errorf(v.Name.NamePos, "duplicate variant '%s' in enum '%s'", v.Name.Name, d.Name.Name)
+			continue
+		}
+		seen[v.Name.Name] = true
+		if v.Value != nil {
+			val, ok := constIntValue(v.Value)
+			if !ok {
+				c.errorf(v.Value.Span(), "enum variant '%s.%s' needs a constant integer value", d.Name.Name, v.Name.Name)
+			} else if val < -2147483648 || val > 2147483647 {
+				c.errorf(v.Value.Span(), "enum variant '%s.%s' value %d does not fit in 32 bits", d.Name.Name, v.Name.Name, val)
+			} else {
+				next = val
+			}
+		}
+		et.Variants = append(et.Variants, v.Name.Name)
+		et.Values = append(et.Values, next)
+		next++
+	}
+	if len(et.Variants) == 0 {
+		c.errorf(d.Name.NamePos, "enum '%s' has no variants", d.Name.Name)
+	}
+	scope.Enums[d.Name.Name] = et
+	c.enums[dMod+"."+d.Name.Name] = et
+	if _, exists := c.enums[d.Name.Name]; !exists || dMod == "main" {
+		c.enums[d.Name.Name] = et
+	}
+}
+
+// constIntValue evaluates an integer literal, optionally negated.
+func constIntValue(e ast.Expr) (int64, bool) {
+	switch v := e.(type) {
+	case *ast.LiteralExpr:
+		if v.Kind != token.TokInt {
+			return 0, false
+		}
+		var n int64
+		lit := strings.TrimSuffix(v.Value, "i64")
+		if _, err := fmt.Sscan(lit, &n); err != nil {
+			return 0, false
+		}
+		return n, true
+	case *ast.UnaryExpr:
+		if v.Op == token.TokMinus {
+			n, ok := constIntValue(v.Expr)
+			return -n, ok
+		}
+	}
+	return 0, false
+}
+
+// Enums returns every registered enum, keyed by "module.Name" (and by bare name for main).
+func (c *Checker) Enums() map[string]*EnumType {
+	return c.enums
+}
+
+// lookupEnumByName resolves an enum named from the current module (or main fallback).
+func (c *Checker) lookupEnumByName(name string) *EnumType {
+	if modScope, ok := c.modules[c.currentMod]; ok {
+		if et, ok := modScope.Enums[name]; ok {
+			return et
+		}
+	}
+	if c.currentMod == "main" || c.currentMod == "" {
+		if et, ok := c.enums[name]; ok {
+			return et
+		}
+	}
+	return nil
+}
+
+// lookupEnumInModule resolves `pkg.Name` through the current file's imports.
+func (c *Checker) lookupEnumInModule(pkg string, name string) *EnumType {
+	target := pkg
+	if resolved, ok := c.currentImports[pkg]; ok {
+		target = resolved
+	}
+	if modScope, ok := c.modules[target]; ok {
+		if et, ok := modScope.Enums[name]; ok && (et.IsPub || target == c.currentMod) {
+			return et
+		}
+	}
+	return nil
+}
+
+// enumVariantExpr resolves `Color.red` or `pkg.Color.red`; it returns nil when the
+// selector does not name an enum variant.
+func (c *Checker) enumVariantExpr(e *ast.SelectorExpr, scope *Scope) *EnumValueRef {
+	var et *EnumType
+	switch left := e.Left.(type) {
+	case *ast.IdentExpr:
+		if _, inScope := scope.Lookup(left.Ident.Name); inScope {
+			return nil
+		}
+		et = c.lookupEnumByName(left.Ident.Name)
+	case *ast.SelectorExpr:
+		if pkg, ok := left.Left.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(pkg.Ident.Name); inScope {
+				return nil
+			}
+			et = c.lookupEnumInModule(pkg.Ident.Name, left.Field.Name)
+		}
+	}
+	if et == nil {
+		return nil
+	}
+	idx := et.VariantIndex(e.Field.Name)
+	if idx < 0 {
+		c.errorf(e.SelSpan, "enum '%s' has no variant '%s'", et.Name, e.Field.Name)
+		return &EnumValueRef{Enum: et, Variant: e.Field.Name}
+	}
+	return &EnumValueRef{Enum: et, Variant: e.Field.Name, Value: et.Values[idx]}
+}
 
 func (c *Checker) registerStructMembers(d *ast.StructDecl) {
 	st := c.LookupStruct(d.Name.Name)
@@ -2165,6 +2303,10 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		return st
 
 	case *ast.SelectorExpr:
+		if ev := c.enumVariantExpr(e, scope); ev != nil {
+			c.EnumValues[e] = ev
+			return ev.Enum
+		}
 		if identLeft, ok := e.Left.(*ast.IdentExpr); ok {
 			if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
 				if cSym := c.LookupConstInModule(identLeft.Ident.Name, e.Field.Name); cSym != nil {
@@ -2379,6 +2521,12 @@ func (c *Checker) checkBinaryOperator(e *ast.BinaryExpr, t Type) {
 	isString := isPrim && prim.Kind == PrimString
 	isBool := isPrim && prim.Kind == PrimBool
 	isPtr := isRef || (isPrim && prim.Kind == PrimVoidPtr)
+	if _, isEnum := t.(*EnumType); isEnum {
+		if e.Op != token.TokEq && e.Op != token.TokNeq {
+			c.errorf(e.BinSpan, "operator '%s' is not defined for enum '%s' (compare with == or !=, or convert with int())", e.Op, t)
+		}
+		return
+	}
 
 	ok := true
 	switch e.Op {
@@ -2483,6 +2631,9 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			argType := c.checkExpr(call.Args[0].Expr, scope)
 			if argType.Equals(TypeString) {
 				c.errorf(call.CallSpan, "cannot cast 'string' directly to '%s' (use .to_int(), .to_i64(), .to_f64(), or .to_f32())", callName)
+				return targetType
+			}
+			if _, isEnum := argType.(*EnumType); isEnum && (callName == "int" || callName == "i64") {
 				return targetType
 			}
 			if _, isPrim := argType.(*PrimitiveType); !isPrim || argType.Equals(TypeVoid) {
@@ -3347,6 +3498,12 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			}
 			return iface
 		}
+		if et, ok := modScope.Enums[typeName]; ok {
+			if targetMod != c.currentMod && !et.IsPub {
+				c.errorf(t.Name.NamePos, "enum '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			return et
+		}
 		c.errorf(t.Name.NamePos, "module '%s' has no type '%s'", pkgName, typeName)
 		return TypeVoid
 
@@ -3410,6 +3567,10 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 				return &FutureType{Inner: c.resolveTypeExpr(t.TypeParams[0])}
 			}
 			return &FutureType{Inner: TypeVoid}
+		}
+
+		if et := c.lookupEnumByName(t.Name.Name); et != nil {
+			return et
 		}
 
 		// 1. Look in current module scope

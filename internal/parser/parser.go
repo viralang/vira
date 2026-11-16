@@ -152,6 +152,10 @@ func (p *Parser) ParseFile() *ast.File {
 			if d.Module == "" {
 				d.Module = modName
 			}
+		case *ast.EnumDecl:
+			if d.Module == "" {
+				d.Module = modName
+			}
 		}
 	}
 
@@ -285,11 +289,39 @@ func (p *Parser) parseDecls() []ast.Decl {
 		return []ast.Decl{fn}
 	case token.TokConst:
 		return p.parseConstDecls(isPub, startSpan)
+	case token.TokEnum:
+		return []ast.Decl{p.parseEnumDecl(isPub, startSpan)}
 	default:
 		p.errorf(p.cur.Span, "unexpected top-level token %s (%q)", p.cur.Kind, p.cur.Lexeme(p.src))
 		p.advance()
 		return nil
 	}
+}
+
+// parseEnumDecl parses `enum Name { a b = 4 c }`; variants are separated by newlines or commas.
+func (p *Parser) parseEnumDecl(isPub bool, startSpan token.Span) *ast.EnumDecl {
+	p.expect(token.TokEnum)
+	decl := &ast.EnumDecl{IsPub: isPub, Name: p.parseIdent()}
+	p.expect(token.TokLBrace)
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind != token.TokIdent {
+			p.errorf(p.cur.Span, "expected enum variant name, got %s", p.cur.Kind)
+			p.advance()
+			continue
+		}
+		v := ast.EnumVariant{Name: p.parseIdent()}
+		if p.cur.Kind == token.TokAssign {
+			p.advance()
+			v.Value = p.parseExpr(0)
+		}
+		decl.Variants = append(decl.Variants, v)
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	rb := p.expect(token.TokRBrace)
+	decl.DeclSpan = token.Span{Start: startSpan.Start, End: rb.Span.End}
+	return decl
 }
 
 func (p *Parser) parseExternBlock() []ast.Decl {

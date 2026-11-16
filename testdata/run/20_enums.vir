@@ -1,0 +1,70 @@
+// OUT: color green is cool
+// OUT: next blue then red
+// OUT: status later = 419, not_found=404
+// OUT: pixel 3 blue
+// OUT: slice 2 warm=1
+// OUT: [vira_rt] active_leaks=0
+
+// Enums: named int32 constants with auto-incrementing or explicit values. Variants are
+// compared with == / !=, used in switch, stored in structs and slices, converted with
+// int(), and print their name in string interpolation.
+module main
+
+enum Color {
+	red
+	green
+	blue
+}
+
+pub enum Status {
+	ok = 200
+	not_found = 404
+	teapot = 418
+	later
+}
+
+struct Pixel {
+	x int
+	c Color
+}
+
+fn describe(c Color) string {
+	switch c {
+		case Color.red:
+			return 'warm'
+		case Color.green, Color.blue:
+			return 'cool'
+		default:
+			return 'none'
+	}
+}
+
+fn next(c Color) Color {
+	if c == Color.red {
+		return Color.green
+	}
+	if c == Color.green {
+		return Color.blue
+	}
+	return Color.red
+}
+
+fn main() {
+	c := Color.green
+	println('color ${c} is ${describe(c)}')
+	println('next ${next(c)} then ${next(next(c))}')
+	s := Status.later
+	println('status ${s} = ${int(s)}, not_found=${int(Status.not_found)}')
+	p := Pixel{ x: 3, c: Color.blue }
+	println('pixel ${p.x} ${p.c}')
+	mut cs := []Color{}
+	cs.push(Color.red)
+	cs.push(p.c)
+	mut warm := 0
+	for x in cs {
+		if x != Color.blue {
+			warm += 1
+		}
+	}
+	println('slice ${cs.len} warm=${warm}')
+}

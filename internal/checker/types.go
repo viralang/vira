@@ -402,3 +402,42 @@ func (i *InterfaceType) Equals(other Type) bool {
 	o, ok := other.(*InterfaceType)
 	return ok && i.Module == o.Module && i.Name == o.Name
 }
+
+// EnumType models `enum Color { red green blue }`: a named set of integer constants.
+type EnumType struct {
+	Module   string
+	Name     string
+	IsPub    bool
+	Variants []string
+	Values   []int64
+	Span     token.Span
+}
+
+func (e *EnumType) String() string {
+	if e.Module != "" && e.Module != "main" {
+		return e.Module + "." + e.Name
+	}
+	return e.Name
+}
+
+func (e *EnumType) Equals(other Type) bool {
+	o, ok := other.(*EnumType)
+	return ok && e.Module == o.Module && e.Name == o.Name
+}
+
+// VariantIndex returns the position of a variant, or -1.
+func (e *EnumType) VariantIndex(name string) int {
+	for i, v := range e.Variants {
+		if v == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnumValueRef records that an expression (`Color.red`) names one enum variant.
+type EnumValueRef struct {
+	Enum    *EnumType
+	Variant string
+	Value   int64
+}

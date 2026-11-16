@@ -252,6 +252,24 @@ type ConstDecl struct {
 func (d *ConstDecl) Span() token.Span { return d.DeclSpan }
 func (d *ConstDecl) declNode()        {}
 
+// EnumVariant is one named value of an enum: `red` or `red = 4`.
+type EnumVariant struct {
+	Name  Ident
+	Value Expr // optional explicit integer value
+}
+
+// EnumDecl models `enum Color { red green blue }`.
+type EnumDecl struct {
+	Module   string
+	IsPub    bool
+	Name     Ident
+	Variants []EnumVariant
+	DeclSpan token.Span
+}
+
+func (d *EnumDecl) Span() token.Span { return d.DeclSpan }
+func (d *EnumDecl) declNode()        {}
+
 // --- STATEMENTS ---
 
 type BlockStmt struct {
