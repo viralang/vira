@@ -1,0 +1,57 @@
+// OUT: 15 1 6 2 ab-c 4 25 2.50
+// OUT: [vira_rt] active_leaks=0
+
+// `x op= f() or { ... }` applies the operator. It used to be dropped, so the
+// statement overwrote x with the unwrapped value.
+
+fn five() !int {
+    return 5
+}
+
+fn fail() !int {
+    return error('no value')
+}
+
+fn word(s string) !string {
+    return s
+}
+
+fn half() !f64 {
+    return 0.5
+}
+
+fn main() {
+    mut t := five() or { 0 }
+    t += five() or { 0 }
+    t += fail() or { 5 }
+
+    mut d := 6
+    d -= five() or { 0 }
+
+    mut m := 2
+    m *= fail() or { 3 }
+
+    mut q := 10
+    q /= five() or { 1 }
+
+    mut s := word('a') or { '' }
+    s += word('b') or { '' }
+    s += fail_word() or { '-c' }
+
+    mut xs := []int{}
+    xs.push(5)
+    xs.push(20)
+    xs[0] *= five() or { 0 }
+    xs[0] /= fail() or { 10 }
+    xs[0] *= 4
+    xs[0] /= 2
+    xs[1] += five() or { 0 }
+
+    mut f := 2.0
+    f += half() or { 0.0 }
+    println('${t} ${d} ${m} ${q} ${s} ${xs[0]} ${xs[1]} ${f}')
+}
+
+fn fail_word() !string {
+    return error('none')
+}

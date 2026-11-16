@@ -1,0 +1,23 @@
+// OUT: released 3
+// OUT: [vira_rt] active_leaks=0
+
+// An actor method may be called `release`. The compiler's generated actor
+// destructor used to be named `<Type>_release`, the same C name as such a
+// method, and the program failed to compile.
+
+actor Lease {
+mut:
+    count int
+}
+
+fn (mut l Lease) release(n int) int {
+    l.count += n
+    return l.count
+}
+
+fn main() {
+    mut l := Lease{}
+    _ := l <- release(1) or { 0 }
+    total := l <- release(2) or { 0 }
+    println('released ${total}')
+}
