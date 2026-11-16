@@ -3,13 +3,26 @@ package pkg
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/viralang/vira/internal/mod"
+	stdpkg "github.com/viralang/vira/packages"
 )
+
+// IsStandardPackage reports whether name is a package bundled with the
+// compiler (net, http, json, ...). vira.mod may list those under deps with a
+// version; they are never fetched.
+func IsStandardPackage(name string) bool {
+	if name == "" || strings.ContainsAny(name, "/\\.:@") {
+		return false
+	}
+	fi, err := fs.Stat(stdpkg.StandardFS, name)
+	return err == nil && fi.IsDir()
+}
 
 // Manager coordinates package resolution, fetching, locking, and vendoring.
 type Manager struct {
@@ -261,11 +274,15 @@ func (m *Manager) Install(projectRoot string) (int, error) {
 
 	installedCount := 0
 	for _, dep := range manifest.Dependencies {
+		if IsStandardPackage(dep.Path) {
+			continue // bundled with the compiler, nothing to fetch
+		}
 		destDir := PackageDestDir(ProjectCacheDir(projectRoot), dep.Path)
-		
+		locked := lockfile.Find(dep.Path)
+
 		// If already present, verify checksum if locked
 		if _, err := os.Stat(destDir); err == nil {
-			if locked := lockfile.Find(dep.Path); locked != nil && locked.Checksum != "" {
+			if locked != nil && locked.Checksum != "" {
 				currentSum, cErr := mod.ComputeDirChecksum(destDir)
 				if cErr == nil && currentSum == locked.Checksum {
 					continue // Already installed and verified!
@@ -273,9 +290,20 @@ func (m *Manager) Install(projectRoot string) (int, error) {
 			}
 		}
 
-		commit, checksum, err := m.fetch(projectRoot, dep.Path, dep.Version, destDir)
+		// Install reproduces vira.lock: fetch the locked commit, not whatever
+		// the branch points at today. `vira add` is what moves a lock forward.
+		wantCommit := ""
+		if locked != nil && locked.Version == dep.Version && locked.Commit != "local" {
+			wantCommit = locked.Commit
+		}
+		commit, checksum, err := m.fetchAt(projectRoot, dep.Path, dep.Version, destDir, wantCommit)
 		if err != nil {
 			return installedCount, fmt.Errorf("failed to install '%s': %w", dep.Path, err)
+		}
+		if wantCommit != "" && locked.Checksum != "" && checksum != locked.Checksum {
+			_ = os.RemoveAll(destDir)
+			return installedCount, fmt.Errorf("failed to install '%s': checksum of commit %s is %s, but vira.lock expects %s",
+				dep.Path, commit, checksum, locked.Checksum)
 		}
 
 		lockfile.Set(mod.LockedPackage{
@@ -367,6 +395,13 @@ func (m *Manager) Vendor(projectRoot string) (int, error) {
 
 // fetch downloads or links a package (from local directory or Git repo) to destDir.
 func (m *Manager) fetch(projectRoot string, pkgPath string, version string, destDir string) (commit string, checksum string, err error) {
+	return m.fetchAt(projectRoot, pkgPath, version, destDir, "")
+}
+
+// fetchAt is fetch with an optional exact commit: when wantCommit is set and
+// the clone is not already at it, that commit is fetched and checked out, and
+// a failure to get it is an error.
+func (m *Manager) fetchAt(projectRoot string, pkgPath string, version string, destDir string, wantCommit string) (commit string, checksum string, err error) {
 	// Clean destination directory
 	_ = os.RemoveAll(destDir)
 	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
@@ -397,7 +432,8 @@ func (m *Manager) fetch(projectRoot string, pkgPath string, version string, dest
 
 	// 2. Git repository dependency (e.g. github.com/user/repo)
 	gitURL := pkgPath
-	if !strings.HasPrefix(gitURL, "https://") && !strings.HasPrefix(gitURL, "http://") && !strings.HasPrefix(gitURL, "git@") {
+	if !strings.HasPrefix(gitURL, "https://") && !strings.HasPrefix(gitURL, "http://") && !strings.HasPrefix(gitURL, "git@") &&
+		!strings.HasPrefix(gitURL, "ssh://") && !strings.HasPrefix(gitURL, "file://") {
 		gitURL = "https://" + gitURL
 	}
 
@@ -423,9 +459,25 @@ func (m *Manager) fetch(projectRoot string, pkgPath string, version string, dest
 	}
 
 	// Capture exact commit hash
-	commitCmd := exec.Command("git", "-C", destDir, "rev-parse", "HEAD")
-	if commitBytes, cErr := commitCmd.Output(); cErr == nil {
-		commit = strings.TrimSpace(string(commitBytes))
+	revParse := func() string {
+		out, cErr := exec.Command("git", "-C", destDir, "rev-parse", "HEAD").Output()
+		if cErr != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	commit = revParse()
+
+	if wantCommit != "" && commit != wantCommit {
+		fOut, fErr := exec.Command("git", "-C", destDir, "fetch", "--depth", "1", "origin", wantCommit).CombinedOutput()
+		if fErr == nil {
+			fOut, fErr = exec.Command("git", "-C", destDir, "checkout", "-q", "--detach", "FETCH_HEAD").CombinedOutput()
+		}
+		if fErr != nil || revParse() != wantCommit {
+			_ = os.RemoveAll(destDir)
+			return "", "", fmt.Errorf("could not fetch locked commit %s (%v): %s", wantCommit, fErr, strings.TrimSpace(string(fOut)))
+		}
+		commit = wantCommit
 	}
 
 	// Remove .git directory to keep cache clean
