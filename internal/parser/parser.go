@@ -691,6 +691,9 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	default:
 		identTok := p.advance()
 		ident := ast.Ident{Name: identTok.Lexeme(p.src), NamePos: identTok.Span}
+		if ident.Name == "map" && p.cur.Kind == token.TokLBracket {
+			return p.parseMapTypeRest(identTok.Span)
+		}
 		if p.cur.Kind == token.TokDot && p.peek.Kind == token.TokIdent && !p.hasNewlineBetween(identTok.Span, p.cur.Span) {
 			p.advance() // consume '.'
 			nameTok := p.advance()
@@ -707,6 +710,38 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 		}
 		return &ast.IdentType{Name: ident, TypeParams: tArgs}
 	}
+}
+
+// parseMapTypeRest parses `[K]V` after the `map` keyword.
+func (p *Parser) parseMapTypeRest(mapSpan token.Span) *ast.MapType {
+	p.expect(token.TokLBracket)
+	key := p.parseTypeExpr()
+	p.expect(token.TokRBracket)
+	val := p.parseTypeExpr()
+	return &ast.MapType{MapPos: token.Span{Start: mapSpan.Start, End: val.Span().End}, Key: key, Value: val}
+}
+
+// parseMapLit parses `map[K]V{ k: v, ... }` after the `map` identifier.
+func (p *Parser) parseMapLit(mapSpan token.Span) *ast.MapLitExpr {
+	mt := p.parseMapTypeRest(mapSpan)
+	lit := &ast.MapLitExpr{Type: mt}
+	p.expect(token.TokLBrace)
+	prevAllow := p.allowStructInit
+	p.allowStructInit = true
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		k := p.parseExpr(0)
+		p.expect(token.TokColon)
+		v := p.parseExpr(0)
+		lit.Keys = append(lit.Keys, k)
+		lit.Values = append(lit.Values, v)
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	p.allowStructInit = prevAllow
+	rb := p.expect(token.TokRBrace)
+	lit.LitSpan = token.Span{Start: mapSpan.Start, End: rb.Span.End}
+	return lit
 }
 
 func (p *Parser) parseOptionalTypeParams() []ast.Ident {
@@ -837,6 +872,24 @@ func (p *Parser) parseStmt() ast.Stmt {
 
 		prevAllow := p.allowStructInit
 		p.allowStructInit = false
+
+		// 2b. Map loop: `for k, v in m { ... }`
+		if p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokComma {
+			name := p.parseIdent()
+			p.advance() // consume `,`
+			valName := p.parseIdent()
+			p.expect(token.TokIn)
+			iter := p.parseExpr(0)
+			p.allowStructInit = prevAllow
+			body := p.parseBlock()
+			return &ast.ForInStmt{
+				Var:      name,
+				ValueVar: &valName,
+				Iter:     iter,
+				Body:     body,
+				StmtSpan: token.Span{Start: forTok.Span.Start, End: body.BlockSpan.End},
+			}
+		}
 
 		// 2. For-in loop: `for item in items { ... }`
 		if p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokIn {
@@ -1118,6 +1171,10 @@ func (p *Parser) parsePrefix() ast.Expr {
 	switch p.cur.Kind {
 	case token.TokIdent:
 		ident := p.parseIdent()
+		// Map literal: `map[string]int{ 'a': 1 }`
+		if ident.Name == "map" && p.cur.Kind == token.TokLBracket {
+			return p.parseMapLit(ident.NamePos)
+		}
 		// Struct initialization literal: `Invoice{ id: '123', amount_cents: 5000 }`
 		if p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(ident.Name) {
 			return p.parseStructInit(&ast.IdentType{Name: ident})

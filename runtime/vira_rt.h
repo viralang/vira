@@ -8,6 +8,7 @@
 #include "rt/platform/platform.h"
 #include "rt/string/string.h"
 #include "rt/slice/slice.h"
+#include "rt/map/map.h"
 #include "rt/arena/arena.h"
 
 #include "rt/tensor/core.h"

@@ -142,6 +142,16 @@ type ArrayType struct {
 func (t *ArrayType) Span() token.Span { return t.LBracketPos }
 func (t *ArrayType) typeExprNode()    {}
 
+// MapType represents `map[K]V`.
+type MapType struct {
+	MapPos token.Span
+	Key    TypeExpr
+	Value  TypeExpr
+}
+
+func (t *MapType) Span() token.Span { return t.MapPos }
+func (t *MapType) typeExprNode()    {}
+
 // --- OOP & TOP-LEVEL DECLARATIONS ---
 
 // StructField represents a single field inside one of the 4 access quadrants.
@@ -381,9 +391,11 @@ type ForStmt struct {
 func (s *ForStmt) Span() token.Span { return s.StmtSpan }
 func (s *ForStmt) stmtNode()        {}
 
-// ForInStmt represents `for item in items { ... }`.
+// ForInStmt represents `for item in items { ... }`, or `for k, v in m { ... }` over a map
+// (Var is then the key and ValueVar the value).
 type ForInStmt struct {
 	Var      Ident
+	ValueVar *Ident
 	Iter     Expr
 	Body     *BlockStmt
 	StmtSpan token.Span
@@ -438,6 +450,7 @@ const (
 	CleanupActor                        // emits `Module__Actor_autofree(&var);`
 	CleanupFuture                       // emits `vira_future_free(&var);`
 	CleanupSlice                        // emits slice destructor
+	CleanupMap                          // emits `vira_map_free(&var);`
 )
 
 func (k CleanupKind) String() string {
@@ -458,6 +471,8 @@ func (k CleanupKind) String() string {
 		return "vira_future_free"
 	case CleanupSlice:
 		return "slice_autofree"
+	case CleanupMap:
+		return "vira_map_free"
 	default:
 		return "unknown_free"
 	}
@@ -594,3 +609,14 @@ type ArrayLitExpr struct {
 func (e *ArrayLitExpr) Span() token.Span { return e.LitSpan }
 func (e *ArrayLitExpr) exprNode()        {}
 
+
+// MapLitExpr represents `map[string]int{}` or `map[string]int{'a': 1, 'b': 2}`.
+type MapLitExpr struct {
+	Type    *MapType
+	Keys    []Expr
+	Values  []Expr
+	LitSpan token.Span
+}
+
+func (e *MapLitExpr) Span() token.Span { return e.LitSpan }
+func (e *MapLitExpr) exprNode()        {}

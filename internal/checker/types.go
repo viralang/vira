@@ -441,3 +441,27 @@ type EnumValueRef struct {
 	Variant string
 	Value   int64
 }
+
+// MapType represents `map[K]V`: K is a string, an integer type, bool or an enum.
+type MapType struct {
+	Key   Type
+	Value Type
+}
+
+func (m *MapType) String() string { return fmt.Sprintf("map[%s]%s", m.Key, m.Value) }
+
+func (m *MapType) Equals(other Type) bool {
+	o, ok := other.(*MapType)
+	return ok && ExactEquals(m.Key, o.Key) && ExactEquals(m.Value, o.Value)
+}
+
+// IsValidMapKey reports whether t can be a map key.
+func IsValidMapKey(t Type) bool {
+	switch v := t.(type) {
+	case *PrimitiveType:
+		return v.Kind == PrimString || v.Kind == PrimBool || IsIntLike(v.Kind)
+	case *EnumType:
+		return true
+	}
+	return false
+}

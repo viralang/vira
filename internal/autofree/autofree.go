@@ -248,6 +248,8 @@ func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
 		return true, ast.CleanupInterface
 	case *checker.SliceType:
 		return true, ast.CleanupSlice
+	case *checker.MapType:
+		return true, ast.CleanupMap
 	default:
 		return false, 0
 	}
@@ -1180,6 +1182,10 @@ func (a *Analyzer) maybeHoistSubExpr(
 		return expr
 	}
 
+	if mapLit, ok := expr.(*ast.MapLitExpr); ok {
+		return a.hoistExprToTemp(mapLit, a.chk.ExprTypes[mapLit], ast.CleanupMap, "vira_tmp_map", "zero-leak temporary map argument cleanup", preStmts, postFrees, report)
+	}
+
 	if arrLit, ok := expr.(*ast.ArrayLitExpr); ok {
 		exprType := a.chk.ExprTypes[arrLit]
 		if _, isSlice := exprType.(*checker.SliceType); isSlice {
@@ -1249,6 +1255,8 @@ func (a *Analyzer) wouldHoistSubExpr(expr ast.Expr, inArena bool) bool {
 	case *ast.ArrayLitExpr:
 		_, isSlice := a.chk.ExprTypes[e].(*checker.SliceType)
 		return isSlice
+	case *ast.MapLitExpr:
+		return true
 	case *ast.BinaryExpr:
 		_, isTensor := a.chk.ExprTypes[e].(*checker.TensorType)
 		return (isTensor || a.chk.IsStringConcat(e)) && !inArena
@@ -1374,6 +1382,8 @@ func (a *Analyzer) walkAndHoistCallArgs(
 			if recvCall, isCall := sel.Left.(*ast.CallExpr); isCall && recvCall.OrBlock == nil {
 				if rt := a.chk.ExprTypes[recvCall]; rt != nil && rt.Equals(checker.TypeString) {
 					sel.Left = a.maybeHoistSubExpr(sel.Left, inArena, preStmts, postFrees, report)
+				} else if _, isMap := rt.(*checker.MapType); isMap {
+					sel.Left = a.hoistExprToTemp(sel.Left, rt, ast.CleanupMap, "vira_tmp_recv", "zero-leak temporary map receiver", preStmts, postFrees, report)
 				}
 			}
 		}
@@ -1405,6 +1415,18 @@ func (a *Analyzer) walkAndHoistCallArgs(
 
 	case *ast.SelectorExpr:
 		a.walkAndHoistCallArgs(e.Left, inArena, preStmts, postFrees, report)
+		// `xs.clone().len`, `m.keys().len`: a fresh slice or map read only for its length is
+		// freed after the statement.
+		if call, isCall := e.Left.(*ast.CallExpr); isCall && call.OrBlock == nil {
+			lt := a.chk.ExprTypes[e.Left]
+			_, isSl := lt.(*checker.SliceType)
+			_, isMap := lt.(*checker.MapType)
+			if isSl || isMap {
+				_, kind := a.typeNeedsCleanup(lt)
+				e.Left = a.hoistExprToTemp(e.Left, lt, kind, "vira_tmp_recv", "zero-leak temporary container read for a field", preStmts, postFrees, report)
+				return
+			}
+		}
 		// `make_name().len`, `'${x}'.len`, `(a + b).len`: a fresh heap string read only
 		// for a field (the result is an int) is bound to a temporary and freed after the
 		// statement, the same as a method receiver above.
@@ -1431,6 +1453,18 @@ func (a *Analyzer) walkAndHoistCallArgs(
 	case *ast.ArrayLitExpr:
 		for i := range e.Elems {
 			a.walkAndHoistCallArgs(e.Elems[i], inArena, preStmts, postFrees, report)
+		}
+
+	case *ast.MapLitExpr:
+		for i := range e.Keys {
+			a.walkAndHoistCallArgs(e.Keys[i], inArena, preStmts, postFrees, report)
+			a.walkAndHoistCallArgs(e.Values[i], inArena, preStmts, postFrees, report)
+		}
+
+	case *ast.IndexExpr:
+		// A fresh map key (`m['a' + b]`) is a temporary: hoist it so it is freed.
+		if _, isMap := a.chk.ExprTypes[e.Left].(*checker.MapType); isMap {
+			e.Index = a.maybeHoistSubExpr(e.Index, inArena, preStmts, postFrees, report)
 		}
 	}
 }

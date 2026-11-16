@@ -446,15 +446,15 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: &ResultType{Inner: TypeString},
 	}
 	c.functions["write_file"] = &FnSig{
-		Name:   "write_file",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
+		Name:       "write_file",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
 		ReturnType: &ResultType{Inner: TypeBool},
 	}
 	c.functions["append_file"] = &FnSig{
-		Name:   "append_file",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
+		Name:       "append_file",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
 		ReturnType: &ResultType{Inner: TypeBool},
 	}
 	c.functions["remove_file"] = &FnSig{
@@ -496,37 +496,37 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: TypeVoid,
 	}
 	c.functions["http_response"] = &FnSig{
-		Name:   "http_response",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "status", Type: TypeInt}, {Name: "content_type", Type: TypeString}, {Name: "body", Type: TypeString}},
+		Name:       "http_response",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "status", Type: TypeInt}, {Name: "content_type", Type: TypeString}, {Name: "body", Type: TypeString}},
 		ReturnType: TypeString,
 	}
 
 	// Option 1: JSON Parser Primitives
 	c.functions["json_get_str"] = &FnSig{
-		Name:   "json_get_str",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_str",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeString,
 	}
 	c.functions["json_get_int"] = &FnSig{
-		Name:   "json_get_int",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_int",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeI64,
 	}
 	c.functions["json_get_f32"] = &FnSig{
-		Name:   "json_get_f32",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_f32",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeF32,
 	}
 
 	// Option 3: SafeTensors Zero-Copy Loader
 	c.functions["safetensors_load"] = &FnSig{
-		Name:   "safetensors_load",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
+		Name:       "safetensors_load",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
 		ReturnType: &ResultType{Inner: &TensorType{DType: TypeF32}},
 	}
 
@@ -556,9 +556,9 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: &TensorType{DType: TypeF32},
 	}
 	c.functions["tensor_sgd_step"] = &FnSig{
-		Name:   "tensor_sgd_step",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
+		Name:       "tensor_sgd_step",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
 		ReturnType: TypeVoid,
 	}
 
@@ -2059,6 +2059,20 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 	case *ast.ForInStmt:
 		iterType := c.checkExpr(s.Iter, scope)
 		var elemType Type = TypeVoid
+		if mt, ok := iterType.(*MapType); ok {
+			loopScope := NewScope(scope)
+			c.checkCName(s.Var, "loop variable")
+			loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: mt.Key, IsMut: false, Span: s.Var.NamePos, IsBorrowed: true})
+			if s.ValueVar != nil {
+				c.checkCName(*s.ValueVar, "loop variable")
+				loopScope.Define(&VarSymbol{Name: s.ValueVar.Name, Type: mt.Value, IsMut: false, Span: s.ValueVar.NamePos, IsBorrowed: true})
+			}
+			c.checkBlock(s.Body, loopScope)
+			return
+		}
+		if s.ValueVar != nil {
+			c.errorf(s.ValueVar.NamePos, "'for a, b in ...' needs a map; slices iterate with 'for x in xs'")
+		}
 		if sl, ok := iterType.(*SliceType); ok {
 			elemType = sl.Elem
 		} else if arr, ok := iterType.(*ArrayType); ok {
@@ -2127,7 +2141,38 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 }
 
 // verifyAssignmentMutability enforces V-style immutability-by-default and 4-quadrant field access.
+// isIntKey reports whether a map key type is integer-like (an int literal may index it).
+func isIntKey(t Type) bool {
+	p, ok := t.(*PrimitiveType)
+	return ok && IsIntLike(p.Kind)
+}
+
+// rejectMapElemMutation reports changing a map element in place (`m[k].x = 1`,
+// `m[k].push(v)`, `f(mut m[k])`). A missing key reads as a shared zero value, so elements
+// are changed by reading, modifying and storing back: `mut v := m[k]; v.x = 1; m[k] = v`.
+// When whole is false the expression itself may be `m[k]` (an assignment target).
+func (c *Checker) rejectMapElemMutation(expr ast.Expr, scope *Scope, whole bool) {
+	cur := expr
+	first := true
+	for {
+		switch e := cur.(type) {
+		case *ast.IndexExpr:
+			if _, isMap := c.ExprTypes[e.Left].(*MapType); isMap && (whole || !first) {
+				c.errorf(expr.Span(), "cannot change a map element in place; copy it out, change it, and store it back with 'm[key] = value'")
+				return
+			}
+			cur = e.Left
+		case *ast.SelectorExpr:
+			cur = e.Left
+		default:
+			return
+		}
+		first = false
+	}
+}
+
 func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span token.Span) {
+	c.rejectMapElemMutation(target, scope, false)
 	switch t := target.(type) {
 	case *ast.IdentExpr:
 		if cSym, isConst := c.ResolvedConsts[t]; isConst {
@@ -2341,6 +2386,13 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		if leftType.Equals(TypeString) && e.Field.Name == "len" {
 			return TypeInt
 		}
+		if mt, ok := leftType.(*MapType); ok {
+			if e.Field.Name == "len" {
+				return TypeInt
+			}
+			c.errorf(e.SelSpan, "map '%s' has no field '%s' (use .len or methods like .has(), .keys())", mt, e.Field.Name)
+			return TypeVoid
+		}
 		if tt, ok := leftType.(*TensorType); ok {
 			switch e.Field.Name {
 			case "rows", "cols", "ndim", "n_dims":
@@ -2383,6 +2435,12 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 	case *ast.IndexExpr:
 		leftType := c.checkExpr(e.Left, scope)
 		idxType := c.checkExpr(e.Index, scope)
+		if mt, ok := leftType.(*MapType); ok {
+			if !ExactEquals(idxType, mt.Key) && !(isIntKey(mt.Key) && mt.Key.Equals(idxType)) {
+				c.errorf(e.IndexSpan, "map '%s' is indexed by '%s', got '%s'", mt, mt.Key, idxType)
+			}
+			return mt.Value
+		}
 		if !idxType.Equals(TypeInt) && !idxType.Equals(TypeI64) {
 			c.errorf(e.IndexSpan, "index must be integer, got '%s'", idxType)
 		}
@@ -2436,6 +2494,23 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			}
 		}
 		return &SliceType{Elem: firstElemType}
+
+	case *ast.MapLitExpr:
+		mt, _ := c.resolveTypeExpr(e.Type).(*MapType)
+		if mt == nil {
+			return TypeVoid
+		}
+		for i := range e.Keys {
+			kt := c.checkExpr(e.Keys[i], scope)
+			if !ExactEquals(kt, mt.Key) && !(isIntKey(mt.Key) && mt.Key.Equals(kt)) {
+				c.errorf(e.Keys[i].Span(), "map literal key: expected '%s', got '%s'", mt.Key, kt)
+			}
+			vt := c.checkExpr(e.Values[i], scope)
+			if !mt.Value.Equals(vt) {
+				c.errorf(e.Values[i].Span(), "map literal value: expected '%s', got '%s'", mt.Value, vt)
+			}
+		}
+		return mt
 
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, scope)
@@ -2784,6 +2859,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			} else if sl, isSlice := recvType.(*SliceType); isSlice {
 				switch callee.Field.Name {
 				case "push", "append":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method '%s()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2800,6 +2876,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						c.rejectActorStore(call.Args[0].Expr, sl.Elem, "a slice")
 					}
 				case "pop":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'pop()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2822,6 +2899,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					}
 					callName = "slice.get"
 				case "set":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'set()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2838,6 +2916,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						c.rejectActorStore(call.Args[1].Expr, sl.Elem, "a slice")
 					}
 				case "clear":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'clear()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2908,6 +2987,31 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					c.errorf(callee.SelSpan, "slice '%s' has no method '%s'", sl, callee.Field.Name)
 					return TypeVoid
 				}
+			} else if mt, isMap := recvType.(*MapType); isMap {
+				mutating := callee.Field.Name == "delete" || callee.Field.Name == "clear"
+				if mutating {
+					c.rejectMapElemMutation(callee.Left, scope, true)
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method '%s()' on immutable map '%s' (declare 'mut %s := ...')",
+							callee.Field.Name, rootSym.Name, rootSym.Name)
+					}
+					c.rejectMapElemMutation(callee.Left, scope, true)
+				}
+				switch callee.Field.Name {
+				case "has", "delete":
+					sig = &FnSig{Name: callee.Field.Name, Params: []ParamInfo{{Name: "key", Type: mt.Key}}, ReturnType: TypeBool, Span: callee.SelSpan}
+				case "keys":
+					sig = &FnSig{Name: "keys", ReturnType: &SliceType{Elem: mt.Key}, Span: callee.SelSpan}
+				case "values":
+					sig = &FnSig{Name: "values", ReturnType: &SliceType{Elem: mt.Value}, Span: callee.SelSpan}
+				case "clear":
+					sig = &FnSig{Name: "clear", ReturnType: TypeVoid, Span: callee.SelSpan}
+				default:
+					c.errorf(callee.SelSpan, "map '%s' has no method '%s' (available: has, delete, keys, values, clear)", mt, callee.Field.Name)
+					return TypeVoid
+				}
+				callName = "map." + callee.Field.Name
 			} else if arr, isArr := recvType.(*ArrayType); isArr {
 				switch callee.Field.Name {
 				case "get":
@@ -3155,6 +3259,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				}
 
 				if baseSig.IsMutReceiver {
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym == nil || !rootSym.IsMut {
 						name := "<expr>"
@@ -3193,6 +3298,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					return TypeVoid
 				}
 				if msig.IsMutReceiver {
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym == nil || !rootSym.IsMut {
 						name := "<expr>"
@@ -3233,6 +3339,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					param.Name, callName)
 			}
 			if arg.IsMut {
+				c.rejectMapElemMutation(arg.Expr, scope, true)
 				rootSym := c.findRootSymbol(arg.Expr, scope)
 				if rootSym == nil || !rootSym.IsMut {
 					c.errorf(arg.ArgSpan, "cannot pass immutable variable as 'mut' argument to '%s'", callName)
@@ -3627,6 +3734,17 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			Inner: c.resolveTypeExpr(t.Inner),
 			IsMut: t.IsMut,
 		}
+
+	case *ast.MapType:
+		key := c.resolveTypeExpr(t.Key)
+		val := c.resolveTypeExpr(t.Value)
+		if !key.Equals(TypeVoid) && !IsValidMapKey(key) {
+			c.errorf(t.Key.Span(), "map key type must be string, an integer type, bool or an enum, got '%s'", key)
+		}
+		if st, ok := val.(*StructType); ok && st.IsActor {
+			c.errorf(t.Value.Span(), "a map cannot hold actors ('%s'): an actor has a single owner", st.Name)
+		}
+		return &MapType{Key: key, Value: val}
 
 	case *ast.ArrayType:
 		elem := c.resolveTypeExpr(t.Elem)
