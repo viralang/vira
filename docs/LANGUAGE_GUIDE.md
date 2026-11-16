@@ -1,6 +1,6 @@
 # The Vira Programming Language: Complete Language Guide & Reference
 
-> **Version:** Production Toolchain (v0.7.7)  
+> **Version:** Production Toolchain (v0.7.8)  
 > **Status:** Production-Ready Toolchain & Runtime  
 > **Target:** Native Executables via Optimized C99 Backend (GCC / Clang / MinGW-w64)
 

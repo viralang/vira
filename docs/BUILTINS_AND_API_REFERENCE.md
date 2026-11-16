@@ -284,7 +284,7 @@ experts := gguf_load_tensor('gpt-oss-20b-mxfp4.gguf', 'blk.0.ffn_up_exps.weight'
 println('${experts.dim(0)} experts of ${experts.dim(1)}x${experts.dim(2)}')
 ```
 
-> Known issue (Vira <= 0.7.7, builds without F16C, i.e. every ARM build and x86 builds without `-mf16c`): the scalar `_vira_fp16_to_fp32` decodes fp16 **subnormals** wrongly, which breaks F16 models and the scales of K-quants. The fix is in `docs/patches/vira-runtime-fp16-subnormal.patch` of the ViraLama repo.
+> Known issue (Vira <= 0.7.7, builds without F16C, i.e. every ARM build and x86 builds without `-mf16c`): the scalar `_vira_fp16_to_fp32` decodes fp16 **subnormals** wrongly, which breaks F16 models and the scales of K-quants. Fixed in v0.7.8 (commit `9909203`).
 
 ### `tensor_rmsnorm(x tensor[f32], weight tensor[f32], eps f32) tensor[f32]`
 Root Mean Square Layer Normalization used across modern LLMs (LLaMA, Gemma, Mistral):
