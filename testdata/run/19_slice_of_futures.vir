@@ -1,0 +1,31 @@
+// OUT: sum 10
+// OUT: [vira_rt] active_leaks=0
+
+// A slice of futures compiles. Its scope-exit free used to be emitted as
+// `vira_slice_main__Future[int]_free`, which is not valid C.
+
+actor Worker {
+pub:
+    id int
+}
+
+fn (mut w Worker) value() int {
+    return w.id
+}
+
+fn main() {
+    mut workers := []Worker{}
+    for mut i := 1; i <= 4; i += 1 {
+        workers.push(Worker{ id: i })
+    }
+    mut futs := []Future[int]{}
+    for mut i := 0; i < workers.len; i += 1 {
+        futs.push(workers[i] <- value())
+    }
+    mut sum := 0
+    for mut i := 0; i < futs.len; i += 1 {
+        v := futs[i].await() or { 0 }
+        sum += v
+    }
+    println('sum ${sum}')
+}
