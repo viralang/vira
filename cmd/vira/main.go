@@ -835,6 +835,22 @@ func vendorCmd(args []string) {
 	fmt.Printf("✓ Vendored %d package(s) into ./vendor\n", count)
 }
 
+// isNestedModuleDir reports whether dir (below root) has a vira.mod of its own.
+// Such a folder is a separate package, e.g. a local dependency kept inside the
+// project (./libs/mid); it is compiled from the package cache through its
+// import, not as part of the project's own sources.
+func isNestedModuleDir(root string, dir string) bool {
+	if filepath.Clean(root) == filepath.Clean(dir) {
+		return false
+	}
+	for _, name := range []string{"vira.mod", "vex.mod"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // --- CORE FRONTEND + MIDDLEEND PIPELINE WITH MULTI-FILE SUPPORT ---
 
 func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) (string, *checker.Checker, *autofree.Analyzer, []string) {
@@ -884,6 +900,9 @@ func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) 
 				if base == "examples" && !strings.HasSuffix(filepath.Clean(targetPath), "examples") {
 					return filepath.SkipDir
 				}
+				if isNestedModuleDir(targetPath, path) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			isSource := (strings.HasSuffix(info.Name(), ".vir") || strings.HasSuffix(info.Name(), ".vex")) &&
@@ -907,6 +926,9 @@ func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) 
 				if info.IsDir() {
 					base := filepath.Base(path)
 					if base == ".git" || base == "build" || base == "bin" || base == "dist" || base == "node_modules" || base == ".vir" || base == ".vira" || base == "tests" || base == "vendor" || base == "examples" {
+						return filepath.SkipDir
+					}
+					if isNestedModuleDir(pRoot, path) {
 						return filepath.SkipDir
 					}
 					return nil

@@ -18,6 +18,9 @@ type LockedPackage struct {
 	Version  string `json:"version"`
 	Commit   string `json:"commit,omitempty"`
 	Checksum string `json:"checksum"` // "sha256:<hex>"
+	// Module is the `module` name declared in the package's own vira.mod.
+	// Import resolution matches it before falling back to the last part of Path.
+	Module string `json:"module,omitempty"`
 }
 
 // Lockfile represents the contents of vira.lock.

@@ -173,7 +173,18 @@ func (p *Parser) parseImportItem() ast.ImportSpec {
 		ident := p.parseIdent()
 		path = ident.Name
 		span = ident.NamePos
-		defaultName = ident.Name
+		// `import mypkg/sub` is the unquoted form of `import "mypkg/sub"`.
+		for p.cur.Kind == token.TokSlash {
+			p.advance()
+			if p.cur.Kind != token.TokIdent {
+				p.errorf(p.cur.Span, "expected package name after '/' in import path, got %s", p.cur.Kind)
+				return ast.ImportSpec{}
+			}
+			part := p.parseIdent()
+			path += "/" + part.Name
+			span = token.Span{Start: span.Start, End: part.NamePos.End}
+		}
+		defaultName = path
 	} else {
 		p.errorf(p.cur.Span, "expected import target identifier or string, got %s", p.cur.Kind)
 		p.advance()

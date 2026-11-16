@@ -429,11 +429,14 @@ Every project with dependencies generates a `vira.lock` file:
       "path": "github.com/viralang/vira_test",
       "version": "v0.1.0",
       "commit": "05483a31c586b3ecf124...",
-      "checksum": "sha256:db77227fd38302e0564541098036456188b0a1e40217890477e34bb91850b97d"
+      "checksum": "sha256:db77227fd38302e0564541098036456188b0a1e40217890477e34bb91850b97d",
+      "module": "vira_test"
     }
   ]
 }
 ```
+
+`module` is the name declared in the package's own `vira.mod`. Imports match it first, so a repository called `ra` that declares `module a` is imported as `import a` (the last part of the URL, `import ra`, still works as a fallback).
 
 > [!IMPORTANT]
 > **Commit `vira.lock` to version control!**  
@@ -452,7 +455,22 @@ cd my_app
 vira install
 ```
 
-`vira install` (or `vira get`) reads `vira.lock`, downloads any missing packages, and verifies that the directory tree matches the stored SHA-256 checksum.
+`vira install` (or `vira get`) reads `vira.lock`, downloads any missing packages at their locked commits, and verifies that the directory tree matches the stored SHA-256 checksum. This applies to transitive packages too. If the content differs, the download is deleted and the command fails; `vira install` never rewrites an existing lock entry (only `vira add` moves a lock forward).
+
+### Transitive Dependencies
+
+When a package has a `vira.mod` with its own `deps`, those are installed as well, recursively, and recorded in your `vira.lock`. Cycles (`mid → leaf → mid`) are fine.
+
+- **Local paths stay local.** Local dependencies are always written with a leading `./` or `../` relative to your project, e.g. `./libs/leaf`, so they are never mistaken for a git host.
+- **Paths inside a git package stay inside it.** A downloaded package's `./inner` resolves against the package's own folder. A path that leaves that folder (`../../somewhere`) or an absolute path is refused, so a package cannot copy arbitrary folders from your disk.
+- **Version conflicts are errors.** If two packages need different versions of the same dependency, `vira add` / `vira install` stop and name both:
+
+  ```text
+  version conflict for 'github.com/acme/c': 'a' requires v1 but 'b' requires v2; add the version you want to the deps of the root vira.mod
+  ```
+
+  A version pinned in your own `vira.mod` always wins and silences the error.
+- **Nested packages are not project sources.** A folder inside your project that has its own `vira.mod` (such as `./libs/leaf`) is a separate package. It is compiled through its import, not as part of your project's files.
 
 ### Removing Dependencies: `vira remove`
 
@@ -480,7 +498,8 @@ vira vendor
 ```
 
 ### How Vendoring Works:
-- Copies all dependencies directly into `<projectRoot>/vendor/`.
+- Copies all dependencies, direct and transitive, directly into `<projectRoot>/vendor/`.
+- Any package missing from `.vira/pkg` is fetched first at the commit `vira.lock` pins; if that fails, `vira vendor` fails instead of skipping it.
 - Even if `.vira/` is completely deleted and internet access is disabled, `vira run .` and `vira build -prod .` will compile directly from `./vendor`.
 
 ```bash
@@ -503,10 +522,21 @@ When you write `import "my_package"`, the compiler and LSP search the filesystem
 | **2** | `<project_root>/src/<target>` | Internal application subpackages |
 | **3** | `<project_root>/<target>` | Project root modules |
 | **4** | `<project_root>/vendor/<target>` | Vendored air-gapped dependencies |
-| **5** | `<project_root>/.vira/pkg/<target>` | Project-local cached dependencies |
+| **5** | `<project_root>/.vira/pkg/<target>` | Project-local cached dependencies (direct and transitive), matched by declared module name first, then by the last part of the path/URL |
 | **6** | `~/.vir/pkg/<target>` | Global toolchain user cache |
 
 This ensures that local code always takes precedence over cached packages, and vendored packages take precedence over remote network caches.
+
+### Sub-Package Imports
+
+A folder inside a dependency is imported with a slash. Both forms mean the same thing:
+
+```vira
+import mypkg/sub
+import "mypkg/sub"
+```
+
+The code inside uses the sub-package's own module name, e.g. `sub.hi()` for a folder whose files declare `module sub`.
 
 ---
 
