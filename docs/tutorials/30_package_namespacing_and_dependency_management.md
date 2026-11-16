@@ -151,9 +151,9 @@ When packages are installed or built, Vira writes a cryptographic `vira.lock` co
 | Command | Action |
 | :--- | :--- |
 | `vira add <package[@version]>` | Fetches package from Git or local disk, updates `vira.mod` and computes hash in `vira.lock`. |
-| `vira install` | Reads `vira.mod` and `vira.lock`, restoring missing dependencies. |
+| `vira install` | Reads `vira.mod` and `vira.lock`, restoring missing dependencies (direct and transitive) at their locked commits and verifying their checksums. Never rewrites an existing lock entry. |
 | `vira remove <package>` | Removes a dependency from `vira.mod` and `vira.lock`. |
-| `vira vendor` | Vendors all dependencies locally into `./vendor` for air-gapped, offline builds. |
+| `vira vendor` | Vendors all dependencies, direct and transitive, into `./vendor` for air-gapped, offline builds. Fetches anything missing at its locked commit first. |
 | `vira test <path>` | Runs all package tests under `<path>/tests/*.vir`. |
 | `vira build [-target <os>] [-gui]` | Compiles package/application into a native binary for `linux`, `windows`, or `darwin`. |
 | `vira bundle [-target <os>] [-gui\|-cli]` | Packages a distributable release bundle (auto-detects GUI vs Console CLI subsystem). |

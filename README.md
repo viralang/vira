@@ -831,6 +831,8 @@ Vira features a built-in decentralized, Git-first package management system:
 - **Cryptographic Lockfiles (`vira.lock`):** Generates deterministic SHA-256 tree hashes for all dependencies, guaranteeing supply-chain security and bit-exact reproducibility.
 - **Air-Gapped Vendoring (`vira vendor`):** Deep-copies all dependencies into `./vendor/` for 100% offline, zero-network production builds.
 - **`vira install` / `vira remove`**: Deterministic dependency verification and clean unlinking.
+- **Transitive dependencies:** A package's own `deps` are installed recursively, fetched at their locked commits and checksum-verified. Two packages that need different versions of the same dependency stop with an error unless your own `vira.mod` pins one.
+- **Sub-package imports:** A folder inside a dependency is imported as `import mypkg/sub` (or `import "mypkg/sub"`).
 
 > [!TIP]
 > See **[Tutorial 25: Native Package Management, Publishing & Air-Gapped Vendoring](docs/tutorials/25_package_management_publishing_and_vendoring.md)** and matching runnable example **[`24_package_management_consumer.vir`](docs/examples/24_package_management_consumer.vir)**.

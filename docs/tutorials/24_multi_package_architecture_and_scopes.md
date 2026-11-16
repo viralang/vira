@@ -230,6 +230,9 @@ fn main() {
 
 The Vira compiler automatically walks subdirectories recursively to collect and link all packages:
 
+> [!NOTE]
+> A subfolder with its own `vira.mod` is a separate package, not part of your project's sources. The walk skips it; it is compiled when you import it (for example a local dependency kept at `./libs/leaf` and added with `vira add ./libs/leaf`).
+
 ```bash
 # 1. Run the entire application across all packages
 vira run .
