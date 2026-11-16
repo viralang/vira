@@ -2179,3 +2179,89 @@ int main(void) {
 		t.Fatalf("unexpected output:\n%s", string(rawOut))
 	}
 }
+
+// TestPrivateFunctionNotShadowedByOtherModule: an unqualified call inside a
+// package resolves to that package's own function, even when another module
+// registered a function with the same bare name first. viralang/viraplay
+// failed to build because odbc's private pad_right(s, width) was emitted as
+// strings__pad_right (a 3-argument function): stdlib modules register before
+// cached dependency packages, and the global function table keeps the first
+// name it sees.
+func TestPrivateFunctionNotShadowedByOtherModule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the package cache path contains ':' (https:), which Windows does not allow")
+	}
+	tmpDir := t.TempDir()
+	pkgDir := filepath.Join(tmpDir, ".vira", "pkg", "https:", "github.com", "example", "zhelper")
+	files := map[string]string{
+		"vira.mod":                        "module shadow\nversion 0.1.0\n\ndeps\n\thttps://github.com/example/zhelper\n",
+		filepath.Join(pkgDir, "vira.mod"): "module zhelper\nversion 0.1.0\n",
+		filepath.Join(pkgDir, "src", "helper.vir"): `module zhelper
+
+pub struct Box {
+pub mut:
+	v string
+}
+
+fn pad_right(s string, width int) string {
+	return "${s}|${width}"
+}
+
+pub fn (b Box) render() string {
+	return pad_right(b.v, 3)
+}
+`,
+		filepath.Join("lib", "a.vir"): `module lib
+
+import strings
+
+pub fn dots() string {
+	return strings.pad_right("a", 3, ".")
+}
+`,
+		filepath.Join("lib", "lib.vir"): `module lib
+
+import zhelper
+
+pub fn show() string {
+	b := zhelper.Box{ v: "x" }
+	d := dots()
+	return "${b.render()} ${d}"
+}
+`,
+		"main.vir": `module main
+
+import lib
+
+fn main() {
+	println(lib.show())
+}
+`,
+	}
+	for name, src := range files {
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(tmpDir, name)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	viraBin, err := filepath.Abs("vira")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(viraBin, "run", "main.vir")
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("program failed to build or run: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "x|3 a..") {
+		t.Errorf("expected 'x|3 a..', got:\n%s", out)
+	}
+}

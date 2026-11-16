@@ -3054,6 +3054,18 @@ func (g *Generator) emitOrderedArgsCall(call *ast.CallExpr) (string, bool) {
 	return fmt.Sprintf("({ %s %s; })", strings.Join(decls, " "), inner), true
 }
 
+// lookupCallee resolves an unqualified function name: the current module's
+// function first, then the global table (builtins, main, externs).
+func (g *Generator) lookupCallee(name string) *checker.FnSig {
+	if s := g.chk.LookupFunctionInModule(g.currentModule(), name); s != nil {
+		return s
+	}
+	if s, ok := g.chk.Functions()[name]; ok {
+		return s
+	}
+	return nil
+}
+
 func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 	if ordered, ok := g.emitOrderedArgsCall(call); ok {
 		return ordered
@@ -3061,7 +3073,7 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 	var externSig *checker.FnSig
 	switch callee := call.Callee.(type) {
 	case *ast.IdentExpr:
-		if s, ok := g.chk.Functions()[callee.Ident.Name]; ok && s.IsExtern {
+		if s := g.lookupCallee(callee.Ident.Name); s != nil && s.IsExtern {
 			externSig = s
 		}
 	case *ast.SelectorExpr:
@@ -3614,13 +3626,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("%s_box_%s(%s)",
 				g.cStructName(iface.Name), st.Name, argStrs[0])
 		}
-		var sig *checker.FnSig
-		if s, ok := g.chk.Functions()[name]; ok {
-			sig = s
-		}
-		if sig == nil {
-			sig = g.chk.LookupFunctionInModule(g.mod, name)
-		}
+		// The current module's own function wins over a same-named function of
+		// another module: Functions() is keyed by bare name, so it can hold, say,
+		// strings.pad_right while odbc calls its private pad_right.
+		sig := g.lookupCallee(name)
 		if sig != nil && sig.Intrinsic != "" {
 			return fmt.Sprintf("%s(%s)", sig.Intrinsic, strings.Join(argStrs, ", "))
 		}

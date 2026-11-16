@@ -1119,6 +1119,17 @@ func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) 
 
 // --- C99 COMPILER DRIVER ---
 
+// cFileUsesGUI reports whether generated C uses the GUI runtime, with the
+// same markers `vira bundle` uses to pick the GUI subsystem.
+func cFileUsesGUI(cFile string) bool {
+	data, err := os.ReadFile(cFile)
+	if err != nil {
+		return true // unknown: keep the old behaviour and link the GUI libraries
+	}
+	code := string(data)
+	return strings.Contains(code, "vira_gui_init(") || strings.Contains(code, `#include "vira_gui.h"`)
+}
+
 func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string) {
 	runtimeDir := resolveRuntimeDir()
 	targetOS := normalizeTargetOS(opts.targetOS)
@@ -1237,6 +1248,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 
 	extraLibs := []string{}
 	staticFlags := []string{}
+	usesGUI := opts.guiApp || cFileUsesGUI(cFile)
 
 	if opts.shared {
 		staticFlags = append(staticFlags, "-shared")
@@ -1248,7 +1260,7 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		if opts.guiApp {
 			staticFlags = append(staticFlags, "-mwindows")
 		}
-		if hasRaylib {
+		if hasRaylib && usesGUI {
 			if staticRaylibPath != "" {
 				extraLibs = append(extraLibs, staticRaylibPath)
 			} else {
@@ -1257,8 +1269,13 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		}
 		extraLibs = append(extraLibs, "-lopengl32", "-lgdi32", "-luser32", "-lwinmm", "-lws2_32")
 	} else if targetOS == "linux" {
-		extraLibs = append(extraLibs, "-lX11")
-		if hasRaylib {
+		// X11, Raylib and OpenGL only for programs that use the GUI. Linking
+		// them into every program made all builds fail on machines without
+		// libGL headers once scripts/install.sh had downloaded Raylib.
+		if usesGUI {
+			extraLibs = append(extraLibs, "-lX11")
+		}
+		if hasRaylib && usesGUI {
 			if staticRaylibPath != "" {
 				extraLibs = append(extraLibs, staticRaylibPath, "-lGL", "-ldl", "-lrt")
 			} else {
