@@ -180,6 +180,14 @@ pub fn (mut s TcpStream) read_line() !string {
 // deadline_ms > 0, once time.now_ms() passes it (so a peer cannot hold the
 // caller by sending one byte just inside each read timeout).
 pub fn (mut s TcpStream) read_line_limit(max_len int, deadline_ms i64) !string {
+	return s.read_line_limit_idle(max_len, deadline_ms, true)!
+}
+
+// Like read_line_limit; with wait_idle false, a read timeout before the first
+// byte of the line fails at once with 'timeout' (the pre-T-092 behaviour), so
+// a keep-alive server with a short read timeout can drop idle connections.
+// Once a byte has arrived, pauses are retried until the deadline.
+pub fn (mut s TcpStream) read_line_limit_idle(max_len int, deadline_ms i64, wait_idle bool) !string {
 	mut line_bytes := []u8{}
 	for true {
 		if deadline_ms > 0 && time.now_ms() > deadline_ms {
@@ -189,7 +197,7 @@ pub fn (mut s TcpStream) read_line_limit(max_len int, deadline_ms i64) !string {
 			if deadline_ms > 0 && time.now_ms() > deadline_ms {
 				return error('deadline passed')
 			}
-			if deadline_ms > 0 && err == 'timeout' {
+			if deadline_ms > 0 && err == 'timeout' && (wait_idle || line_bytes.len > 0) {
 				// a pause shorter than the deadline: keep waiting
 				continue
 			}

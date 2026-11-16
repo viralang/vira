@@ -64,7 +64,9 @@ pub fn Request.parse_with(mut stream net.TcpStream, max_body int, head_deadline_
 		limit = DEFAULT_MAX_BODY_BYTES
 	}
 	deadline := time.now_ms() + i64(dl)
-	start_line := stream.read_line_limit(MAX_HEADER_LINE, deadline) or {
+	// An idle keep-alive connection (no byte yet) fails on the socket's own
+	// read timeout; once the request has started, the head deadline applies.
+	start_line := stream.read_line_limit_idle(MAX_HEADER_LINE, deadline, false) or {
 		if err.contains('longer than') {
 			stream.write_string('HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') or { 0 }
 		} else if err.contains('deadline') {
