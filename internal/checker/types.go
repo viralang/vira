@@ -465,3 +465,44 @@ func IsValidMapKey(t Type) bool {
 	}
 	return false
 }
+
+// FnType represents a function value type `fn (int, string) bool`. Values of this type are
+// closures: a function plus the variables it captured.
+type FnType struct {
+	Params []Type
+	Return Type // TypeVoid for none
+}
+
+func (f *FnType) String() string {
+	var ps []string
+	for _, p := range f.Params {
+		ps = append(ps, p.String())
+	}
+	s := "fn (" + strings.Join(ps, ", ") + ")"
+	if f.Return != nil && !ExactEquals(f.Return, TypeVoid) {
+		s += " " + f.Return.String()
+	}
+	return s
+}
+
+func (f *FnType) Equals(other Type) bool {
+	o, ok := other.(*FnType)
+	if !ok || len(o.Params) != len(f.Params) {
+		return false
+	}
+	for i := range f.Params {
+		if !ExactEquals(f.Params[i], o.Params[i]) {
+			return false
+		}
+	}
+	return ExactEquals(f.Return, o.Return)
+}
+
+// ClosureInfo describes a lifted anonymous function.
+type ClosureInfo struct {
+	Lit      *ast.FnLitExpr
+	Sig      *FnSig // the lifted function: captures first, then the literal's parameters
+	NumCaps  int
+	Module   string
+	FnType   *FnType
+}

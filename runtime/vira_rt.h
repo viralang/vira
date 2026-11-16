@@ -9,6 +9,7 @@
 #include "rt/string/string.h"
 #include "rt/slice/slice.h"
 #include "rt/map/map.h"
+#include "rt/closure/closure.h"
 #include "rt/arena/arena.h"
 
 #include "rt/tensor/core.h"

@@ -26,11 +26,20 @@ type VarSymbol struct {
 	// IsBorrowed marks bindings that do not own their value: parameters, receivers and
 	// `for x in xs` loop variables. An actor bound this way cannot be returned.
 	IsBorrowed bool
+	// IsCapture marks an outer variable seen from inside an anonymous function.
+	IsCapture bool
 }
 
 type Scope struct {
 	parent *Scope
 	vars   map[string]*VarSymbol
+
+	// A closure boundary: lookups that miss inside the closure continue in captureFrom.
+	// Every outer local found that way is recorded as a capture and seen as an immutable,
+	// borrowed copy.
+	captureFrom *Scope
+	captured    map[string]*VarSymbol
+	captureList []*VarSymbol // captured outer symbols, in first-use order
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -55,6 +64,19 @@ func (s *Scope) Lookup(name string) (*VarSymbol, bool) {
 	for cur := s; cur != nil; cur = cur.parent {
 		if sym, ok := cur.vars[name]; ok {
 			return sym, true
+		}
+		if cur.captureFrom != nil {
+			if sym, ok := cur.captured[name]; ok {
+				return sym, true
+			}
+			outer, ok := cur.captureFrom.Lookup(name)
+			if !ok {
+				return nil, false
+			}
+			cp := &VarSymbol{Name: outer.Name, Type: outer.Type, IsMut: false, Span: outer.Span, IsBorrowed: true, IsCapture: true}
+			cur.captured[name] = cp
+			cur.captureList = append(cur.captureList, outer)
+			return cp, true
 		}
 	}
 	return nil, false
@@ -104,6 +126,13 @@ type Checker struct {
 	SelectorPaths  map[*ast.SelectorExpr][]string // records embedded hop path (e.g. ["AuditMeta"])
 	ResolvedConsts map[ast.Expr]*ConstSymbol      // records resolved top-level constant references
 	EnumValues     map[ast.Expr]*EnumValueRef     // records `Color.red` variant references
+	Closures       map[*ast.FnLitExpr]*ClosureInfo
+	ClosureList    []*ClosureInfo
+	FnRefs         map[ast.Expr]*FnSig        // a named function used as a value
+	ClosureCalls   map[*ast.CallExpr]*FnType  // calls through a closure value
+	synthesized    []ast.Decl                 // lifted closures (and generic instances)
+	synthByFile    map[*ast.File][]ast.Decl
+	lambdaCounter  int
 	enums          map[string]*EnumType
 
 	// Function context during Pass 3
@@ -126,6 +155,10 @@ func New() *Checker {
 		SelectorPaths:  make(map[*ast.SelectorExpr][]string),
 		ResolvedConsts: make(map[ast.Expr]*ConstSymbol),
 		EnumValues:     make(map[ast.Expr]*EnumValueRef),
+		Closures:       make(map[*ast.FnLitExpr]*ClosureInfo),
+		FnRefs:         make(map[ast.Expr]*FnSig),
+		ClosureCalls:   make(map[*ast.CallExpr]*FnType),
+		synthByFile:    make(map[*ast.File][]ast.Decl),
 		enums:          make(map[string]*EnumType),
 	}
 	c.registerBuiltins()
@@ -1434,6 +1467,12 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		}
 	}
 
+	// Declarations the checker created (lifted closures, generic instances) become part of
+	// the file they came from, so autofree and codegen see them like written code.
+	for _, file := range files {
+		file.Decls = append(file.Decls, c.synthByFile[file]...)
+	}
+
 	// Reset currentMod to root file's module so c.ModuleName() reports the primary module
 	rootMod := "main"
 	if len(files) > 0 && files[0].Module.Name != "" {
@@ -1443,6 +1482,173 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 }
 
 // --- PASS 1: HEADER & MEMBER REGISTRATION ---
+
+// lookupPlainFunction finds a free function (not a method, builtin, extern or intrinsic) by name.
+func (c *Checker) lookupPlainFunction(mod string, name string) *FnSig {
+	var sig *FnSig
+	if ms, ok := c.modules[mod]; ok {
+		sig = ms.Functions[name]
+	}
+	if sig == nil && (mod == "main" || mod == "") {
+		sig = c.functions[name]
+	}
+	if sig == nil || sig.HasReceiver || sig.IsExtern || sig.Intrinsic != "" || sig.Module == "" {
+		return nil
+	}
+	return sig
+}
+
+// fnRefType records a named function used as a value and returns its function type.
+func (c *Checker) fnRefType(e ast.Expr, sig *FnSig) *FnType {
+	if sig == nil {
+		return nil
+	}
+	ft := &FnType{Return: sig.ReturnType}
+	if ft.Return == nil {
+		ft.Return = TypeVoid
+	}
+	for _, p := range sig.Params {
+		if p.IsMut {
+			c.errorf(e.Span(), "function '%s' has a 'mut' parameter and cannot be used as a value", sig.Name)
+			return ft
+		}
+		ft.Params = append(ft.Params, p.Type)
+	}
+	c.FnRefs[e] = sig
+	return ft
+}
+
+// checkFnLit type-checks an anonymous function and lifts it to a top-level function whose
+// leading parameters are the outer variables it captures (by value, read-only).
+func (c *Checker) checkFnLit(e *ast.FnLitExpr, scope *Scope) Type {
+	ft := &FnType{Return: TypeVoid}
+	if e.ReturnType != nil {
+		ft.Return = c.resolveTypeExpr(e.ReturnType)
+	}
+	boundary := &Scope{vars: make(map[string]*VarSymbol), captureFrom: scope, captured: make(map[string]*VarSymbol)}
+	var params []ParamInfo
+	for _, p := range e.Params {
+		if p.IsMut {
+			c.errorf(p.ParamSpan, "parameters of an anonymous function cannot be 'mut'")
+		}
+		c.checkCName(p.Name, "parameter")
+		pt := c.resolveTypeExpr(p.Type)
+		ft.Params = append(ft.Params, pt)
+		params = append(params, ParamInfo{Name: p.Name.Name, Type: pt})
+		boundary.Define(&VarSymbol{Name: p.Name.Name, Type: pt, Span: p.ParamSpan, IsBorrowed: true})
+	}
+
+	prevRet, prevActor := c.curFnReturn, c.curActor
+	c.curFnReturn, c.curActor = ft.Return, nil
+	c.checkBlock(e.Body, NewScope(boundary))
+	c.curFnReturn, c.curActor = prevRet, prevActor
+
+	c.lambdaCounter++
+	name := fmt.Sprintf("_lambda_%d", c.lambdaCounter)
+	var capParams []ParamInfo
+	var astParams []ast.Param
+	for _, sym := range boundary.captureList {
+		if st, ok := sym.Type.(*StructType); ok && st.IsActor {
+			c.errorf(e.LitSpan, "an anonymous function cannot capture actor '%s': an actor has a single owner; pass it as an argument instead", sym.Name)
+		}
+		capParams = append(capParams, ParamInfo{Name: sym.Name, Type: sym.Type})
+		e.Captures = append(e.Captures, sym.Name)
+	}
+	allParams := append(append([]ParamInfo{}, capParams...), params...)
+	for _, p := range allParams {
+		astParams = append(astParams, ast.Param{
+			Name: ast.Ident{Name: p.Name, NamePos: e.LitSpan},
+			Type: &ast.ResolvedType{Type: p.Type, Pos: e.LitSpan},
+		})
+	}
+	sig := &FnSig{Module: c.currentMod, Name: name, Params: allParams, ReturnType: ft.Return, Span: e.LitSpan}
+	c.getOrCreateModule(c.currentMod).Functions[name] = sig
+	var retExpr ast.TypeExpr
+	if !ExactEquals(ft.Return, TypeVoid) {
+		retExpr = &ast.ResolvedType{Type: ft.Return, Pos: e.LitSpan}
+	}
+	decl := &ast.FnDecl{
+		Module:     c.currentMod,
+		Name:       ast.Ident{Name: name, NamePos: e.LitSpan},
+		Params:     astParams,
+		ReturnType: retExpr,
+		Body:       e.Body,
+		DeclSpan:   e.LitSpan,
+	}
+	e.LiftedName = name
+	info := &ClosureInfo{Lit: e, Sig: sig, NumCaps: len(capParams), Module: c.currentMod, FnType: ft}
+	c.Closures[e] = info
+	c.ClosureList = append(c.ClosureList, info)
+	c.synthesized = append(c.synthesized, decl)
+	c.synthByFile[c.curFile] = append(c.synthByFile[c.curFile], decl)
+	return ft
+}
+
+// closureCallee reports a call through a closure value: a local variable, a struct field, an
+// element or any other expression of function type (but not a named function or method).
+func (c *Checker) closureCallee(call *ast.CallExpr, scope *Scope) *FnType {
+	switch callee := call.Callee.(type) {
+	case *ast.IdentExpr:
+		sym, ok := scope.Lookup(callee.Ident.Name)
+		if !ok {
+			return nil
+		}
+		ft, _ := sym.Type.(*FnType)
+		if ft != nil {
+			c.ExprTypes[callee] = ft
+		}
+		return ft
+	case *ast.SelectorExpr:
+		if callee.IsActorSend {
+			return nil
+		}
+		// A chain rooted at a module or type name (`io.copy()`, `net.TcpStream.connect()`)
+		// is a qualified function or static method, never a closure.
+		root := callee.Left
+		for {
+			if sel, ok := root.(*ast.SelectorExpr); ok {
+				root = sel.Left
+				continue
+			}
+			if idx, ok := root.(*ast.IndexExpr); ok {
+				root = idx.Left
+				continue
+			}
+			break
+		}
+		if id, ok := root.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(id.Ident.Name); !inScope {
+				return nil
+			}
+		}
+		lt := c.checkExpr(callee.Left, scope)
+		st, ok := lt.(*StructType)
+		if !ok {
+			return nil
+		}
+		if m, _, _ := st.LookupMethod(callee.Field.Name); m != nil {
+			return nil
+		}
+		f, _, _ := st.LookupField(callee.Field.Name)
+		if f == nil {
+			return nil
+		}
+		ft, _ := f.Type.(*FnType)
+		if ft != nil {
+			c.checkExpr(callee, scope)
+		}
+		return ft
+	default:
+		ft, _ := c.checkExpr(call.Callee, scope).(*FnType)
+		return ft
+	}
+}
+
+// SynthesizedDecls returns the declarations the checker created: lifted closures and
+// generic instances. CheckFiles also appends them to the file each came from.
+func (c *Checker) SynthesizedDecls() []ast.Decl {
+	return c.synthesized
+}
 
 // registerEnum records an enum and computes its variant values: each variant is one more
 // than the previous one (starting at 0) unless it gives an explicit constant integer.
@@ -2183,7 +2389,9 @@ func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span
 		if !ok {
 			return
 		}
-		if !sym.IsMut {
+		if sym.IsCapture {
+			c.errorf(span, "cannot assign to '%s' inside an anonymous function: closures capture variables by value, read-only", t.Ident.Name)
+		} else if !sym.IsMut {
 			c.errorf(span, "cannot reassign immutable variable '%s' (declare with 'mut %s := ...')",
 				t.Ident.Name, t.Ident.Name)
 		}
@@ -2305,8 +2513,14 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			c.ResolvedConsts[e] = cSym
 			return cSym.Type
 		}
+		if ft := c.fnRefType(e, c.lookupPlainFunction(c.currentMod, e.Ident.Name)); ft != nil {
+			return ft
+		}
 		c.errorf(e.Ident.NamePos, "undefined variable '%s'", e.Ident.Name)
 		return TypeVoid
+
+	case *ast.FnLitExpr:
+		return c.checkFnLit(e, scope)
 
 	case *ast.StructInitExpr:
 		typ := c.resolveTypeExpr(e.Type)
@@ -2351,6 +2565,24 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		if ev := c.enumVariantExpr(e, scope); ev != nil {
 			c.EnumValues[e] = ev
 			return ev.Enum
+		}
+		if pkg, ok := e.Left.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(pkg.Ident.Name); !inScope {
+				target := pkg.Ident.Name
+				if resolved, ok := c.currentImports[target]; ok {
+					target = resolved
+				}
+				if _, isMod := c.modules[target]; isMod && c.LookupConstInModule(pkg.Ident.Name, e.Field.Name) == nil {
+					if sig := c.lookupPlainFunction(target, e.Field.Name); sig != nil {
+						if target != c.currentMod && !sig.IsPub {
+							c.errorf(e.SelSpan, "function '%s.%s' is private to module '%s'", pkg.Ident.Name, e.Field.Name, target)
+						}
+						if ft := c.fnRefType(e, sig); ft != nil {
+							return ft
+						}
+					}
+				}
+			}
 		}
 		if identLeft, ok := e.Left.(*ast.IdentExpr); ok {
 			if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
@@ -2666,6 +2898,21 @@ func (c *Checker) IsStringConcat(expr ast.Expr) bool {
 func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 	var sig *FnSig
 	var callName string
+
+	if ft := c.closureCallee(call, scope); ft != nil {
+		c.ClosureCalls[call] = ft
+		sig = &FnSig{Name: "closure", ReturnType: ft.Return, Span: call.CallSpan}
+		for i, p := range ft.Params {
+			sig.Params = append(sig.Params, ParamInfo{Name: fmt.Sprintf("arg%d", i+1), Type: p})
+		}
+		callName = "function value"
+		if id, ok := call.Callee.(*ast.IdentExpr); ok {
+			callName = id.Ident.Name
+		} else if sel, ok := call.Callee.(*ast.SelectorExpr); ok {
+			callName = sel.Field.Name
+		}
+		return c.finishCallCheck(call, scope, sig, callName)
+	}
 
 	switch callee := call.Callee.(type) {
 	case *ast.IdentExpr:
@@ -3318,7 +3565,12 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			}
 		}
 	}
+	return c.finishCallCheck(call, scope, sig, callName)
+}
 
+// finishCallCheck verifies a resolved call: unsafe context, argument count, types and `mut`
+// markers, and Result / Option handling.
+func (c *Checker) finishCallCheck(call *ast.CallExpr, scope *Scope, sig *FnSig, callName string) Type {
 	// Unsafe context verification: calling an extern C function or @[unsafe] function requires unsafe context
 	if (sig.IsExtern || sig.IsUnsafe) && !c.inUnsafeContext {
 		c.errorf(call.CallSpan, "call to %s function '%s' is unsafe; requires an 'unsafe { ... }' block or '@[unsafe]' function",
@@ -3734,6 +3986,22 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			Inner: c.resolveTypeExpr(t.Inner),
 			IsMut: t.IsMut,
 		}
+
+	case *ast.ResolvedType:
+		if rt, ok := t.Type.(Type); ok {
+			return rt
+		}
+		return TypeVoid
+
+	case *ast.FnType:
+		ft := &FnType{Return: TypeVoid}
+		for _, p := range t.Params {
+			ft.Params = append(ft.Params, c.resolveTypeExpr(p))
+		}
+		if t.Return != nil {
+			ft.Return = c.resolveTypeExpr(t.Return)
+		}
+		return ft
 
 	case *ast.MapType:
 		key := c.resolveTypeExpr(t.Key)

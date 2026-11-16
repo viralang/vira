@@ -152,6 +152,27 @@ type MapType struct {
 func (t *MapType) Span() token.Span { return t.MapPos }
 func (t *MapType) typeExprNode()    {}
 
+// FnType represents a function type `fn (int, string) bool` (Return nil means void).
+type FnType struct {
+	FnPos  token.Span
+	Params []TypeExpr
+	Return TypeExpr
+}
+
+func (t *FnType) Span() token.Span { return t.FnPos }
+func (t *FnType) typeExprNode()    {}
+
+// ResolvedType carries an already-resolved semantic type (a checker.Type) through the AST.
+// The checker uses it for declarations it synthesizes, such as lifted closures and
+// generic instantiations.
+type ResolvedType struct {
+	Type any
+	Pos  token.Span
+}
+
+func (t *ResolvedType) Span() token.Span { return t.Pos }
+func (t *ResolvedType) typeExprNode()    {}
+
 // --- OOP & TOP-LEVEL DECLARATIONS ---
 
 // StructField represents a single field inside one of the 4 access quadrants.
@@ -451,6 +472,7 @@ const (
 	CleanupFuture                       // emits `vira_future_free(&var);`
 	CleanupSlice                        // emits slice destructor
 	CleanupMap                          // emits `vira_map_free(&var);`
+	CleanupClosure                      // emits `vira_closure_release(&var);`
 )
 
 func (k CleanupKind) String() string {
@@ -473,6 +495,8 @@ func (k CleanupKind) String() string {
 		return "slice_autofree"
 	case CleanupMap:
 		return "vira_map_free"
+	case CleanupClosure:
+		return "vira_closure_release"
 	default:
 		return "unknown_free"
 	}
@@ -620,3 +644,19 @@ type MapLitExpr struct {
 
 func (e *MapLitExpr) Span() token.Span { return e.LitSpan }
 func (e *MapLitExpr) exprNode()        {}
+
+// FnLitExpr represents an anonymous function `fn (x int) int { return x * k }`. It captures
+// the outer variables it reads by value. The checker lifts its body into a top-level function
+// named LiftedName whose leading parameters are the captured variables (Captures, in order).
+type FnLitExpr struct {
+	Params     []Param
+	ReturnType TypeExpr
+	Body       *BlockStmt
+	LitSpan    token.Span
+
+	LiftedName string
+	Captures   []string
+}
+
+func (e *FnLitExpr) Span() token.Span { return e.LitSpan }
+func (e *FnLitExpr) exprNode()        {}

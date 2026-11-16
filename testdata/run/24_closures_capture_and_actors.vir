@@ -1,0 +1,60 @@
+// OUT: svc:2
+// OUT: nested 123
+// OUT: actor total 22
+// OUT: lens 6
+// OUT: [vira_rt] active_leaks=0 | total_freed=15
+
+// Closures capturing structs and slices, three levels of nesting, and closures sent to an
+// actor in a message.
+module main
+
+struct Config {
+	name string
+	tags []string
+}
+
+pub actor Runner {
+mut:
+	total int
+}
+
+pub fn (mut r Runner) run(f fn (int) int, x int) int {
+	r.total += f(x)
+	return r.total
+}
+
+fn counter_from(cfg Config) fn () string {
+	return fn () string {
+		return '${cfg.name}:${cfg.tags.len}'
+	}
+}
+
+fn nested(base int) fn (int) fn (int) int {
+	return fn (a int) fn (int) int {
+		return fn (b int) int {
+			return base + a + b
+		}
+	}
+}
+
+fn main() {
+	cfg := Config{ name: 'svc', tags: ['a', 'b'] }
+	describe := counter_from(cfg)
+	println(describe())
+	add := nested(100)(20)
+	println('nested ${add(3)}')
+	scale := 4
+	mut r := Runner{ total: 0 }
+	_ := r <- run(fn (x int) int { return x * scale }, 5) or { 0 }
+	t := r <- run(fn (x int) int { return x + 1 }, 1) or { 0 }
+	println('actor total ${t}')
+	words := ['x', 'yy', 'zzz']
+	lens := fn () int {
+		mut n := 0
+		for w in words {
+			n += w.len
+		}
+		return n
+	}
+	println('lens ${lens()}')
+}

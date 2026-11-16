@@ -310,6 +310,9 @@ func (g *Generator) EmitFile(file *ast.File) string {
 	}
 	out.WriteString("\n")
 
+	// 4b. Closure environments, trampolines and function-reference thunks
+	g.emitClosureDefinitions(&out)
+
 	// 5. Emit Static VTables & Boxing Constructors for (Struct, Interface) pairs
 	if len(g.vtablePairs) > 0 {
 		out.WriteString("// --- 5. POLYMORPHIC VTABLES & AUTOFREE HOOKS ---\n")
@@ -710,6 +713,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if _, isFn := f.Type.(*checker.FnType); isFn {
+				out.WriteString(fmt.Sprintf("    vira_closure_release(&self->%s);\n", fname))
 			} else if _, isMap := f.Type.(*checker.MapType); isMap {
 				out.WriteString(fmt.Sprintf("    vira_map_free(&self->%s);\n", fname))
 			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
@@ -739,6 +744,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := f.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if _, isFn := f.Type.(*checker.FnType); isFn {
+				out.WriteString(fmt.Sprintf("    vira_closure_release(&self->%s);\n", fname))
 			} else if _, isMap := f.Type.(*checker.MapType); isMap {
 				out.WriteString(fmt.Sprintf("    vira_map_free(&self->%s);\n", fname))
 			} else if sl, isSl := f.Type.(*checker.SliceType); isSl {
@@ -784,6 +791,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    vira_str_free(&self->%s);\n", fname))
 			} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    vira_tensor_f32_free(&self->%s);\n", fname))
+			} else if _, isFn := finfo.Type.(*checker.FnType); isFn {
+				out.WriteString(fmt.Sprintf("    vira_closure_release(&self->%s);\n", fname))
 			} else if _, isMap := finfo.Type.(*checker.MapType); isMap {
 				out.WriteString(fmt.Sprintf("    vira_map_free(&self->%s);\n", fname))
 			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
@@ -817,6 +826,8 @@ func (g *Generator) emitStructAndDestructor(out *strings.Builder, sd *ast.Struct
 				out.WriteString(fmt.Sprintf("    copy.%s = vira_str_clone(self->%s);\n", fname, fname))
 			} else if _, isTensor := finfo.Type.(*checker.TensorType); isTensor {
 				out.WriteString(fmt.Sprintf("    copy.%s = vira_tensor_f32_clone(self->%s);\n", fname, fname))
+			} else if _, isFn := finfo.Type.(*checker.FnType); isFn {
+				out.WriteString(fmt.Sprintf("    copy.%s = vira_closure_retain(self->%s);\n", fname, fname))
 			} else if _, isMap := finfo.Type.(*checker.MapType); isMap {
 				out.WriteString(fmt.Sprintf("    copy.%s = vira_map_clone(&self->%s);\n", fname, fname))
 			} else if sl, isSl := finfo.Type.(*checker.SliceType); isSl {
@@ -1223,6 +1234,9 @@ func (g *Generator) emitCloneExpr(t checker.Type, expr string) string {
 	if _, isMap := t.(*checker.MapType); isMap {
 		return fmt.Sprintf("({ vira_map _clone_tmp = (%s); vira_map_clone(&_clone_tmp); })", expr)
 	}
+	if _, isFn := t.(*checker.FnType); isFn {
+		return fmt.Sprintf("vira_closure_retain(%s)", expr)
+	}
 	if st, isSt := t.(*checker.StructType); isSt && !st.IsActor && g.af.StructTypeNeedsFree(st) {
 		cSt := g.cType(st)
 		return fmt.Sprintf("({ %s _clone_tmp = (%s); %s_clone(&_clone_tmp); })", cSt, expr, cSt)
@@ -1356,6 +1370,8 @@ func (g *Generator) emitFreeLValueStmt(out *strings.Builder, indent string, t ch
 		out.WriteString(fmt.Sprintf("%s%s_free(&%s);\n", indent, g.cSliceName(sl.Elem), lval))
 	} else if _, isMap := t.(*checker.MapType); isMap {
 		out.WriteString(fmt.Sprintf("%svira_map_free(&%s);\n", indent, lval))
+	} else if _, isFn := t.(*checker.FnType); isFn {
+		out.WriteString(fmt.Sprintf("%svira_closure_release(&%s);\n", indent, lval))
 	} else if st, isSt := t.(*checker.StructType); isSt && st.IsActor {
 		out.WriteString(fmt.Sprintf("%s%s__vira_release(&%s);\n", indent, g.cStructBase(st), lval))
 	} else if st, isSt := t.(*checker.StructType); isSt && g.af.StructTypeNeedsFree(st) {
@@ -1373,7 +1389,7 @@ func (g *Generator) typeOwnsHeap(t checker.Type) bool {
 		return true
 	}
 	switch v := t.(type) {
-	case *checker.TensorType, *checker.FutureType, *checker.SliceType, *checker.InterfaceType, *checker.MapType:
+	case *checker.TensorType, *checker.FutureType, *checker.SliceType, *checker.InterfaceType, *checker.MapType, *checker.FnType:
 		return true
 	case *checker.StructType:
 		return v.IsActor || g.af.StructTypeNeedsFree(v)
@@ -1397,6 +1413,8 @@ func (g *Generator) typeDeferFreeFn(t checker.Type) string {
 		return fmt.Sprintf("(vira_defer_fn)%s_free", g.cSliceName(v.Elem))
 	case *checker.MapType:
 		return "(vira_defer_fn)vira_map_free"
+	case *checker.FnType:
+		return "(vira_defer_fn)vira_closure_release"
 	case *checker.StructType:
 		if v.IsActor {
 			return fmt.Sprintf("(vira_defer_fn)%s__vira_release", g.cStructBase(v))
@@ -1889,7 +1907,7 @@ func (g *Generator) tryEmitDetachedActorSend(expr ast.Expr) (string, bool) {
 
 func isFreshOwningRValue(expr ast.Expr) bool {
 	switch expr.(type) {
-	case *ast.CallExpr, *ast.StringInterpExpr, *ast.StructInitExpr, *ast.ArrayLitExpr, *ast.BinaryExpr, *ast.MapLitExpr:
+	case *ast.CallExpr, *ast.StringInterpExpr, *ast.StructInitExpr, *ast.ArrayLitExpr, *ast.BinaryExpr, *ast.MapLitExpr, *ast.FnLitExpr:
 		return true
 	}
 	return false
@@ -2264,6 +2282,8 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			out.WriteString(fmt.Sprintf("%s%s_free(&%s); // autofree: %s\n", indent, sliceName, s.VarName, s.Reason))
 		case ast.CleanupMap:
 			out.WriteString(fmt.Sprintf("%svira_map_free(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
+		case ast.CleanupClosure:
+			out.WriteString(fmt.Sprintf("%svira_closure_release(&%s); // autofree: %s\n", indent, s.VarName, s.Reason))
 		}
 
 	case *ast.DeferStmt:
@@ -2733,6 +2753,9 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		if cSym, ok := g.chk.ResolvedConsts[e]; ok {
 			return g.emitConstValue(cSym)
 		}
+		if sig, ok := g.chk.FnRefs[e]; ok {
+			return g.emitFnRef(sig)
+		}
 		return e.Ident.Name
 
 	case *ast.StructInitExpr:
@@ -2805,6 +2828,9 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		return fmt.Sprintf("(%s){ %s }", cSt, strings.Join(inits, ", "))
 
 	case *ast.SelectorExpr:
+		if sig, ok := g.chk.FnRefs[e]; ok {
+			return g.emitFnRef(sig)
+		}
 		if ev, ok := g.chk.EnumValues[e]; ok {
 			return fmt.Sprintf("((int32_t)%d)", ev.Value)
 		}
@@ -2888,6 +2914,9 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		}
 		return fmt.Sprintf("({ vira_bounds_check(%s, %s, __FILE__, __LINE__); %s; })",
 			g.emitExpr(e.Index), lenExpr, g.emitLValue(e))
+
+	case *ast.FnLitExpr:
+		return g.emitClosureLit(e)
 
 	case *ast.MapLitExpr:
 		mt, _ := g.chk.ExprTypes[e].(*checker.MapType)
@@ -3168,6 +3197,9 @@ func (g *Generator) lookupCallee(name string) *checker.FnSig {
 func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 	if ordered, ok := g.emitOrderedArgsCall(call); ok {
 		return ordered
+	}
+	if ft, ok := g.chk.ClosureCalls[call]; ok {
+		return g.emitClosureCall(call, ft)
 	}
 	var externSig *checker.FnSig
 	switch callee := call.Callee.(type) {
@@ -4402,6 +4434,8 @@ func (g *Generator) cType(t checker.Type) string {
 		return "int32_t"
 	case *checker.MapType:
 		return "vira_map"
+	case *checker.FnType:
+		return "vira_closure"
 	case *checker.FutureType:
 		return "vira_future"
 	case *checker.StructType:
@@ -4455,6 +4489,8 @@ func (g *Generator) cSliceName(elem checker.Type) string {
 		return "vira_slice_" + g.cSliceName(v.Elem)
 	case *checker.EnumType:
 		return "vira_slice_int" // enums are int32_t values
+	case *checker.FnType:
+		return "vira_slice_closure" // every function type is a vira_closure
 	case *checker.StructType:
 		if v.Module != "" {
 			return fmt.Sprintf("vira_slice_%s__%s", v.Module, v.Name)
@@ -4491,6 +4527,9 @@ func (g *Generator) cSliceNameFromTypeName(tName string) string {
 		if et, ok := g.chk.Enums()[elem]; ok && et != nil {
 			return "vira_slice_int"
 		}
+		if strings.HasPrefix(elem, "fn (") || strings.HasPrefix(elem, "fn(") {
+			return "vira_slice_closure"
+		}
 		if strings.Contains(elem, "[") {
 			// Generic element such as Future[int]: mangle it the way cSliceName
 			// does (vira_slice_Future_int), not as a struct name.
@@ -4514,7 +4553,7 @@ func (g *Generator) needsMutableAddressForCleanup(t checker.Type) bool {
 		return true
 	}
 	switch t.(type) {
-	case *checker.StructType, *checker.InterfaceType, *checker.TensorType, *checker.FutureType, *checker.SliceType, *checker.MapType:
+	case *checker.StructType, *checker.InterfaceType, *checker.TensorType, *checker.FutureType, *checker.SliceType, *checker.MapType, *checker.FnType:
 		return true
 	}
 	return false

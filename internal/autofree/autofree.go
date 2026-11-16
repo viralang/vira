@@ -250,6 +250,8 @@ func (a *Analyzer) typeNeedsCleanup(t checker.Type) (bool, ast.CleanupKind) {
 		return true, ast.CleanupSlice
 	case *checker.MapType:
 		return true, ast.CleanupMap
+	case *checker.FnType:
+		return true, ast.CleanupClosure
 	default:
 		return false, 0
 	}
@@ -1182,6 +1184,10 @@ func (a *Analyzer) maybeHoistSubExpr(
 		return expr
 	}
 
+	if fnLit, ok := expr.(*ast.FnLitExpr); ok {
+		return a.hoistExprToTemp(fnLit, a.chk.ExprTypes[fnLit], ast.CleanupClosure, "vira_tmp_fn", "zero-leak temporary closure argument cleanup", preStmts, postFrees, report)
+	}
+
 	if mapLit, ok := expr.(*ast.MapLitExpr); ok {
 		return a.hoistExprToTemp(mapLit, a.chk.ExprTypes[mapLit], ast.CleanupMap, "vira_tmp_map", "zero-leak temporary map argument cleanup", preStmts, postFrees, report)
 	}
@@ -1255,7 +1261,7 @@ func (a *Analyzer) wouldHoistSubExpr(expr ast.Expr, inArena bool) bool {
 	case *ast.ArrayLitExpr:
 		_, isSlice := a.chk.ExprTypes[e].(*checker.SliceType)
 		return isSlice
-	case *ast.MapLitExpr:
+	case *ast.MapLitExpr, *ast.FnLitExpr:
 		return true
 	case *ast.BinaryExpr:
 		_, isTensor := a.chk.ExprTypes[e].(*checker.TensorType)

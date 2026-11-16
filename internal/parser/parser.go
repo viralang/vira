@@ -651,12 +651,14 @@ func (p *Parser) parseParamList() []ast.Param {
 // --- TYPE EXPRESSIONS ---
 
 func (p *Parser) isTypeStart(k token.Kind) bool {
-	return k == token.TokIdent || k == token.TokBang || k == token.TokQuestion || k == token.TokAmp ||
+	return k == token.TokIdent || k == token.TokBang || k == token.TokQuestion || k == token.TokAmp || k == token.TokFn ||
 		k == token.TokF32 || k == token.TokF16 || k == token.TokBF16 || k == token.TokTensor || k == token.TokLBracket
 }
 
 func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	switch p.cur.Kind {
+	case token.TokFn:
+		return p.parseFnType()
 	case token.TokLBracket:
 		lb := p.advance()
 		var lenExpr ast.Expr
@@ -710,6 +712,47 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 		}
 		return &ast.IdentType{Name: ident, TypeParams: tArgs}
 	}
+}
+
+// parseFnType parses `fn (int, string) bool`. Parameter names are allowed and ignored:
+// `fn (x int) int` is the same type as `fn (int) int`.
+func (p *Parser) parseFnType() *ast.FnType {
+	fnTok := p.expect(token.TokFn)
+	ft := &ast.FnType{FnPos: fnTok.Span}
+	p.expect(token.TokLParen)
+	for p.cur.Kind != token.TokRParen && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind == token.TokIdent && p.peek.Kind != token.TokComma && p.peek.Kind != token.TokRParen &&
+			p.peek.Kind != token.TokDot && p.isTypeStart(p.peek.Kind) && p.cur.Lexeme(p.src) != "map" {
+			p.advance() // parameter name
+		}
+		ft.Params = append(ft.Params, p.parseTypeExpr())
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	rp := p.expect(token.TokRParen)
+	ft.FnPos.End = rp.Span.End
+	if p.isTypeStart(p.cur.Kind) && p.cur.Kind != token.TokLBrace && !p.hasNewlineBetween(rp.Span, p.cur.Span) {
+		ft.Return = p.parseTypeExpr()
+		ft.FnPos.End = ft.Return.Span().End
+	}
+	return ft
+}
+
+// parseFnLit parses an anonymous function `fn (x int) int { ... }`.
+func (p *Parser) parseFnLit() *ast.FnLitExpr {
+	fnTok := p.expect(token.TokFn)
+	lit := &ast.FnLitExpr{}
+	lit.Params = p.parseParamList()
+	if p.cur.Kind != token.TokLBrace && p.isTypeStart(p.cur.Kind) {
+		lit.ReturnType = p.parseTypeExpr()
+	}
+	prevAllow := p.allowStructInit
+	p.allowStructInit = true
+	lit.Body = p.parseBlock()
+	p.allowStructInit = prevAllow
+	lit.LitSpan = token.Span{Start: fnTok.Span.Start, End: lit.Body.BlockSpan.End}
+	return lit
 }
 
 // parseMapTypeRest parses `[K]V` after the `map` keyword.
@@ -1184,6 +1227,9 @@ func (p *Parser) parsePrefix() ast.Expr {
 	case token.TokF32:
 		tok := p.advance()
 		return &ast.IdentExpr{Ident: ast.Ident{Name: "f32", NamePos: tok.Span}}
+
+	case token.TokFn:
+		return p.parseFnLit()
 
 	case token.TokInt, token.TokFloat, token.TokTrue, token.TokFalse:
 		tok := p.advance()

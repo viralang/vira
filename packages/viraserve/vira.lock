@@ -4,7 +4,7 @@
     {
       "path": "http",
       "version": "0.1.0",
-      "checksum": "sha256:6fa2c33a26ef502498229651d7265ff9a9f9529c56883f2670533c835dfc9de4"
+      "checksum": "sha256:e3bf8ee40fe65cf4c87df5c759bf9ee159e64cd5498031568c5ee29fc81daef6"
     },
     {
       "path": "io",
