@@ -518,6 +518,9 @@ func (s *DeferFreeStmt) stmtNode()        {}
 
 type IdentExpr struct {
 	Ident Ident
+	// TypeArgs holds explicit generic arguments on a type name used in an expression,
+	// as in `Box[int].new(1)`. The checker resolves them and clears the field.
+	TypeArgs []TypeExpr
 }
 
 func (e *IdentExpr) Span() token.Span { return e.Ident.Span() }
@@ -548,6 +551,8 @@ type SelectorExpr struct {
 	Field       Ident
 	IsActorSend bool // true when invoked via `actor <- method(...)`
 	SelSpan     token.Span
+	// TypeArgs: explicit generic arguments on a qualified type, `pkg.Box[int].new(1)`.
+	TypeArgs []TypeExpr
 }
 
 func (e *SelectorExpr) Span() token.Span { return e.SelSpan }

@@ -1,0 +1,110 @@
+// OUT: first 7 a
+// OUT: explicit 5
+// OUT: map 5 #1 #5
+// OUT: filter 2 4
+// OUT: reduce 15 #1#2#3#4#5
+// OUT: max 9 pear 2.50
+// OUT: box 42
+// OUT: box str hi
+// OUT: pair age=36
+// OUT: count a=2 b=2 c=1
+// OUT: nested 2
+// OUT: [vira_rt] active_leaks=0 | total_freed=39
+
+// Generics: functions with inferred or explicit type arguments, generic structs with
+// methods and static constructors, two type parameters, combinators taking closures
+// (map / filter / reduce), a generic map return type, and nested type arguments.
+module main
+
+struct Box[T] {
+pub mut:
+	value T
+}
+
+fn Box[T].new(v T) Box[T] {
+	return Box[T]{ value: v }
+}
+
+fn (b Box[T]) get() T {
+	return b.value
+}
+
+fn (mut b Box[T]) set(v T) {
+	b.value = v
+}
+
+struct Pair[A, B] {
+	first A
+	second B
+}
+
+fn first[T](xs []T) T {
+	return xs[0]
+}
+
+fn map_slice[T, U](xs []T, f fn (T) U) []U {
+	mut out := []U{}
+	for x in xs {
+		out.push(f(x))
+	}
+	return out
+}
+
+fn filter[T](xs []T, keep fn (T) bool) []T {
+	mut out := []T{}
+	for x in xs {
+		if keep(x) {
+			out.push(x)
+		}
+	}
+	return out
+}
+
+fn reduce[T, A](xs []T, init A, f fn (A, T) A) A {
+	mut acc := init
+	for x in xs {
+		acc = f(acc, x)
+	}
+	return acc
+}
+
+fn max_of[T](a T, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+fn count_by[K, T](xs []T, key fn (T) K) map[K]int {
+	mut m := map[K]int{}
+	for x in xs {
+		m[key(x)] += 1
+	}
+	return m
+}
+
+fn main() {
+	println('first ${first([7, 8, 9])} ${first(['a', 'b'])}')
+	println('explicit ${first[int]([5])}')
+	nums := [1, 2, 3, 4, 5]
+	strs := map_slice(nums, fn (n int) string { return '#${n}' })
+	println('map ${strs.len} ${strs[0]} ${strs[4]}')
+	evens := filter(nums, fn (n int) bool { return n % 2 == 0 })
+	println('filter ${evens.len} ${evens[1]}')
+	total := reduce(nums, 0, fn (acc int, n int) int { return acc + n })
+	joined := reduce(strs, '', fn (acc string, s string) string { return acc + s })
+	println('reduce ${total} ${joined}')
+	println('max ${max_of(3, 9)} ${max_of('pear', 'apple')} ${max_of(2.5, 1.5)}')
+	mut b := Box[int].new(41)
+	b.set(b.get() + 1)
+	println('box ${b.get()}')
+	s := Box[string]{ value: 'hi' }
+	println('box str ${s.get()}')
+	p := Pair[string, int]{ first: 'age', second: 36 }
+	println('pair ${p.first}=${p.second}')
+	words := ['apple', 'avocado', 'banana', 'blueberry', 'cherry']
+	by_letter := count_by(words, fn (w string) string { return w[0] })
+	println('count a=${by_letter['a']} b=${by_letter['b']} c=${by_letter['c']}')
+	nested := Box[[]string].new(['x', 'y'])
+	println('nested ${nested.get().len}')
+}

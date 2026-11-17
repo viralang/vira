@@ -41,6 +41,25 @@ func New(src string) *Parser {
 	return p
 }
 
+// parserState is a snapshot used to parse a construct tentatively and back out of it.
+type parserState struct {
+	lex     lexer.Lexer
+	cur     token.Token
+	peek    token.Token
+	prev    token.Token
+	nErrors int
+}
+
+func (p *Parser) save() parserState {
+	return parserState{lex: *p.lex, cur: p.cur, peek: p.peek, prev: p.prev, nErrors: len(p.errors)}
+}
+
+func (p *Parser) restore(s parserState) {
+	*p.lex = s.lex
+	p.cur, p.peek, p.prev = s.cur, s.peek, s.prev
+	p.errors = p.errors[:s.nErrors]
+}
+
 func (p *Parser) Errors() []ParseError {
 	return p.errors
 }
@@ -589,20 +608,23 @@ func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string,
 		}
 	}
 
-	// 2. Function Name or Static Type Method (`fn Invoice.new(...)`)
+	// 2. Function Name or Static Type Method (`fn Invoice.new(...)`, `fn Box[T].new(...)`)
 	firstIdent := p.parseIdent()
+	typeParams := p.parseOptionalTypeParams()
 	if decl.Receiver == nil && p.cur.Kind == token.TokDot {
 		p.advance() // consume `.`
 		decl.StaticType = &firstIdent
 		decl.Name = p.parseIdent()
+		// For a static method of a generic struct, TypeParams are the struct's parameters.
+		decl.TypeParams = typeParams
 	} else {
 		decl.Name = firstIdent
+		decl.TypeParams = typeParams
 	}
 	if isExtern {
 		decl.CName = decl.Name.Name
 	}
 
-	decl.TypeParams = p.parseOptionalTypeParams()
 	decl.Params = p.parseParamList()
 
 	// 3. Optional Return Type (`!User`, `?int`, `Invoice`, etc.) if not `{`
@@ -1176,6 +1198,22 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 				IsActorSend: isSend,
 				SelSpan:     token.Span{Start: left.Span().Start, End: field.NamePos.End},
 			}
+			// Qualified generic type: `pkg.Box[int]{ ... }` or `pkg.Box[int].new(...)`.
+			if identLeft, isIdent := left.(*ast.SelectorExpr).Left.(*ast.IdentExpr); isIdent && !isSend &&
+				p.cur.Kind == token.TokLBracket && isPascalCase(field.Name) {
+				st := p.save()
+				args := p.parseTypeArgList()
+				if len(p.errors) == st.nErrors && len(args) > 0 {
+					if p.allowStructInit && p.cur.Kind == token.TokLBrace {
+						return p.parseStructInit(&ast.SelectorType{Pkg: identLeft.Ident, Name: field, TypeParams: args})
+					}
+					if p.cur.Kind == token.TokDot {
+						left.(*ast.SelectorExpr).TypeArgs = args
+						continue
+					}
+				}
+				p.restore(st)
+			}
 			if !isSend && p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(field.Name) {
 				if identLeft, isIdent := left.(*ast.SelectorExpr).Left.(*ast.IdentExpr); isIdent {
 					return p.parseStructInit(&ast.SelectorType{
@@ -1221,6 +1259,21 @@ func (p *Parser) parsePrefix() ast.Expr {
 		// Struct initialization literal: `Invoice{ id: '123', amount_cents: 5000 }`
 		if p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(ident.Name) {
 			return p.parseStructInit(&ast.IdentType{Name: ident})
+		}
+		// Generic type in an expression: `Box[int]{ v: 1 }` or `Box[int].new(1)`. Parsed
+		// tentatively: anything else (`TABLE[i]`) is an ordinary index expression.
+		if p.cur.Kind == token.TokLBracket && isPascalCase(ident.Name) {
+			st := p.save()
+			args := p.parseTypeArgList()
+			if len(p.errors) == st.nErrors && len(args) > 0 {
+				if p.allowStructInit && p.cur.Kind == token.TokLBrace {
+					return p.parseStructInit(&ast.IdentType{Name: ident, TypeParams: args})
+				}
+				if p.cur.Kind == token.TokDot {
+					return &ast.IdentExpr{Ident: ident, TypeArgs: args}
+				}
+			}
+			p.restore(st)
 		}
 		return &ast.IdentExpr{Ident: ident}
 

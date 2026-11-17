@@ -500,9 +500,9 @@ func (f *FnType) Equals(other Type) bool {
 
 // ClosureInfo describes a lifted anonymous function.
 type ClosureInfo struct {
-	Lit      *ast.FnLitExpr
-	Sig      *FnSig // the lifted function: captures first, then the literal's parameters
-	NumCaps  int
-	Module   string
-	FnType   *FnType
+	Lit     *ast.FnLitExpr
+	Sig     *FnSig // the lifted function: captures first, then the literal's parameters
+	NumCaps int
+	Module  string
+	FnType  *FnType
 }

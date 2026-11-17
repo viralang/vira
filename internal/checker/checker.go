@@ -130,6 +130,7 @@ type Checker struct {
 	ClosureList    []*ClosureInfo
 	FnRefs         map[ast.Expr]*FnSig        // a named function used as a value
 	ClosureCalls   map[*ast.CallExpr]*FnType  // calls through a closure value
+	generics       genericsState
 	synthesized    []ast.Decl                 // lifted closures (and generic instances)
 	synthByFile    map[*ast.File][]ast.Decl
 	lambdaCounter  int
@@ -161,6 +162,7 @@ func New() *Checker {
 		synthByFile:    make(map[*ast.File][]ast.Decl),
 		enums:          make(map[string]*EnumType),
 	}
+	c.generics.init()
 	c.registerBuiltins()
 	return c
 }
@@ -326,10 +328,14 @@ func (c *Checker) checkCName(id ast.Ident, what string) {
 }
 
 func (c *Checker) errorf(span token.Span, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if c.generics.instCtx != "" {
+		msg += " (in " + c.generics.instCtx + ")"
+	}
 	c.errors = append(c.errors, SemanticError{
 		File: c.curFile,
 		Span: span,
-		Msg:  fmt.Sprintf(format, args...),
+		Msg:  msg,
 	})
 }
 
@@ -1349,6 +1355,10 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				if dMod == "" {
 					dMod = modName
 				}
+				if len(d.TypeParams) > 0 {
+					c.registerGenericStruct(d, file, dMod)
+					continue
+				}
 				dScope := c.getOrCreateModule(dMod)
 				st := &StructType{
 					Module:          dMod,
@@ -1392,6 +1402,9 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		}
 	}
 
+	// Pass 1A.5: Generic function templates and the methods of generic structs
+	c.collectGenericTemplates(files)
+
 	// Pass 1B: Resolve struct fields, embeds, interface members, and function/method headers
 	for _, file := range files {
 		c.curFile = file
@@ -1403,6 +1416,9 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
+			if c.generics.templates[decl] {
+				continue
+			}
 			savedMod := c.currentMod
 			if d, ok := decl.(*ast.StructDecl); ok && d.Module != "" {
 				c.currentMod = d.Module
@@ -1456,6 +1472,9 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
+			if c.generics.templates[decl] {
+				continue
+			}
 			if fn, ok := decl.(*ast.FnDecl); ok {
 				savedMod := c.currentMod
 				if fn.Module != "" {
@@ -1467,10 +1486,20 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		}
 	}
 
+	// Generic instances whose bodies were not checked yet (created while checking others).
+	c.checkPendingInstances()
+
 	// Declarations the checker created (lifted closures, generic instances) become part of
-	// the file they came from, so autofree and codegen see them like written code.
+	// the file they came from, so autofree and codegen see them like written code. Generic
+	// templates are dropped: only their instances are compiled.
 	for _, file := range files {
-		file.Decls = append(file.Decls, c.synthByFile[file]...)
+		kept := file.Decls[:0:0]
+		for _, d := range file.Decls {
+			if !c.generics.templates[d] {
+				kept = append(kept, d)
+			}
+		}
+		file.Decls = append(kept, c.synthByFile[file]...)
 	}
 
 	// Reset currentMod to root file's module so c.ModuleName() reports the primary module
@@ -2526,8 +2555,19 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		typ := c.resolveTypeExpr(e.Type)
 		st, ok := typ.(*StructType)
 		if !ok {
-			c.errorf(e.InitSpan, "'%s' is not a struct type", typ)
+			if !ExactEquals(typ, TypeVoid) { // void: the type was already reported
+				c.errorf(e.InitSpan, "'%s' is not a struct type", typ)
+			}
 			return TypeVoid
+		}
+		if c.generics.InstanceArgs[st] != nil {
+			// `Box[int]{...}` names the instance from here on.
+			switch te := e.Type.(type) {
+			case *ast.IdentType:
+				e.Type = &ast.IdentType{Name: ast.Ident{Name: st.Name, NamePos: te.Name.NamePos}}
+			case *ast.SelectorType:
+				e.Type = &ast.SelectorType{Pkg: te.Pkg, Name: ast.Ident{Name: st.Name, NamePos: te.Name.NamePos}}
+			}
 		}
 		for _, initField := range e.Fields {
 			valType := c.checkExpr(initField.Value, scope)
@@ -2898,6 +2938,10 @@ func (c *Checker) IsStringConcat(expr ast.Expr) bool {
 func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 	var sig *FnSig
 	var callName string
+
+	if !c.rewriteGenericCall(call, scope) {
+		return TypeVoid // the generic call was already reported
+	}
 
 	if ft := c.closureCallee(call, scope); ft != nil {
 		c.ClosureCalls[call] = ft
@@ -3583,7 +3627,10 @@ func (c *Checker) finishCallCheck(call *ast.CallExpr, scope *Scope, sig *FnSig, 
 			callName, len(sig.Params), len(call.Args))
 	} else {
 		for i, arg := range call.Args {
-			argType := c.checkExpr(arg.Expr, scope)
+			argType, pre := c.generics.preChecked[arg.Expr]
+			if !pre {
+				argType = c.checkExpr(arg.Expr, scope)
+			}
 			param := sig.Params[i]
 
 			if param.IsMut && !arg.IsMut {
@@ -3845,6 +3892,20 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			return TypeVoid
 		}
 		typeName := t.Name.Name
+		if tpl := c.lookupGenericStruct(targetMod, typeName); tpl != nil {
+			if len(t.TypeParams) == 0 {
+				c.errorf(t.Name.NamePos, "generic struct '%s.%s' needs type arguments", pkgName, typeName)
+				return TypeVoid
+			}
+			if targetMod != c.currentMod && !tpl.decl.(*ast.StructDecl).IsPub {
+				c.errorf(t.Name.NamePos, "type '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			var args []Type
+			for _, a := range t.TypeParams {
+				args = append(args, c.resolveTypeExpr(a))
+			}
+			return c.instantiateStruct(tpl, args, t.Name.NamePos)
+		}
 		if st, ok := modScope.Structs[typeName]; ok {
 			if targetMod != c.currentMod && !st.IsPub {
 				c.errorf(t.Name.NamePos, "type '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
@@ -3867,6 +3928,21 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 		return TypeVoid
 
 	case *ast.IdentType:
+		tpl := c.lookupGenericStruct(c.currentMod, t.Name.Name)
+		if tpl == nil && (c.currentMod == "main" || c.currentMod == "") {
+			tpl = c.lookupGenericStruct("main", t.Name.Name)
+		}
+		if tpl != nil {
+			if len(t.TypeParams) == 0 {
+				c.errorf(t.Name.NamePos, "generic struct '%s' needs type arguments, e.g. %s[int]", t.Name.Name, t.Name.Name)
+				return TypeVoid
+			}
+			var args []Type
+			for _, a := range t.TypeParams {
+				args = append(args, c.resolveTypeExpr(a))
+			}
+			return c.instantiateStruct(tpl, args, t.Name.NamePos)
+		}
 		switch t.Name.Name {
 		case "u8", "byte":
 			return TypeU8
