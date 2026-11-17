@@ -1,0 +1,287 @@
+module main
+
+// Tutorial 44, part 2: an order-processing backend on the event bus.
+//
+//   orders.placed  (Topic, publish)  -> Billing, Inventory, Notifier, Audit, a live dashboard
+//   shipping.jobs  (Topic, send)     -> 3 couriers, each job goes to ONE courier (work queue)
+//   catalog.price  (Service)         -> 2 price servers, request/reply, round-robin
+//
+// The checkout code knows only the topic addresses, never the services behind them: adding
+// a consumer (a fraud check, a loyalty program) needs no change to the publisher.
+//
+//   vira run docs/examples/50_eventbus_order_pipeline.vir
+
+import eventbus
+
+pub struct Order {
+pub:
+	id int
+	customer string
+	sku string
+	qty int
+	total int
+}
+
+pub struct ShipJob {
+pub:
+	order_id int
+	city string
+}
+
+// --- Latch: main waits until N events have been handled ----------------------------
+pub actor Latch {
+mut:
+	ticks int = 0
+}
+
+pub fn (mut l Latch) tick() {
+	l.ticks = l.ticks + 1
+}
+
+pub fn (mut l Latch) count() int {
+	return l.ticks
+}
+
+fn wait_for(mut l Latch, want int) {
+	mut got := 0
+	for got < want {
+		got = l <- count() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+// --- Consumers of orders.placed ------------------------------------------------------
+pub actor Billing {
+pub:
+	done Ref[Latch]
+mut:
+	revenue int = 0
+}
+
+pub fn (mut b Billing) charge(o Order) {
+	b.revenue = b.revenue + o.total
+	b.done <- tick()
+}
+
+pub fn (mut b Billing) revenue() int {
+	return b.revenue
+}
+
+pub actor Inventory {
+pub:
+	done Ref[Latch]
+	shipping Ref[eventbus.Topic[ShipJob]]
+mut:
+	stock map[string]int
+}
+
+pub fn (mut inv Inventory) restock(sku string, qty int) {
+	inv.stock[sku] = qty
+}
+
+pub fn (mut inv Inventory) reserve(o Order) {
+	left := inv.stock[o.sku] - o.qty
+	inv.stock[o.sku] = left
+	// Inventory publishes the next event itself: actors are publishers too.
+	inv.shipping <- send(ShipJob{ order_id: o.id, city: 'Cairo' })
+	inv.done <- tick()
+}
+
+pub fn (mut inv Inventory) left(sku string) int {
+	return inv.stock[sku]
+}
+
+pub actor Notifier {
+pub:
+	done Ref[Latch]
+mut:
+	sent int = 0
+}
+
+pub fn (mut n Notifier) whatsapp(o Order) {
+	n.sent = n.sent + 1
+	println('  [whatsapp] ${o.customer}: order #${o.id} confirmed (${o.qty} x ${o.sku})')
+	n.done <- tick()
+}
+
+pub actor Audit {
+pub:
+	done Ref[Latch]
+mut:
+	log []string
+}
+
+pub fn (mut a Audit) record(o Order) {
+	a.log.push('order ${o.id} ${o.total}')
+	a.done <- tick()
+}
+
+pub fn (mut a Audit) entries() int {
+	return a.log.len
+}
+
+pub actor Dashboard {
+mut:
+	seen int = 0
+}
+
+pub fn (mut d Dashboard) show(o Order) {
+	d.seen = d.seen + 1
+}
+
+// --- Consumers of shipping.jobs (work queue) -----------------------------------------
+pub actor Courier {
+pub:
+	name string
+	done Ref[Latch]
+mut:
+	jobs int = 0
+}
+
+pub fn (mut c Courier) deliver(j ShipJob) {
+	c.jobs = c.jobs + 1
+	c.done <- tick()
+}
+
+pub fn (mut c Courier) jobs() int {
+	return c.jobs
+}
+
+// --- Handlers of catalog.price (request/reply) ---------------------------------------
+pub actor PriceServer {
+pub:
+	name string
+mut:
+	served int = 0
+}
+
+pub fn (mut p PriceServer) price(sku string) int {
+	p.served = p.served + 1
+	if sku == 'shirt' {
+		return 250
+	}
+	if sku == 'shoes' {
+		return 900
+	}
+	return 100
+}
+
+pub fn (mut p PriceServer) served() int {
+	return p.served
+}
+
+// A dashboard session that subscribes, and then the browser tab closes.
+fn open_dashboard(orders Ref[eventbus.Topic[Order]]) {
+	mut d := Dashboard{}
+	dr := d.ref()
+	_ := orders <- consumer(fn (o Order) bool {
+		dr <- show(o)
+		return dr.alive()
+	}) or { 0 }
+} // d is destroyed here; the bus drops this consumer on its next delivery
+
+fn checkout(orders Ref[eventbus.Topic[Order]], prices Ref[eventbus.Service[string, int]], id int, customer string, sku string, qty int) {
+	unit := eventbus.request(prices, sku) or { 0 } // request/reply
+	orders <- publish(Order{ id: id, customer: customer, sku: sku, qty: qty, total: unit * qty })
+}
+
+fn main() {
+	// The three addresses of the system.
+	mut orders_topic := eventbus.Topic[Order]{ name: 'orders.placed' }
+	mut ship_topic := eventbus.Topic[ShipJob]{ name: 'shipping.jobs' }
+	mut price_service := eventbus.Service[string, int]{ name: 'catalog.price' }
+	orders := orders_topic.ref()
+	shipping := ship_topic.ref()
+	prices := price_service.ref()
+
+	mut handled := Latch{} // every consumer ticks once per message it handles
+	hr := handled.ref()
+
+	// Price servers answer requests.
+	mut p1 := PriceServer{ name: 'price-1' }
+	mut p2 := PriceServer{ name: 'price-2' }
+	r1 := p1.ref()
+	r2 := p2.ref()
+	_ := prices <- handler(fn (sku string) int {
+		return r1 <- price(sku) or { 0 }
+	}, fn () bool {
+		return r1.alive()
+	}) or { 0 }
+	_ := prices <- handler(fn (sku string) int {
+		return r2 <- price(sku) or { 0 }
+	}, fn () bool {
+		return r2.alive()
+	}) or { 0 }
+
+	// Couriers share the shipping work queue.
+	mut c1 := Courier{ name: 'courier-1', done: hr }
+	mut c2 := Courier{ name: 'courier-2', done: hr }
+	mut c3 := Courier{ name: 'courier-3', done: hr }
+	cr1 := c1.ref()
+	cr2 := c2.ref()
+	cr3 := c3.ref()
+	_ := shipping <- consumer(fn (j ShipJob) bool {
+		cr1 <- deliver(j)
+		return cr1.alive()
+	}) or { 0 }
+	_ := shipping <- consumer(fn (j ShipJob) bool {
+		cr2 <- deliver(j)
+		return cr2.alive()
+	}) or { 0 }
+	_ := shipping <- consumer(fn (j ShipJob) bool {
+		cr3 <- deliver(j)
+		return cr3.alive()
+	}) or { 0 }
+
+	// Order consumers.
+	mut billing := Billing{ done: hr }
+	mut inventory := Inventory{ done: hr, shipping: shipping }
+	mut notifier := Notifier{ done: hr }
+	mut audit := Audit{ done: hr }
+	_ := inventory <- restock('shirt', 100) or { false }
+	_ := inventory <- restock('shoes', 20) or { false }
+	br := billing.ref()
+	ir := inventory.ref()
+	nr := notifier.ref()
+	ar := audit.ref()
+	_ := orders <- consumer(fn (o Order) bool {
+		br <- charge(o)
+		return br.alive()
+	}) or { 0 }
+	_ := orders <- consumer(fn (o Order) bool {
+		ir <- reserve(o)
+		return ir.alive()
+	}) or { 0 }
+	notify_id := orders <- consumer(fn (o Order) bool {
+		nr <- whatsapp(o)
+		return nr.alive()
+	}) or { 0 }
+	_ := orders <- consumer(fn (o Order) bool {
+		ar <- record(o)
+		return ar.alive()
+	}) or { 0 }
+	open_dashboard(orders)
+	println('consumers on orders.placed: ${orders <- consumers() or { 0 }}')
+
+	println('checkout x3')
+	checkout(orders, prices, 1, 'Mona', 'shirt', 2)
+	checkout(orders, prices, 2, 'Omar', 'shoes', 1)
+	checkout(orders, prices, 3, 'Sara', 'shirt', 4)
+	// 3 orders x 4 consumers + 3 shipping jobs
+	wait_for(mut handled, 3 * 4 + 3)
+
+	println('the customer turned off notifications')
+	_ := orders <- unregister(notify_id) or { false }
+	checkout(orders, prices, 4, 'Mona', 'shoes', 2)
+	wait_for(mut handled, 3 * 4 + 3 + 3 + 1)
+
+	st := orders <- stats() or { eventbus.TopicStats{} }
+	println('orders.placed: ${st.published} published, ${st.delivered} deliveries, ${st.consumers} consumers left, ${st.removed} removed (dashboard closed + unregistered)')
+	println('revenue: ${billing <- revenue() or { 0 }}')
+	println('stock left: shirt=${inventory <- left('shirt') or { 0 }} shoes=${inventory <- left('shoes') or { 0 }}')
+	println('audit entries: ${audit <- entries() or { 0 }}')
+	println('courier jobs: ${c1 <- jobs() or { 0 }} ${c2 <- jobs() or { 0 }} ${c3 <- jobs() or { 0 }}')
+	println('price requests: ${p1 <- served() or { 0 }} + ${p2 <- served() or { 0 }}')
+}

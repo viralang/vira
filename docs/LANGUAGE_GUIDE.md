@@ -852,7 +852,7 @@ _ := bus <- consumer(fn (o Order) bool {
 bus <- publish(Order{ id: 1, amount: 10 })   // returns immediately
 ```
 
-See `packages/eventbus/README.md` for the full API.
+See `packages/eventbus/README.md` for the full API and [Tutorial 44](tutorials/44_actor_references_and_event_bus.md) for patterns and use cases.
 
 ---
 

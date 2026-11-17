@@ -1,0 +1,193 @@
+module main
+
+// Tutorial 44, part 1: Ref[T], actors that talk to each other.
+//
+//   1. Workers report back to the manager that owns them (child -> parent).
+//   2. A pipeline of stages, each forwarding to the next one itself.
+//   3. A ring: the token travels actor to actor, main never touches it.
+//   4. What happens when the actor behind a Ref is gone.
+//   5. A crash and supervisor restart: the Ref keeps working.
+//
+//   vira run docs/examples/49_actor_references.vir
+
+// --- A latch: lets main wait until N events have happened -------------------------
+// main cannot receive messages, so it waits by asking a counter actor.
+pub actor Latch {
+mut:
+	ticks int = 0
+}
+
+pub fn (mut l Latch) tick() {
+	l.ticks = l.ticks + 1
+}
+
+pub fn (mut l Latch) count() int {
+	return l.ticks
+}
+
+fn wait_for(mut l Latch, want int) {
+	mut got := 0
+	for got < want {
+		got = l <- count() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+// --- 1. Child -> parent --------------------------------------------------------------
+pub actor Manager {
+mut:
+	done int = 0
+	total int = 0
+}
+
+pub fn (mut m Manager) report(worker_id int, result int) {
+	m.done = m.done + 1
+	m.total = m.total + result
+}
+
+pub fn (mut m Manager) summary() string {
+	return '${m.done} jobs, total ${m.total}'
+}
+
+pub actor Worker {
+pub:
+	id int
+	boss Ref[Manager] // a Ref in an immutable field: set once at construction
+}
+
+pub fn (mut w Worker) run(job int) {
+	result := job * job
+	w.boss <- report(w.id, result) // tell the parent, fire-and-forget
+}
+
+// --- 2. Pipeline -------------------------------------------------------------------
+pub actor Stage {
+pub:
+	name string
+mut:
+	next Ref[Stage] // null until linked: the last stage has no next
+	out Ref[Latch]
+	seen int = 0
+}
+
+pub fn (mut s Stage) wire(next Ref[Stage], out Ref[Latch]) {
+	s.next = next
+	s.out = out
+}
+
+pub fn (mut s Stage) push(text string) {
+	s.seen = s.seen + 1
+	stamped := '${text}>${s.name}'
+	if s.next.alive() {
+		s.next <- push(stamped)
+	} else {
+		println('  pipeline output: ${stamped}')
+		s.out <- tick()
+	}
+}
+
+// --- 3. Ring ----------------------------------------------------------------------
+pub actor Hop {
+mut:
+	next Ref[Hop]
+}
+
+pub fn (mut h Hop) link(n Ref[Hop]) {
+	h.next = n
+}
+
+pub fn (mut h Hop) pass(left int, done Ref[Latch]) {
+	if left == 0 {
+		done <- tick()
+		return
+	}
+	h.next <- pass(left - 1, done)
+}
+
+// --- 5. A worker that crashes on bad input ------------------------------------------
+pub actor Parser {
+mut:
+	parsed int = 0
+}
+
+pub fn (mut p Parser) parse(s string) int {
+	n := s.to_int() or { panic('not a number: ${s}') }
+	p.parsed = p.parsed + 1
+	return n
+}
+
+fn make_temp_worker(boss Ref[Manager]) Ref[Worker] {
+	mut w := Worker{ id: 99, boss: boss }
+	return w.ref() // the Ref survives, the actor does not
+}
+
+fn main() {
+	println('1. workers report to their manager')
+	mut manager := Manager{}
+	mut workers := []Worker{}
+	for mut i := 0; i < 4; i = i + 1 {
+		workers.push(Worker{ id: i, boss: manager.ref() })
+	}
+	for mut job := 1; job <= 8; job = job + 1 {
+		workers[job % 4] <- run(job)
+	}
+	mut summary := ''
+	for summary != '8 jobs, total 204' {
+		summary = manager <- summary() or { '' }
+		if summary != '8 jobs, total 204' {
+			time_sleep_ms(1)
+		}
+	}
+	println('  manager: ${summary}')
+
+	println('2. pipeline parse > enrich > store')
+	mut done := Latch{}
+	mut parse := Stage{ name: 'parse' }
+	mut enrich := Stage{ name: 'enrich' }
+	mut store := Stage{ name: 'store' }
+	_ := parse <- wire(enrich.ref(), done.ref()) or { false }
+	_ := enrich <- wire(store.ref(), done.ref()) or { false }
+	_ := store <- wire(Ref[Stage]{}, done.ref()) or { false }
+	head := parse.ref()
+	head <- push('order-1')
+	head <- push('order-2')
+	wait_for(mut done, 2)
+
+	println('3. ring of 100 actors, 10,000 hops')
+	mut ring := []Hop{}
+	for mut i := 0; i < 100; i = i + 1 {
+		ring.push(Hop{})
+	}
+	for mut i := 0; i < 100; i = i + 1 {
+		_ := ring[i] <- link(ring[(i + 1) % 100].ref()) or { false }
+	}
+	mut lap := Latch{}
+	t0 := time_now_us()
+	first := ring[0].ref()
+	first <- pass(9999, lap.ref())
+	wait_for(mut lap, 1)
+	println('  token came back after 10000 hops in ${time_now_us() - t0} us')
+
+	println('4. a Ref to an actor that is gone')
+	stale := make_temp_worker(manager.ref())
+	println('  alive: ${stale.alive()}')
+	stale <- run(5) // fire-and-forget: silently dropped
+	f := stale <- run(5)
+	_ := f.await() or {
+		println('  future: ${err}')
+		false
+	}
+
+	println('5. crash, restart, same Ref')
+	mut parser := Parser{}
+	pr := parser.ref()
+	a := pr <- parse('41') or { 0 }
+	_ := pr <- parse('oops') or {
+		println('  parse failed: ${err}')
+		0
+	}
+	b := pr <- parse('1') or { 0 }
+	println('  after restart: ${a} + ${b} = ${a + b}, alive: ${pr.alive()}')
+}

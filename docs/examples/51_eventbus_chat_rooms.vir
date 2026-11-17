@@ -1,0 +1,154 @@
+module main
+
+// Tutorial 44, part 3: chat rooms on the event bus.
+//
+//   - one Topic per room; users join (consumer) and leave (unregister)
+//   - a handler can FILTER: a "mentions only" subscription forwards just the messages
+//     that name the user
+//   - a bot is both consumer and publisher: it answers "!time" in the same room
+//   - a user who disconnects (actor destroyed) is dropped from every room automatically
+//
+//   vira run docs/examples/51_eventbus_chat_rooms.vir
+
+import eventbus
+
+pub struct ChatMsg {
+pub:
+	room string
+	from string
+	text string
+}
+
+pub actor Latch {
+mut:
+	ticks int = 0
+}
+
+pub fn (mut l Latch) tick() {
+	l.ticks = l.ticks + 1
+}
+
+pub fn (mut l Latch) count() int {
+	return l.ticks
+}
+
+fn wait_for(mut l Latch, want int) {
+	mut got := 0
+	for got < want {
+		got = l <- count() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+pub actor User {
+pub:
+	name string
+	done Ref[Latch]
+mut:
+	inbox []string
+}
+
+pub fn (mut u User) receive(m ChatMsg) {
+	if m.from != u.name {
+		u.inbox.push('#${m.room} ${m.from}: ${m.text}')
+	}
+	u.done <- tick()
+}
+
+pub fn (mut u User) read_all() string {
+	mut out := ''
+	for line in u.inbox {
+		out = out + '    ' + line + '\n'
+	}
+	u.inbox.clear()
+	return out
+}
+
+// The bot holds a Ref to the room so it can publish replies into it.
+pub actor Bot {
+pub:
+	room Ref[eventbus.Topic[ChatMsg]]
+	done Ref[Latch]
+mut:
+	answered int = 0
+}
+
+pub fn (mut b Bot) on_message(m ChatMsg) {
+	if m.from != 'bot' && m.text == '!time' {
+		b.answered = b.answered + 1
+		b.room <- publish(ChatMsg{ room: m.room, from: 'bot', text: 'server uptime ok, request #${b.answered}' })
+	}
+	b.done <- tick()
+}
+
+// join subscribes a user to a room; `mentions_only` filters inside the handler.
+fn join(room Ref[eventbus.Topic[ChatMsg]], user Ref[User], name string, mentions_only bool) int {
+	return room <- consumer(fn (m ChatMsg) bool {
+		if mentions_only && !m.text.contains('@' + name) {
+			return user.alive() // not for this user: skip, but stay subscribed
+		}
+		user <- receive(m)
+		return user.alive()
+	}) or { 0 }
+}
+
+fn say(room Ref[eventbus.Topic[ChatMsg]], room_name string, from string, text string) {
+	room <- publish(ChatMsg{ room: room_name, from: from, text: text })
+}
+
+fn guest_visits(room Ref[eventbus.Topic[ChatMsg]], done Ref[Latch]) {
+	mut guest := User{ name: 'guest', done: done }
+	_ := join(room, guest.ref(), 'guest', false)
+} // the guest disconnects here: the room drops them on the next message
+
+fn main() {
+	mut delivered := Latch{}
+	dl := delivered.ref()
+
+	mut general_topic := eventbus.Topic[ChatMsg]{ name: 'general' }
+	mut ops_topic := eventbus.Topic[ChatMsg]{ name: 'ops' }
+	general := general_topic.ref()
+	ops := ops_topic.ref()
+
+	mut ali := User{ name: 'ali', done: dl }
+	mut nour := User{ name: 'nour', done: dl }
+	mut karim := User{ name: 'karim', done: dl }
+	_ := join(general, ali.ref(), 'ali', false)
+	nour_general := join(general, nour.ref(), 'nour', false)
+	_ := join(general, karim.ref(), 'karim', true) // karim only wants @karim
+	_ := join(ops, ali.ref(), 'ali', false)
+	_ := join(ops, karim.ref(), 'karim', false)
+
+	mut bot := Bot{ room: ops, done: dl }
+	bref := bot.ref()
+	_ := ops <- consumer(fn (m ChatMsg) bool {
+		bref <- on_message(m)
+		return bref.alive()
+	}) or { 0 }
+
+	guest_visits(general, dl)
+
+	// #general: 3 messages to ali and nour (senders get their own message too, and skip
+	// it), 1 of them mentions karim -> 3 + 3 + 1 deliveries
+	say(general, 'general', 'ali', 'hi all')
+	say(general, 'general', 'nour', 'lunch at 1?')
+	say(general, 'general', 'ali', '@karim can you join?')
+	// #ops: ali, karim and the bot get '!time' (3), then the bot's reply (3)
+	say(ops, 'ops', 'karim', '!time')
+	wait_for(mut delivered, 7 + 6)
+
+	println('ali:\n${ali <- read_all() or { '' }}')
+	println('nour:\n${nour <- read_all() or { '' }}')
+	println('karim (mentions only in #general):\n${karim <- read_all() or { '' }}')
+
+	println('nour leaves #general')
+	_ := general <- unregister(nour_general) or { false }
+	say(general, 'general', 'ali', 'bye nour')
+	wait_for(mut delivered, 13 + 1) // only ali: nour left, karim's filter skips it
+	println('nour:\n${nour <- read_all() or { '' }}(nothing new)')
+
+	st := general <- stats() or { eventbus.TopicStats{} }
+	println('#general: ${st.consumers} members, ${st.published} messages, ${st.removed} removed (guest disconnected, nour left)')
+}

@@ -33,7 +33,9 @@ Beginner                           Intermediate                               Ad
                                                                                   │
                                                                                   ├── [41. GPU LLM Chat & GUI Studio]
                                                                                   │
-                                                                                  └── [42. Ownership, Strings & Actor Handles]
+                                                                                  ├── [42. Ownership, Strings & Actor Handles]
+                                                                                  │
+                                                                                  └── [44. Actor References & Event Bus]
 ```
 
 ---
@@ -85,6 +87,7 @@ Beginner                           Intermediate                               Ad
 | **41** | [**Building GPU-Accelerated LLM Chat Applications (CLI & Native 60 FPS Desktop Studio)**](./41_building_gpu_accelerated_llm_chat_apps.md) | Advanced / AI & GUI | [`43_qwen2_5_gguf_chat_inference.vir`](../examples/43_qwen2_5_gguf_chat_inference.vir)<br>[`45_gui_qwen2_5_gguf_chat_studio.vir`](../examples/45_gui_qwen2_5_gguf_chat_studio.vir) | Production-grade LLM applications: Zero-SDK NVIDIA CUDA Driver API, sm_70+ Tensor Core (WMMA) hardware specialization, OpenCL/CPU fallbacks, direct GGUF quantized block offloading, non-blocking frame-by-frame layer streaming, live autoregressive canvas drawing, and real-time hardware telemetry. |
 | **42** | [**Ownership, Strings & Actor Handles**](./42_ownership_strings_and_actor_handles.md) | Intermediate / Advanced | [`47_ownership_strings_and_actor_handles.vir`](../examples/47_ownership_strings_and_actor_handles.vir) | String `+` and `+=`, which types each operator accepts, copies vs moves, borrowed arguments, actors as handles, message-only access to actors, single-owner actors, deadlock avoidance, defined arithmetic (division by zero, overflow), worker pool size, and how to migrate code written for v0.7.7. **Read this if you wrote Vira code for v0.7.7 or earlier.** |
 | **43** | [**Enums, Maps, Closures & Generics**](./43_enums_maps_closures_generics.md) | Intermediate | [`48_enums_maps_closures_generics.vir`](../examples/48_enums_maps_closures_generics.vir) | Enums with explicit values, `map[K]V` with insertion-ordered iteration, closures capturing by value, generic functions with inference and generic structs with methods. |
+| **44** | [**Actor References (`Ref[T]`) & the Event Bus**](./44_actor_references_and_event_bus.md) | Intermediate / Advanced | [`49_actor_references.vir`](../examples/49_actor_references.vir)<br>[`50_eventbus_order_pipeline.vir`](../examples/50_eventbus_order_pipeline.vir)<br>[`51_eventbus_chat_rooms.vir`](../examples/51_eventbus_chat_rooms.vir) | Copyable actor addresses (`a.ref()`, all three send forms, `alive()`, null Ref), what happens when the actor is gone, child → parent, pipelines and rings, Vert.x-style `eventbus` topics (`publish`, round-robin `send`, `unregister`, filters) and request/reply services, with an order backend and chat rooms as use cases. |
 
 
 
