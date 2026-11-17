@@ -29,8 +29,9 @@ def compile_ptx(lib, path):
     name = os.path.basename(path).encode()
     rc = lib.nvrtcCreateProgram(ctypes.byref(prog), src, name, 0, None, None)
     assert rc == 0, 'nvrtcCreateProgram %d' % rc
-    opts = [('--gpu-architecture=%s' % ARCH).encode(), b'--std=c++14', b'-default-device',
-            b'--use_fast_math']
+    # No --use_fast_math: it flushes denormals (.ftz), and the fused kernels must repeat
+    # the arithmetic of the separate kernels exactly.
+    opts = [('--gpu-architecture=%s' % ARCH).encode(), b'--std=c++14', b'-default-device']
     arr = (ctypes.c_char_p * len(opts))(*opts)
     rc = lib.nvrtcCompileProgram(prog, len(opts), arr)
     log_size = ctypes.c_size_t()

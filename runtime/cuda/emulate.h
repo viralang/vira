@@ -11,7 +11,7 @@
 #define __restrict__
 #define __launch_bounds__(x)
 struct vl_dim3 { int x, y, z; };
-static vl_dim3 threadIdx, blockIdx;
+static thread_local vl_dim3 threadIdx, blockIdx;
 template <typename T> static inline T __ldg(const T *p) { return *p; }
 #define VL_WRITER (THREADS - 1)
 #define VL_WARP_WRITER 31
@@ -60,3 +60,58 @@ static inline float vl_warp_reduce(float v) { // threads of a warp run lane 0..3
           threadIdx.x = t; threadIdx.y = j;                      \
           k(__VA_ARGS__);                                        \
         }
+
+// ---- threaded mode, for kernels with barriers and warp shuffles (fused.cu) ----
+// One std::thread per CUDA thread; one block at a time. __shared__ arrays become statics.
+#include <barrier>
+#include <thread>
+#include <vector>
+#include <algorithm>
+#define __shared__ static
+#define WARP_EMU 32
+static std::barrier<> *vl_block_bar = nullptr;
+static std::barrier<> *vl_warp_bar[64];
+static float vl_wbuf_f[2048];
+static int vl_wbuf_i[2048];
+#define VL_SYNC() vl_block_bar->arrive_and_wait()
+static inline float vl_rsqrt_approx(float x) { return 1.0f / sqrtf(x); }
+static inline float vl_fma(float a, float b, float c) { return fmaf(a, b, c); }
+static inline float vl_mul(float a, float b) { return a * b; }
+static inline float vl_add(float a, float b) { return a + b; }
+static inline float vl_div(float a, float b) { return a / b; }
+static inline int __float2int_rn(float x) { return (int)nearbyintf(x); }
+static inline float __int_as_float(int i) { float f; memcpy(&f, &i, 4); return f; }
+using std::max;
+using std::min;
+static inline float vl_warp_max(float v) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_f[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  float m = vl_wbuf_f[w * WARP_EMU];
+  for (int i = 1; i < WARP_EMU; i++) m = fmaxf(m, vl_wbuf_f[w * WARP_EMU + i]);
+  vl_warp_bar[w]->arrive_and_wait();
+  return m;
+}
+static inline int vl_warp_sum_i(int v) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_i[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  int s = 0;
+  for (int i = 0; i < WARP_EMU; i++) s += vl_wbuf_i[w * WARP_EMU + i];
+  vl_warp_bar[w]->arrive_and_wait();
+  return s;
+}
+// 1-D blocks of `threads` threads, grid gx.
+#define VL_LAUNCH_THREADED(k, gx, threads, ...)                                  \
+  for (int bx_ = 0; bx_ < (gx); bx_++) {                                         \
+    std::barrier<> bb_(threads);                                                 \
+    std::vector<std::barrier<> *> wb_;                                           \
+    for (int w_ = 0; w_ < (threads) / WARP_EMU; w_++) wb_.push_back(new std::barrier<>(WARP_EMU)); \
+    vl_block_bar = &bb_;                                                         \
+    for (int w_ = 0; w_ < (threads) / WARP_EMU; w_++) vl_warp_bar[w_] = wb_[w_]; \
+    std::vector<std::thread> th_;                                                \
+    for (int t_ = 0; t_ < (threads); t_++)                                       \
+      th_.emplace_back([&, t_] { threadIdx.x = t_; threadIdx.y = 0; blockIdx.x = bx_; blockIdx.y = 0; k(__VA_ARGS__); }); \
+    for (auto &t_ : th_) t_.join();                                              \
+    for (auto *p_ : wb_) delete p_;                                              \
+  }

@@ -49,6 +49,53 @@ def random_blocks(rng, name, nblocks, size, f16_at):
     return raw
 
 
+def build_fused():
+    out = os.path.join(tempfile.mkdtemp(), 'f.so')
+    src = os.path.join(tempfile.mkdtemp(), 'f.cpp')
+    open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/fused.cu"\n' % HERE + r'''
+extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsigned char *q8, int rows, int cols, float eps) {
+  VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, rows, 256, x, w, y, q8, cols, eps);
+}
+''')
+    subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
+    return ctypes.CDLL(out)
+
+
+def check_fused(rng):
+    """rmsnorm + Q8_1 against NumPy: the rmsnorm, then the Q8_1 rule of vira_cu_quantize_q8_1."""
+    lib = build_fused()
+    ok = True
+    for rows, cols in [(1, 64), (1, 4096), (2, 1024), (4, 2048), (3, 96), (1, 5120)]:
+        x = rng.standard_normal((rows, cols)).astype(np.float32)
+        x[0, :32] = 0.0  # an all-zero Q8_1 block (amax == 0)
+        w = rng.uniform(0.5, 1.5, cols).astype(np.float32)
+        eps = np.float32(1e-6)
+        y = np.zeros((rows, cols), np.float32)
+        q8 = np.zeros(rows * cols // 32 * 40, np.uint8)
+        lib.run_rmsnorm_q8_1(x.ctypes.data_as(ctypes.c_void_p), w.ctypes.data_as(ctypes.c_void_p),
+                             y.ctypes.data_as(ctypes.c_void_p), q8.ctypes.data_as(ctypes.c_void_p),
+                             rows, cols, ctypes.c_float(eps))
+        r = (1.0 / np.sqrt((x.astype(np.float64) ** 2).mean(axis=1) + eps)).astype(np.float32)
+        want = (r[:, None] * x) * w[None, :]
+        e_y = np.abs(y - want).max() / np.abs(want).max()
+        b = y.reshape(rows, cols // 32, 32)
+        amax = np.abs(b).max(axis=2)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            qq = np.where(amax[..., None] > 0, np.clip(np.rint(b * (np.float32(127.0) / amax[..., None])), -127, 127), 0).astype(np.int32)
+        d = (amax * np.float32(1.0 / 127.0)).astype(np.float32)
+        blocks = q8.reshape(rows, cols // 32, 40)
+        gd = blocks[..., 0:4].copy().view(np.float32)[..., 0]
+        gs = blocks[..., 4:8].copy().view(np.float32)[..., 0]
+        gq = blocks[..., 8:].view(np.int8).astype(np.int32)
+        exact = bool(np.array_equal(gq, qq) and np.allclose(gd, d, rtol=1e-6, atol=0) and
+                     np.allclose(gs, d * qq.sum(axis=2), rtol=1e-5, atol=1e-7))
+        good = bool(e_y < 1e-5 and exact)
+        ok &= good
+        print('rmsnorm_q8_1 rows=%d cols=%5d  y rel err %.1e  q8 matches the quantize rule: %s  %s'
+              % (rows, cols, e_y, exact, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def build():
     out = os.path.join(tempfile.mkdtemp(), 'k.so')
     src = os.path.join(tempfile.mkdtemp(), 'k.cpp')
@@ -63,7 +110,7 @@ extern "C" void run_mmvq2w_##fmt(const unsigned char *xq, const unsigned char *w
 VL_RUN_WARP(q8_0) VL_RUN_WARP(q4_0) VL_RUN_WARP(q4_1) VL_RUN_WARP(q5_0) VL_RUN_WARP(q5_1)
 VL_RUN_WARP(q4_k) VL_RUN_WARP(q5_k) VL_RUN_WARP(q6_k)
 ''')
-    subprocess.check_call(['g++', '-O2', '-shared', '-fPIC', '-I', HERE, src, '-o', out])
+    subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
 
 
@@ -130,6 +177,7 @@ def main():
             good = bool(err < 1e-4)
             ok &= good
             print('mmvq2w_%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
+    ok &= check_fused(rng)
     sys.exit(0 if ok else 1)
 
 

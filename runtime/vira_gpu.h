@@ -8,6 +8,7 @@
 #include "vira_rt.h"
 #include "vira_cuda_ptx.h"
 #include "vira_cuda_mmvq2_ptx.h"
+#include "vira_cuda_fused_ptx.h"
 #if defined(_WIN32) && !defined(_WIN64)
 #define VIRA_CL_API __stdcall
 #else
@@ -373,6 +374,8 @@ typedef struct {
   vira_cu_module cu_wmma_module;
   vira_cu_module cu_dp4a_module;
   vira_cu_module cu_mmvq2_module; // runtime/cuda/mmvq2.cu
+  vira_cu_module cu_fused_module; // runtime/cuda/fused.cu
+  vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
 
   // CUDA Compute kernels
   vira_cu_function cu_k_gemv_q4_0;
@@ -4384,6 +4387,17 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       }
     }
   }
+  g->cu_fused_module = NULL;
+  g->cu_k_rmsnorm_q8_1 = NULL;
+  {
+    const char *fz = getenv("VIRA_GPU_FUSE");
+    vira_cu_module fm = NULL;
+    if (g->has_dp4a && !(fz != NULL && strcmp(fz, "0") == 0) &&
+        g->cuModuleLoadData(&fm, _vira_cuda_fused_ptx) == VIRA_CUDA_SUCCESS && fm != NULL) {
+      g->cu_fused_module = fm;
+      (void)g->cuModuleGetFunction(&g->cu_k_rmsnorm_q8_1, fm, "vira_cu_rmsnorm_q8_1_f32");
+    }
+  }
   g->cu_mmvq2_module = NULL;
   g->cu_k_mmvq2_q8_0 = NULL;
   g->mmvq2_warp = false;
@@ -4438,7 +4452,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (_vira_gpu_debug()) {
     fprintf(stderr,
             "vira gpu: [CUDA Driver API] %s (sm_%d%d%s%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s\n",
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s\n",
             g->device_name, g->compute_capability_major, g->compute_capability_minor,
             g->has_tensor_cores ? " + Tensor Cores" : "",
             g->has_dp4a ? " + DP4A" : "",
@@ -4447,7 +4461,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->warp_size, g->wg_size, g->tile_dim,
             g->has_tensor_cores ? " / WMMA" : "",
             g->has_dp4a ? " / MMVQ-Q8_1" : "",
-            g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)");
+            g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)",
+            g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "");
   }
 
   return true;
@@ -4962,6 +4977,11 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_dp4a_module);
         _vira_gpu.cu_dp4a_module = NULL;
       }
+      if (_vira_gpu.cu_fused_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_fused_module);
+        _vira_gpu.cu_fused_module = NULL;
+      }
+      _vira_gpu.cu_k_rmsnorm_q8_1 = NULL;
       if (_vira_gpu.cu_mmvq2_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmvq2_module);
         _vira_gpu.cu_mmvq2_module = NULL;
@@ -5268,6 +5288,44 @@ static inline void vira_gpu_sync(void) {
   }
 }
 
+// Makes slot->cu_q8_buf hold at least q8_bytes (Q8_1 copy of the slot's activation),
+// evicting other buffers if needed but never the slot itself, avoid_cu or avoid_w_cu.
+static inline bool _vira_gpu_act_q8_reserve_locked(_vira_gpu_act_entry *x_slot, size_t q8_bytes,
+                                                   vira_cu_deviceptr avoid_cu,
+                                                   vira_cu_deviceptr avoid_w_cu,
+                                                   const void *pin_w) {
+  if (x_slot->cu_q8_buf == 0 || x_slot->q8_buf_cap < q8_bytes) {
+    if (x_slot->cu_q8_buf != 0 && _vira_gpu.cuMemFree) {
+      _vira_gpu.cuMemFree(x_slot->cu_q8_buf);
+      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
+                         (int64_t)x_slot->q8_buf_cap, __ATOMIC_RELAXED);
+      x_slot->cu_q8_buf = 0;
+      x_slot->q8_buf_cap = 0;
+      x_slot->q8_bytes = 0;
+      x_slot->q8_epoch = 0;
+    }
+    size_t new_cap = (q8_bytes + 4095ULL) & ~4095ULL;
+    _vira_gpu_evict_lru_bytes_ex_locked(new_cap, pin_w, NULL, NULL, NULL, NULL,
+                                        x_slot->cu_buf, avoid_cu, avoid_w_cu,
+                                        x_slot);
+    int64_t cur_alloc =
+        __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
+    if (_vira_gpu.vram_budget_bytes > 0 &&
+        cur_alloc + (int64_t)new_cap > _vira_gpu.vram_budget_bytes) {
+      return false;
+    }
+    vira_cu_deviceptr nb = 0;
+    if (_vira_gpu.cuMemAlloc(&nb, new_cap) != VIRA_CUDA_SUCCESS || nb == 0) {
+      return false;
+    }
+    x_slot->cu_q8_buf = nb;
+    x_slot->q8_buf_cap = new_cap;
+    __atomic_add_fetch(&_vira_gpu.allocated_bytes, (int64_t)new_cap,
+                       __ATOMIC_RELAXED);
+  }
+  return true;
+}
+
 static inline bool _vira_gpu_ensure_act_q8_locked(
     _vira_gpu_act_entry *x_slot, int32_t M, int32_t K,
     _vira_gpu_act_entry *y_slot, vira_cu_deviceptr avoid_w_cu,
@@ -5285,35 +5343,9 @@ static inline bool _vira_gpu_ensure_act_q8_locked(
     *out_q8_buf = x_slot->cu_q8_buf;
     return true;
   }
-  if (x_slot->cu_q8_buf == 0 || x_slot->q8_buf_cap < q8_bytes) {
-    if (x_slot->cu_q8_buf != 0 && _vira_gpu.cuMemFree) {
-      _vira_gpu.cuMemFree(x_slot->cu_q8_buf);
-      __atomic_sub_fetch(&_vira_gpu.allocated_bytes,
-                         (int64_t)x_slot->q8_buf_cap, __ATOMIC_RELAXED);
-      x_slot->cu_q8_buf = 0;
-      x_slot->q8_buf_cap = 0;
-      x_slot->q8_bytes = 0;
-      x_slot->q8_epoch = 0;
-    }
-    size_t new_cap = (q8_bytes + 4095ULL) & ~4095ULL;
-    vira_cu_deviceptr y_cu = y_slot ? y_slot->cu_buf : 0;
-    _vira_gpu_evict_lru_bytes_ex_locked(new_cap, pin_w, NULL, NULL, NULL, NULL,
-                                        x_slot->cu_buf, y_cu, avoid_w_cu,
-                                        x_slot);
-    int64_t cur_alloc =
-        __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED);
-    if (_vira_gpu.vram_budget_bytes > 0 &&
-        cur_alloc + (int64_t)new_cap > _vira_gpu.vram_budget_bytes) {
-      return false;
-    }
-    vira_cu_deviceptr nb = 0;
-    if (_vira_gpu.cuMemAlloc(&nb, new_cap) != VIRA_CUDA_SUCCESS || nb == 0) {
-      return false;
-    }
-    x_slot->cu_q8_buf = nb;
-    x_slot->q8_buf_cap = new_cap;
-    __atomic_add_fetch(&_vira_gpu.allocated_bytes, (int64_t)new_cap,
-                       __ATOMIC_RELAXED);
+  if (!_vira_gpu_act_q8_reserve_locked(x_slot, q8_bytes, y_slot ? y_slot->cu_buf : 0,
+                                       avoid_w_cu, pin_w)) {
+    return false;
   }
 
   unsigned int qgx = (unsigned int)((num_blocks_k + 3) / 4);
@@ -6079,12 +6111,27 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
     return res;
   }
 
+  size_t fused_q8_bytes = 0; // > 0: the Q8_1 copy of y was written with it
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
     vira_cu_deviceptr w_buf = w_act_slot ? w_act_slot->cu_buf : w_cache_slot->cu_buf;
-    void *args[] = {&x_slot->cu_buf, &w_buf, &y_slot->cu_buf, &cols, &eps};
-    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rmsnorm, (unsigned int)rows, 1, 1,
-                                    256, 1, 1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    // Decode (1-4 rows): write the Q8_1 copy the next matrix-vector product reads in the
+    // same kernel (runtime/cuda/fused.cu), saving a quantize launch per norm.
+    if (_vira_gpu.cu_k_rmsnorm_q8_1 != NULL && rows <= 4 && (cols & 31) == 0) {
+      size_t qb = (size_t)rows * (size_t)(cols >> 5) * 40ULL;
+      if (_vira_gpu_act_q8_reserve_locked(y_slot, qb, x_slot->cu_buf, w_buf, pin_w)) {
+        void *fargs[] = {&x_slot->cu_buf, &w_buf, &y_slot->cu_buf, &y_slot->cu_q8_buf, &cols, &eps};
+        if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rmsnorm_q8_1, (unsigned int)rows, 1, 1, 256, 1, 1, 0,
+                                     _vira_gpu.cu_stream, fargs, NULL) == VIRA_CUDA_SUCCESS) {
+          fused_q8_bytes = qb;
+        }
+      }
+    }
+    if (fused_q8_bytes == 0) {
+      void *args[] = {&x_slot->cu_buf, &w_buf, &y_slot->cu_buf, &cols, &eps};
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rmsnorm, (unsigned int)rows, 1, 1,
+                                      256, 1, 1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    }
   } else {
     vira_cl_mem w_buf = w_act_slot ? w_act_slot->dev_buf : w_cache_slot->dev_buf;
     err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rmsnorm, 0, sizeof(vira_cl_mem), &x_slot->dev_buf);
@@ -6116,6 +6163,10 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
   _vira_gpu_act_bind_locked(y_slot, out.data, x_bytes, y_slot->epoch,
                             y_slot->last_used, !out.is_arena);
   _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
+  if (fused_q8_bytes > 0) { // after bind, which clears the Q8_1 state
+    y_slot->q8_bytes = fused_q8_bytes;
+    y_slot->q8_epoch = y_slot->epoch;
+  }
   pthread_mutex_unlock(&_vira_gpu.lock);
   return out;
 }
