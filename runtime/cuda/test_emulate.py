@@ -54,7 +54,7 @@ def build_fused():
     src = os.path.join(tempfile.mkdtemp(), 'f.cpp')
     open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/fused.cu"\n' % HERE + r'''
 extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsigned char *q8, int rows, int cols, float eps) {
-  VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, rows, 256, x, w, y, q8, cols, eps);
+  VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, (cols / 32 + 7) / 8, rows, 256, x, w, y, q8, cols, eps);
 }
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
@@ -109,6 +109,11 @@ extern "C" void run_mmvq2w_##fmt(const unsigned char *xq, const unsigned char *w
 }
 VL_RUN_WARP(q8_0) VL_RUN_WARP(q4_0) VL_RUN_WARP(q4_1) VL_RUN_WARP(q5_0) VL_RUN_WARP(q5_1)
 VL_RUN_WARP(q4_k) VL_RUN_WARP(q5_k) VL_RUN_WARP(q6_k)
+#define VL_RUN_X(fmt) \
+extern "C" void run_mmvq2x_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) { \
+  VL_LAUNCH2(vira_cu_mmvq2x_##fmt, (N + 7) / 8, M, 32, 4, xq, w, y, M, nb, N); \
+}
+VL_RUN_X(q4_0) VL_RUN_X(q4_1) VL_RUN_X(q5_0) VL_RUN_X(q5_1) VL_RUN_X(q4_k) VL_RUN_X(q5_k) VL_RUN_X(q6_k)
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
@@ -171,12 +176,15 @@ def main():
             xraw, xd, xq = q8_1_acts(rng, M, K)
             xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
             want = xf @ wf.reshape(N, K).astype(np.float64).T
-            y = np.full(M * N, np.nan, np.float32)
-            getattr(lib, 'run_mmvq2w_' + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
-            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
-            good = bool(err < 1e-4)
-            ok &= good
-            print('mmvq2w_%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
+            for kind in ('mmvq2w_', 'mmvq2x_'):
+                if kind == 'mmvq2x_' and name == 'q8_0':
+                    continue
+                y = np.full(M * N, np.nan, np.float32)
+                getattr(lib, 'run_' + kind + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
+                err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+                good = bool(err < 1e-4)
+                ok &= good
+                print('%s%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
     ok &= check_fused(rng)
     sys.exit(0 if ok else 1)
 

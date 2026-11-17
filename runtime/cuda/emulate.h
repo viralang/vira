@@ -42,6 +42,12 @@ static inline float vl_warp_reduce(float v) { // threads of a warp run lane 0..3
   vl_emul_warp[threadIdx.y] += v;
   return vl_emul_warp[threadIdx.y]; // complete at lane 31
 }
+static float vl_emul_warp2[64];
+static inline float vl_warp_reduce2(float v) { // second value per warp (two-row kernels)
+  if (threadIdx.x == 0) vl_emul_warp2[threadIdx.y] = 0.0f;
+  vl_emul_warp2[threadIdx.y] += v;
+  return vl_emul_warp2[threadIdx.y];
+}
 // Runs kernel `k` over grid (gx, gy) with `threads` threads per block.
 #define VL_LAUNCH(k, gx, gy, threads, ...)                       \
   for (int by = 0; by < (gy); by++)                              \
@@ -101,8 +107,9 @@ static inline int vl_warp_sum_i(int v) {
   vl_warp_bar[w]->arrive_and_wait();
   return s;
 }
-// 1-D blocks of `threads` threads, grid gx.
-#define VL_LAUNCH_THREADED(k, gx, threads, ...)                                  \
+// 1-D blocks of `threads` threads, grid (gx, gy).
+#define VL_LAUNCH_THREADED(k, gx, gy, threads, ...)                              \
+  for (int by_ = 0; by_ < (gy); by_++)                                           \
   for (int bx_ = 0; bx_ < (gx); bx_++) {                                         \
     std::barrier<> bb_(threads);                                                 \
     std::vector<std::barrier<> *> wb_;                                           \
@@ -111,7 +118,7 @@ static inline int vl_warp_sum_i(int v) {
     for (int w_ = 0; w_ < (threads) / WARP_EMU; w_++) vl_warp_bar[w_] = wb_[w_]; \
     std::vector<std::thread> th_;                                                \
     for (int t_ = 0; t_ < (threads); t_++)                                       \
-      th_.emplace_back([&, t_] { threadIdx.x = t_; threadIdx.y = 0; blockIdx.x = bx_; blockIdx.y = 0; k(__VA_ARGS__); }); \
+      th_.emplace_back([&, t_] { threadIdx.x = t_; threadIdx.y = 0; blockIdx.x = bx_; blockIdx.y = by_; k(__VA_ARGS__); }); \
     for (auto &t_ : th_) t_.join();                                              \
     for (auto *p_ : wb_) delete p_;                                              \
   }

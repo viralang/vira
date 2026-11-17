@@ -28,18 +28,22 @@ __device__ __forceinline__ int vl_warp_sum_i(int v) {
 #define VL_SYNC() __syncthreads()
 #endif
 
-// RMSNorm of one row (block of 256 threads per row, grid = rows) that also writes the row
+// RMSNorm of one row that also writes the row
 // as Q8_1 blocks {f32 d, f32 d * sum(q), int8 q[32]}, so the next matrix-vector product
 // does not need its own quantize launch. Both halves repeat the arithmetic of the separate
 // kernels exactly (vira_cu_rmsnorm_f32: strided fma sum, shared-memory tree, sum / cols,
 // + eps, rsqrt.approx, (r * x) * w; vira_cu_quantize_q8_1: warp absmax, q = rni(v * (127 /
 // amax)) clamped to +-127, d = amax * (1 / 127)), so results do not change. cols % 32 == 0.
+// Grid ((cols / 32 + 7) / 8, rows), block 256: block x handles Q8_1 blocks 8x .. 8x + 7 of
+// row y, one per warp. Every block repeats the row's sum of squares in the same order (the
+// row is 20 KB at most, read from L2), so all of them get the same r; one block per row ran
+// the whole decode norm on a single SM (T4: 28.8 us vs 10.4 + 9.4 for the two kernels).
 extern "C" __global__ void __launch_bounds__(256)
 vira_cu_rmsnorm_q8_1_f32(const float *__restrict__ x, const float *__restrict__ w,
                          float *__restrict__ y, unsigned char *__restrict__ q8, int cols, float eps) {
   __shared__ float sdata[256];
   const int tid = threadIdx.x;
-  const int row = blockIdx.x;
+  const int row = blockIdx.y;
   const float *xr = x + (size_t)row * (size_t)cols;
   float *yr = y + (size_t)row * (size_t)cols;
   float acc = 0.0f;
@@ -58,7 +62,8 @@ vira_cu_rmsnorm_q8_1_f32(const float *__restrict__ x, const float *__restrict__ 
   const int lane = tid & (WARP - 1);
   const int nblk = cols / 32;
   unsigned char *qr = q8 + (size_t)row * (size_t)nblk * 40u;
-  for (int blk = tid / WARP; blk < nblk; blk += 256 / WARP) {
+  const int blk = blockIdx.x * (256 / WARP) + tid / WARP;
+  if (blk < nblk) { // after the last barrier, so a warp may leave
     const int i = blk * 32 + lane;
     const float v = vl_mul(vl_mul(r, __ldg(xr + i)), __ldg(w + i));
     yr[i] = v;
