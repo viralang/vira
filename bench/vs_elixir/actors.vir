@@ -1,0 +1,293 @@
+module vs_elixir_actors
+// Vira side of the Vira-vs-Elixir actor benchmark (bench/vs_elixir/run.sh).
+// Every test has a line-for-line counterpart in actors.exs with the same message
+// pattern, counts and self-check. Prints one machine-readable BENCH line.
+//
+//   send1_mps     1,000,000 fire-and-forget messages to one actor, then one sync drain
+//   sendN_mps     1,000,000 messages round-robin over 64 actors, then 64 sync drains
+//   reqrep_ns     200,000 synchronous request/reply round trips to one actor (ns each)
+//   fanout_rps    20,000 rounds: 4 async requests to 4 actors, await all 4 (replies/s)
+//   ring_hops     ring of 1,000 actors, token driven by main for 1,000 laps (hops/s)
+//   spawn_ns      create 100,000 actors, one message each, drop (ns per actor)
+//   mass_ms       100,000 live actors x 10 messages, then a sync drain of each (ms)
+//   chaos_us      5,000 sync jobs to one supervised actor, 1 in 7 panics + restart
+//   par_seq_us    PAR actors run a CPU job one after another
+//   par_us        the same PAR jobs all at once
+//   par_x100      speedup (seq / par) x 100
+
+import os
+
+pub actor Sink {
+mut:
+	count int = 0
+}
+
+pub fn (mut s Sink) hit(v int) {
+	s.count = s.count + v
+}
+
+pub fn (mut s Sink) total() int {
+	return s.count
+}
+
+pub fn (mut s Sink) echo(v int) int {
+	return v + 1
+}
+
+pub actor Hop {
+pub:
+	id int
+mut:
+	seen int = 0
+}
+
+pub fn (mut h Hop) pass(left int) int {
+	h.seen = h.seen + 1
+	return left - 1
+}
+
+pub actor Node {
+pub:
+	id int
+mut:
+	ops int = 0
+}
+
+pub fn (mut n Node) ping(v int) int {
+	n.ops = n.ops + 1
+	return v + 1
+}
+
+pub fn (mut n Node) job(v int, fault bool) int {
+	n.ops = n.ops + 1
+	if fault {
+		panic('injected fault')
+	}
+	return v * 2
+}
+
+pub actor Cruncher {
+pub:
+	id int
+mut:
+	result int = 0
+}
+
+pub fn (mut c Cruncher) crunch(iterations int) {
+	mut acc := c.id
+	for mut i := 0; i < iterations; i = i + 1 {
+		for mut j := 0; j < 5000; j = j + 1 {
+			acc = (acc + (i * 3 + j * 7)) % 1000007
+		}
+	}
+	c.result = acc
+}
+
+pub fn (mut c Cruncher) get() int {
+	return c.result
+}
+
+fn bench_send1(n int) i64 {
+	mut s := Sink{ count: 0 }
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		s <- hit(1)
+	}
+	total := s <- total() or { 0 }
+	elapsed := time_now_us() - t0
+	if total != n {
+		println('BENCH_ERROR send1 total=${total}')
+	}
+	return elapsed
+}
+
+fn bench_send_n(n int, actors int) i64 {
+	mut sinks := []Sink{}
+	for mut i := 0; i < actors; i = i + 1 {
+		sinks.push(Sink{ count: 0 })
+	}
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		sinks[i % actors] <- hit(1)
+	}
+	mut total := 0
+	for mut i := 0; i < actors; i = i + 1 {
+		total = total + (sinks[i] <- total() or { 0 })
+	}
+	elapsed := time_now_us() - t0
+	if total != n {
+		println('BENCH_ERROR sendN total=${total}')
+	}
+	return elapsed
+}
+
+fn bench_reqrep(n int) i64 {
+	mut s := Sink{ count: 0 }
+	mut acc := 0
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		acc = s <- echo(acc) or { 0 }
+	}
+	elapsed := time_now_us() - t0
+	if acc != n {
+		println('BENCH_ERROR reqrep acc=${acc}')
+	}
+	return elapsed
+}
+
+fn bench_fanout(rounds int) i64 {
+	mut w0 := Node{ id: 0, ops: 0 }
+	mut w1 := Node{ id: 1, ops: 0 }
+	mut w2 := Node{ id: 2, ops: 0 }
+	mut w3 := Node{ id: 3, ops: 0 }
+	mut ok := 0
+	t0 := time_now_us()
+	for mut b := 0; b < rounds; b = b + 1 {
+		f0 := w0 <- ping(b)
+		f1 := w1 <- ping(b)
+		f2 := w2 <- ping(b)
+		f3 := w3 <- ping(b)
+		v0 := f0.await() or { 0 }
+		v1 := f1.await() or { 0 }
+		v2 := f2.await() or { 0 }
+		v3 := f3.await() or { 0 }
+		if v0 > 0 && v1 > 0 && v2 > 0 && v3 > 0 {
+			ok = ok + 4
+		}
+	}
+	elapsed := time_now_us() - t0
+	if ok != rounds * 4 {
+		println('BENCH_ERROR fanout ok=${ok}')
+	}
+	return elapsed
+}
+
+fn bench_ring(size int, laps int) i64 {
+	mut ring := []Hop{}
+	for mut i := 0; i < size; i = i + 1 {
+		ring.push(Hop{ id: i, seen: 0 })
+	}
+	mut left := size * laps
+	t0 := time_now_us()
+	mut i := 0
+	for left > 0 {
+		left = ring[i] <- pass(left) or { 0 }
+		i = i + 1
+		if i == size {
+			i = 0
+		}
+	}
+	return time_now_us() - t0
+}
+
+fn bench_spawn(n int) i64 {
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		mut s := Sink{ count: 0 }
+		s <- hit(1)
+	}
+	return time_now_us() - t0
+}
+
+fn bench_mass(actors int, per int) i64 {
+	t0 := time_now_us()
+	mut cells := []Sink{}
+	for mut i := 0; i < actors; i = i + 1 {
+		cells.push(Sink{ count: 0 })
+	}
+	for mut k := 0; k < per; k = k + 1 {
+		for mut i := 0; i < actors; i = i + 1 {
+			cells[i] <- hit(1)
+		}
+	}
+	mut total := 0
+	for mut i := 0; i < actors; i = i + 1 {
+		total = total + (cells[i] <- total() or { 0 })
+	}
+	elapsed := time_now_us() - t0
+	if total != actors * per {
+		println('BENCH_ERROR mass total=${total}')
+	}
+	return elapsed
+}
+
+fn bench_chaos(n int) i64 {
+	mut node := Node{ id: 7, ops: 0 }
+	mut trapped := 0
+	mut sum := 0
+	t0 := time_now_us()
+	for mut c := 0; c < n; c = c + 1 {
+		r := node <- job(c, c % 7 == 0) or {
+			trapped = trapped + 1
+			0
+		}
+		sum = sum + r
+	}
+	elapsed := time_now_us() - t0
+	if trapped != (n + 6) / 7 {
+		println('BENCH_ERROR chaos trapped=${trapped}')
+	}
+	return elapsed
+}
+
+// run_crunch sends one CPU job to each actor; `serial` waits for each job before
+// sending the next. Returns the sum of results (checked against the other mode).
+fn run_crunch(mut pool []Cruncher, iters int, serial bool) int {
+	mut sum := 0
+	for mut i := 0; i < pool.len; i = i + 1 {
+		pool[i] <- crunch(iters)
+		if serial {
+			sum = sum + (pool[i] <- get() or { 0 })
+		}
+	}
+	if !serial {
+		for mut i := 0; i < pool.len; i = i + 1 {
+			sum = sum + (pool[i] <- get() or { 0 })
+		}
+	}
+	return sum
+}
+
+fn main() {
+	par := os.getenv('PAR').to_int() or { 4 }
+	crunch_iters := os.getenv('CRUNCH').to_int() or { 600 }
+
+	n := 1000000
+	s1 := bench_send1(n)
+	sn := bench_send_n(n, 64)
+	rr_n := 200000
+	rr := bench_reqrep(rr_n)
+	fan_rounds := 20000
+	fo := bench_fanout(fan_rounds)
+	ring_size := 1000
+	laps := 1000
+	r := bench_ring(ring_size, laps)
+	spawn_n := 100000
+	sp := bench_spawn(spawn_n)
+	ms := bench_mass(100000, 10)
+	ch := bench_chaos(5000)
+
+	mut pool := []Cruncher{}
+	for mut i := 0; i < par; i = i + 1 {
+		pool.push(Cruncher{ id: i, result: 0 })
+	}
+	t_seq := time_now_us()
+	sum_seq := run_crunch(mut pool, crunch_iters, true)
+	seq_us := time_now_us() - t_seq
+	t_par := time_now_us()
+	sum_par := run_crunch(mut pool, crunch_iters, false)
+	par_us := time_now_us() - t_par
+	if sum_seq != sum_par {
+		println('BENCH_ERROR crunch seq=${sum_seq} par=${sum_par}')
+	}
+
+	send1_mps := i64(n) * 1000000 / s1
+	sendn_mps := i64(n) * 1000000 / sn
+	reqrep_ns := rr * 1000 / i64(rr_n)
+	fanout_rps := i64(fan_rounds * 4) * 1000000 / fo
+	ring_hops := i64(ring_size * laps) * 1000000 / r
+	spawn_ns := sp * 1000 / i64(spawn_n)
+	mass_ms := ms / 1000
+	par_x100 := seq_us * 100 / par_us
+	println('BENCH send1_mps=${send1_mps} sendN_mps=${sendn_mps} reqrep_ns=${reqrep_ns} fanout_rps=${fanout_rps} ring_hops=${ring_hops} spawn_ns=${spawn_ns} mass_ms=${mass_ms} chaos_us=${ch} par_seq_us=${seq_us} par_us=${par_us} par_x100=${par_x100} crunch_sum=${sum_par}')
+}
