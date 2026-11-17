@@ -1,0 +1,137 @@
+// The eventbus package: typed topics (publish to all, send to one round-robin, unregister,
+// automatic removal of consumers whose actor is gone) and request/reply services.
+module main
+
+import eventbus
+
+pub struct Order {
+pub:
+	id int
+	amount int
+}
+
+pub actor Billing {
+mut:
+	total int = 0
+	count int = 0
+}
+
+pub fn (mut b Billing) charge(o Order) {
+	b.total = b.total + o.amount
+	b.count = b.count + 1
+}
+
+pub fn (mut b Billing) get() int {
+	return b.total
+}
+
+pub fn (mut b Billing) n() int {
+	return b.count
+}
+
+fn wait_n(mut b Billing, want int) {
+	mut got := 0
+	for got < want {
+		got = b <- n() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+fn temp_consumer(bus Ref[eventbus.Topic[Order]]) {
+	mut gone := Billing{}
+	gr := gone.ref()
+	_ := bus <- consumer(fn (o Order) bool {
+		gr <- charge(o)
+		return gr.alive()
+	}) or { 0 }
+}
+
+pub actor Pricer {
+pub:
+	mult int
+mut:
+	calls int = 0
+}
+
+pub fn (mut p Pricer) price(qty int) int {
+	p.calls = p.calls + 1
+	return qty * p.mult
+}
+
+pub fn (mut p Pricer) calls_n() int {
+	return p.calls
+}
+
+fn test_topic() {
+	mut orders := eventbus.Topic[Order]{ name: 'orders.new' }
+	bus := orders.ref()
+	mut a := Billing{}
+	mut b := Billing{}
+	ar := a.ref()
+	br := b.ref()
+	ida := bus <- consumer(fn (o Order) bool {
+		ar <- charge(o)
+		return ar.alive()
+	}) or { 0 }
+	_ := bus <- consumer(fn (o Order) bool {
+		br <- charge(o)
+		return br.alive()
+	}) or { 0 }
+	temp_consumer(bus)
+
+	bus <- publish(Order{ id: 1, amount: 10 })
+	bus <- publish(Order{ id: 2, amount: 20 })
+	wait_n(mut a, 2)
+	wait_n(mut b, 2)
+	println('publish: a=${a <- get() or { 0 }} b=${b <- get() or { 0 }} consumers=${bus <- consumers() or { 0 }}')
+
+	for mut i := 0; i < 4; i = i + 1 {
+		bus <- send(Order{ id: 10 + i, amount: 1 })
+	}
+	wait_n(mut a, 4)
+	wait_n(mut b, 4)
+	println('send round-robin: a=${a <- get() or { 0 }} b=${b <- get() or { 0 }}')
+
+	ok := bus <- unregister(ida) or { false }
+	bus <- publish(Order{ id: 99, amount: 100 })
+	wait_n(mut b, 5)
+	st := bus <- stats() or { eventbus.TopicStats{} }
+	println('after unregister(${ok}): a=${a <- get() or { 0 }} b=${b <- get() or { 0 }} consumers=${st.consumers} published=${st.published} delivered=${st.delivered} removed=${st.removed}')
+}
+
+fn test_service() {
+	mut svc := eventbus.Service[int, int]{ name: 'pricing' }
+	sr := svc.ref()
+	mut p1 := Pricer{ mult: 10 }
+	mut p2 := Pricer{ mult: 100 }
+	r1 := p1.ref()
+	r2 := p2.ref()
+	_ := sr <- handler(fn (q int) int {
+		return r1 <- price(q) or { 0 }
+	}, fn () bool {
+		return r1.alive()
+	}) or { 0 }
+	_ := sr <- handler(fn (q int) int {
+		return r2 <- price(q) or { 0 }
+	}, fn () bool {
+		return r2.alive()
+	}) or { 0 }
+	a := eventbus.request(sr, 3) or { 0 }
+	b := eventbus.request(sr, 3) or { 0 }
+	c := eventbus.request(sr, 3) or { 0 }
+	println('replies ${a} ${b} ${c} calls ${p1 <- calls_n() or { 0 }} ${p2 <- calls_n() or { 0 }}')
+	mut empty := eventbus.Service[int, int]{ name: 'none' }
+	er := empty.ref()
+	_ := eventbus.request(er, 1) or {
+		println('empty: ${err}')
+		0
+	}
+}
+
+fn main() {
+	test_topic()
+	test_service()
+	println('All eventbus tests passed successfully!')
+}

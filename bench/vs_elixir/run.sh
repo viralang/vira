@@ -2,7 +2,8 @@
 # Vira vs Elixir: actors and concurrency, side by side on this machine.
 #
 #   bench/vs_elixir/run.sh                      # 5 runs, workers = cores (max 16)
-#   RUNS=9 WORKERS=4 VIRA=./vira bench/vs_elixir/run.sh
+#   RUNS=9 WORKERS=4 bench/vs_elixir/run.sh
+#   VIRA=./vira bench/vs_elixir/run.sh          # use a prebuilt compiler instead of building one
 #
 # Both sides get the same number of OS threads: VIRA_WORKERS=W for Vira and
 # +S W:W (W schedulers) for the BEAM. PAR=W CPU-bound actors in the parallel test.
@@ -17,12 +18,18 @@ cd "$ROOT"
 RUNS=${RUNS:-5}
 CORES=$(nproc)
 W=${WORKERS:-$(( CORES > 16 ? 16 : CORES ))}
-VIRA=${VIRA:-./vira}
+VIRA=${VIRA:-}
 ERL_FLAGS="+P 4000000 +S $W:$W"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 command -v elixir >/dev/null || { echo "elixir not found in PATH" >&2; exit 1; }
+if [ -z "$VIRA" ]; then
+  # Benchmark the compiler in this source tree (Ref[T] and eventbus need a current build).
+  echo "Building the Vira compiler from source..."
+  go build -o "$TMP/vira" ./cmd/vira
+  VIRA="$TMP/vira"
+fi
 echo "Building Vira benchmark ($("$VIRA" version 2>/dev/null | head -1))..."
 "$VIRA" build -prod -o "$TMP/vira_actors" "$HERE/actors.vir" >/dev/null
 "$VIRA" build -prod -o "$TMP/vira_memory" scripts/bench/actor_memory.vir >/dev/null
@@ -77,7 +84,8 @@ sendN_mps:1:1M msgs over 64 actors (msg/s)
 reqrep_ns:0:sync request/reply round trip (ns)
 fanout_rps:1:4 parallel requests, await all (replies/s)
 ring_hops:1:1000-actor ring, main-driven hops (hops/s)
-ring_native_hops:1:1000-process ring, process-to-process (hops/s)
+ring_native_hops:1:1000-actor ring, actor-to-actor (hops/s)
+pubsub_mps:1:pub/sub, 16 consumers x 100k publishes (deliveries/s)
 spawn_ns:0:spawn + 1 msg + drop, per actor (ns)
 mass_ms:0:100k live actors x 10 msgs + drain (ms)
 chaos_us:0:5000 jobs, 1/7 crash + supervised restart (us)
@@ -104,8 +112,7 @@ while IFS=: read -r m hib desc; do
   if [ "$m" = bytes_per_actor ]; then v=$vira_mem; e=$elixir_mem
   else v=$(median "$TMP/vira.out" "$m"); e=$(median "$TMP/elixir.out" "$m"); fi
   if [ "$v" = "-" ] || [ "$e" = "-" ] || [ "$v" = 0 ] || [ "$e" = 0 ]; then
-    verdict="n/a (Vira actors cannot hold each other)"
-    [ "$m" != ring_native_hops ] && verdict="n/a"
+    verdict="n/a"
   else
     verdict=$(awk -v v="$v" -v e="$e" -v h="$hib" 'BEGIN {
       r = (h == 1) ? v / e : e / v

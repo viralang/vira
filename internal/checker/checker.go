@@ -2553,6 +2553,13 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 
 	case *ast.StructInitExpr:
 		typ := c.resolveTypeExpr(e.Type)
+		if rt, isRef := typ.(*ActorRefType); isRef {
+			// `Ref[T]{}` is the null reference: sends through it fail with "actor is gone".
+			if len(e.Fields) > 0 {
+				c.errorf(e.InitSpan, "'%s{}' takes no fields; get a reference with '<actor>.ref()'", rt)
+			}
+			return rt
+		}
 		st, ok := typ.(*StructType)
 		if !ok {
 			if !ExactEquals(typ, TypeVoid) { // void: the type was already reported
@@ -3147,6 +3154,39 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					ReturnType: &ResultType{Inner: futType.Inner},
 					Span:       callee.SelSpan,
 				}
+			} else if rt, isRef := recvType.(*ActorRefType); isRef {
+				if !callee.IsActorSend {
+					if callee.Field.Name != "alive" {
+						c.errorf(call.CallSpan,
+							"cannot call '%s()' directly on '%s'; send a message instead: '<ref> <- %s(...)' (a Ref only has '.alive()')",
+							callee.Field.Name, rt, callee.Field.Name)
+						return TypeVoid
+					}
+					callName = rt.String() + ".alive"
+					sig = &FnSig{Name: "alive", IsPub: true, ReturnType: TypeBool, Span: callee.SelSpan}
+				} else {
+					baseSig, _, ambig := rt.Actor.LookupMethod(callee.Field.Name)
+					if ambig || baseSig == nil {
+						c.errorf(callee.SelSpan, "method '%s' not found on actor '%s'", callee.Field.Name, rt.Actor.Name)
+						return TypeVoid
+					}
+					callName = rt.Actor.Name + "." + callee.Field.Name
+					sigCopy := *baseSig
+					innerRet := baseSig.ReturnType
+					if res, isRes := innerRet.(*ResultType); isRes {
+						innerRet = res.Inner
+					}
+					if call.OrBlock == nil && !call.Propagate {
+						sigCopy.ReturnType = &FutureType{Inner: innerRet}
+					} else {
+						sigCopy.ReturnType = &ResultType{Inner: innerRet}
+					}
+					sig = &sigCopy
+				}
+			} else if st, isSt := recvType.(*StructType); isSt && st.IsActor && !callee.IsActorSend &&
+				callee.Field.Name == "ref" && st.Methods["ref"] == nil {
+				callName = st.Name + ".ref"
+				sig = &FnSig{Name: "ref", IsPub: true, ReturnType: &ActorRefType{Actor: st}, Span: callee.SelSpan}
 			} else if sl, isSlice := recvType.(*SliceType); isSlice {
 				switch callee.Field.Name {
 				case "push", "append":
@@ -3997,6 +4037,17 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 				return &TensorType{DType: c.resolveTypeExpr(t.TypeParams[0])}
 			}
 			return &TensorType{DType: TypeF32}
+		case "Ref":
+			if len(t.TypeParams) == 1 {
+				inner := c.resolveTypeExpr(t.TypeParams[0])
+				if st, ok := inner.(*StructType); ok && st.IsActor {
+					return &ActorRefType{Actor: st}
+				}
+				c.errorf(t.Span(), "Ref[T] needs an actor type, got '%s'", inner)
+				return TypeVoid
+			}
+			c.errorf(t.Span(), "Ref needs one actor type argument: Ref[MyActor]")
+			return TypeVoid
 		case "Future":
 			if len(t.TypeParams) == 1 {
 				return &FutureType{Inner: c.resolveTypeExpr(t.TypeParams[0])}

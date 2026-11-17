@@ -1,0 +1,320 @@
+// OUT: publish: a=30 b=30 consumers=2
+// OUT: send round-robin: a=32 b=32
+// OUT: after unregister(true): a=32 b=132 consumers=1 published=7 delivered=9 removed=2
+// OUT: replies 30 300 30 calls 2 1
+// OUT: empty: no handler registered for this service
+// OUT: [vira_rt] active_leaks=0
+
+// The eventbus package (inlined: golden tests compile one file without std imports): typed topics (publish to all, send to one round-robin, unregister,
+// automatic removal of consumers whose actor is gone) and request/reply services. Also covers []fn fields in actors and functions returning !fn(...).
+module main
+
+pub struct TopicStats {
+pub:
+	consumers int
+	published i64
+	delivered i64
+	removed i64
+}
+
+pub actor Topic[T] {
+pub:
+	name string
+mut:
+	handlers []fn (T) bool
+	ids []int
+	next_id int = 1
+	cursor int = 0
+	published i64 = 0
+	delivered i64 = 0
+	removed i64 = 0
+}
+
+// consumer registers a handler and returns its id (for `unregister`).
+pub fn (mut t Topic[T]) consumer(h fn (T) bool) int {
+	id := t.next_id
+	t.next_id = t.next_id + 1
+	t.handlers.push(h)
+	t.ids.push(id)
+	return id
+}
+
+// unregister removes a consumer; false if the id is unknown (already removed).
+pub fn (mut t Topic[T]) unregister(id int) bool {
+	for mut i := 0; i < t.ids.len; i = i + 1 {
+		if t.ids[i] == id {
+			t.drop_at(i)
+			return true
+		}
+	}
+	return false
+}
+
+// publish delivers v to every consumer and returns how many received it.
+pub fn (mut t Topic[T]) publish(v T) int {
+	t.published = t.published + 1
+	mut reached := 0
+	mut i := 0
+	for i < t.handlers.len {
+		h := t.handlers[i]
+		if h(v) {
+			reached = reached + 1
+			i = i + 1
+		} else {
+			t.drop_at(i)
+		}
+	}
+	t.delivered = t.delivered + i64(reached)
+	return reached
+}
+
+// send delivers v to ONE consumer, rotating between them; false if there is none left.
+pub fn (mut t Topic[T]) send(v T) bool {
+	t.published = t.published + 1
+	for t.handlers.len > 0 {
+		if t.cursor >= t.handlers.len {
+			t.cursor = 0
+		}
+		h := t.handlers[t.cursor]
+		if h(v) {
+			t.cursor = t.cursor + 1
+			t.delivered = t.delivered + 1
+			return true
+		}
+		t.drop_at(t.cursor)
+	}
+	return false
+}
+
+pub fn (mut t Topic[T]) consumers() int {
+	return t.handlers.len
+}
+
+pub fn (mut t Topic[T]) stats() TopicStats {
+	return TopicStats{
+		consumers: t.handlers.len
+		published: t.published
+		delivered: t.delivered
+		removed: t.removed
+	}
+}
+
+// drop_at removes consumer i (order is not kept: the last one takes its place).
+fn (mut t Topic[T]) drop_at(i int) {
+	last := t.handlers.len - 1
+	if i != last {
+		t.handlers.set(i, t.handlers[last])
+		t.ids.set(i, t.ids[last])
+	}
+	_ := t.handlers.pop()
+	_ := t.ids.pop()
+	t.removed = t.removed + 1
+}
+
+// Service[T, R]: request/reply. Each handler answers a request of type T with an R (usually by
+// a synchronous call to an actor through a Ref); `alive` tells the service whether the handler
+// can still answer, so dead handlers are skipped and removed.
+pub actor Service[T, R] {
+pub:
+	name string
+mut:
+	handlers []fn (T) R
+	alive []fn () bool
+	ids []int
+	next_id int = 1
+	cursor int = 0
+	served i64 = 0
+}
+
+// handler registers a request handler and returns its id (for `unregister`).
+pub fn (mut s Service[T, R]) handler(h fn (T) R, alive fn () bool) int {
+	id := s.next_id
+	s.next_id = s.next_id + 1
+	s.handlers.push(h)
+	s.alive.push(alive)
+	s.ids.push(id)
+	return id
+}
+
+pub fn (mut s Service[T, R]) unregister(id int) bool {
+	for mut i := 0; i < s.ids.len; i = i + 1 {
+		if s.ids[i] == id {
+			s.drop_at(i)
+			return true
+		}
+	}
+	return false
+}
+
+pub fn (mut s Service[T, R]) handlers_count() int {
+	return s.handlers.len
+}
+
+// pick returns the next live handler (round-robin) for the caller to run in its own context.
+pub fn (mut s Service[T, R]) pick() !fn (T) R {
+	for s.handlers.len > 0 {
+		if s.cursor >= s.handlers.len {
+			s.cursor = 0
+		}
+		ok := s.alive[s.cursor]
+		if ok() {
+			h := s.handlers[s.cursor]
+			s.cursor = s.cursor + 1
+			s.served = s.served + 1
+			return h
+		}
+		s.drop_at(s.cursor)
+	}
+	return error('no handler registered for this service')
+}
+
+fn (mut s Service[T, R]) drop_at(i int) {
+	last := s.handlers.len - 1
+	if i != last {
+		s.handlers.set(i, s.handlers[last])
+		s.alive.set(i, s.alive[last])
+		s.ids.set(i, s.ids[last])
+	}
+	_ := s.handlers.pop()
+	_ := s.alive.pop()
+	_ := s.ids.pop()
+}
+
+// request sends v to one handler of the service and returns its reply. The handler runs in the
+// caller's context (main or the calling actor), so the service actor is never blocked.
+pub fn request[T, R](svc Ref[Service[T, R]], v T) !R {
+	h := svc <- pick() or { return error(err) }
+	return h(v)
+}
+
+
+pub struct Order {
+pub:
+	id int
+	amount int
+}
+
+pub actor Billing {
+mut:
+	total int = 0
+	count int = 0
+}
+
+pub fn (mut b Billing) charge(o Order) {
+	b.total = b.total + o.amount
+	b.count = b.count + 1
+}
+
+pub fn (mut b Billing) get() int {
+	return b.total
+}
+
+pub fn (mut b Billing) n() int {
+	return b.count
+}
+
+fn wait_n(mut b Billing, want int) {
+	mut got := 0
+	for got < want {
+		got = b <- n() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+fn temp_consumer(bus Ref[Topic[Order]]) {
+	mut gone := Billing{}
+	gr := gone.ref()
+	_ := bus <- consumer(fn (o Order) bool {
+		gr <- charge(o)
+		return gr.alive()
+	}) or { 0 }
+}
+
+pub actor Pricer {
+pub:
+	mult int
+mut:
+	calls int = 0
+}
+
+pub fn (mut p Pricer) price(qty int) int {
+	p.calls = p.calls + 1
+	return qty * p.mult
+}
+
+pub fn (mut p Pricer) calls_n() int {
+	return p.calls
+}
+
+fn test_topic() {
+	mut orders := Topic[Order]{ name: 'orders.new' }
+	bus := orders.ref()
+	mut a := Billing{}
+	mut b := Billing{}
+	ar := a.ref()
+	br := b.ref()
+	ida := bus <- consumer(fn (o Order) bool {
+		ar <- charge(o)
+		return ar.alive()
+	}) or { 0 }
+	_ := bus <- consumer(fn (o Order) bool {
+		br <- charge(o)
+		return br.alive()
+	}) or { 0 }
+	temp_consumer(bus)
+
+	bus <- publish(Order{ id: 1, amount: 10 })
+	bus <- publish(Order{ id: 2, amount: 20 })
+	wait_n(mut a, 2)
+	wait_n(mut b, 2)
+	println('publish: a=${a <- get() or { 0 }} b=${b <- get() or { 0 }} consumers=${bus <- consumers() or { 0 }}')
+
+	for mut i := 0; i < 4; i = i + 1 {
+		bus <- send(Order{ id: 10 + i, amount: 1 })
+	}
+	wait_n(mut a, 4)
+	wait_n(mut b, 4)
+	println('send round-robin: a=${a <- get() or { 0 }} b=${b <- get() or { 0 }}')
+
+	ok := bus <- unregister(ida) or { false }
+	bus <- publish(Order{ id: 99, amount: 100 })
+	wait_n(mut b, 5)
+	st := bus <- stats() or { TopicStats{} }
+	println('after unregister(${ok}): a=${a <- get() or { 0 }} b=${b <- get() or { 0 }} consumers=${st.consumers} published=${st.published} delivered=${st.delivered} removed=${st.removed}')
+}
+
+fn test_service() {
+	mut svc := Service[int, int]{ name: 'pricing' }
+	sr := svc.ref()
+	mut p1 := Pricer{ mult: 10 }
+	mut p2 := Pricer{ mult: 100 }
+	r1 := p1.ref()
+	r2 := p2.ref()
+	_ := sr <- handler(fn (q int) int {
+		return r1 <- price(q) or { 0 }
+	}, fn () bool {
+		return r1.alive()
+	}) or { 0 }
+	_ := sr <- handler(fn (q int) int {
+		return r2 <- price(q) or { 0 }
+	}, fn () bool {
+		return r2.alive()
+	}) or { 0 }
+	a := request(sr, 3) or { 0 }
+	b := request(sr, 3) or { 0 }
+	c := request(sr, 3) or { 0 }
+	println('replies ${a} ${b} ${c} calls ${p1 <- calls_n() or { 0 }} ${p2 <- calls_n() or { 0 }}')
+	mut empty := Service[int, int]{ name: 'none' }
+	er := empty.ref()
+	_ := request(er, 1) or {
+		println('empty: ${err}')
+		0
+	}
+}
+
+fn main() {
+	test_topic()
+	test_service()
+}

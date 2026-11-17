@@ -242,6 +242,19 @@ func (f *FutureType) Equals(other Type) bool {
 	return ok && ExactEquals(f.Inner, o.Inner)
 }
 
+// ActorRefType represents `Ref[T]`: a copyable address of actor T that does not own it.
+// Sends through it (`r <- method()`) fail with an error once the actor is gone.
+type ActorRefType struct {
+	Actor *StructType
+}
+
+func (r *ActorRefType) String() string { return fmt.Sprintf("Ref[%s]", r.Actor.Name) }
+
+func (r *ActorRefType) Equals(other Type) bool {
+	o, ok := other.(*ActorRefType)
+	return ok && o.Actor == r.Actor
+}
+
 // ArrayType represents a fixed-size stack array `[N]T`.
 type ArrayType struct {
 	Len  int

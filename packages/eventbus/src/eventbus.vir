@@ -1,0 +1,203 @@
+module eventbus
+
+// eventbus: Vert.x-style messaging between actors, built on Ref[T].
+//
+// A Topic[T] is an address that carries messages of type T. Any number of consumers register
+// a handler on it; anyone holding a Ref to the topic (main, other actors, closures) can
+// publish to all consumers or send to one of them. The topic is itself an actor, so
+// registering, unregistering and delivery are serialized without locks, and a publisher
+// never waits: `topic <- publish(v)` returns as soon as the message is queued.
+//
+// A consumer handler usually forwards the message to an actor through a Ref and reports
+// whether that actor still exists; returning false removes the consumer:
+//
+//     mut orders := eventbus.Topic[Order]{ name: 'orders.new' }
+//     bus := orders.ref()
+//     br := billing.ref()
+//     _ := bus <- consumer(fn (o Order) bool {
+//         br <- charge(o)   // runs later, on the worker pool, one message at a time
+//         return br.alive()
+//     }) or { 0 }
+//     bus <- publish(Order{ id: 1, amount: 10 })   // returns immediately
+//
+// A Service[T, R] is the request/reply form: `eventbus.request(svc, v)` picks one handler
+// (round-robin) and runs it in the requester's own context, so the service actor is never
+// blocked waiting for a reply.
+
+pub struct TopicStats {
+pub:
+	consumers int
+	published i64
+	delivered i64
+	removed i64
+}
+
+pub actor Topic[T] {
+pub:
+	name string
+mut:
+	handlers []fn (T) bool
+	ids []int
+	next_id int = 1
+	cursor int = 0
+	published i64 = 0
+	delivered i64 = 0
+	removed i64 = 0
+}
+
+// consumer registers a handler and returns its id (for `unregister`).
+pub fn (mut t Topic[T]) consumer(h fn (T) bool) int {
+	id := t.next_id
+	t.next_id = t.next_id + 1
+	t.handlers.push(h)
+	t.ids.push(id)
+	return id
+}
+
+// unregister removes a consumer; false if the id is unknown (already removed).
+pub fn (mut t Topic[T]) unregister(id int) bool {
+	for mut i := 0; i < t.ids.len; i = i + 1 {
+		if t.ids[i] == id {
+			t.drop_at(i)
+			return true
+		}
+	}
+	return false
+}
+
+// publish delivers v to every consumer and returns how many received it.
+pub fn (mut t Topic[T]) publish(v T) int {
+	t.published = t.published + 1
+	mut reached := 0
+	mut i := 0
+	for i < t.handlers.len {
+		h := t.handlers[i]
+		if h(v) {
+			reached = reached + 1
+			i = i + 1
+		} else {
+			t.drop_at(i)
+		}
+	}
+	t.delivered = t.delivered + i64(reached)
+	return reached
+}
+
+// send delivers v to ONE consumer, rotating between them; false if there is none left.
+pub fn (mut t Topic[T]) send(v T) bool {
+	t.published = t.published + 1
+	for t.handlers.len > 0 {
+		if t.cursor >= t.handlers.len {
+			t.cursor = 0
+		}
+		h := t.handlers[t.cursor]
+		if h(v) {
+			t.cursor = t.cursor + 1
+			t.delivered = t.delivered + 1
+			return true
+		}
+		t.drop_at(t.cursor)
+	}
+	return false
+}
+
+pub fn (mut t Topic[T]) consumers() int {
+	return t.handlers.len
+}
+
+pub fn (mut t Topic[T]) stats() TopicStats {
+	return TopicStats{
+		consumers: t.handlers.len
+		published: t.published
+		delivered: t.delivered
+		removed: t.removed
+	}
+}
+
+// drop_at removes consumer i (order is not kept: the last one takes its place).
+fn (mut t Topic[T]) drop_at(i int) {
+	last := t.handlers.len - 1
+	if i != last {
+		t.handlers.set(i, t.handlers[last])
+		t.ids.set(i, t.ids[last])
+	}
+	_ := t.handlers.pop()
+	_ := t.ids.pop()
+	t.removed = t.removed + 1
+}
+
+// Service[T, R]: request/reply. Each handler answers a request of type T with an R (usually by
+// a synchronous call to an actor through a Ref); `alive` tells the service whether the handler
+// can still answer, so dead handlers are skipped and removed.
+pub actor Service[T, R] {
+pub:
+	name string
+mut:
+	handlers []fn (T) R
+	alive []fn () bool
+	ids []int
+	next_id int = 1
+	cursor int = 0
+	served i64 = 0
+}
+
+// handler registers a request handler and returns its id (for `unregister`).
+pub fn (mut s Service[T, R]) handler(h fn (T) R, alive fn () bool) int {
+	id := s.next_id
+	s.next_id = s.next_id + 1
+	s.handlers.push(h)
+	s.alive.push(alive)
+	s.ids.push(id)
+	return id
+}
+
+pub fn (mut s Service[T, R]) unregister(id int) bool {
+	for mut i := 0; i < s.ids.len; i = i + 1 {
+		if s.ids[i] == id {
+			s.drop_at(i)
+			return true
+		}
+	}
+	return false
+}
+
+pub fn (mut s Service[T, R]) handlers_count() int {
+	return s.handlers.len
+}
+
+// pick returns the next live handler (round-robin) for the caller to run in its own context.
+pub fn (mut s Service[T, R]) pick() !fn (T) R {
+	for s.handlers.len > 0 {
+		if s.cursor >= s.handlers.len {
+			s.cursor = 0
+		}
+		ok := s.alive[s.cursor]
+		if ok() {
+			h := s.handlers[s.cursor]
+			s.cursor = s.cursor + 1
+			s.served = s.served + 1
+			return h
+		}
+		s.drop_at(s.cursor)
+	}
+	return error('no handler registered for this service')
+}
+
+fn (mut s Service[T, R]) drop_at(i int) {
+	last := s.handlers.len - 1
+	if i != last {
+		s.handlers.set(i, s.handlers[last])
+		s.alive.set(i, s.alive[last])
+		s.ids.set(i, s.ids[last])
+	}
+	_ := s.handlers.pop()
+	_ := s.alive.pop()
+	_ := s.ids.pop()
+}
+
+// request sends v to one handler of the service and returns its reply. The handler runs in the
+// caller's context (main or the calling actor), so the service actor is never blocked.
+pub fn request[T, R](svc Ref[Service[T, R]], v T) !R {
+	h := svc <- pick() or { return error(err) }
+	return h(v)
+}

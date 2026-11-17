@@ -217,6 +217,15 @@ func (g *Generator) EmitFile(file *ast.File) string {
 		}
 	}
 	out.WriteString("\n")
+	// Slices whose elements are runtime types (closures, actor Refs) do not depend on any
+	// struct, but structs and actors may hold them as fields: define them first. The slice
+	// definitions are include-guarded, so the pass below skips them.
+	for _, sl := range g.sliceTypes {
+		switch sl.Elem.(type) {
+		case *checker.FnType, *checker.ActorRefType:
+			g.emitGenericSliceDefinition(&out, sl)
+		}
+	}
 	g.emitStructsTopologically(&out, file)
 
 	// Emit Generic and Nested Slice Definitions (e.g. [][]string, []MyStruct)
@@ -556,6 +565,19 @@ func (g *Generator) scanExprRequirements(expr ast.Expr) {
 				if m, _, _ := st.LookupMethod(sel.Field.Name); m != nil {
 					key := st.Name + "_" + m.Name
 					g.actorSenders[key] = actorMethodDispatchSpec{Actor: st, Method: m}
+					inner := m.ReturnType
+					if res, isRes := inner.(*checker.ResultType); isRes {
+						inner = res.Inner
+					}
+					g.resultTypes[g.cResultName(inner)] = inner
+				}
+			}
+		}
+		if sel, ok := e.Callee.(*ast.SelectorExpr); ok && sel.IsActorSend {
+			if rt, ok := g.chk.ExprTypes[sel.Left].(*checker.ActorRefType); ok {
+				if m, _, _ := rt.Actor.LookupMethod(sel.Field.Name); m != nil {
+					key := rt.Actor.Name + "_" + m.Name
+					g.actorSenders[key] = actorMethodDispatchSpec{Actor: rt.Actor, Method: m}
 					inner := m.ReturnType
 					if res, isRes := inner.(*checker.ResultType); isRes {
 						inner = res.Inner
@@ -1584,7 +1606,7 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString("    env->_hdr._task.env = env;\n")
 	out.WriteString("    env->_hdr._task.done = 0;\n")
 	out.WriteString("    vira_actor_send(&self->_ctx, &env->_hdr._task);\n")
-	out.WriteString(fmt.Sprintf("    return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result, .actor = &self->_ctx };\n", cActor, method.Name))
+	out.WriteString(fmt.Sprintf("    return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result, .actor = &self->_ctx, .target_wf = self->_ctx.wf_slot + 1u };\n", cActor, method.Name))
 	out.WriteString("}\n\n")
 
 	// 4. Emit Fire-and-Forget Detached Sender (_send_detached_) — deep-clones heap arguments & auto-frees result
@@ -1637,6 +1659,77 @@ func (g *Generator) emitActorSupervisorWrapper(out *strings.Builder, actor *chec
 	out.WriteString("    env._hdr._task.next_actor_msg = NULL;\n")
 	out.WriteString("    env._hdr._task.done = 0;\n")
 	out.WriteString("    vira_actor_send(&self->_ctx, &env._hdr._task);\n")
+	out.WriteString("    vira_scheduler_await(&env._hdr._task);\n")
+	out.WriteString("    return env._hdr.result;\n")
+	out.WriteString("}\n\n")
+	g.emitActorRefWrappers(out, cActor, method, envName, cRes)
+}
+
+// emitActorRefWrappers emits the three send forms through a `Ref[T]`. Each pins the actor's
+// reference slot (failing with "actor is gone" if the Ref is stale), enqueues the message
+// through the ordinary sender and unpins right after enqueueing, so destroying the actor never
+// waits for a reply, only for senders that are mid-enqueue.
+func (g *Generator) emitActorRefWrappers(out *strings.Builder, cActor string, method *checker.FnSig, envName, cRes string) {
+	const goneErr = "actor is gone"
+	params := []string{"vira_ref _r"}
+	args := []string{fmt.Sprintf("(%s*)_c", cActor)}
+	for _, p := range method.Params {
+		params = append(params, fmt.Sprintf("%s %s", g.cType(p.Type), p.Name))
+		args = append(args, p.Name)
+	}
+	plist := strings.Join(params, ", ")
+	alist := strings.Join(args, ", ")
+
+	// Future form. A dead Ref yields a future that is already complete with the error.
+	out.WriteString(fmt.Sprintf("static inline vira_future %s_ref_spawn_%s(%s) {\n", cActor, method.Name, plist))
+	out.WriteString("    vira_actor_ctx* _c = vira_ref_pin(_r);\n")
+	out.WriteString("    if (!_c) {\n")
+	out.WriteString(fmt.Sprintf("        %s* env = (%s*)calloc(1, sizeof(%s));\n", envName, envName, envName))
+	out.WriteString("        if (!env) { fprintf(stderr, \"vira panic: out of memory\\n\"); exit(1); }\n")
+	out.WriteString("        _vira_record_alloc();\n")
+	out.WriteString(fmt.Sprintf("        env->_hdr.result = (%s){ .is_err = true, .err = vira_str_lit(%q, %d) };\n", cRes, goneErr, len(goneErr)))
+	out.WriteString("        env->_hdr._task.done = 1;\n")
+	out.WriteString(fmt.Sprintf("        return (vira_future){ .task = &env->_hdr._task, .env = env, .drop_fn = _%s_%s_drop_result, .actor = NULL };\n", cActor, method.Name))
+	out.WriteString("    }\n")
+	out.WriteString(fmt.Sprintf("    vira_future _f = %s_spawn_%s(%s);\n", cActor, method.Name, alist))
+	out.WriteString("    vira_ref_unpin(_r);\n")
+	out.WriteString("    return _f;\n")
+	out.WriteString("}\n\n")
+
+	// Fire-and-forget form. Arguments are only borrowed until the message is built, so a send
+	// to a dead actor owns nothing and is simply dropped.
+	out.WriteString(fmt.Sprintf("static inline void %s_ref_send_detached_%s(%s) {\n", cActor, method.Name, plist))
+	out.WriteString("    vira_actor_ctx* _c = vira_ref_pin(_r);\n")
+	out.WriteString("    if (!_c) return;\n")
+	out.WriteString(fmt.Sprintf("    %s_send_detached_%s(%s);\n", cActor, method.Name, alist))
+	out.WriteString("    vira_ref_unpin(_r);\n")
+	out.WriteString("}\n\n")
+
+	// Synchronous form.
+	out.WriteString(fmt.Sprintf("static inline %s %s_ref_supervise_%s(%s) {\n", cRes, cActor, method.Name, plist))
+	out.WriteString("    vira_actor_ctx* _c = vira_ref_pin(_r);\n")
+	out.WriteString(fmt.Sprintf("    if (!_c) return (%s){ .is_err = true, .err = vira_str_lit(%q, %d) };\n", cRes, goneErr, len(goneErr)))
+	out.WriteString("    if (vira_actor_is_current(_c)) {\n")
+	out.WriteString("        vira_ref_unpin(_r);\n")
+	out.WriteString(fmt.Sprintf("        return (%s){ .is_err = true, .err = vira_str_lit(%q, %d) };\n", cRes, selfAwaitErr, len(selfAwaitErr)))
+	out.WriteString("    }\n")
+	out.WriteString("    if (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) {\n")
+	out.WriteString(fmt.Sprintf("        vira_future _f = %s_spawn_%s(%s);\n", cActor, method.Name, alist))
+	out.WriteString("        vira_ref_unpin(_r);\n")
+	out.WriteString(fmt.Sprintf("        return Future_%s_await(&_f);\n", cRes))
+	out.WriteString("    }\n")
+	out.WriteString(fmt.Sprintf("    %s env;\n", envName))
+	out.WriteString(fmt.Sprintf("    env.self = (%s*)_c;\n", cActor))
+	out.WriteString("    env.owns_params = false;\n")
+	for _, p := range method.Params {
+		out.WriteString(fmt.Sprintf("    env.%s = %s;\n", p.Name, p.Name))
+	}
+	out.WriteString(fmt.Sprintf("    env._hdr._task.fn = _%s_%s_worker_task;\n", cActor, method.Name))
+	out.WriteString("    env._hdr._task.env = &env;\n")
+	out.WriteString("    env._hdr._task.next_actor_msg = NULL;\n")
+	out.WriteString("    env._hdr._task.done = 0;\n")
+	out.WriteString("    vira_actor_send(_c, &env._hdr._task);\n")
+	out.WriteString("    vira_ref_unpin(_r);\n")
 	out.WriteString("    vira_scheduler_await(&env._hdr._task);\n")
 	out.WriteString("    return env._hdr.result;\n")
 	out.WriteString("}\n\n")
@@ -1874,6 +1967,14 @@ func (g *Generator) tryEmitDetachedActorSend(expr ast.Expr) (string, bool) {
 		return "", false
 	}
 	leftType := g.chk.ExprTypes[callee.Left]
+	if rt, isRef := leftType.(*checker.ActorRefType); isRef {
+		args := []string{g.emitExpr(callee.Left)}
+		for _, arg := range call.Args {
+			args = append(args, g.emitExpr(arg.Expr))
+		}
+		return fmt.Sprintf("%s_ref_send_detached_%s(%s)",
+			g.cStructName(rt.Actor.Name), callee.Field.Name, strings.Join(args, ", ")), true
+	}
 	st, isStruct := leftType.(*checker.StructType)
 	if !isStruct || !st.IsActor {
 		return "", false
@@ -2759,6 +2860,9 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		return e.Ident.Name
 
 	case *ast.StructInitExpr:
+		if _, isRef := g.chk.ExprTypes[e].(*checker.ActorRefType); isRef {
+			return "((vira_ref)0)"
+		}
 		var stName string
 		var fullType string
 		if ident, ok := e.Type.(*ast.IdentType); ok {
@@ -3854,6 +3958,19 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return fmt.Sprintf("Future_%s_await(&%s)", cRes, g.emitLValue(callee.Left))
 		}
 
+		// 2b. Sends through an actor reference: `r <- method()`, and `r.alive()`
+		if rt, isRef := leftType.(*checker.ActorRefType); isRef {
+			recv := g.emitExpr(callee.Left)
+			if !callee.IsActorSend {
+				return fmt.Sprintf("vira_ref_alive(%s)", recv)
+			}
+			allArgs := append([]string{recv}, argStrs...)
+			if call.OrBlock == nil && !call.Propagate {
+				return fmt.Sprintf("%s_ref_spawn_%s(%s)", g.cStructName(rt.Actor.Name), callee.Field.Name, strings.Join(allArgs, ", "))
+			}
+			return fmt.Sprintf("%s_ref_supervise_%s(%s)", g.cStructName(rt.Actor.Name), callee.Field.Name, strings.Join(allArgs, ", "))
+		}
+
 		// 3. Receiver Method, Promoted Method, or Actor <- Send
 		if st, ok := leftType.(*checker.StructType); ok {
 			recvExpr := g.emitLValue(callee.Left)
@@ -3876,6 +3993,9 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 
 			allArgs := append([]string{recvExpr}, argStrs...)
 
+			if st.IsActor && !callee.IsActorSend && callee.Field.Name == "ref" && st.Methods["ref"] == nil {
+				return fmt.Sprintf("vira_actor_ref(&(%s)->_ctx)", recvExpr)
+			}
 			if callee.IsActorSend && st.IsActor {
 				if call.OrBlock == nil && !call.Propagate {
 					return fmt.Sprintf("%s_spawn_%s(%s)",
@@ -4362,7 +4482,17 @@ func (g *Generator) cResultName(inner checker.Type) string {
 		}
 		return "Result_" + g.cStructName(st.Name)
 	}
+	if _, isFn := inner.(*checker.FnType); isFn {
+		return "Result_closure" // every function type is a vira_closure in C
+	}
 	clean := strings.NewReplacer("[", "_", "]", "", " ", "_", ".", "__").Replace(inner.String())
+	// Keep the name a valid C identifier whatever the type spelling contains.
+	clean = strings.Map(func(r rune) rune {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, clean)
 	return "Result_" + clean
 }
 
@@ -4428,6 +4558,8 @@ func (g *Generator) cType(t checker.Type) string {
 		}
 		inner := g.cType(v.Inner)
 		return inner + "*"
+	case *checker.ActorRefType:
+		return "vira_ref"
 	case *checker.TensorType:
 		return "vira_tensor_f32"
 	case *checker.EnumType:

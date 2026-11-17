@@ -43,6 +43,7 @@
    - [Actor Definition](#actor-definition)
    - [Actors Are Handles: Isolation & Ownership](#actors-are-handles-isolation--ownership)
    - [Message Passing (`<-`) & Futures](#message-passing----futures)
+   - [Actor References (`Ref[T]`) & the Event Bus](#actor-references-reft--the-event-bus)
    - [Deadlock Avoidance](#deadlock-avoidance)
    - [Lock-Free Work-Stealing Pool](#lock-free-work-stealing-pool)
    - [Erlang-Style Fault Boundaries (`panic` & `OneForOne`)](#erlang-style-fault-boundaries-panic--oneforone)
@@ -794,6 +795,67 @@ Messages from one sender to one actor run in the order they were sent.
 
 ---
 
+### Actor References (`Ref[T]`) & the Event Bus
+
+An actor has one owner, but any number of places can hold a **reference** to it. `a.ref()`
+returns a `Ref[A]`: a small copyable value (8 bytes) that addresses the actor without owning
+it. Refs can be stored in actor fields, slices and maps, captured by closures and passed in
+messages, so actors can message each other directly:
+
+```v
+pub actor Hop {
+mut:
+    next Ref[Hop]          // zero value: the null Ref
+}
+
+pub fn (mut h Hop) link(n Ref[Hop]) { h.next = n }
+
+pub fn (mut h Hop) pass(left int) {
+    if left > 0 {
+        h.next <- pass(left - 1)    // actor-to-actor, no round trip through main
+    }
+}
+
+mut a := Hop{}
+mut b := Hop{}
+_ := a <- link(b.ref()) or { false }
+_ := b <- link(a.ref()) or { false }
+r := a.ref()
+r <- pass(1000)                     // all three send forms work through a Ref
+```
+
+- **Sending:** `r <- m()` (fire-and-forget), `f := r <- m()` (future) and `r <- m() or { ... }`
+  (synchronous) behave exactly like sends to the actor itself. A Ref does not need a `mut` binding.
+- **Safe after the actor is gone:** once the owner destroys the actor, sends through its Refs
+  fail with `actor is gone` (a fire-and-forget send is dropped) instead of touching freed memory.
+  `r.alive()` reports whether the actor still exists and has not stopped.
+- **Destruction waits only for senders in the middle of enqueueing**, never for replies: every
+  message that got into the mailbox still runs before the actor is destroyed.
+- **Supervisor restarts keep the Ref valid**; a reused slot gets a new generation, so a stale
+  Ref never reaches a different actor.
+- `Ref[T]{}` is the null Ref; a direct method call on a Ref (`r.m()`) is a compile error.
+
+The standard `eventbus` package builds Vert.x-style messaging on Refs: typed topics with
+`publish` (all consumers), `send` (one, round-robin), `unregister`, automatic removal of
+consumers whose actor is gone, and request/reply services:
+
+```v
+import eventbus
+
+mut orders := eventbus.Topic[Order]{ name: 'orders.new' }
+bus := orders.ref()
+br := billing.ref()
+_ := bus <- consumer(fn (o Order) bool {
+    br <- charge(o)            // runs later, on the worker pool, one message at a time
+    return br.alive()          // false unsubscribes
+}) or { 0 }
+bus <- publish(Order{ id: 1, amount: 10 })   // returns immediately
+```
+
+See `packages/eventbus/README.md` for the full API.
+
+---
+
 ### Deadlock Avoidance
 
 Waiting that can never finish returns an error to one waiter instead of hanging:
@@ -889,6 +951,7 @@ Vira's compiler resolves built-in pure-Vira standard library packages automatica
 - `import net` — Cross-platform TCP listeners/streams, UDP sockets, DNS resolution, and non-blocking pollers.
 - `import http` — HTTP/1.1 request parser, response builder, header maps, server loops, and SSE streaming.
 - `import json` — 100% pure-Vira RFC 8259 JSON validator (`json.is_valid`), depth-aware parser (`json.get_str`, `json.get_int`, `json.get_i64`, `json.get_bool`, `json.array_get_str`), and $O(N)$ `json.JsonBuilder`.
+- `import eventbus` — Vert.x-style typed topics (publish, round-robin send, request/reply) between actors, built on `Ref[T]`.
 - `import viraserve` — Work-stealing actor HTTP microframework with route dispatch and zero memory leaks.
 
 For complete API signatures and runnable examples, see the [**Standard Library Manual**](STANDARD_LIBRARY.md).

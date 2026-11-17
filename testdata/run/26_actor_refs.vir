@@ -1,0 +1,183 @@
+// OUT: ring hops=500 seen=500
+// OUT: chain 1 -> 2 -> 3 = 6
+// OUT: null alive=false
+// OUT: tmp alive=true
+// OUT: dropped alive=false
+// OUT: sync to dropped: actor is gone
+// OUT: future to dropped: actor is gone
+// OUT: closure sent 3 total=30
+// OUT: restart 1->10 3->failed 5->50 alive=true
+// OUT: self ref ok=true
+// OUT: [vira_rt] active_leaks=0
+
+// Ref[T]: a copyable address of an actor that does not own it. Actors keep Refs to each other
+// in fields, forward messages without going through main, and a Ref to a destroyed actor fails
+// cleanly ("actor is gone") instead of touching freed memory.
+module main
+
+pub actor Hop {
+pub:
+	id int
+mut:
+	next Ref[Hop]
+	seen int = 0
+}
+
+pub fn (mut h Hop) link(n Ref[Hop]) {
+	h.next = n
+}
+
+pub fn (mut h Hop) pass(left int, done Ref[Tally]) {
+	h.seen = h.seen + 1
+	if left == 0 {
+		done <- add(1)
+		return
+	}
+	h.next <- pass(left - 1, done)
+}
+
+pub fn (mut h Hop) seen_count() int {
+	return h.seen
+}
+
+pub fn (mut h Hop) me() Ref[Hop] {
+	return h.ref()
+}
+
+pub actor Tally {
+mut:
+	n int = 0
+}
+
+pub fn (mut t Tally) add(v int) {
+	t.n = t.n + v
+}
+
+pub fn (mut t Tally) get() int {
+	return t.n
+}
+
+// Stage forwards to the next stage synchronously and adds its own value on the way back.
+pub actor Stage {
+pub:
+	v int
+mut:
+	next Ref[Stage]
+}
+
+pub fn (mut s Stage) set_next(n Ref[Stage]) {
+	s.next = n
+}
+
+pub fn (mut s Stage) sum() int {
+	if !s.next.alive() {
+		return s.v
+	}
+	rest := s.next <- sum() or { 0 }
+	return s.v + rest
+}
+
+pub actor Crashy {
+mut:
+	n int = 0
+}
+
+pub fn (mut c Crashy) work(v int) int {
+	if v == 3 {
+		panic('boom')
+	}
+	return v * 10
+}
+
+fn short_lived() Ref[Tally] {
+	mut t := Tally{}
+	r := t.ref()
+	println('tmp alive=${r.alive()}')
+	return r
+}
+
+fn wait_for(mut t Tally, want int) {
+	mut got := 0
+	for got < want {
+		got = t <- get() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+fn main() {
+	// A ring of 50 actors: each forwards the token to its neighbour itself.
+	size := 50
+	mut ring := []Hop{}
+	for mut i := 0; i < size; i = i + 1 {
+		ring.push(Hop{ id: i })
+	}
+	for mut i := 0; i < size; i = i + 1 {
+		nxt := ring[(i + 1) % size].ref()
+		_ := ring[i] <- link(nxt) or { false }
+	}
+	mut done := Tally{}
+	first := ring[0].ref()
+	first <- pass(499, done.ref())
+	wait_for(mut done, 1)
+	mut seen := 0
+	for mut i := 0; i < size; i = i + 1 {
+		seen = seen + (ring[i] <- seen_count() or { 0 })
+	}
+	println('ring hops=500 seen=${seen}')
+
+	// Synchronous calls along a chain of actors (actor -> actor -> actor).
+	mut s1 := Stage{ v: 1 }
+	mut s2 := Stage{ v: 2 }
+	mut s3 := Stage{ v: 3 }
+	_ := s1 <- set_next(s2.ref()) or { false }
+	_ := s2 <- set_next(s3.ref()) or { false }
+	total := s1 <- sum() or { 0 }
+	println('chain 1 -> 2 -> 3 = ${total}')
+
+	// Null and stale references.
+	null_ref := Ref[Tally]{}
+	println('null alive=${null_ref.alive()}')
+	stale := short_lived()
+	println('dropped alive=${stale.alive()}')
+	_ := stale <- get() or {
+		println('sync to dropped: ${err}')
+		0
+	}
+	f := stale <- get()
+	_ := f.await() or {
+		println('future to dropped: ${err}')
+		0
+	}
+	stale <- add(5) // fire-and-forget to a dead actor is dropped
+
+	// A Ref captured by a closure.
+	mut sink := Tally{}
+	sr := sink.ref()
+	send10 := fn () {
+		sr <- add(10)
+	}
+	send10()
+	send10()
+	send10()
+	wait_for(mut sink, 30)
+	println('closure sent 3 total=${sink <- get() or { 0 }}')
+
+	// A supervisor restart keeps the actor's Ref valid.
+	mut c := Crashy{}
+	cr := c.ref()
+	r1 := cr <- work(1) or { 0 }
+	mut r3 := 'ok'
+	_ := cr <- work(3) or {
+		r3 = 'failed'
+		0
+	}
+	r5 := cr <- work(5) or { 0 }
+	println('restart 1->${r1} 3->${r3} 5->${r5} alive=${cr.alive()}')
+
+	// A Ref taken inside a handler addresses the same actor.
+	inner := ring[7] <- me() or { Ref[Hop]{} }
+	_ := inner <- link(ring[8].ref()) or { false }
+	println('self ref ok=${inner.alive()}')
+}

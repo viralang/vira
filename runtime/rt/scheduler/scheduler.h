@@ -78,6 +78,7 @@ struct _vira_actor_ctx {
   int32_t defer_cap;
   int32_t defer_top;
   uint32_t wf_slot; // this actor's entry in the wait-for graph (VIRA_WF_NONE if unavailable)
+  volatile uint32_t ref_slot; // slot + 1 in the actor reference table (0 = no Ref[T] taken yet)
 };
 
 // Thread-Local Storage (TLS): Each worker pthread tracks its own active actor!
@@ -209,6 +210,194 @@ static inline bool _vira_wf_walk(uint32_t target, _vira_wf_hop *hops, int32_t *n
     cur = next - 1;
   }
   return false;
+}
+
+// ----------------------------------------------------------------------------
+// ACTOR REFERENCES: `Ref[T]`, a copyable address of an actor that does not own it.
+//
+// An actor is owned by exactly one variable, field or slice element; a Ref lets any number of
+// other places (actor fields, closures, messages, the event bus) send to it. The first `.ref()`
+// gives the actor a slot in a global table. A Ref packs (generation << 32) | (slot + 1).
+//
+// A slot word is (generation << 32) | CLOSING | pins. A send through a Ref PINS the slot (CAS
+// pins + 1, only while the generation matches and CLOSING is clear), enqueues the message, and
+// unpins. Destroying the actor sets CLOSING, waits for the pins to drain (helping the scheduler
+// meanwhile), and only then quiesces the mailbox, so every message that got in runs before the
+// actor goes away and every later send fails cleanly. Freeing the slot bumps the generation, so
+// a stale Ref can never reach a new actor that reuses the slot. Chunks are never freed, so a
+// stale Ref can always be checked safely. A supervisor restart keeps the slot: Refs stay valid.
+// ----------------------------------------------------------------------------
+typedef uint64_t vira_ref;
+#define VIRA_REF_CHUNK_BITS 12
+#define VIRA_REF_CHUNK (1u << VIRA_REF_CHUNK_BITS)
+#define VIRA_REF_MAX_CHUNKS 4096 // 16M actors with a Ref at once
+#define VIRA_REF_CLOSING 0x80000000ull
+#define VIRA_REF_PINS 0x7FFFFFFFull
+
+typedef struct {
+  volatile uint64_t word;
+  vira_actor_ctx *volatile ctx;
+  uint32_t next_free; // free-list link (slot + 1), guarded by _vira_ref_lock
+} _vira_ref_slot;
+
+static _vira_ref_slot *volatile _vira_ref_chunks[VIRA_REF_MAX_CHUNKS];
+static volatile int32_t _vira_ref_lock = 0;
+static uint32_t _vira_ref_free_head = 0;
+static uint32_t _vira_ref_next = 0;
+
+// Slot `s` of a chunk known to exist (any slot that was ever allocated).
+static inline _vira_ref_slot *_vira_ref_at(uint32_t s) {
+  _vira_ref_slot *chunk = __atomic_load_n(&_vira_ref_chunks[s >> VIRA_REF_CHUNK_BITS], __ATOMIC_ACQUIRE);
+  return &chunk[s & (VIRA_REF_CHUNK - 1)];
+}
+
+static inline void _vira_ref_lock_acquire(void) {
+  while (__atomic_exchange_n(&_vira_ref_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+    while (__atomic_load_n(&_vira_ref_lock, __ATOMIC_RELAXED) != 0) {
+    }
+  }
+}
+
+static inline void _vira_ref_lock_release(void) { __atomic_store_n(&_vira_ref_lock, 0, __ATOMIC_RELEASE); }
+
+/** Takes a free slot for `ctx`; returns slot + 1, or 0 if the table is full. */
+static inline uint32_t _vira_ref_alloc(vira_actor_ctx *ctx) {
+  _vira_ref_lock_acquire();
+  uint32_t s;
+  if (_vira_ref_free_head != 0) {
+    s = _vira_ref_free_head - 1;
+    _vira_ref_free_head = _vira_ref_at(s)->next_free;
+  } else {
+    s = _vira_ref_next;
+    uint32_t ci = s >> VIRA_REF_CHUNK_BITS;
+    if (ci >= VIRA_REF_MAX_CHUNKS) {
+      _vira_ref_lock_release();
+      return 0;
+    }
+    if ((s & (VIRA_REF_CHUNK - 1)) == 0) {
+      _vira_ref_slot *chunk = (_vira_ref_slot *)calloc(VIRA_REF_CHUNK, sizeof(_vira_ref_slot));
+      if (chunk == NULL) {
+        _vira_ref_lock_release();
+        return 0;
+      }
+      __atomic_store_n(&_vira_ref_chunks[ci], chunk, __ATOMIC_RELEASE);
+    }
+    _vira_ref_next++;
+  }
+  _vira_ref_lock_release();
+  _vira_ref_slot *slot = _vira_ref_at(s);
+  uint64_t gen = __atomic_load_n(&slot->word, __ATOMIC_RELAXED) >> 32;
+  if (gen == 0)
+    gen = 1; // generation 0 is reserved: a zero Ref never matches
+  __atomic_store_n(&slot->ctx, ctx, __ATOMIC_RELAXED);
+  __atomic_store_n(&slot->word, gen << 32, __ATOMIC_RELEASE);
+  return s + 1;
+}
+
+/**
+ * Returns a Ref to the actor, giving it a slot on first use. Safe to call from the owner and
+ * from the actor's own handlers at the same time. A full table yields the null Ref (sends fail).
+ */
+static inline vira_ref vira_actor_ref(vira_actor_ctx *ctx) {
+  if (ctx == NULL)
+    return 0;
+  uint32_t s1 = __atomic_load_n(&ctx->ref_slot, __ATOMIC_ACQUIRE);
+  if (s1 == 0) {
+    uint32_t mine = _vira_ref_alloc(ctx);
+    if (mine == 0)
+      return 0;
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&ctx->ref_slot, &expected, mine, false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+      s1 = mine;
+    } else {
+      // Another thread won: return our slot to the free list.
+      _vira_ref_slot *slot = _vira_ref_at(mine - 1);
+      __atomic_store_n(&slot->ctx, NULL, __ATOMIC_RELAXED);
+      _vira_ref_lock_acquire();
+      slot->next_free = _vira_ref_free_head;
+      _vira_ref_free_head = mine;
+      _vira_ref_lock_release();
+      s1 = expected;
+    }
+  }
+  uint64_t gen = __atomic_load_n(&_vira_ref_at(s1 - 1)->word, __ATOMIC_ACQUIRE) >> 32;
+  return (gen << 32) | (uint64_t)s1;
+}
+
+/** Pins the actor a Ref points to; NULL if the Ref is null, stale or the actor is closing. */
+static inline vira_actor_ctx *vira_ref_pin(vira_ref r) {
+  uint32_t s1 = (uint32_t)r;
+  if (s1 == 0 || ((s1 - 1) >> VIRA_REF_CHUNK_BITS) >= VIRA_REF_MAX_CHUNKS)
+    return NULL;
+  if (__atomic_load_n(&_vira_ref_chunks[(s1 - 1) >> VIRA_REF_CHUNK_BITS], __ATOMIC_ACQUIRE) == NULL)
+    return NULL; // a forged or corrupt Ref: never handed out
+  _vira_ref_slot *slot = _vira_ref_at(s1 - 1);
+  uint64_t w = __atomic_load_n(&slot->word, __ATOMIC_ACQUIRE);
+  for (;;) {
+    if ((w >> 32) != (r >> 32) || (w & VIRA_REF_CLOSING) != 0)
+      return NULL;
+    if (__atomic_compare_exchange_n(&slot->word, &w, w + 1, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      return __atomic_load_n(&slot->ctx, __ATOMIC_ACQUIRE);
+  }
+}
+
+static inline void vira_ref_unpin(vira_ref r) {
+  __atomic_sub_fetch(&_vira_ref_at((uint32_t)r - 1)->word, 1, __ATOMIC_RELEASE);
+}
+
+/** True while the actor behind the Ref exists and is not being destroyed. */
+static inline bool vira_ref_alive(vira_ref r) {
+  vira_actor_ctx *ctx = vira_ref_pin(r);
+  if (ctx == NULL)
+    return false;
+  bool alive = ctx->state != VIRA_ACTOR_STOPPED;
+  vira_ref_unpin(r);
+  return alive;
+}
+
+/**
+ * Closes the actor's slot before it is destroyed: new sends through Refs fail, and the call
+ * returns once every send that pinned the slot has finished enqueueing.
+ */
+static inline void _vira_ref_close(vira_actor_ctx *ctx) {
+  uint32_t s1 = __atomic_load_n(&ctx->ref_slot, __ATOMIC_ACQUIRE);
+  if (s1 == 0)
+    return;
+  _vira_ref_slot *slot = _vira_ref_at(s1 - 1);
+  __atomic_fetch_or(&slot->word, VIRA_REF_CLOSING, __ATOMIC_SEQ_CST);
+  uint32_t rng = 0x9E3779B9u;
+  int32_t idle = 0;
+  while ((__atomic_load_n(&slot->word, __ATOMIC_ACQUIRE) & VIRA_REF_PINS) != 0) {
+    if (_vira_sched_help_one(&rng)) {
+      idle = 0;
+      continue;
+    }
+    if (idle < 32) {
+      vira_cpu_relax();
+    } else {
+      sched_yield();
+    }
+    idle++;
+  }
+}
+
+/** Frees the actor's slot (after the mailbox is quiet): bumps the generation, so stale Refs fail. */
+static inline void _vira_ref_release(vira_actor_ctx *ctx) {
+  uint32_t s1 = __atomic_load_n(&ctx->ref_slot, __ATOMIC_ACQUIRE);
+  if (s1 == 0)
+    return;
+  ctx->ref_slot = 0;
+  _vira_ref_slot *slot = _vira_ref_at(s1 - 1);
+  uint64_t gen = (__atomic_load_n(&slot->word, __ATOMIC_ACQUIRE) >> 32) + 1;
+  if ((uint32_t)gen == 0)
+    gen = 1;
+  __atomic_store_n(&slot->ctx, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&slot->word, (gen & 0xFFFFFFFFull) << 32, __ATOMIC_RELEASE);
+  _vira_ref_lock_acquire();
+  slot->next_free = _vira_ref_free_head;
+  _vira_ref_free_head = s1;
+  _vira_ref_lock_release();
 }
 
 /**
@@ -376,6 +565,7 @@ static inline void vira_actor_ctx_init(vira_actor_ctx *ctx, int32_t id,
   ctx->defer_cap = 0;
   ctx->defer_top = 0;
   ctx->wf_slot = _vira_wf_alloc();
+  ctx->ref_slot = 0;
 }
 
 /**
@@ -412,7 +602,9 @@ static inline void vira_actor_quiesce(vira_actor_ctx *ctx) {
  * Usage: Invoked when an actor terminates or is shut down by its supervisor.
  */
 static inline void vira_actor_ctx_destroy(vira_actor_ctx *ctx) {
+  _vira_ref_close(ctx); // no new sends through Refs; the ones in flight finish enqueueing
   vira_actor_quiesce(ctx);
+  _vira_ref_release(ctx);
   if (!ctx->last_error.is_lit && ctx->last_error.data != NULL) {
     vira_str_free(&ctx->last_error);
   }
@@ -1267,6 +1459,10 @@ typedef struct {
   void *env;
   void (*drop_fn)(void *env);
   vira_actor_ctx *actor; // target actor for actor messages (NULL for plain async tasks)
+  // Target's wait-for slot + 1 (0 = none), copied when the message is sent. A waiter must not
+  // read it from `actor` later: once the message has run, the actor may already be destroyed
+  // (its owner, or the last Ref sender, no longer has to wait for anyone).
+  uint32_t target_wf;
 } vira_future;
 
 // Pushes a task onto a worker deque and returns immediately (non-blocking)
@@ -1575,20 +1771,21 @@ static inline bool _vira_future_detach_if_self(vira_future *f) {
  * and the message has not started yet, the message is converted into a detached send (it still
  * runs later and the drain loop frees its envelope) and the wait is abandoned.
  * @param task The message being waited on.
- * @param target The actor the message was sent to.
+ * @param target_wf1 The target actor's wait-for slot + 1 (0 = not an actor message).
  * @return True if the wait was abandoned because of a deadlock; the caller must then treat the
  * envelope as no longer its own.
  */
-static inline bool vira_actor_await_msg(vira_task *task, const vira_actor_ctx *target) {
+static inline bool vira_actor_await_msg(vira_task *task, uint32_t target_wf1) {
   vira_actor_ctx *me = (_vira_tls_actor != NULL && _vira_tls_actor->in_actor) ? _vira_tls_actor : NULL;
-  if (task == NULL || me == NULL || target == NULL || me->wf_slot == VIRA_WF_NONE ||
-      target->wf_slot == VIRA_WF_NONE || _vira_tls_wf_depth >= VIRA_WF_STACK) {
+  uint32_t target_wf = target_wf1 - 1; // VIRA_WF_NONE when target_wf1 == 0
+  if (task == NULL || me == NULL || target_wf1 == 0 || me->wf_slot == VIRA_WF_NONE ||
+      target_wf == VIRA_WF_NONE || _vira_tls_wf_depth >= VIRA_WF_STACK) {
     vira_scheduler_await(task);
     return false;
   }
   _vira_wf_slot *my_slot = _vira_wf_at(me->wf_slot);
   uint64_t seq = (__atomic_load_n(&my_slot->edge, __ATOMIC_RELAXED) >> 32) + 1;
-  __atomic_store_n(&my_slot->edge, (seq << 32) | ((uint64_t)target->wf_slot + 1), __ATOMIC_SEQ_CST);
+  __atomic_store_n(&my_slot->edge, (seq << 32) | ((uint64_t)target_wf + 1), __ATOMIC_SEQ_CST);
   _vira_tls_wf_stack[_vira_tls_wf_depth++] = me->wf_slot;
 
   _vira_wf_hop prev[VIRA_WF_MAX_HOPS];
@@ -1604,7 +1801,7 @@ static inline bool vira_actor_await_msg(vira_task *task, const vira_actor_ctx *t
       break;
     if ((iter++ & 255u) == 0) {
       int32_t cur_n = 0;
-      if (_vira_wf_walk(target->wf_slot, cur, &cur_n)) {
+      if (_vira_wf_walk(target_wf, cur, &cur_n)) {
         if (prev_n == cur_n && memcmp(prev, cur, sizeof(_vira_wf_hop) * (size_t)cur_n) == 0) {
           int32_t expected = 0;
           if (__atomic_compare_exchange_n(&task->done, &expected, VIRA_TASK_DETACHED, false,
@@ -1644,7 +1841,7 @@ static inline bool vira_actor_await_msg(vira_task *task, const vira_actor_ctx *t
  * belongs to the drain loop.
  */
 static inline bool _vira_future_wait_or_detach(vira_future *f) {
-  if (vira_actor_await_msg(f->task, f->actor)) {
+  if (vira_actor_await_msg(f->task, f->target_wf)) {
     f->env = NULL;
     f->task = NULL;
     f->drop_fn = NULL;

@@ -1,0 +1,27 @@
+module main
+
+pub actor Worker {
+mut:
+	n int = 0
+}
+
+pub fn (mut w Worker) bump() int {
+	w.n += 1
+	return w.n
+}
+
+struct Plain {
+	x int
+}
+
+fn main() {
+	mut w := Worker{}
+	r := w.ref()
+	_ := r.bump() // ERROR: cannot call 'bump()' directly on 'Ref[Worker]'
+	_ := r <- nope() or { 0 } // ERROR: method 'nope' not found on actor 'Worker'
+	bad := Ref[Plain]{} // ERROR: Ref[T] needs an actor type
+	_ := bad
+	_ := Ref[Worker]{ n: 1 } // ERROR: takes no fields
+	ok := r <- bump() or { 0 }
+	_ := ok
+}

@@ -429,6 +429,12 @@ func (c *Checker) unify(te ast.TypeExpr, t Type, params map[string]bool, bind ma
 			bind[x.Name.Name] = t
 			return ""
 		}
+		if x.Name.Name == "Ref" && len(x.TypeParams) == 1 {
+			// Ref[Actor[T...]]: unify the actor inside the reference.
+			if rt, ok := t.(*ActorRefType); ok {
+				return c.unify(x.TypeParams[0], rt.Actor, params, bind)
+			}
+		}
 		if len(x.TypeParams) > 0 {
 			if st, ok := t.(*StructType); ok {
 				if info := c.generics.InstanceArgs[st]; info != nil && info.Template == x.Name.Name && len(info.Args) == len(x.TypeParams) {

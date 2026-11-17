@@ -2,9 +2,9 @@
 # Each test mirrors the same-named test in actors.vir: same message pattern, counts
 # and self-check. Raw processes with send/receive are used (the fastest BEAM path);
 # the chaos test uses a GenServer under a Supervisor, the OTP way to restart.
-# Two extra Elixir-only tests show the BEAM's native patterns:
-#   ring_native_hops  each process forwards the token to its neighbour itself
-#   (Vira actors cannot hold each other, so its ring is driven by main)
+#   ring_native_hops  each process forwards the token to its neighbour itself (Vira: Ref[T])
+#   pubsub_mps        Registry.dispatch (the local pub/sub Phoenix.PubSub is built on) to 16
+#                     subscribers, 100,000 publishes (Vira: eventbus.Topic)
 #
 #   elixir --erl "+P 4000000 +S 4:4" actors.exs
 
@@ -168,6 +168,41 @@ defmodule B do
     el
   end
 
+  # --- Pub/sub: Registry with duplicate keys, dispatch in the publisher ------------
+  def wait_total(pid, want) do
+    if total(pid) < want, do: (Process.sleep(1); wait_total(pid, want)), else: :ok
+  end
+
+  def subscriber(parent) do
+    Registry.register(BenchBus, "bench", nil)
+    send(parent, :subscribed)
+    sink(0)
+  end
+
+  def bench_pubsub(consumers, msgs) do
+    {:ok, reg} = Registry.start_link(keys: :duplicate, name: BenchBus,
+                                     partitions: System.schedulers_online())
+    me = self()
+    subs = for _ <- 1..consumers, do: spawn(fn -> subscriber(me) end)
+    for _ <- subs, do: (receive do :subscribed -> :ok end)
+    t0 = now()
+    pub_loop(msgs)
+    Enum.each(subs, &wait_total(&1, msgs))
+    el = now() - t0
+    Enum.each(subs, &send(&1, :stop))
+    Process.unlink(reg)
+    Process.exit(reg, :shutdown)
+    el
+  end
+
+  defp pub_loop(0), do: :ok
+  defp pub_loop(n) do
+    Registry.dispatch(BenchBus, "bench", fn entries ->
+      for {pid, _} <- entries, do: send(pid, {:hit, 1})
+    end)
+    pub_loop(n - 1)
+  end
+
   # --- Spawn: create, one message, process exits -----------------------------------
   def bench_spawn(n) do
     t0 = now()
@@ -285,6 +320,9 @@ ring_size = 1000
 laps = 1000
 r = B.bench_ring(ring_size, laps)
 rn = B.bench_ring_native(ring_size, laps)
+ps_consumers = 16
+ps_msgs = 100_000
+ps = B.bench_pubsub(ps_consumers, ps_msgs)
 spawn_n = 100_000
 sp = B.bench_spawn(spawn_n)
 ms = B.bench_mass(100_000, 10)
@@ -303,6 +341,7 @@ IO.puts(
   "BENCH send1_mps=#{div(n * 1_000_000, s1)} sendN_mps=#{div(n * 1_000_000, sn)}" <>
     " reqrep_ns=#{div(rr * 1000, rr_n)} fanout_rps=#{div(fan_rounds * 4 * 1_000_000, fo)}" <>
     " ring_hops=#{div(ring_size * laps * 1_000_000, r)} ring_native_hops=#{div(ring_size * laps * 1_000_000, rn)}" <>
+    " pubsub_mps=#{div(ps_consumers * ps_msgs * 1_000_000, ps)}" <>
     " spawn_ns=#{div(sp * 1000, spawn_n)} mass_ms=#{div(ms, 1000)} chaos_us=#{ch}" <>
     " par_seq_us=#{seq_us} par_us=#{par_us} par_x100=#{div(seq_us * 100, par_us)} crunch_sum=#{sum_par}"
 )

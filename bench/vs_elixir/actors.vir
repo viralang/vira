@@ -8,6 +8,9 @@ module vs_elixir_actors
 //   reqrep_ns     200,000 synchronous request/reply round trips to one actor (ns each)
 //   fanout_rps    20,000 rounds: 4 async requests to 4 actors, await all 4 (replies/s)
 //   ring_hops     ring of 1,000 actors, token driven by main for 1,000 laps (hops/s)
+//   ring_native_hops  the same ring, but each actor forwards the token to its neighbour
+//                 itself through a Ref[Hop] (hops/s)
+//   pubsub_mps    eventbus.Topic with 16 consumers, 100,000 publishes (deliveries/s)
 //   spawn_ns      create 100,000 actors, one message each, drop (ns per actor)
 //   mass_ms       100,000 live actors x 10 messages, then a sync drain of each (ms)
 //   chaos_us      5,000 sync jobs to one supervised actor, 1 in 7 panics + restart
@@ -16,6 +19,7 @@ module vs_elixir_actors
 //   par_x100      speedup (seq / par) x 100
 
 import os
+import eventbus
 
 pub actor Sink {
 mut:
@@ -44,6 +48,25 @@ mut:
 pub fn (mut h Hop) pass(left int) int {
 	h.seen = h.seen + 1
 	return left - 1
+}
+
+pub actor RingHop {
+mut:
+	next Ref[RingHop]
+	seen int = 0
+}
+
+pub fn (mut h RingHop) link(n Ref[RingHop]) {
+	h.next = n
+}
+
+pub fn (mut h RingHop) pass(left int, done Ref[Sink]) {
+	h.seen = h.seen + 1
+	if left == 0 {
+		done <- hit(1)
+		return
+	}
+	h.next <- pass(left - 1, done)
 }
 
 pub actor Node {
@@ -180,6 +203,56 @@ fn bench_ring(size int, laps int) i64 {
 	return time_now_us() - t0
 }
 
+// wait_total polls a sink (sync call, then 1 ms sleep) until it has counted `want`.
+fn wait_total(mut s Sink, want int) {
+	mut got := 0
+	for got < want {
+		got = s <- total() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+fn bench_ring_native(size int, laps int) i64 {
+	mut ring := []RingHop{}
+	for mut i := 0; i < size; i = i + 1 {
+		ring.push(RingHop{})
+	}
+	for mut i := 0; i < size; i = i + 1 {
+		nxt := ring[(i + 1) % size].ref()
+		_ := ring[i] <- link(nxt) or { false }
+	}
+	mut done := Sink{ count: 0 }
+	first := ring[0].ref()
+	t0 := time_now_us()
+	first <- pass(size * laps - 1, done.ref())
+	wait_total(mut done, 1)
+	return time_now_us() - t0
+}
+
+fn bench_pubsub(consumers int, msgs int) i64 {
+	mut topic := eventbus.Topic[int]{ name: 'bench' }
+	bus := topic.ref()
+	mut sinks := []Sink{}
+	for mut i := 0; i < consumers; i = i + 1 {
+		sinks.push(Sink{ count: 0 })
+		r := sinks[i].ref()
+		_ := bus <- consumer(fn (v int) bool {
+			r <- hit(v)
+			return r.alive()
+		}) or { 0 }
+	}
+	t0 := time_now_us()
+	for mut m := 0; m < msgs; m = m + 1 {
+		bus <- publish(1)
+	}
+	for mut i := 0; i < consumers; i = i + 1 {
+		wait_total(mut sinks[i], msgs)
+	}
+	return time_now_us() - t0
+}
+
 fn bench_spawn(n int) i64 {
 	t0 := time_now_us()
 	for mut i := 0; i < n; i = i + 1 {
@@ -262,6 +335,10 @@ fn main() {
 	ring_size := 1000
 	laps := 1000
 	r := bench_ring(ring_size, laps)
+	rn := bench_ring_native(ring_size, laps)
+	ps_consumers := 16
+	ps_msgs := 100000
+	ps := bench_pubsub(ps_consumers, ps_msgs)
 	spawn_n := 100000
 	sp := bench_spawn(spawn_n)
 	ms := bench_mass(100000, 10)
@@ -286,8 +363,10 @@ fn main() {
 	reqrep_ns := rr * 1000 / i64(rr_n)
 	fanout_rps := i64(fan_rounds * 4) * 1000000 / fo
 	ring_hops := i64(ring_size * laps) * 1000000 / r
+	ring_native_hops := i64(ring_size * laps) * 1000000 / rn
+	pubsub_mps := i64(ps_consumers * ps_msgs) * 1000000 / ps
 	spawn_ns := sp * 1000 / i64(spawn_n)
 	mass_ms := ms / 1000
 	par_x100 := seq_us * 100 / par_us
-	println('BENCH send1_mps=${send1_mps} sendN_mps=${sendn_mps} reqrep_ns=${reqrep_ns} fanout_rps=${fanout_rps} ring_hops=${ring_hops} spawn_ns=${spawn_ns} mass_ms=${mass_ms} chaos_us=${ch} par_seq_us=${seq_us} par_us=${par_us} par_x100=${par_x100} crunch_sum=${sum_par}')
+	println('BENCH send1_mps=${send1_mps} sendN_mps=${sendn_mps} reqrep_ns=${reqrep_ns} fanout_rps=${fanout_rps} ring_hops=${ring_hops} ring_native_hops=${ring_native_hops} pubsub_mps=${pubsub_mps} spawn_ns=${spawn_ns} mass_ms=${mass_ms} chaos_us=${ch} par_seq_us=${seq_us} par_us=${par_us} par_x100=${par_x100} crunch_sum=${sum_par}')
 }
