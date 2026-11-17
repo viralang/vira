@@ -9,8 +9,12 @@
     { "include": "#attributes" },
     { "include": "#modules" },
     { "include": "#imports" },
+    { "include": "#enum-block" },
     { "include": "#declarations" },
     { "include": "#quadrants" },
+    { "include": "#maps" },
+    { "include": "#generic-calls" },
+    { "include": "#enum-members" },
     { "include": "#keywords" },
     { "include": "#constants" },
     { "include": "#gui" },
@@ -101,17 +105,24 @@
       "patterns": [
         {
           "name": "meta.function.static.vira",
-          "match": "\\b(pub\\s+)?(fn)\\s+([A-Z][a-zA-Z0-9_]*)\\.([a-zA-Z0-9_]+)\\s*(?=\\()",
+          "match": "\\b(pub\\s+)?(fn)\\s+([A-Z][a-zA-Z0-9_]*)(?:(\\[)([^\\]]*)(\\]))?\\.([a-zA-Z0-9_]+)\\s*(?=\\()",
           "captures": {
             "1": { "name": "storage.modifier.pub.vira" },
             "2": { "name": "keyword.declaration.function.vira" },
             "3": { "name": "entity.name.type.vira" },
-            "4": { "name": "entity.name.function.member.static.vira" }
+            "4": { "name": "punctuation.definition.typeparameters.begin.vira" },
+            "5": {
+              "patterns": [
+                { "include": "#type-params" }
+              ]
+            },
+            "6": { "name": "punctuation.definition.typeparameters.end.vira" },
+            "7": { "name": "entity.name.function.member.static.vira" }
           }
         },
         {
           "name": "meta.function.receiver.vira",
-          "match": "\\b(pub\\s+)?(fn)\\s*(\\()\\s*(mut\\s+)?([a-zA-Z0-9_]+)\\s+(&)?([A-Z][a-zA-Z0-9_]*)\\s*(\\))\\s*([a-zA-Z0-9_]+)\\s*(?=\\()",
+          "match": "\\b(pub\\s+)?(fn)\\s*(\\()\\s*(mut\\s+)?([a-zA-Z0-9_]+)\\s+(&)?([A-Z][a-zA-Z0-9_]*)(?:(\\[)([^\\]]*)(\\]))?\\s*(\\))\\s*([a-zA-Z0-9_]+)\\s*(?=\\()",
           "captures": {
             "1": { "name": "storage.modifier.pub.vira" },
             "2": { "name": "keyword.declaration.function.vira" },
@@ -120,26 +131,54 @@
             "5": { "name": "variable.parameter.receiver.vira" },
             "6": { "name": "keyword.operator.reference.vira" },
             "7": { "name": "entity.name.type.vira" },
-            "8": { "name": "punctuation.definition.parameters.end.vira" },
-            "9": { "name": "entity.name.function.member.vira" }
+            "8": { "name": "punctuation.definition.typeparameters.begin.vira" },
+            "9": {
+              "patterns": [
+                { "include": "#type-params" }
+              ]
+            },
+            "10": { "name": "punctuation.definition.typeparameters.end.vira" },
+            "11": { "name": "punctuation.definition.parameters.end.vira" },
+            "12": { "name": "entity.name.function.member.vira" }
           }
         },
         {
           "name": "meta.function.top.vira",
-          "match": "\\b(pub\\s+)?(fn)\\s+([a-zA-Z0-9_]+)\\s*(?=\\()",
+          "match": "\\b(pub\\s+)?(fn)\\s+([a-zA-Z0-9_]+)\\s*(?:(\\[)([^\\]]*)(\\]))?\\s*(?=\\()",
           "captures": {
             "1": { "name": "storage.modifier.pub.vira" },
             "2": { "name": "keyword.declaration.function.vira" },
-            "3": { "name": "entity.name.function.declaration.vira" }
+            "3": { "name": "entity.name.function.declaration.vira" },
+            "4": { "name": "punctuation.definition.typeparameters.begin.vira" },
+            "5": {
+              "patterns": [
+                { "include": "#type-params" }
+              ]
+            },
+            "6": { "name": "punctuation.definition.typeparameters.end.vira" }
+          }
+        },
+        {
+          "name": "meta.function.anonymous.vira",
+          "match": "\\b(fn)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.vira" }
           }
         },
         {
           "name": "meta.type.declaration.vira",
-          "match": "\\b(pub\\s+)?(struct|interface|actor|enum|type)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
+          "match": "\\b(pub\\s+)?(struct|interface|actor|type)\\s+([A-Z][a-zA-Z0-9_]*)(?:(\\[)([^\\]]*)(\\]))?",
           "captures": {
             "1": { "name": "storage.modifier.pub.vira" },
             "2": { "name": "keyword.declaration.type.vira" },
-            "3": { "name": "entity.name.type.class.vira" }
+            "3": { "name": "entity.name.type.class.vira" },
+            "4": { "name": "punctuation.definition.typeparameters.begin.vira" },
+            "5": {
+              "patterns": [
+                { "include": "#type-params" }
+              ]
+            },
+            "6": { "name": "punctuation.definition.typeparameters.end.vira" }
           }
         }
       ]
@@ -292,7 +331,7 @@
         },
         {
           "name": "meta.call.func.qualified.vira",
-          "match": "\\b([a-zA-Z0-9_]+)\\.([a-z_][a-zA-Z0-9_]*)\\b(?=\\s*\\()",
+          "match": "\\b([a-zA-Z0-9_]+)\\.(?!(?:push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|gpu_linear|gpu_matmul|copy_row|slice_rows|data_ptr|await|has|delete|keys|values)\\b)([a-z_][a-zA-Z0-9_]*)\\b(?=\\s*\\()",
           "captures": {
             "1": { "name": "entity.name.namespace.vira" },
             "2": { "name": "entity.name.function.call.vira" }
@@ -320,7 +359,7 @@
       "patterns": [
         {
           "name": "support.function.method.collection.vira",
-          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|gpu_linear|gpu_matmul|copy_row|slice_rows|data_ptr|await)\\b(?=\\s*\\()"
+          "match": "(?<=\\.)(push|append|pop|get|set|clear|clone|contains|is_empty|to_string|to_str|index_of|last_index_of|substr|slice|starts_with|ends_with|split|replace|repeat|lines|byte_at|trim|trim_left|trim_right|to_lower|to_upper|to_int|to_i64|to_f64|to_f32|bytes|to_bytes|numel|dim|stride|reshape_2d|reshape_3d|reshape_4d|transpose|linear|gpu_linear|gpu_matmul|copy_row|slice_rows|data_ptr|await|has|delete|keys|values)\\b(?=\\s*\\()"
         },
         {
           "name": "support.variable.property.collection.vira",
@@ -491,6 +530,125 @@
         {
           "name": "entity.name.function.call.vira",
           "match": "\\b([a-zA-Z0-9_]+)\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "type-params": {
+      "patterns": [
+        {
+          "name": "entity.name.type.parameter.vira",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.comma.vira",
+          "match": ","
+        }
+      ]
+    },
+    "type-args": {
+      "patterns": [
+        { "include": "#maps" },
+        { "include": "#types" },
+        {
+          "name": "punctuation.separator.comma.vira",
+          "match": ","
+        }
+      ]
+    },
+    "enum-block": {
+      "patterns": [
+        {
+          "name": "meta.enum.vira",
+          "begin": "\\b(pub\\s+)?(enum)\\s+([A-Z][a-zA-Z0-9_]*)\\s*(\\{)",
+          "beginCaptures": {
+            "1": { "name": "storage.modifier.pub.vira" },
+            "2": { "name": "keyword.declaration.type.vira" },
+            "3": { "name": "entity.name.type.enum.vira" },
+            "4": { "name": "punctuation.definition.block.begin.vira" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.block.end.vira" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#numbers" },
+            {
+              "name": "keyword.operator.assignment.vira",
+              "match": "="
+            },
+            {
+              "name": "keyword.operator.arithmetic.vira",
+              "match": "-"
+            },
+            {
+              "name": "punctuation.separator.comma.vira",
+              "match": ","
+            },
+            {
+              "name": "variable.other.enummember.vira",
+              "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "enum-members": {
+      "patterns": [
+        {
+          "name": "meta.enum.member.qualified.vira",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\.([A-Z][a-zA-Z0-9_]*)\\.([a-z_][a-zA-Z0-9_]*)\\b(?!\\s*[\\(\\[])",
+          "captures": {
+            "1": { "name": "entity.name.namespace.vira" },
+            "2": { "name": "entity.name.type.enum.vira" },
+            "3": { "name": "variable.other.enummember.vira" }
+          }
+        },
+        {
+          "name": "meta.enum.member.vira",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\.([a-z_][a-zA-Z0-9_]*)\\b(?!\\s*[\\(\\[])",
+          "captures": {
+            "1": { "name": "entity.name.type.enum.vira" },
+            "2": { "name": "variable.other.enummember.vira" }
+          }
+        }
+      ]
+    },
+    "maps": {
+      "patterns": [
+        {
+          "name": "meta.type.map.vira",
+          "match": "\\b(map)(\\[)",
+          "captures": {
+            "1": { "name": "storage.type.map.vira" },
+            "2": { "name": "punctuation.bracket.square.vira" }
+          }
+        }
+      ]
+    },
+    "generic-calls": {
+      "patterns": [
+        {
+          "name": "meta.function-call.generic.vira",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\[)((?:\\s*(?:[a-z_][a-zA-Z0-9_]*\\.)?(?:[A-Z][a-zA-Z0-9_]*|u8|byte|int|i64|f32|f16|bf16|f64|bool|string|void)\\s*,?)+)(\\])(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.vira" },
+            "2": { "name": "punctuation.definition.typeparameters.begin.vira" },
+            "3": {
+              "patterns": [
+                { "include": "#type-args" }
+              ]
+            },
+            "4": { "name": "punctuation.definition.typeparameters.end.vira" }
+          }
+        },
+        {
+          "name": "meta.type.generic.vira",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)(\\[)(?=[^\\]]*\\]\\s*[\\.{])",
+          "captures": {
+            "1": { "name": "entity.name.type.generic.vira" },
+            "2": { "name": "punctuation.definition.typeparameters.begin.vira" }
+          }
         }
       ]
     }

@@ -312,5 +312,92 @@
       "}"
     ],
     "description": "Load GGUF v2/v3 tensor and run SIMD linear projection in an arena"
+  },
+  "Enum Declaration": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "\t${2:first}",
+      "\t${3:second}",
+      "}",
+      "$0"
+    ],
+    "description": "Enum: named int32 values (Name.first), usable in switch, maps and interpolation"
+  },
+  "Map Literal": {
+    "prefix": "map",
+    "body": [
+      "mut ${1:m} := map[${2:string}]${3:int}{${4}}",
+      "$0"
+    ],
+    "description": "Map literal map[K]V{} (keys: string, integer types, bool, enums)"
+  },
+  "Map Iteration": {
+    "prefix": "forkv",
+    "body": [
+      "for ${1:key}, ${2:value} in ${3:m} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Iterate over a map's keys and values in insertion order"
+  },
+  "Map Has / Delete": {
+    "prefix": "mapdel",
+    "body": [
+      "if ${1:m}.has(${2:key}) {",
+      "\t${1:m}.delete(${2:key})",
+      "}",
+      "$0"
+    ],
+    "description": "Check for a key and remove it"
+  },
+  "Anonymous Function": {
+    "prefix": "lambda",
+    "body": [
+      "fn (${1:x} ${2:int}) ${3:int} {",
+      "\treturn ${4:x}",
+      "}$0"
+    ],
+    "description": "Anonymous function (closure); captures outer variables by value"
+  },
+  "Closure Factory": {
+    "prefix": "fnret",
+    "body": [
+      "fn ${1:make_adder}(${2:n} ${3:int}) fn (${4:int}) ${5:int} {",
+      "\treturn fn (${6:x} ${4:int}) ${5:int} {",
+      "\t\treturn ${6:x} + ${2:n}",
+      "\t}",
+      "}",
+      "$0"
+    ],
+    "description": "Function returning a closure"
+  },
+  "Generic Function": {
+    "prefix": "fngen",
+    "body": [
+      "fn ${1:name}[${2:T}](${3:xs} []${2:T}) ${4:${2:T}} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Generic function; type arguments are inferred at the call (or name[int](...))"
+  },
+  "Generic Struct": {
+    "prefix": "structgen",
+    "body": [
+      "struct ${1:Box}[${2:T}] {",
+      "pub mut:",
+      "\t${3:value} ${2:T}",
+      "}",
+      "",
+      "fn ${1:Box}[${2:T}].new(${4:v} ${2:T}) ${1:Box}[${2:T}] {",
+      "\treturn ${1:Box}[${2:T}]{ ${3:value}: ${4:v} }",
+      "}",
+      "",
+      "fn (${5:b} ${1:Box}[${2:T}]) ${6:get}() ${2:T} {",
+      "\treturn ${5:b}.${3:value}",
+      "}",
+      "$0"
+    ],
+    "description": "Generic struct with a static constructor and a method"
   }
 }
