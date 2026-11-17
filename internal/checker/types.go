@@ -402,3 +402,107 @@ func (i *InterfaceType) Equals(other Type) bool {
 	o, ok := other.(*InterfaceType)
 	return ok && i.Module == o.Module && i.Name == o.Name
 }
+
+// EnumType models `enum Color { red green blue }`: a named set of integer constants.
+type EnumType struct {
+	Module   string
+	Name     string
+	IsPub    bool
+	Variants []string
+	Values   []int64
+	Span     token.Span
+}
+
+func (e *EnumType) String() string {
+	if e.Module != "" && e.Module != "main" {
+		return e.Module + "." + e.Name
+	}
+	return e.Name
+}
+
+func (e *EnumType) Equals(other Type) bool {
+	o, ok := other.(*EnumType)
+	return ok && e.Module == o.Module && e.Name == o.Name
+}
+
+// VariantIndex returns the position of a variant, or -1.
+func (e *EnumType) VariantIndex(name string) int {
+	for i, v := range e.Variants {
+		if v == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnumValueRef records that an expression (`Color.red`) names one enum variant.
+type EnumValueRef struct {
+	Enum    *EnumType
+	Variant string
+	Value   int64
+}
+
+// MapType represents `map[K]V`: K is a string, an integer type, bool or an enum.
+type MapType struct {
+	Key   Type
+	Value Type
+}
+
+func (m *MapType) String() string { return fmt.Sprintf("map[%s]%s", m.Key, m.Value) }
+
+func (m *MapType) Equals(other Type) bool {
+	o, ok := other.(*MapType)
+	return ok && ExactEquals(m.Key, o.Key) && ExactEquals(m.Value, o.Value)
+}
+
+// IsValidMapKey reports whether t can be a map key.
+func IsValidMapKey(t Type) bool {
+	switch v := t.(type) {
+	case *PrimitiveType:
+		return v.Kind == PrimString || v.Kind == PrimBool || IsIntLike(v.Kind)
+	case *EnumType:
+		return true
+	}
+	return false
+}
+
+// FnType represents a function value type `fn (int, string) bool`. Values of this type are
+// closures: a function plus the variables it captured.
+type FnType struct {
+	Params []Type
+	Return Type // TypeVoid for none
+}
+
+func (f *FnType) String() string {
+	var ps []string
+	for _, p := range f.Params {
+		ps = append(ps, p.String())
+	}
+	s := "fn (" + strings.Join(ps, ", ") + ")"
+	if f.Return != nil && !ExactEquals(f.Return, TypeVoid) {
+		s += " " + f.Return.String()
+	}
+	return s
+}
+
+func (f *FnType) Equals(other Type) bool {
+	o, ok := other.(*FnType)
+	if !ok || len(o.Params) != len(f.Params) {
+		return false
+	}
+	for i := range f.Params {
+		if !ExactEquals(f.Params[i], o.Params[i]) {
+			return false
+		}
+	}
+	return ExactEquals(f.Return, o.Return)
+}
+
+// ClosureInfo describes a lifted anonymous function.
+type ClosureInfo struct {
+	Lit     *ast.FnLitExpr
+	Sig     *FnSig // the lifted function: captures first, then the literal's parameters
+	NumCaps int
+	Module  string
+	FnType  *FnType
+}

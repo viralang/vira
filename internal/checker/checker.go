@@ -26,11 +26,20 @@ type VarSymbol struct {
 	// IsBorrowed marks bindings that do not own their value: parameters, receivers and
 	// `for x in xs` loop variables. An actor bound this way cannot be returned.
 	IsBorrowed bool
+	// IsCapture marks an outer variable seen from inside an anonymous function.
+	IsCapture bool
 }
 
 type Scope struct {
 	parent *Scope
 	vars   map[string]*VarSymbol
+
+	// A closure boundary: lookups that miss inside the closure continue in captureFrom.
+	// Every outer local found that way is recorded as a capture and seen as an immutable,
+	// borrowed copy.
+	captureFrom *Scope
+	captured    map[string]*VarSymbol
+	captureList []*VarSymbol // captured outer symbols, in first-use order
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -56,6 +65,19 @@ func (s *Scope) Lookup(name string) (*VarSymbol, bool) {
 		if sym, ok := cur.vars[name]; ok {
 			return sym, true
 		}
+		if cur.captureFrom != nil {
+			if sym, ok := cur.captured[name]; ok {
+				return sym, true
+			}
+			outer, ok := cur.captureFrom.Lookup(name)
+			if !ok {
+				return nil, false
+			}
+			cp := &VarSymbol{Name: outer.Name, Type: outer.Type, IsMut: false, Span: outer.Span, IsBorrowed: true, IsCapture: true}
+			cur.captured[name] = cp
+			cur.captureList = append(cur.captureList, outer)
+			return cp, true
+		}
 	}
 	return nil, false
 }
@@ -75,6 +97,7 @@ type ModuleScope struct {
 	Interfaces map[string]*InterfaceType
 	Functions  map[string]*FnSig
 	Consts     map[string]*ConstSymbol
+	Enums      map[string]*EnumType
 }
 
 func NewModuleScope(name string) *ModuleScope {
@@ -84,6 +107,7 @@ func NewModuleScope(name string) *ModuleScope {
 		Interfaces: make(map[string]*InterfaceType),
 		Functions:  make(map[string]*FnSig),
 		Consts:     make(map[string]*ConstSymbol),
+		Enums:      make(map[string]*EnumType),
 	}
 }
 
@@ -101,6 +125,16 @@ type Checker struct {
 	ExprTypes      map[ast.Expr]Type
 	SelectorPaths  map[*ast.SelectorExpr][]string // records embedded hop path (e.g. ["AuditMeta"])
 	ResolvedConsts map[ast.Expr]*ConstSymbol      // records resolved top-level constant references
+	EnumValues     map[ast.Expr]*EnumValueRef     // records `Color.red` variant references
+	Closures       map[*ast.FnLitExpr]*ClosureInfo
+	ClosureList    []*ClosureInfo
+	FnRefs         map[ast.Expr]*FnSig        // a named function used as a value
+	ClosureCalls   map[*ast.CallExpr]*FnType  // calls through a closure value
+	generics       genericsState
+	synthesized    []ast.Decl                 // lifted closures (and generic instances)
+	synthByFile    map[*ast.File][]ast.Decl
+	lambdaCounter  int
+	enums          map[string]*EnumType
 
 	// Function context during Pass 3
 	curFile         *ast.File
@@ -121,7 +155,14 @@ func New() *Checker {
 		ExprTypes:      make(map[ast.Expr]Type),
 		SelectorPaths:  make(map[*ast.SelectorExpr][]string),
 		ResolvedConsts: make(map[ast.Expr]*ConstSymbol),
+		EnumValues:     make(map[ast.Expr]*EnumValueRef),
+		Closures:       make(map[*ast.FnLitExpr]*ClosureInfo),
+		FnRefs:         make(map[ast.Expr]*FnSig),
+		ClosureCalls:   make(map[*ast.CallExpr]*FnType),
+		synthByFile:    make(map[*ast.File][]ast.Decl),
+		enums:          make(map[string]*EnumType),
 	}
+	c.generics.init()
 	c.registerBuiltins()
 	return c
 }
@@ -287,10 +328,14 @@ func (c *Checker) checkCName(id ast.Ident, what string) {
 }
 
 func (c *Checker) errorf(span token.Span, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if c.generics.instCtx != "" {
+		msg += " (in " + c.generics.instCtx + ")"
+	}
 	c.errors = append(c.errors, SemanticError{
 		File: c.curFile,
 		Span: span,
-		Msg:  fmt.Sprintf(format, args...),
+		Msg:  msg,
 	})
 }
 
@@ -440,15 +485,15 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: &ResultType{Inner: TypeString},
 	}
 	c.functions["write_file"] = &FnSig{
-		Name:   "write_file",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
+		Name:       "write_file",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
 		ReturnType: &ResultType{Inner: TypeBool},
 	}
 	c.functions["append_file"] = &FnSig{
-		Name:   "append_file",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
+		Name:       "append_file",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "content", Type: TypeString}},
 		ReturnType: &ResultType{Inner: TypeBool},
 	}
 	c.functions["remove_file"] = &FnSig{
@@ -490,37 +535,37 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: TypeVoid,
 	}
 	c.functions["http_response"] = &FnSig{
-		Name:   "http_response",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "status", Type: TypeInt}, {Name: "content_type", Type: TypeString}, {Name: "body", Type: TypeString}},
+		Name:       "http_response",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "status", Type: TypeInt}, {Name: "content_type", Type: TypeString}, {Name: "body", Type: TypeString}},
 		ReturnType: TypeString,
 	}
 
 	// Option 1: JSON Parser Primitives
 	c.functions["json_get_str"] = &FnSig{
-		Name:   "json_get_str",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_str",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeString,
 	}
 	c.functions["json_get_int"] = &FnSig{
-		Name:   "json_get_int",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_int",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeI64,
 	}
 	c.functions["json_get_f32"] = &FnSig{
-		Name:   "json_get_f32",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
+		Name:       "json_get_f32",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "json", Type: TypeString}, {Name: "key", Type: TypeString}},
 		ReturnType: TypeF32,
 	}
 
 	// Option 3: SafeTensors Zero-Copy Loader
 	c.functions["safetensors_load"] = &FnSig{
-		Name:   "safetensors_load",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
+		Name:       "safetensors_load",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "path", Type: TypeString}, {Name: "tensor_name", Type: TypeString}},
 		ReturnType: &ResultType{Inner: &TensorType{DType: TypeF32}},
 	}
 
@@ -550,9 +595,9 @@ func (c *Checker) registerBuiltins() {
 		ReturnType: &TensorType{DType: TypeF32},
 	}
 	c.functions["tensor_sgd_step"] = &FnSig{
-		Name:   "tensor_sgd_step",
-		IsPub:  true,
-		Params: []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
+		Name:       "tensor_sgd_step",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "param", Type: &TensorType{DType: TypeF32}, IsMut: true}, {Name: "grad", Type: &TensorType{DType: TypeF32}}, {Name: "lr", Type: TypeF32}},
 		ReturnType: TypeVoid,
 	}
 
@@ -1310,6 +1355,10 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				if dMod == "" {
 					dMod = modName
 				}
+				if len(d.TypeParams) > 0 {
+					c.registerGenericStruct(d, file, dMod)
+					continue
+				}
 				dScope := c.getOrCreateModule(dMod)
 				st := &StructType{
 					Module:          dMod,
@@ -1347,9 +1396,14 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 				if _, exists := c.interfaces[d.Name.Name]; !exists || dMod == "main" {
 					c.interfaces[d.Name.Name] = iface
 				}
+			case *ast.EnumDecl:
+				c.registerEnum(d, modName)
 			}
 		}
 	}
+
+	// Pass 1A.5: Generic function templates and the methods of generic structs
+	c.collectGenericTemplates(files)
 
 	// Pass 1B: Resolve struct fields, embeds, interface members, and function/method headers
 	for _, file := range files {
@@ -1362,6 +1416,9 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
+			if c.generics.templates[decl] {
+				continue
+			}
 			savedMod := c.currentMod
 			if d, ok := decl.(*ast.StructDecl); ok && d.Module != "" {
 				c.currentMod = d.Module
@@ -1415,6 +1472,9 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		c.SetFileImports(file.Imports)
 
 		for _, decl := range file.Decls {
+			if c.generics.templates[decl] {
+				continue
+			}
 			if fn, ok := decl.(*ast.FnDecl); ok {
 				savedMod := c.currentMod
 				if fn.Module != "" {
@@ -1426,6 +1486,22 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 		}
 	}
 
+	// Generic instances whose bodies were not checked yet (created while checking others).
+	c.checkPendingInstances()
+
+	// Declarations the checker created (lifted closures, generic instances) become part of
+	// the file they came from, so autofree and codegen see them like written code. Generic
+	// templates are dropped: only their instances are compiled.
+	for _, file := range files {
+		kept := file.Decls[:0:0]
+		for _, d := range file.Decls {
+			if !c.generics.templates[d] {
+				kept = append(kept, d)
+			}
+		}
+		file.Decls = append(kept, c.synthByFile[file]...)
+	}
+
 	// Reset currentMod to root file's module so c.ModuleName() reports the primary module
 	rootMod := "main"
 	if len(files) > 0 && files[0].Module.Name != "" {
@@ -1435,6 +1511,303 @@ func (c *Checker) CheckFiles(files []*ast.File) {
 }
 
 // --- PASS 1: HEADER & MEMBER REGISTRATION ---
+
+// lookupPlainFunction finds a free function (not a method, builtin, extern or intrinsic) by name.
+func (c *Checker) lookupPlainFunction(mod string, name string) *FnSig {
+	var sig *FnSig
+	if ms, ok := c.modules[mod]; ok {
+		sig = ms.Functions[name]
+	}
+	if sig == nil && (mod == "main" || mod == "") {
+		sig = c.functions[name]
+	}
+	if sig == nil || sig.HasReceiver || sig.IsExtern || sig.Intrinsic != "" || sig.Module == "" {
+		return nil
+	}
+	return sig
+}
+
+// fnRefType records a named function used as a value and returns its function type.
+func (c *Checker) fnRefType(e ast.Expr, sig *FnSig) *FnType {
+	if sig == nil {
+		return nil
+	}
+	ft := &FnType{Return: sig.ReturnType}
+	if ft.Return == nil {
+		ft.Return = TypeVoid
+	}
+	for _, p := range sig.Params {
+		if p.IsMut {
+			c.errorf(e.Span(), "function '%s' has a 'mut' parameter and cannot be used as a value", sig.Name)
+			return ft
+		}
+		ft.Params = append(ft.Params, p.Type)
+	}
+	c.FnRefs[e] = sig
+	return ft
+}
+
+// checkFnLit type-checks an anonymous function and lifts it to a top-level function whose
+// leading parameters are the outer variables it captures (by value, read-only).
+func (c *Checker) checkFnLit(e *ast.FnLitExpr, scope *Scope) Type {
+	ft := &FnType{Return: TypeVoid}
+	if e.ReturnType != nil {
+		ft.Return = c.resolveTypeExpr(e.ReturnType)
+	}
+	boundary := &Scope{vars: make(map[string]*VarSymbol), captureFrom: scope, captured: make(map[string]*VarSymbol)}
+	var params []ParamInfo
+	for _, p := range e.Params {
+		if p.IsMut {
+			c.errorf(p.ParamSpan, "parameters of an anonymous function cannot be 'mut'")
+		}
+		c.checkCName(p.Name, "parameter")
+		pt := c.resolveTypeExpr(p.Type)
+		ft.Params = append(ft.Params, pt)
+		params = append(params, ParamInfo{Name: p.Name.Name, Type: pt})
+		boundary.Define(&VarSymbol{Name: p.Name.Name, Type: pt, Span: p.ParamSpan, IsBorrowed: true})
+	}
+
+	prevRet, prevActor := c.curFnReturn, c.curActor
+	c.curFnReturn, c.curActor = ft.Return, nil
+	c.checkBlock(e.Body, NewScope(boundary))
+	c.curFnReturn, c.curActor = prevRet, prevActor
+
+	c.lambdaCounter++
+	name := fmt.Sprintf("_lambda_%d", c.lambdaCounter)
+	var capParams []ParamInfo
+	var astParams []ast.Param
+	for _, sym := range boundary.captureList {
+		if st, ok := sym.Type.(*StructType); ok && st.IsActor {
+			c.errorf(e.LitSpan, "an anonymous function cannot capture actor '%s': an actor has a single owner; pass it as an argument instead", sym.Name)
+		}
+		capParams = append(capParams, ParamInfo{Name: sym.Name, Type: sym.Type})
+		e.Captures = append(e.Captures, sym.Name)
+	}
+	allParams := append(append([]ParamInfo{}, capParams...), params...)
+	for _, p := range allParams {
+		astParams = append(astParams, ast.Param{
+			Name: ast.Ident{Name: p.Name, NamePos: e.LitSpan},
+			Type: &ast.ResolvedType{Type: p.Type, Pos: e.LitSpan},
+		})
+	}
+	sig := &FnSig{Module: c.currentMod, Name: name, Params: allParams, ReturnType: ft.Return, Span: e.LitSpan}
+	c.getOrCreateModule(c.currentMod).Functions[name] = sig
+	var retExpr ast.TypeExpr
+	if !ExactEquals(ft.Return, TypeVoid) {
+		retExpr = &ast.ResolvedType{Type: ft.Return, Pos: e.LitSpan}
+	}
+	decl := &ast.FnDecl{
+		Module:     c.currentMod,
+		Name:       ast.Ident{Name: name, NamePos: e.LitSpan},
+		Params:     astParams,
+		ReturnType: retExpr,
+		Body:       e.Body,
+		DeclSpan:   e.LitSpan,
+	}
+	e.LiftedName = name
+	info := &ClosureInfo{Lit: e, Sig: sig, NumCaps: len(capParams), Module: c.currentMod, FnType: ft}
+	c.Closures[e] = info
+	c.ClosureList = append(c.ClosureList, info)
+	c.synthesized = append(c.synthesized, decl)
+	c.synthByFile[c.curFile] = append(c.synthByFile[c.curFile], decl)
+	return ft
+}
+
+// closureCallee reports a call through a closure value: a local variable, a struct field, an
+// element or any other expression of function type (but not a named function or method).
+func (c *Checker) closureCallee(call *ast.CallExpr, scope *Scope) *FnType {
+	switch callee := call.Callee.(type) {
+	case *ast.IdentExpr:
+		sym, ok := scope.Lookup(callee.Ident.Name)
+		if !ok {
+			return nil
+		}
+		ft, _ := sym.Type.(*FnType)
+		if ft != nil {
+			c.ExprTypes[callee] = ft
+		}
+		return ft
+	case *ast.SelectorExpr:
+		if callee.IsActorSend {
+			return nil
+		}
+		// A chain rooted at a module or type name (`io.copy()`, `net.TcpStream.connect()`)
+		// is a qualified function or static method, never a closure.
+		root := callee.Left
+		for {
+			if sel, ok := root.(*ast.SelectorExpr); ok {
+				root = sel.Left
+				continue
+			}
+			if idx, ok := root.(*ast.IndexExpr); ok {
+				root = idx.Left
+				continue
+			}
+			break
+		}
+		if id, ok := root.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(id.Ident.Name); !inScope {
+				return nil
+			}
+		}
+		lt := c.checkExpr(callee.Left, scope)
+		st, ok := lt.(*StructType)
+		if !ok {
+			return nil
+		}
+		if m, _, _ := st.LookupMethod(callee.Field.Name); m != nil {
+			return nil
+		}
+		f, _, _ := st.LookupField(callee.Field.Name)
+		if f == nil {
+			return nil
+		}
+		ft, _ := f.Type.(*FnType)
+		if ft != nil {
+			c.checkExpr(callee, scope)
+		}
+		return ft
+	default:
+		ft, _ := c.checkExpr(call.Callee, scope).(*FnType)
+		return ft
+	}
+}
+
+// SynthesizedDecls returns the declarations the checker created: lifted closures and
+// generic instances. CheckFiles also appends them to the file each came from.
+func (c *Checker) SynthesizedDecls() []ast.Decl {
+	return c.synthesized
+}
+
+// registerEnum records an enum and computes its variant values: each variant is one more
+// than the previous one (starting at 0) unless it gives an explicit constant integer.
+func (c *Checker) registerEnum(d *ast.EnumDecl, fileMod string) {
+	dMod := d.Module
+	if dMod == "" {
+		dMod = fileMod
+	}
+	scope := c.getOrCreateModule(dMod)
+	if _, dup := scope.Enums[d.Name.Name]; dup {
+		c.errorf(d.Name.NamePos, "enum '%s' is declared more than once", d.Name.Name)
+		return
+	}
+	et := &EnumType{Module: dMod, Name: d.Name.Name, IsPub: d.IsPub, Span: d.DeclSpan}
+	next := int64(0)
+	seen := map[string]bool{}
+	for _, v := range d.Variants {
+		if seen[v.Name.Name] {
+			c.errorf(v.Name.NamePos, "duplicate variant '%s' in enum '%s'", v.Name.Name, d.Name.Name)
+			continue
+		}
+		seen[v.Name.Name] = true
+		if v.Value != nil {
+			val, ok := constIntValue(v.Value)
+			if !ok {
+				c.errorf(v.Value.Span(), "enum variant '%s.%s' needs a constant integer value", d.Name.Name, v.Name.Name)
+			} else if val < -2147483648 || val > 2147483647 {
+				c.errorf(v.Value.Span(), "enum variant '%s.%s' value %d does not fit in 32 bits", d.Name.Name, v.Name.Name, val)
+			} else {
+				next = val
+			}
+		}
+		et.Variants = append(et.Variants, v.Name.Name)
+		et.Values = append(et.Values, next)
+		next++
+	}
+	if len(et.Variants) == 0 {
+		c.errorf(d.Name.NamePos, "enum '%s' has no variants", d.Name.Name)
+	}
+	scope.Enums[d.Name.Name] = et
+	c.enums[dMod+"."+d.Name.Name] = et
+	if _, exists := c.enums[d.Name.Name]; !exists || dMod == "main" {
+		c.enums[d.Name.Name] = et
+	}
+}
+
+// constIntValue evaluates an integer literal, optionally negated.
+func constIntValue(e ast.Expr) (int64, bool) {
+	switch v := e.(type) {
+	case *ast.LiteralExpr:
+		if v.Kind != token.TokInt {
+			return 0, false
+		}
+		var n int64
+		lit := strings.TrimSuffix(v.Value, "i64")
+		if _, err := fmt.Sscan(lit, &n); err != nil {
+			return 0, false
+		}
+		return n, true
+	case *ast.UnaryExpr:
+		if v.Op == token.TokMinus {
+			n, ok := constIntValue(v.Expr)
+			return -n, ok
+		}
+	}
+	return 0, false
+}
+
+// Enums returns every registered enum, keyed by "module.Name" (and by bare name for main).
+func (c *Checker) Enums() map[string]*EnumType {
+	return c.enums
+}
+
+// lookupEnumByName resolves an enum named from the current module (or main fallback).
+func (c *Checker) lookupEnumByName(name string) *EnumType {
+	if modScope, ok := c.modules[c.currentMod]; ok {
+		if et, ok := modScope.Enums[name]; ok {
+			return et
+		}
+	}
+	if c.currentMod == "main" || c.currentMod == "" {
+		if et, ok := c.enums[name]; ok {
+			return et
+		}
+	}
+	return nil
+}
+
+// lookupEnumInModule resolves `pkg.Name` through the current file's imports.
+func (c *Checker) lookupEnumInModule(pkg string, name string) *EnumType {
+	target := pkg
+	if resolved, ok := c.currentImports[pkg]; ok {
+		target = resolved
+	}
+	if modScope, ok := c.modules[target]; ok {
+		if et, ok := modScope.Enums[name]; ok && (et.IsPub || target == c.currentMod) {
+			return et
+		}
+	}
+	return nil
+}
+
+// enumVariantExpr resolves `Color.red` or `pkg.Color.red`; it returns nil when the
+// selector does not name an enum variant.
+func (c *Checker) enumVariantExpr(e *ast.SelectorExpr, scope *Scope) *EnumValueRef {
+	var et *EnumType
+	switch left := e.Left.(type) {
+	case *ast.IdentExpr:
+		if _, inScope := scope.Lookup(left.Ident.Name); inScope {
+			return nil
+		}
+		et = c.lookupEnumByName(left.Ident.Name)
+	case *ast.SelectorExpr:
+		if pkg, ok := left.Left.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(pkg.Ident.Name); inScope {
+				return nil
+			}
+			et = c.lookupEnumInModule(pkg.Ident.Name, left.Field.Name)
+		}
+	}
+	if et == nil {
+		return nil
+	}
+	idx := et.VariantIndex(e.Field.Name)
+	if idx < 0 {
+		c.errorf(e.SelSpan, "enum '%s' has no variant '%s'", et.Name, e.Field.Name)
+		return &EnumValueRef{Enum: et, Variant: e.Field.Name}
+	}
+	return &EnumValueRef{Enum: et, Variant: e.Field.Name, Value: et.Values[idx]}
+}
 
 func (c *Checker) registerStructMembers(d *ast.StructDecl) {
 	st := c.LookupStruct(d.Name.Name)
@@ -1921,6 +2294,20 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 	case *ast.ForInStmt:
 		iterType := c.checkExpr(s.Iter, scope)
 		var elemType Type = TypeVoid
+		if mt, ok := iterType.(*MapType); ok {
+			loopScope := NewScope(scope)
+			c.checkCName(s.Var, "loop variable")
+			loopScope.Define(&VarSymbol{Name: s.Var.Name, Type: mt.Key, IsMut: false, Span: s.Var.NamePos, IsBorrowed: true})
+			if s.ValueVar != nil {
+				c.checkCName(*s.ValueVar, "loop variable")
+				loopScope.Define(&VarSymbol{Name: s.ValueVar.Name, Type: mt.Value, IsMut: false, Span: s.ValueVar.NamePos, IsBorrowed: true})
+			}
+			c.checkBlock(s.Body, loopScope)
+			return
+		}
+		if s.ValueVar != nil {
+			c.errorf(s.ValueVar.NamePos, "'for a, b in ...' needs a map; slices iterate with 'for x in xs'")
+		}
 		if sl, ok := iterType.(*SliceType); ok {
 			elemType = sl.Elem
 		} else if arr, ok := iterType.(*ArrayType); ok {
@@ -1989,7 +2376,38 @@ func (c *Checker) checkStmt(stmt ast.Stmt, scope *Scope) {
 }
 
 // verifyAssignmentMutability enforces V-style immutability-by-default and 4-quadrant field access.
+// isIntKey reports whether a map key type is integer-like (an int literal may index it).
+func isIntKey(t Type) bool {
+	p, ok := t.(*PrimitiveType)
+	return ok && IsIntLike(p.Kind)
+}
+
+// rejectMapElemMutation reports changing a map element in place (`m[k].x = 1`,
+// `m[k].push(v)`, `f(mut m[k])`). A missing key reads as a shared zero value, so elements
+// are changed by reading, modifying and storing back: `mut v := m[k]; v.x = 1; m[k] = v`.
+// When whole is false the expression itself may be `m[k]` (an assignment target).
+func (c *Checker) rejectMapElemMutation(expr ast.Expr, scope *Scope, whole bool) {
+	cur := expr
+	first := true
+	for {
+		switch e := cur.(type) {
+		case *ast.IndexExpr:
+			if _, isMap := c.ExprTypes[e.Left].(*MapType); isMap && (whole || !first) {
+				c.errorf(expr.Span(), "cannot change a map element in place; copy it out, change it, and store it back with 'm[key] = value'")
+				return
+			}
+			cur = e.Left
+		case *ast.SelectorExpr:
+			cur = e.Left
+		default:
+			return
+		}
+		first = false
+	}
+}
+
 func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span token.Span) {
+	c.rejectMapElemMutation(target, scope, false)
 	switch t := target.(type) {
 	case *ast.IdentExpr:
 		if cSym, isConst := c.ResolvedConsts[t]; isConst {
@@ -2000,7 +2418,9 @@ func (c *Checker) verifyAssignmentMutability(target ast.Expr, scope *Scope, span
 		if !ok {
 			return
 		}
-		if !sym.IsMut {
+		if sym.IsCapture {
+			c.errorf(span, "cannot assign to '%s' inside an anonymous function: closures capture variables by value, read-only", t.Ident.Name)
+		} else if !sym.IsMut {
 			c.errorf(span, "cannot reassign immutable variable '%s' (declare with 'mut %s := ...')",
 				t.Ident.Name, t.Ident.Name)
 		}
@@ -2122,15 +2542,32 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			c.ResolvedConsts[e] = cSym
 			return cSym.Type
 		}
+		if ft := c.fnRefType(e, c.lookupPlainFunction(c.currentMod, e.Ident.Name)); ft != nil {
+			return ft
+		}
 		c.errorf(e.Ident.NamePos, "undefined variable '%s'", e.Ident.Name)
 		return TypeVoid
+
+	case *ast.FnLitExpr:
+		return c.checkFnLit(e, scope)
 
 	case *ast.StructInitExpr:
 		typ := c.resolveTypeExpr(e.Type)
 		st, ok := typ.(*StructType)
 		if !ok {
-			c.errorf(e.InitSpan, "'%s' is not a struct type", typ)
+			if !ExactEquals(typ, TypeVoid) { // void: the type was already reported
+				c.errorf(e.InitSpan, "'%s' is not a struct type", typ)
+			}
 			return TypeVoid
+		}
+		if c.generics.InstanceArgs[st] != nil {
+			// `Box[int]{...}` names the instance from here on.
+			switch te := e.Type.(type) {
+			case *ast.IdentType:
+				e.Type = &ast.IdentType{Name: ast.Ident{Name: st.Name, NamePos: te.Name.NamePos}}
+			case *ast.SelectorType:
+				e.Type = &ast.SelectorType{Pkg: te.Pkg, Name: ast.Ident{Name: st.Name, NamePos: te.Name.NamePos}}
+			}
 		}
 		for _, initField := range e.Fields {
 			valType := c.checkExpr(initField.Value, scope)
@@ -2165,6 +2602,28 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		return st
 
 	case *ast.SelectorExpr:
+		if ev := c.enumVariantExpr(e, scope); ev != nil {
+			c.EnumValues[e] = ev
+			return ev.Enum
+		}
+		if pkg, ok := e.Left.(*ast.IdentExpr); ok {
+			if _, inScope := scope.Lookup(pkg.Ident.Name); !inScope {
+				target := pkg.Ident.Name
+				if resolved, ok := c.currentImports[target]; ok {
+					target = resolved
+				}
+				if _, isMod := c.modules[target]; isMod && c.LookupConstInModule(pkg.Ident.Name, e.Field.Name) == nil {
+					if sig := c.lookupPlainFunction(target, e.Field.Name); sig != nil {
+						if target != c.currentMod && !sig.IsPub {
+							c.errorf(e.SelSpan, "function '%s.%s' is private to module '%s'", pkg.Ident.Name, e.Field.Name, target)
+						}
+						if ft := c.fnRefType(e, sig); ft != nil {
+							return ft
+						}
+					}
+				}
+			}
+		}
 		if identLeft, ok := e.Left.(*ast.IdentExpr); ok {
 			if _, inScope := scope.Lookup(identLeft.Ident.Name); !inScope {
 				if cSym := c.LookupConstInModule(identLeft.Ident.Name, e.Field.Name); cSym != nil {
@@ -2198,6 +2657,13 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 		}
 		if leftType.Equals(TypeString) && e.Field.Name == "len" {
 			return TypeInt
+		}
+		if mt, ok := leftType.(*MapType); ok {
+			if e.Field.Name == "len" {
+				return TypeInt
+			}
+			c.errorf(e.SelSpan, "map '%s' has no field '%s' (use .len or methods like .has(), .keys())", mt, e.Field.Name)
+			return TypeVoid
 		}
 		if tt, ok := leftType.(*TensorType); ok {
 			switch e.Field.Name {
@@ -2241,6 +2707,12 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 	case *ast.IndexExpr:
 		leftType := c.checkExpr(e.Left, scope)
 		idxType := c.checkExpr(e.Index, scope)
+		if mt, ok := leftType.(*MapType); ok {
+			if !ExactEquals(idxType, mt.Key) && !(isIntKey(mt.Key) && mt.Key.Equals(idxType)) {
+				c.errorf(e.IndexSpan, "map '%s' is indexed by '%s', got '%s'", mt, mt.Key, idxType)
+			}
+			return mt.Value
+		}
 		if !idxType.Equals(TypeInt) && !idxType.Equals(TypeI64) {
 			c.errorf(e.IndexSpan, "index must be integer, got '%s'", idxType)
 		}
@@ -2294,6 +2766,23 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 			}
 		}
 		return &SliceType{Elem: firstElemType}
+
+	case *ast.MapLitExpr:
+		mt, _ := c.resolveTypeExpr(e.Type).(*MapType)
+		if mt == nil {
+			return TypeVoid
+		}
+		for i := range e.Keys {
+			kt := c.checkExpr(e.Keys[i], scope)
+			if !ExactEquals(kt, mt.Key) && !(isIntKey(mt.Key) && mt.Key.Equals(kt)) {
+				c.errorf(e.Keys[i].Span(), "map literal key: expected '%s', got '%s'", mt.Key, kt)
+			}
+			vt := c.checkExpr(e.Values[i], scope)
+			if !mt.Value.Equals(vt) {
+				c.errorf(e.Values[i].Span(), "map literal value: expected '%s', got '%s'", mt.Value, vt)
+			}
+		}
+		return mt
 
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, scope)
@@ -2379,6 +2868,12 @@ func (c *Checker) checkBinaryOperator(e *ast.BinaryExpr, t Type) {
 	isString := isPrim && prim.Kind == PrimString
 	isBool := isPrim && prim.Kind == PrimBool
 	isPtr := isRef || (isPrim && prim.Kind == PrimVoidPtr)
+	if _, isEnum := t.(*EnumType); isEnum {
+		if e.Op != token.TokEq && e.Op != token.TokNeq {
+			c.errorf(e.BinSpan, "operator '%s' is not defined for enum '%s' (compare with == or !=, or convert with int())", e.Op, t)
+		}
+		return
+	}
 
 	ok := true
 	switch e.Op {
@@ -2444,6 +2939,25 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 	var sig *FnSig
 	var callName string
 
+	if !c.rewriteGenericCall(call, scope) {
+		return TypeVoid // the generic call was already reported
+	}
+
+	if ft := c.closureCallee(call, scope); ft != nil {
+		c.ClosureCalls[call] = ft
+		sig = &FnSig{Name: "closure", ReturnType: ft.Return, Span: call.CallSpan}
+		for i, p := range ft.Params {
+			sig.Params = append(sig.Params, ParamInfo{Name: fmt.Sprintf("arg%d", i+1), Type: p})
+		}
+		callName = "function value"
+		if id, ok := call.Callee.(*ast.IdentExpr); ok {
+			callName = id.Ident.Name
+		} else if sel, ok := call.Callee.(*ast.SelectorExpr); ok {
+			callName = sel.Field.Name
+		}
+		return c.finishCallCheck(call, scope, sig, callName)
+	}
+
 	switch callee := call.Callee.(type) {
 	case *ast.IdentExpr:
 		callName = callee.Ident.Name
@@ -2483,6 +2997,9 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			argType := c.checkExpr(call.Args[0].Expr, scope)
 			if argType.Equals(TypeString) {
 				c.errorf(call.CallSpan, "cannot cast 'string' directly to '%s' (use .to_int(), .to_i64(), .to_f64(), or .to_f32())", callName)
+				return targetType
+			}
+			if _, isEnum := argType.(*EnumType); isEnum && (callName == "int" || callName == "i64") {
 				return targetType
 			}
 			if _, isPrim := argType.(*PrimitiveType); !isPrim || argType.Equals(TypeVoid) {
@@ -2633,6 +3150,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			} else if sl, isSlice := recvType.(*SliceType); isSlice {
 				switch callee.Field.Name {
 				case "push", "append":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method '%s()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2649,6 +3167,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						c.rejectActorStore(call.Args[0].Expr, sl.Elem, "a slice")
 					}
 				case "pop":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'pop()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2671,6 +3190,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					}
 					callName = "slice.get"
 				case "set":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'set()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2687,6 +3207,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 						c.rejectActorStore(call.Args[1].Expr, sl.Elem, "a slice")
 					}
 				case "clear":
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym != nil && !rootSym.IsMut {
 						c.errorf(call.CallSpan, "cannot call mutating method 'clear()' on immutable slice '%s' (declare 'mut %s := ...')",
@@ -2757,6 +3278,31 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					c.errorf(callee.SelSpan, "slice '%s' has no method '%s'", sl, callee.Field.Name)
 					return TypeVoid
 				}
+			} else if mt, isMap := recvType.(*MapType); isMap {
+				mutating := callee.Field.Name == "delete" || callee.Field.Name == "clear"
+				if mutating {
+					c.rejectMapElemMutation(callee.Left, scope, true)
+					rootSym := c.findRootSymbol(callee.Left, scope)
+					if rootSym != nil && !rootSym.IsMut {
+						c.errorf(call.CallSpan, "cannot call mutating method '%s()' on immutable map '%s' (declare 'mut %s := ...')",
+							callee.Field.Name, rootSym.Name, rootSym.Name)
+					}
+					c.rejectMapElemMutation(callee.Left, scope, true)
+				}
+				switch callee.Field.Name {
+				case "has", "delete":
+					sig = &FnSig{Name: callee.Field.Name, Params: []ParamInfo{{Name: "key", Type: mt.Key}}, ReturnType: TypeBool, Span: callee.SelSpan}
+				case "keys":
+					sig = &FnSig{Name: "keys", ReturnType: &SliceType{Elem: mt.Key}, Span: callee.SelSpan}
+				case "values":
+					sig = &FnSig{Name: "values", ReturnType: &SliceType{Elem: mt.Value}, Span: callee.SelSpan}
+				case "clear":
+					sig = &FnSig{Name: "clear", ReturnType: TypeVoid, Span: callee.SelSpan}
+				default:
+					c.errorf(callee.SelSpan, "map '%s' has no method '%s' (available: has, delete, keys, values, clear)", mt, callee.Field.Name)
+					return TypeVoid
+				}
+				callName = "map." + callee.Field.Name
 			} else if arr, isArr := recvType.(*ArrayType); isArr {
 				switch callee.Field.Name {
 				case "get":
@@ -3004,6 +3550,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				}
 
 				if baseSig.IsMutReceiver {
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym == nil || !rootSym.IsMut {
 						name := "<expr>"
@@ -3042,6 +3589,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					return TypeVoid
 				}
 				if msig.IsMutReceiver {
+					c.rejectMapElemMutation(callee.Left, scope, true)
 					rootSym := c.findRootSymbol(callee.Left, scope)
 					if rootSym == nil || !rootSym.IsMut {
 						name := "<expr>"
@@ -3061,7 +3609,12 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			}
 		}
 	}
+	return c.finishCallCheck(call, scope, sig, callName)
+}
 
+// finishCallCheck verifies a resolved call: unsafe context, argument count, types and `mut`
+// markers, and Result / Option handling.
+func (c *Checker) finishCallCheck(call *ast.CallExpr, scope *Scope, sig *FnSig, callName string) Type {
 	// Unsafe context verification: calling an extern C function or @[unsafe] function requires unsafe context
 	if (sig.IsExtern || sig.IsUnsafe) && !c.inUnsafeContext {
 		c.errorf(call.CallSpan, "call to %s function '%s' is unsafe; requires an 'unsafe { ... }' block or '@[unsafe]' function",
@@ -3074,7 +3627,10 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 			callName, len(sig.Params), len(call.Args))
 	} else {
 		for i, arg := range call.Args {
-			argType := c.checkExpr(arg.Expr, scope)
+			argType, pre := c.generics.preChecked[arg.Expr]
+			if !pre {
+				argType = c.checkExpr(arg.Expr, scope)
+			}
 			param := sig.Params[i]
 
 			if param.IsMut && !arg.IsMut {
@@ -3082,6 +3638,7 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 					param.Name, callName)
 			}
 			if arg.IsMut {
+				c.rejectMapElemMutation(arg.Expr, scope, true)
 				rootSym := c.findRootSymbol(arg.Expr, scope)
 				if rootSym == nil || !rootSym.IsMut {
 					c.errorf(arg.ArgSpan, "cannot pass immutable variable as 'mut' argument to '%s'", callName)
@@ -3335,6 +3892,20 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			return TypeVoid
 		}
 		typeName := t.Name.Name
+		if tpl := c.lookupGenericStruct(targetMod, typeName); tpl != nil {
+			if len(t.TypeParams) == 0 {
+				c.errorf(t.Name.NamePos, "generic struct '%s.%s' needs type arguments", pkgName, typeName)
+				return TypeVoid
+			}
+			if targetMod != c.currentMod && !tpl.decl.(*ast.StructDecl).IsPub {
+				c.errorf(t.Name.NamePos, "type '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			var args []Type
+			for _, a := range t.TypeParams {
+				args = append(args, c.resolveTypeExpr(a))
+			}
+			return c.instantiateStruct(tpl, args, t.Name.NamePos)
+		}
 		if st, ok := modScope.Structs[typeName]; ok {
 			if targetMod != c.currentMod && !st.IsPub {
 				c.errorf(t.Name.NamePos, "type '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
@@ -3347,10 +3918,31 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			}
 			return iface
 		}
+		if et, ok := modScope.Enums[typeName]; ok {
+			if targetMod != c.currentMod && !et.IsPub {
+				c.errorf(t.Name.NamePos, "enum '%s.%s' is private to module '%s'", pkgName, typeName, targetMod)
+			}
+			return et
+		}
 		c.errorf(t.Name.NamePos, "module '%s' has no type '%s'", pkgName, typeName)
 		return TypeVoid
 
 	case *ast.IdentType:
+		tpl := c.lookupGenericStruct(c.currentMod, t.Name.Name)
+		if tpl == nil && (c.currentMod == "main" || c.currentMod == "") {
+			tpl = c.lookupGenericStruct("main", t.Name.Name)
+		}
+		if tpl != nil {
+			if len(t.TypeParams) == 0 {
+				c.errorf(t.Name.NamePos, "generic struct '%s' needs type arguments, e.g. %s[int]", t.Name.Name, t.Name.Name)
+				return TypeVoid
+			}
+			var args []Type
+			for _, a := range t.TypeParams {
+				args = append(args, c.resolveTypeExpr(a))
+			}
+			return c.instantiateStruct(tpl, args, t.Name.NamePos)
+		}
 		switch t.Name.Name {
 		case "u8", "byte":
 			return TypeU8
@@ -3412,6 +4004,10 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			return &FutureType{Inner: TypeVoid}
 		}
 
+		if et := c.lookupEnumByName(t.Name.Name); et != nil {
+			return et
+		}
+
 		// 1. Look in current module scope
 		if modScope, ok := c.modules[c.currentMod]; ok {
 			if st, ok := modScope.Structs[t.Name.Name]; ok {
@@ -3466,6 +4062,33 @@ func (c *Checker) resolveTypeExpr(te ast.TypeExpr) Type {
 			Inner: c.resolveTypeExpr(t.Inner),
 			IsMut: t.IsMut,
 		}
+
+	case *ast.ResolvedType:
+		if rt, ok := t.Type.(Type); ok {
+			return rt
+		}
+		return TypeVoid
+
+	case *ast.FnType:
+		ft := &FnType{Return: TypeVoid}
+		for _, p := range t.Params {
+			ft.Params = append(ft.Params, c.resolveTypeExpr(p))
+		}
+		if t.Return != nil {
+			ft.Return = c.resolveTypeExpr(t.Return)
+		}
+		return ft
+
+	case *ast.MapType:
+		key := c.resolveTypeExpr(t.Key)
+		val := c.resolveTypeExpr(t.Value)
+		if !key.Equals(TypeVoid) && !IsValidMapKey(key) {
+			c.errorf(t.Key.Span(), "map key type must be string, an integer type, bool or an enum, got '%s'", key)
+		}
+		if st, ok := val.(*StructType); ok && st.IsActor {
+			c.errorf(t.Value.Span(), "a map cannot hold actors ('%s'): an actor has a single owner", st.Name)
+		}
+		return &MapType{Key: key, Value: val}
 
 	case *ast.ArrayType:
 		elem := c.resolveTypeExpr(t.Elem)

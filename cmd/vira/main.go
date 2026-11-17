@@ -1128,6 +1128,16 @@ func compileVexToC99(targetPath string, isTestMode bool, targetOSOpt ...string) 
 		os.Exit(1)
 	}
 
+	// Lifted closures and generic instances created by the checker; generic templates
+	// themselves are never compiled.
+	kept := mergedAst.Decls[:0:0]
+	for _, d := range mergedAst.Decls {
+		if !chk.IsGenericTemplate(d) {
+			kept = append(kept, d)
+		}
+	}
+	mergedAst.Decls = append(kept, chk.SynthesizedDecls()...)
+
 	// Phase 3: Static Escape Analysis & Deterministic LIFO Destructor Injection
 	af := autofree.New(chk)
 	af.AnalyzeFile(mergedAst)

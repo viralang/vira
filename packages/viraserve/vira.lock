@@ -4,7 +4,7 @@
     {
       "path": "http",
       "version": "0.1.0",
-      "checksum": "sha256:bd35a28a514130be785019d802acc7daedf161615a49f4ef9bffffb9d6c997b5"
+      "checksum": "sha256:e3bf8ee40fe65cf4c87df5c759bf9ee159e64cd5498031568c5ee29fc81daef6"
     },
     {
       "path": "io",
@@ -14,7 +14,7 @@
     {
       "path": "net",
       "version": "0.1.0",
-      "checksum": "sha256:15386b70d22184f8d0ba8fd6399180fda040b64220a63c978a8d68ffe609cc3e"
+      "checksum": "sha256:989d67fefdf207b454e2b96ea6c9a66dd125eda60c58fa600bc1b955c6f373dd"
     }
   ]
 }

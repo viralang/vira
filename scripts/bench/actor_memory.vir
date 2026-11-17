@@ -1,0 +1,29 @@
+module actor_memory
+// Resident memory per idle actor. Creates ACTORS actors (default 1,000,000), sends each
+// one message, then sleeps so scripts/bench_actor_compare.sh can read the process's
+// VmRSS. Run once with ACTORS=0 and once with ACTORS=1000000 and divide the difference.
+
+import os
+
+pub actor Cell {
+mut:
+	v int = 0
+}
+
+pub fn (mut c Cell) set(x int) {
+	c.v = x
+}
+
+fn main() {
+	n := os.getenv('ACTORS').to_int() or { 1000000 }
+	mut cells := []Cell{}
+	for mut i := 0; i < n; i = i + 1 {
+		cells.push(Cell{ v: 0 })
+		cells[i] <- set(i)
+	}
+	if n > 0 {
+		_ := cells[n - 1] <- set(0) or { 0 }
+	}
+	println('READY ${n}')
+	time_sleep_ms(1500)
+}

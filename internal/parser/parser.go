@@ -41,6 +41,25 @@ func New(src string) *Parser {
 	return p
 }
 
+// parserState is a snapshot used to parse a construct tentatively and back out of it.
+type parserState struct {
+	lex     lexer.Lexer
+	cur     token.Token
+	peek    token.Token
+	prev    token.Token
+	nErrors int
+}
+
+func (p *Parser) save() parserState {
+	return parserState{lex: *p.lex, cur: p.cur, peek: p.peek, prev: p.prev, nErrors: len(p.errors)}
+}
+
+func (p *Parser) restore(s parserState) {
+	*p.lex = s.lex
+	p.cur, p.peek, p.prev = s.cur, s.peek, s.prev
+	p.errors = p.errors[:s.nErrors]
+}
+
 func (p *Parser) Errors() []ParseError {
 	return p.errors
 }
@@ -149,6 +168,10 @@ func (p *Parser) ParseFile() *ast.File {
 				d.Module = modName
 			}
 		case *ast.ConstDecl:
+			if d.Module == "" {
+				d.Module = modName
+			}
+		case *ast.EnumDecl:
 			if d.Module == "" {
 				d.Module = modName
 			}
@@ -285,11 +308,39 @@ func (p *Parser) parseDecls() []ast.Decl {
 		return []ast.Decl{fn}
 	case token.TokConst:
 		return p.parseConstDecls(isPub, startSpan)
+	case token.TokEnum:
+		return []ast.Decl{p.parseEnumDecl(isPub, startSpan)}
 	default:
 		p.errorf(p.cur.Span, "unexpected top-level token %s (%q)", p.cur.Kind, p.cur.Lexeme(p.src))
 		p.advance()
 		return nil
 	}
+}
+
+// parseEnumDecl parses `enum Name { a b = 4 c }`; variants are separated by newlines or commas.
+func (p *Parser) parseEnumDecl(isPub bool, startSpan token.Span) *ast.EnumDecl {
+	p.expect(token.TokEnum)
+	decl := &ast.EnumDecl{IsPub: isPub, Name: p.parseIdent()}
+	p.expect(token.TokLBrace)
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind != token.TokIdent {
+			p.errorf(p.cur.Span, "expected enum variant name, got %s", p.cur.Kind)
+			p.advance()
+			continue
+		}
+		v := ast.EnumVariant{Name: p.parseIdent()}
+		if p.cur.Kind == token.TokAssign {
+			p.advance()
+			v.Value = p.parseExpr(0)
+		}
+		decl.Variants = append(decl.Variants, v)
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	rb := p.expect(token.TokRBrace)
+	decl.DeclSpan = token.Span{Start: startSpan.Start, End: rb.Span.End}
+	return decl
 }
 
 func (p *Parser) parseExternBlock() []ast.Decl {
@@ -557,20 +608,23 @@ func (p *Parser) parseFnDecl(isPub bool, startSpan token.Span, intrinsic string,
 		}
 	}
 
-	// 2. Function Name or Static Type Method (`fn Invoice.new(...)`)
+	// 2. Function Name or Static Type Method (`fn Invoice.new(...)`, `fn Box[T].new(...)`)
 	firstIdent := p.parseIdent()
+	typeParams := p.parseOptionalTypeParams()
 	if decl.Receiver == nil && p.cur.Kind == token.TokDot {
 		p.advance() // consume `.`
 		decl.StaticType = &firstIdent
 		decl.Name = p.parseIdent()
+		// For a static method of a generic struct, TypeParams are the struct's parameters.
+		decl.TypeParams = typeParams
 	} else {
 		decl.Name = firstIdent
+		decl.TypeParams = typeParams
 	}
 	if isExtern {
 		decl.CName = decl.Name.Name
 	}
 
-	decl.TypeParams = p.parseOptionalTypeParams()
 	decl.Params = p.parseParamList()
 
 	// 3. Optional Return Type (`!User`, `?int`, `Invoice`, etc.) if not `{`
@@ -619,12 +673,14 @@ func (p *Parser) parseParamList() []ast.Param {
 // --- TYPE EXPRESSIONS ---
 
 func (p *Parser) isTypeStart(k token.Kind) bool {
-	return k == token.TokIdent || k == token.TokBang || k == token.TokQuestion || k == token.TokAmp ||
+	return k == token.TokIdent || k == token.TokBang || k == token.TokQuestion || k == token.TokAmp || k == token.TokFn ||
 		k == token.TokF32 || k == token.TokF16 || k == token.TokBF16 || k == token.TokTensor || k == token.TokLBracket
 }
 
 func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	switch p.cur.Kind {
+	case token.TokFn:
+		return p.parseFnType()
 	case token.TokLBracket:
 		lb := p.advance()
 		var lenExpr ast.Expr
@@ -659,6 +715,9 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 	default:
 		identTok := p.advance()
 		ident := ast.Ident{Name: identTok.Lexeme(p.src), NamePos: identTok.Span}
+		if ident.Name == "map" && p.cur.Kind == token.TokLBracket {
+			return p.parseMapTypeRest(identTok.Span)
+		}
 		if p.cur.Kind == token.TokDot && p.peek.Kind == token.TokIdent && !p.hasNewlineBetween(identTok.Span, p.cur.Span) {
 			p.advance() // consume '.'
 			nameTok := p.advance()
@@ -675,6 +734,79 @@ func (p *Parser) parseTypeExpr() ast.TypeExpr {
 		}
 		return &ast.IdentType{Name: ident, TypeParams: tArgs}
 	}
+}
+
+// parseFnType parses `fn (int, string) bool`. Parameter names are allowed and ignored:
+// `fn (x int) int` is the same type as `fn (int) int`.
+func (p *Parser) parseFnType() *ast.FnType {
+	fnTok := p.expect(token.TokFn)
+	ft := &ast.FnType{FnPos: fnTok.Span}
+	p.expect(token.TokLParen)
+	for p.cur.Kind != token.TokRParen && p.cur.Kind != token.TokEOF {
+		if p.cur.Kind == token.TokIdent && p.peek.Kind != token.TokComma && p.peek.Kind != token.TokRParen &&
+			p.peek.Kind != token.TokDot && p.isTypeStart(p.peek.Kind) && p.cur.Lexeme(p.src) != "map" {
+			p.advance() // parameter name
+		}
+		ft.Params = append(ft.Params, p.parseTypeExpr())
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	rp := p.expect(token.TokRParen)
+	ft.FnPos.End = rp.Span.End
+	if p.isTypeStart(p.cur.Kind) && p.cur.Kind != token.TokLBrace && !p.hasNewlineBetween(rp.Span, p.cur.Span) {
+		ft.Return = p.parseTypeExpr()
+		ft.FnPos.End = ft.Return.Span().End
+	}
+	return ft
+}
+
+// parseFnLit parses an anonymous function `fn (x int) int { ... }`.
+func (p *Parser) parseFnLit() *ast.FnLitExpr {
+	fnTok := p.expect(token.TokFn)
+	lit := &ast.FnLitExpr{}
+	lit.Params = p.parseParamList()
+	if p.cur.Kind != token.TokLBrace && p.isTypeStart(p.cur.Kind) {
+		lit.ReturnType = p.parseTypeExpr()
+	}
+	prevAllow := p.allowStructInit
+	p.allowStructInit = true
+	lit.Body = p.parseBlock()
+	p.allowStructInit = prevAllow
+	lit.LitSpan = token.Span{Start: fnTok.Span.Start, End: lit.Body.BlockSpan.End}
+	return lit
+}
+
+// parseMapTypeRest parses `[K]V` after the `map` keyword.
+func (p *Parser) parseMapTypeRest(mapSpan token.Span) *ast.MapType {
+	p.expect(token.TokLBracket)
+	key := p.parseTypeExpr()
+	p.expect(token.TokRBracket)
+	val := p.parseTypeExpr()
+	return &ast.MapType{MapPos: token.Span{Start: mapSpan.Start, End: val.Span().End}, Key: key, Value: val}
+}
+
+// parseMapLit parses `map[K]V{ k: v, ... }` after the `map` identifier.
+func (p *Parser) parseMapLit(mapSpan token.Span) *ast.MapLitExpr {
+	mt := p.parseMapTypeRest(mapSpan)
+	lit := &ast.MapLitExpr{Type: mt}
+	p.expect(token.TokLBrace)
+	prevAllow := p.allowStructInit
+	p.allowStructInit = true
+	for p.cur.Kind != token.TokRBrace && p.cur.Kind != token.TokEOF {
+		k := p.parseExpr(0)
+		p.expect(token.TokColon)
+		v := p.parseExpr(0)
+		lit.Keys = append(lit.Keys, k)
+		lit.Values = append(lit.Values, v)
+		if p.cur.Kind == token.TokComma {
+			p.advance()
+		}
+	}
+	p.allowStructInit = prevAllow
+	rb := p.expect(token.TokRBrace)
+	lit.LitSpan = token.Span{Start: mapSpan.Start, End: rb.Span.End}
+	return lit
 }
 
 func (p *Parser) parseOptionalTypeParams() []ast.Ident {
@@ -805,6 +937,24 @@ func (p *Parser) parseStmt() ast.Stmt {
 
 		prevAllow := p.allowStructInit
 		p.allowStructInit = false
+
+		// 2b. Map loop: `for k, v in m { ... }`
+		if p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokComma {
+			name := p.parseIdent()
+			p.advance() // consume `,`
+			valName := p.parseIdent()
+			p.expect(token.TokIn)
+			iter := p.parseExpr(0)
+			p.allowStructInit = prevAllow
+			body := p.parseBlock()
+			return &ast.ForInStmt{
+				Var:      name,
+				ValueVar: &valName,
+				Iter:     iter,
+				Body:     body,
+				StmtSpan: token.Span{Start: forTok.Span.Start, End: body.BlockSpan.End},
+			}
+		}
 
 		// 2. For-in loop: `for item in items { ... }`
 		if p.cur.Kind == token.TokIdent && p.peek.Kind == token.TokIn {
@@ -1048,6 +1198,22 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 				IsActorSend: isSend,
 				SelSpan:     token.Span{Start: left.Span().Start, End: field.NamePos.End},
 			}
+			// Qualified generic type: `pkg.Box[int]{ ... }` or `pkg.Box[int].new(...)`.
+			if identLeft, isIdent := left.(*ast.SelectorExpr).Left.(*ast.IdentExpr); isIdent && !isSend &&
+				p.cur.Kind == token.TokLBracket && isPascalCase(field.Name) {
+				st := p.save()
+				args := p.parseTypeArgList()
+				if len(p.errors) == st.nErrors && len(args) > 0 {
+					if p.allowStructInit && p.cur.Kind == token.TokLBrace {
+						return p.parseStructInit(&ast.SelectorType{Pkg: identLeft.Ident, Name: field, TypeParams: args})
+					}
+					if p.cur.Kind == token.TokDot {
+						left.(*ast.SelectorExpr).TypeArgs = args
+						continue
+					}
+				}
+				p.restore(st)
+			}
 			if !isSend && p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(field.Name) {
 				if identLeft, isIdent := left.(*ast.SelectorExpr).Left.(*ast.IdentExpr); isIdent {
 					return p.parseStructInit(&ast.SelectorType{
@@ -1086,15 +1252,37 @@ func (p *Parser) parsePrefix() ast.Expr {
 	switch p.cur.Kind {
 	case token.TokIdent:
 		ident := p.parseIdent()
+		// Map literal: `map[string]int{ 'a': 1 }`
+		if ident.Name == "map" && p.cur.Kind == token.TokLBracket {
+			return p.parseMapLit(ident.NamePos)
+		}
 		// Struct initialization literal: `Invoice{ id: '123', amount_cents: 5000 }`
 		if p.allowStructInit && p.cur.Kind == token.TokLBrace && isPascalCase(ident.Name) {
 			return p.parseStructInit(&ast.IdentType{Name: ident})
+		}
+		// Generic type in an expression: `Box[int]{ v: 1 }` or `Box[int].new(1)`. Parsed
+		// tentatively: anything else (`TABLE[i]`) is an ordinary index expression.
+		if p.cur.Kind == token.TokLBracket && isPascalCase(ident.Name) {
+			st := p.save()
+			args := p.parseTypeArgList()
+			if len(p.errors) == st.nErrors && len(args) > 0 {
+				if p.allowStructInit && p.cur.Kind == token.TokLBrace {
+					return p.parseStructInit(&ast.IdentType{Name: ident, TypeParams: args})
+				}
+				if p.cur.Kind == token.TokDot {
+					return &ast.IdentExpr{Ident: ident, TypeArgs: args}
+				}
+			}
+			p.restore(st)
 		}
 		return &ast.IdentExpr{Ident: ident}
 
 	case token.TokF32:
 		tok := p.advance()
 		return &ast.IdentExpr{Ident: ast.Ident{Name: "f32", NamePos: tok.Span}}
+
+	case token.TokFn:
+		return p.parseFnLit()
 
 	case token.TokInt, token.TokFloat, token.TokTrue, token.TokFalse:
 		tok := p.advance()

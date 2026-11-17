@@ -52,6 +52,11 @@
 11. [Diagnostic Engine](#11-diagnostic-engine)
 12. [Complete End-to-End Program Walkthrough](#12-complete-end-to-end-program-walkthrough)
 13. [Native C & Python FFI (v0.7)](#13-native-c--python-ffi-v07)
+14. [Enums, Maps, Closures & Generics (v0.9)](#14-enums-maps-closures--generics-v09)
+   - [Enums](#enums)
+   - [Maps](#maps)
+   - [Closures & Function Types](#closures--function-types)
+   - [Generics](#generics)
 
 ---
 
@@ -348,7 +353,7 @@ for item in scores {
 #### Multi-Branch Control Flow (`switch`)
 Vira provides a native, zero-cost `switch` statement with automatic break, support for primitives, strings, and tagless boolean conditions:
 ```v
-// Integer / Enum switch with multiple comma-separated cases
+// Integer switch with multiple comma-separated cases (enums work the same way: `case Color.red:`)
 switch status_code {
 case 200:
     println('OK')
@@ -1166,3 +1171,87 @@ res = lib.vira_add(15, 27)
 print(f"Result from Vira: {res}")  # 42
 ```
 
+
+---
+
+## 14. Enums, Maps, Closures & Generics (v0.9)
+
+> Full guide: [Tutorial 43: Enums, Maps, Closures & Generics](docs/tutorials/43_enums_maps_closures_generics.md) and the runnable example [`48_enums_maps_closures_generics.vir`](docs/examples/48_enums_maps_closures_generics.vir).
+
+### Enums
+```v
+enum Color {
+    red
+    green
+    blue
+}
+
+pub enum Status {
+    ok = 200
+    not_found = 404
+    later          // 405: one more than the previous value
+}
+
+c := Color.green
+if c == Color.green { println('${c}') }   // prints "green"
+code := int(Status.not_found)             // 404
+```
+Variants are written `Enum.variant` (or `pkg.Enum.variant`), compare with `==` / `!=`, work in `switch`, struct fields, slices and as map keys, convert to an integer with `int()`, and print their name in string interpolation. Ordering operators (`<`, `>`) are not defined on enums.
+
+### Maps
+```v
+mut ages := map[string]int{'ada': 36, 'linus': 54}
+ages['grace'] = 85
+ages['ada'] += 1
+println('${ages['nobody']}')     // 0: a missing key reads as the zero value
+if ages.has('grace') { ages.delete('grace') }
+for name, age in ages {          // insertion order
+    println('${name} -> ${age}')
+}
+names := ages.keys()             // []string; also .values(), .clear(), .len
+```
+Keys are `string`, any integer type, `bool` or an enum; values can be any type, including slices, structs and other maps. A map is a value like a slice: `b := a` makes an independent copy and autofree releases it. A map element cannot be changed in place (`m[k].x = 1`, `m[k].push(v)`): copy it out, change it and store it back with `m[k] = v`. Do not insert into or delete from a map while iterating over it.
+
+### Closures & Function Types
+```v
+fn make_adder(n int) fn (int) int {
+    return fn (x int) int {
+        return x + n            // `n` is captured by value
+    }
+}
+
+add10 := make_adder(10)
+println('${add10(5)}')          // 15
+
+fn apply(f fn (int) int, x int) int { return f(x) }
+fn double(x int) int { return x * 2 }
+println('${apply(double, 21)}') // a named function used as a value
+```
+Anonymous functions capture the outer variables they read, by value and read-only: assigning to a captured variable is an error. Closures can be stored in variables, struct fields, slices and maps, returned and sent to actors. Their parameters cannot be `mut`, and an actor cannot be captured (it has a single owner): pass it as an argument instead.
+
+### Generics
+```v
+fn first[T](xs []T) T {
+    return xs[0]
+}
+
+fn map_to[T, U](xs []T, f fn (T) U) []U {
+    mut out := []U{}
+    for x in xs { out.push(f(x)) }
+    return out
+}
+
+struct Box[T] {
+pub mut:
+    value T
+}
+
+fn Box[T].new(v T) Box[T] { return Box[T]{ value: v } }
+fn (b Box[T]) get() T { return b.value }
+
+n := first([7, 8, 9])                         // T inferred as int
+s := first[string](['a'])                     // explicit type argument
+labels := map_to([1, 2], fn (x int) string { return '#${x}' })
+b := Box[int].new(41)
+```
+Generics are monomorphised: every distinct use creates a separate, fully typed copy (`first__int`, `Box__string`), so there is no runtime dispatch. Function type arguments are inferred from the arguments, or written explicitly (`f[int](x)`, simple type names only). Struct type arguments are always written (`Box[int]{...}`, `pkg.Stack[string].new()`). Methods of a generic struct name its parameters in the receiver: `fn (b Box[T]) get() T`. There are no constraints: an operation the concrete type does not support is reported inside the instance (`operator '>' is not defined for type 'P'`, `help: in max_of[P]`).

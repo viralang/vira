@@ -1,0 +1,40 @@
+module main
+
+pub actor A {
+mut:
+	n int
+}
+
+fn takes_mut(mut x int) {
+	x += 1
+}
+
+fn main() {
+	mut k := 1
+	f := fn () {
+		k = 2 // ERROR: closures capture variables by value, read-only
+	}
+	g := fn (mut y int) { // ERROR: parameters of an anonymous function cannot be 'mut'
+	}
+	h := takes_mut // ERROR: has a 'mut' parameter and cannot be used as a value
+	a := A{ n: 0 }
+	q := fn () int {
+		return 1
+	}
+	_ := q('extra') // ERROR: call to 'q' expects 0 arguments, got 1
+	w := fn (x int) string {
+		return x // ERROR: cannot return 'int' from function expecting 'string'
+	}
+	z := fn () { // ERROR: cannot capture actor 'a'
+		_ := a
+	}
+	add := fn (x int, y int) int {
+		return x + y
+	}
+	_ := add(1, 'two') // ERROR: expects 'int', got 'string'
+	_ := f
+	_ := g
+	_ := h
+	_ := w
+	_ := z
+}

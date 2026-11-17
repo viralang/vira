@@ -1,0 +1,119 @@
+module main
+
+// Tutorial 43: enums, maps, closures and generics working together.
+// An inventory: items have a category (enum), stock is a map, reports use
+// closures, and the helpers are generic.
+
+enum Category {
+	fruit
+	dairy
+	bakery
+}
+
+struct Item {
+	name     string
+	category Category
+	price    int // cents
+}
+
+// A generic container with methods.
+struct Stack[T] {
+mut:
+	items []T
+}
+
+fn Stack[T].new() Stack[T] {
+	return Stack[T]{ items: []T{} }
+}
+
+fn (mut s Stack[T]) push(v T) {
+	s.items.push(v)
+}
+
+fn (mut s Stack[T]) pop() T {
+	return s.items.pop()
+}
+
+fn (s Stack[T]) size() int {
+	return s.items.len
+}
+
+// Generic helpers that take closures.
+fn filter[T](xs []T, keep fn (T) bool) []T {
+	mut out := []T{}
+	for x in xs {
+		if keep(x) {
+			out.push(x)
+		}
+	}
+	return out
+}
+
+fn map_to[T, U](xs []T, f fn (T) U) []U {
+	mut out := []U{}
+	for x in xs {
+		out.push(f(x))
+	}
+	return out
+}
+
+fn sum_by[T](xs []T, f fn (T) int) int {
+	mut total := 0
+	for x in xs {
+		total += f(x)
+	}
+	return total
+}
+
+// A closure factory: the returned function remembers `limit`.
+fn cheaper_than(limit int) fn (Item) bool {
+	return fn (it Item) bool {
+		return it.price < limit
+	}
+}
+
+fn label(c Category) string {
+	switch c {
+		case Category.fruit:
+			return 'fresh fruit'
+		case Category.dairy:
+			return 'dairy'
+		default:
+			return 'baked goods'
+	}
+}
+
+fn main() {
+	items := [
+		Item{ name: 'apple', category: Category.fruit, price: 50 },
+		Item{ name: 'milk', category: Category.dairy, price: 120 },
+		Item{ name: 'bread', category: Category.bakery, price: 300 },
+		Item{ name: 'pear', category: Category.fruit, price: 70 },
+	]
+
+	// Maps: stock per item name, count per category.
+	mut stock := map[string]int{'apple': 12, 'milk': 4}
+	stock['bread'] = 2
+	stock['pear'] += 9
+	mut per_category := map[Category]int{}
+	for it in items {
+		per_category[it.category] += stock[it.name]
+	}
+	for cat, n in per_category {
+		println('${cat} (${label(cat)}): ${n} in stock')
+	}
+
+	// Closures + generics.
+	cheap := filter(items, cheaper_than(100))
+	names := map_to(cheap, fn (it Item) string { return it.name })
+	println('under 1.00: ${names.len} items, first ${names[0]}')
+	value := sum_by(items, fn (it Item) int { return it.price * stock[it.name] })
+	println('stock value: ${value} cents')
+
+	// A generic struct.
+	mut orders := Stack[string].new()
+	orders.push('order-1')
+	orders.push('order-2')
+	last := orders.pop()
+	println('last order ${last}, ${orders.size()} left')
+}

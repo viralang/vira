@@ -1,0 +1,54 @@
+// OUT: registry 2 a=3 b=2
+// OUT: bump x=11 y=10 keys=2
+// OUT: r2 2
+// OUT: actor hits=2
+// OUT: fresh key 5 has=true
+// OUT: [vira_rt] active_leaks=0 | total_freed=19
+
+// Maps as struct and actor fields, mut map parameters, struct copies, and fresh keys.
+module main
+
+struct Registry {
+pub mut:
+	ids map[string]int
+}
+
+fn (mut r Registry) add(name string) int {
+	r.ids[name] = r.ids.len + 1
+	return r.ids[name]
+}
+
+fn bump(mut m map[string]int, k string) {
+	m[k] += 10
+}
+
+pub actor Cache {
+mut:
+	hits map[string]int
+}
+
+pub fn (mut c Cache) hit(k string) int {
+	c.hits[k] += 1
+	return c.hits[k]
+}
+
+fn main() {
+	mut r := Registry{ ids: map[string]int{} }
+	r.add('a')
+	r.add('b')
+	r.add('a')
+	println('registry ${r.ids.len} a=${r.ids['a']} b=${r.ids['b']}')
+	mut m := map[string]int{'x': 1}
+	bump(mut m, 'x')
+	bump(mut m, 'y')
+	println('bump x=${m['x']} y=${m['y']} keys=${m.keys().len}')
+	r2 := r
+	println('r2 ${r2.ids.len}')
+	mut c := Cache{ hits: map[string]int{} }
+	_ := c <- hit('k') or { 0 }
+	n := c <- hit('k') or { 0 }
+	println('actor hits=${n}')
+	k := 'dyn'
+	m['${k}-1'] = 5
+	println('fresh key ${m['${k}-1']} has=${m.has('d' + 'yn-1')}')
+}

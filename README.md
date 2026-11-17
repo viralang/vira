@@ -37,6 +37,7 @@
    - [Methods (Value vs Mutable Pointer Receivers)](#methods-value-vs-mutable-pointer-receivers)
    - [Static Factory Methods](#static-factory-methods)
    - [Structural Interfaces & Dynamic Dispatch](#structural-interfaces--dynamic-dispatch)
+   - [Enums, Maps, Closures & Generics](#enums-maps-closures--generics)
    - [Zero-Cost Error Handling: `!T` Result & `or { ... }`](#zero-cost-error-handling-t-result--or----)
    - [Deterministic Memory Management: Autofree & Arenas](#deterministic-memory-management-autofree--arenas)
    - [First-Class AI Tensors & SIMD Acceleration](#first-class-ai-tensors--simd-acceleration)
@@ -244,6 +245,7 @@ The repository includes 42 step-by-step tutorials paired with 48 runnable `.vir`
 | **40** | **Cross-Platform GPU Compute & Actor OOM Supervision** | Advanced/Systems | [`44_gpu_compute_acceleration.vir`](docs/examples/44_gpu_compute_acceleration.vir) | [`40_cross_platform_gpu_compute_acceleration.md`](docs/tutorials/40_cross_platform_gpu_compute_acceleration.md) | Zero-SDK GPU compute runtime, unified DMA, persistent weight caching, fused transformer blocks in bump arenas, and OOM supervision with CPU-SIMD fallback. |
 | **41** | **GPU-Accelerated LLM Chat Apps (CLI & Desktop Studio)** | Advanced/AI | [`43_qwen2_5_gguf_chat_inference.vir`](docs/examples/43_qwen2_5_gguf_chat_inference.vir)<br>[`45_gui_qwen2_5_gguf_chat_studio.vir`](docs/examples/45_gui_qwen2_5_gguf_chat_studio.vir) | [`41_building_gpu_accelerated_llm_chat_apps.md`](docs/tutorials/41_building_gpu_accelerated_llm_chat_apps.md) | CUDA Driver API, Tensor Core specialization, OpenCL/CPU fallbacks, GGUF block offloading, and frame-by-frame layer streaming in a 60 FPS GUI. |
 | **42** | **Ownership, Strings & Actor Handles** | Intermediate/Adv | [`47_ownership_strings_and_actor_handles.vir`](docs/examples/47_ownership_strings_and_actor_handles.vir) | [`42_ownership_strings_and_actor_handles.md`](docs/tutorials/42_ownership_strings_and_actor_handles.md) | String `+`/`+=`, operator type rules, copies vs moves, borrowed arguments, actor handles and isolation, single-owner actors, deadlock avoidance, and migrating code from v0.7.7. |
+| **43** | **Enums, Maps, Closures & Generics** | Intermediate | [`48_enums_maps_closures_generics.vir`](docs/examples/48_enums_maps_closures_generics.vir) | [`43_enums_maps_closures_generics.md`](docs/tutorials/43_enums_maps_closures_generics.md) |
 
 ---
 
@@ -463,6 +465,31 @@ println(p.summary()) // Dispatches through vtable
 When `p` goes out of scope, the runtime invokes `p._vtable->_autofree(p._object)` to release internal struct heap fields and boxed memory.
 
 ---
+
+### Enums, Maps, Closures & Generics
+
+```v
+enum Category { fruit dairy bakery }
+
+fn cheaper_than(limit int) fn (Item) bool {
+    return fn (it Item) bool { return it.price < limit }   // captures `limit` by value
+}
+
+fn filter[T](xs []T, keep fn (T) bool) []T {
+    mut out := []T{}
+    for x in xs {
+        if keep(x) { out.push(x) }
+    }
+    return out
+}
+
+mut stock := map[string]int{'apple': 12}
+stock['pear'] += 9                         // missing keys read as the zero value
+cheap := filter(items, cheaper_than(100))  // T inferred as Item
+for name, n in stock { println('${name}: ${n}') }
+```
+
+Enums are named `int32` constants that print their name. Maps (`map[K]V`, keys: strings, integers, bools, enums) are insertion-ordered values with copy semantics. Closures (`fn (A) R`) capture by value and are reference-counted. Generics are monomorphised: each distinct use compiles to its own concrete code. See [Tutorial 43](docs/tutorials/43_enums_maps_closures_generics.md).
 
 ### Zero-Cost Error Handling: `!T` Result & `or { ... }`
 

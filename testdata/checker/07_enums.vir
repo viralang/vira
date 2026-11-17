@@ -1,0 +1,30 @@
+module main
+
+enum Color {
+	red
+	green
+}
+
+enum Twice {
+	a
+	a // ERROR: duplicate variant 'a' in enum 'Twice'
+}
+
+enum Big {
+	x = 3000000000 // ERROR: does not fit in 32 bits
+}
+
+fn main() {
+	a := Color.purple // ERROR: enum 'Color' has no variant 'purple'
+	b := Color.red
+	if b < Color.green { // ERROR: operator '<' is not defined for enum 'Color'
+		println('x')
+	}
+	if b == 1 { // ERROR: mismatched types in binary operation '=='
+		println('y')
+	}
+	s := 'x'
+	n := int(s) // ERROR: cannot cast 'string' directly to 'int'
+	_ := a
+	_ := n
+}

@@ -1,0 +1,119 @@
+// OUT: len=3 ada=37 missing=0
+// OUT: has grace: true, has bob: false
+// OUT: ada -> 37
+// OUT: linus -> 54
+// OUT: grace -> 85
+// OUT: removed=true len=2 keys=2
+// OUT: a=3 b=2 c=1 total=6
+// OUT: orig a=3 copy a=100
+// OUT: names uno two-ish []
+// OUT: read copy two-ish! vs two-ish
+// OUT: a tags=2 b tags=3 name=alice
+// OUT: fruit pear=3
+// OUT: fruit apple=2
+// OUT: nested x=1 inner x=2
+// OUT: values sum=122
+// OUT: big len=500 999=1998 998=0
+// OUT: cleared len=0
+// OUT: [vira_rt] active_leaks=0 | total_freed=63
+
+// Maps: map[K]V literals, m[k] reads (zero value when missing), m[k] = v and m[k] op= v,
+// has / delete / keys / values / clear, insertion-ordered for-in, independent copies,
+// string, struct, enum, nested-map values, and growth with deletes. No leaks.
+module main
+
+enum Fruit {
+	apple
+	pear
+}
+
+struct Account {
+	name string
+	tags []string
+}
+
+fn count_words(text string) map[string]int {
+	mut counts := map[string]int{}
+	for w in text.split(' ') {
+		counts[w] += 1
+	}
+	return counts
+}
+
+fn total(m map[string]int) int {
+	mut t := 0
+	for _, v in m {
+		t += v
+	}
+	return t
+}
+
+fn main() {
+	mut ages := map[string]int{'ada': 36, 'linus': 54}
+	ages['grace'] = 85
+	ages['ada'] = 37
+	println('len=${ages.len} ada=${ages['ada']} missing=${ages['nobody']}')
+	println('has grace: ${ages.has('grace')}, has bob: ${ages.has('bob')}')
+	for name, age in ages {
+		println('${name} -> ${age}')
+	}
+	removed := ages.delete('linus')
+	println('removed=${removed} len=${ages.len} keys=${ages.keys().len}')
+
+	counts := count_words('a b a c b a')
+	println('a=${counts['a']} b=${counts['b']} c=${counts['c']} total=${total(counts)}')
+
+	// copies are independent
+	mut copy := counts
+	copy['a'] = 100
+	println('orig a=${counts['a']} copy a=${copy['a']}')
+
+	// string values and heap values
+	mut names := map[int]string{}
+	names[1] = 'one'
+	names[2] = 'two-' + 'ish'
+	names[1] = 'uno'
+	println('names ${names[1]} ${names[2]} [${names[3]}]')
+	mut s := names[2]
+	s += '!'
+	println('read copy ${s} vs ${names[2]}')
+
+	mut accts := map[string]Account{}
+	accts['a'] = Account{ name: 'alice', tags: ['x', 'y'] }
+	mut acc := accts['a']
+	acc.tags.push('z')
+	accts['b'] = acc
+	println('a tags=${accts['a'].tags.len} b tags=${accts['b'].tags.len} name=${accts['b'].name}')
+
+	mut fr := map[Fruit]int{}
+	fr[Fruit.pear] = 3
+	fr[Fruit.apple] += 2
+	for f, n in fr {
+		println('fruit ${f}=${n}')
+	}
+
+	mut nested := map[string]map[string]int{}
+	mut inner := map[string]int{}
+	inner['x'] = 1
+	nested['outer'] = inner
+	inner['x'] = 2
+	println('nested x=${nested['outer']['x']} inner x=${inner['x']}')
+
+	vals := ages.values()
+	mut sum := 0
+	for v in vals {
+		sum += v
+	}
+	println('values sum=${sum}')
+
+	mut big := map[int]int{}
+	for mut i := 0; i < 1000; i += 1 {
+		big[i] = i * 2
+	}
+	for mut i := 0; i < 1000; i += 2 {
+		big.delete(i)
+	}
+	println('big len=${big.len} 999=${big[999]} 998=${big[998]}')
+	big.clear()
+	println('cleared len=${big.len}')
+}

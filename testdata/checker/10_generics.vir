@@ -1,0 +1,32 @@
+module main
+
+struct Box[T] {
+	value T
+}
+
+struct P {
+	x int
+}
+
+fn max_of[T](a T, b T) T {
+	if a > b { // ERROR: operator '>' is not defined for type 'P'
+		return a
+	}
+	return b
+}
+
+fn make[T]() []T {
+	return []T{}
+}
+
+fn main() {
+	_ := max_of(1, 'x') // ERROR: type parameter T is both 'int' and 'string'
+	_ := max_of(P{ x: 1 }, P{ x: 2 })
+	_ := make() // ERROR: cannot infer type parameter 'T' of 'make'
+	_ := make[int]()
+	b := Box{ value: 1 } // ERROR: generic struct 'Box' needs type arguments
+	c := Box[int, string]{ value: 1 } // ERROR: expects 1 type argument(s), got 2
+	_ := max_of(1) // ERROR: call to 'max_of' expects 2 arguments, got 1
+	_ := b
+	_ := c
+}

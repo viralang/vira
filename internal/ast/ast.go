@@ -142,6 +142,37 @@ type ArrayType struct {
 func (t *ArrayType) Span() token.Span { return t.LBracketPos }
 func (t *ArrayType) typeExprNode()    {}
 
+// MapType represents `map[K]V`.
+type MapType struct {
+	MapPos token.Span
+	Key    TypeExpr
+	Value  TypeExpr
+}
+
+func (t *MapType) Span() token.Span { return t.MapPos }
+func (t *MapType) typeExprNode()    {}
+
+// FnType represents a function type `fn (int, string) bool` (Return nil means void).
+type FnType struct {
+	FnPos  token.Span
+	Params []TypeExpr
+	Return TypeExpr
+}
+
+func (t *FnType) Span() token.Span { return t.FnPos }
+func (t *FnType) typeExprNode()    {}
+
+// ResolvedType carries an already-resolved semantic type (a checker.Type) through the AST.
+// The checker uses it for declarations it synthesizes, such as lifted closures and
+// generic instantiations.
+type ResolvedType struct {
+	Type any
+	Pos  token.Span
+}
+
+func (t *ResolvedType) Span() token.Span { return t.Pos }
+func (t *ResolvedType) typeExprNode()    {}
+
 // --- OOP & TOP-LEVEL DECLARATIONS ---
 
 // StructField represents a single field inside one of the 4 access quadrants.
@@ -251,6 +282,24 @@ type ConstDecl struct {
 
 func (d *ConstDecl) Span() token.Span { return d.DeclSpan }
 func (d *ConstDecl) declNode()        {}
+
+// EnumVariant is one named value of an enum: `red` or `red = 4`.
+type EnumVariant struct {
+	Name  Ident
+	Value Expr // optional explicit integer value
+}
+
+// EnumDecl models `enum Color { red green blue }`.
+type EnumDecl struct {
+	Module   string
+	IsPub    bool
+	Name     Ident
+	Variants []EnumVariant
+	DeclSpan token.Span
+}
+
+func (d *EnumDecl) Span() token.Span { return d.DeclSpan }
+func (d *EnumDecl) declNode()        {}
 
 // --- STATEMENTS ---
 
@@ -363,9 +412,11 @@ type ForStmt struct {
 func (s *ForStmt) Span() token.Span { return s.StmtSpan }
 func (s *ForStmt) stmtNode()        {}
 
-// ForInStmt represents `for item in items { ... }`.
+// ForInStmt represents `for item in items { ... }`, or `for k, v in m { ... }` over a map
+// (Var is then the key and ValueVar the value).
 type ForInStmt struct {
 	Var      Ident
+	ValueVar *Ident
 	Iter     Expr
 	Body     *BlockStmt
 	StmtSpan token.Span
@@ -420,6 +471,8 @@ const (
 	CleanupActor                        // emits `Module__Actor_autofree(&var);`
 	CleanupFuture                       // emits `vira_future_free(&var);`
 	CleanupSlice                        // emits slice destructor
+	CleanupMap                          // emits `vira_map_free(&var);`
+	CleanupClosure                      // emits `vira_closure_release(&var);`
 )
 
 func (k CleanupKind) String() string {
@@ -440,6 +493,10 @@ func (k CleanupKind) String() string {
 		return "vira_future_free"
 	case CleanupSlice:
 		return "slice_autofree"
+	case CleanupMap:
+		return "vira_map_free"
+	case CleanupClosure:
+		return "vira_closure_release"
 	default:
 		return "unknown_free"
 	}
@@ -461,6 +518,9 @@ func (s *DeferFreeStmt) stmtNode()        {}
 
 type IdentExpr struct {
 	Ident Ident
+	// TypeArgs holds explicit generic arguments on a type name used in an expression,
+	// as in `Box[int].new(1)`. The checker resolves them and clears the field.
+	TypeArgs []TypeExpr
 }
 
 func (e *IdentExpr) Span() token.Span { return e.Ident.Span() }
@@ -491,6 +551,8 @@ type SelectorExpr struct {
 	Field       Ident
 	IsActorSend bool // true when invoked via `actor <- method(...)`
 	SelSpan     token.Span
+	// TypeArgs: explicit generic arguments on a qualified type, `pkg.Box[int].new(1)`.
+	TypeArgs []TypeExpr
 }
 
 func (e *SelectorExpr) Span() token.Span { return e.SelSpan }
@@ -576,3 +638,30 @@ type ArrayLitExpr struct {
 func (e *ArrayLitExpr) Span() token.Span { return e.LitSpan }
 func (e *ArrayLitExpr) exprNode()        {}
 
+
+// MapLitExpr represents `map[string]int{}` or `map[string]int{'a': 1, 'b': 2}`.
+type MapLitExpr struct {
+	Type    *MapType
+	Keys    []Expr
+	Values  []Expr
+	LitSpan token.Span
+}
+
+func (e *MapLitExpr) Span() token.Span { return e.LitSpan }
+func (e *MapLitExpr) exprNode()        {}
+
+// FnLitExpr represents an anonymous function `fn (x int) int { return x * k }`. It captures
+// the outer variables it reads by value. The checker lifts its body into a top-level function
+// named LiftedName whose leading parameters are the captured variables (Captures, in order).
+type FnLitExpr struct {
+	Params     []Param
+	ReturnType TypeExpr
+	Body       *BlockStmt
+	LitSpan    token.Span
+
+	LiftedName string
+	Captures   []string
+}
+
+func (e *FnLitExpr) Span() token.Span { return e.LitSpan }
+func (e *FnLitExpr) exprNode()        {}

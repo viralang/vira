@@ -1,0 +1,26 @@
+module main
+
+struct P {
+pub mut:
+	x int
+}
+
+fn main() {
+	m := map[string]int{'a': 1}
+	mut ps := map[string]P{}
+	ps['a'].x = 3 // ERROR: cannot change a map element in place
+	mut ls := map[string][]int{}
+	ls['a'].push(1) // ERROR: cannot change a map element in place
+	bad := map[f64]int{} // ERROR: map key type must be string, an integer type, bool or an enum
+	wrong := m[3] // ERROR: map 'map[string]int' is indexed by 'string', got 'int'
+	m.delete('a') // ERROR: cannot call mutating method 'delete()' on immutable map 'm'
+	for a, b in [1, 2] { // ERROR: needs a map
+		_ := a
+	}
+	y := m.nope() // ERROR: map 'map[string]int' has no method 'nope'
+	lit := map[string]int{'a': 'b'} // ERROR: map literal value: expected 'int', got 'string'
+	_ := bad
+	_ := wrong
+	_ := y
+	_ := lit
+}
