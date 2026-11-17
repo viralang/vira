@@ -253,6 +253,8 @@ RUNS=25 WORKERS=8 bash scripts/bench_actors.sh
 
 It prints the median, minimum and maximum of five measurements and appends them to `bench/results.tsv`.
 
+`scripts/bench_actor_compare.sh` measures the figures usually quoted for Erlang/OTP and Akka (one-way message throughput, a 1,000-actor ring, spawn cost, memory per idle actor); the [roadmap](../../ROADMAP.md#-actor-performance-vs-erlangotp-and-akka) lists the latest results next to the published numbers.
+
 ---
 
 ## 7. Migrating code written for v0.7.7 and earlier

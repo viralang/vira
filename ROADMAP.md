@@ -44,9 +44,11 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [post-v0.7.7] Runtime & Compiler Hardening     ✅ COMPLETED (unreleased)
        │
+ [v0.9] Enums, Maps, Closures & Generics        ✅ COMPLETED (unreleased)
+       │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
- [v0.9] Generics & Pattern Matching Expressiveness ⏳ NEXT MILESTONE
+ [v0.9.x] Pattern Matching, Ranges & Actor Refs ⏳ NEXT MILESTONE
        │
  [v1.0] Production Registry, Stability & Freeze 📅 PLANNED
 ```
@@ -230,25 +232,66 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
 - [x] **Verified end to end** by ViraLama's reference suite: 64 model cases (Llama ... DeepSeek-V4.1, gpt-oss) against an independent NumPy forward pass, prefill and decode.
 - [ ] **Still open:** fp16 subnormals decode wrongly on builds without F16C (patch in ViraLama `docs/patches/vira-runtime-fp16-subnormal.patch`); `gguf_load_tensor` trusts tensor offsets and sizes (no check against the file size) and reopens the file per tensor; element counts above 2^31 overflow 32-bit `int` / `numel()`; IQ\* types are not supported.
 
+### 16. Enums, Maps, Closures & Generics (v0.9, unreleased, Nov 2026)
+- [x] **Enums:** `enum Color { red green blue }` with optional explicit values; `Color.red` / `pkg.Color.red`, `==` / `!=`, `switch`, struct fields, slices, map keys, `int()`, and the variant name in string interpolation. Lowered to `int32_t`.
+- [x] **Maps:** `map[K]V` (keys: strings, integer types, `bool`, enums) with literals, `m[k]` (zero value when missing), `m[k] = v`, `m[k] op= v`, `.len`, `has` / `delete` / `keys` / `values` / `clear`, and insertion-ordered `for k, v in m`. Value semantics like slices (independent copies, autofree), including as struct and actor fields. One untyped runtime hash map (`runtime/rt/map/map.h`) plus a generated ops table per value type.
+- [x] **Closures & function types:** `fn (A, B) R` types and anonymous functions that capture by value, read-only; named functions (and `pkg.fn`) as values; closures in variables, fields, slices, maps and actor messages. Lifted to top-level functions; at runtime a function pointer plus an atomically reference-counted environment (`runtime/rt/closure/closure.h`).
+- [x] **Generics:** generic functions with type arguments inferred from the arguments (through slices, maps, function types and generic structs) or explicit (`f[int](x)`), and generic structs with receiver and static methods (`Box[T]`, `fn Box[T].new()`, `pkg.Stack[string].new()`). Monomorphised in the checker: each distinct use is a concrete copy (`first__int`), so there is no runtime dispatch.
+- [x] **Tests & docs:** 6 run tests under ASan/UBSan and 4 checker tests (`testdata/run/20_*` to `25_*`, `testdata/checker/07_*` to `10_*`); [Tutorial 43](docs/tutorials/43_enums_maps_closures_generics.md), [example 48](docs/examples/48_enums_maps_closures_generics.vir), Language Guide §14. All 59 example programs check identically before and after.
+- [x] **Fixed on the way:** a fresh slice or map read only for a field (`xs.clone().len`, `m.keys().len`) leaked.
+- [ ] **Still open:** generic constraints (an unsupported operation is reported inside the instance, `help: in max_of[P]`); generic interfaces and enums; type parameters on methods; explicit type arguments other than plain names (`f[[]int]` must be inferred); a map element cannot be changed in place (copy out, store back); changing a map while iterating it is not detected; no `match` / `Option` integration for map lookups (`m[k]` returns the zero value; use `has`); `os.read_file` returns an empty string for `/proc` files (they report size 0).
+
+---
+
+## 📈 Actor Performance vs Erlang/OTP and Akka
+
+Measured with `scripts/bench_actor_compare.sh` (`scripts/bench/actor_compare.vir`, `actor_memory.vir`): 9 runs, `VIRA_WORKERS=4`, a 4-core Linux container, `-prod` (gcc -O3), Nov 2026.
+
+| Metric | Vira (median, min–max) | What it measures |
+| :-- | :-- | :-- |
+| One-way messages, 1 sender → 1 actor | **2.54 M msg/s** (2.35–3.01 M) | 1,000,000 fire-and-forget sends, then one awaited reply |
+| One-way messages, 1 sender → 64 actors | **1.78 M msg/s** (1.61–1.90 M) | same, spread round-robin |
+| Ring of 1,000 actors | **1.08 M hops/s** (1.06–1.38 M) | 1,000 laps; each hop is an awaited request/reply driven by the ring's owner |
+| Spawn | **0.69 µs** per actor (0.45–0.76) | create, send one message, drop; 100,000 actors |
+| Memory per idle actor | **408 bytes** | VmRSS difference for 1,000,000 actors that each handled one message |
+
+Published figures for comparison. They were **not measured here** (Erlang and Akka could not be installed or downloaded in this environment), they come from other hardware, and the vendor pages could not be re-fetched from here, so check them against the current documentation before citing them:
+
+| Runtime | Published figure | Source |
+| :-- | :-- | :-- |
+| Akka | "up to 50 million msg/sec on a single machine" | akka.io; measured on a large multi-core server with many senders |
+| Akka | "~2.5 million actors per GB of heap" (≈ 430 bytes per actor) | akka.io |
+| Erlang/OTP | a newly spawned process uses 327 words (≈ 2.6 KB on 64-bit), including its initial 233-word heap | Erlang Efficiency Guide, "Processes" |
+
+What this does and does not show:
+- **Memory:** a Vira actor (≈ 408 bytes resident) is in the same range as Akka's published ≈ 430 bytes and about 6× smaller than a fresh Erlang process. Erlang's figure includes a private heap and stack that Vira and Akka do not pre-allocate.
+- **Throughput:** Akka's 50 M msg/s is an aggregate over many cores and many concurrent senders; Vira's figures above have **one** sending thread, which is the bottleneck. They are not comparable per core, and no conclusion should be drawn from the ratio. A multi-sender benchmark is the next step (below).
+- **Ring:** the classic Erlang/Akka ring has each actor forward the token to its neighbour. Vira actors cannot hold references to one another yet (single owner), so here the owner relays every hop as a request/reply, which costs two messages and a wake-up per hop.
+- Run-to-run spread on this container was 1.2–1.7× (min to max); compare medians from the same machine only.
+
+Follow-up work:
+- [ ] **Actor references** (a sendable, non-owning handle) so actors can message each other directly; then a true ring and pipeline benchmark.
+- [ ] **Multi-sender throughput benchmark** (one sender per worker), the shape behind Akka's and Erlang's published numbers.
+- [ ] **Side-by-side runs** of the same three benchmarks in Erlang/OTP and Akka on one machine, scripted next to `bench_actor_compare.sh`.
+
 ---
 
 ## 🚀 Upcoming Strategic Frontiers
 
-### 🧩 Phase 1: Advanced Language Features & Expressiveness (v0.9) ⏳ NEXT MILESTONE
+### 🧩 Phase 1: Advanced Language Features & Expressiveness (v0.9 / v0.9.x) ⏳ IN PROGRESS
 *Target: Modern type system ergonomic enhancements while preserving mechanical sympathy.*
 
-- [ ] **Parametric Polymorphism (Generics):**
-  - Type-parameterized structs and functions:
+- [x] **Parametric Polymorphism (Generics):** done in v0.9 (milestone 16), with enums, maps and closures:
     ```vira
     struct RingBuffer[T] {
-        items: []T
-        head: int
-        tail: int
+        items []T
+        head  int
+        tail  int
     }
-    
-    fn map[T, U](list: []T, transform: fn(T) -> U) -> []U
+
+    fn map_to[T, U](list []T, transform fn (T) U) []U
     ```
-  - Monomorphized ahead-of-time code generation ensuring zero dynamic dispatch overhead for generic types.
+  - Monomorphised ahead-of-time: zero dynamic dispatch. Constraints, generic interfaces and method-level type parameters remain open.
 - [ ] **Exhaustive Pattern Matching (`match` expressions):**
   - Multi-branch pattern matching on primitive values, strings, Result unwrap, and discriminated unions:
     ```vira
