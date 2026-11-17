@@ -96,6 +96,40 @@ def check_fused(rng):
     return ok
 
 
+def build_mmq():
+    out = os.path.join(tempfile.mkdtemp(), 'q.so')
+    src = os.path.join(tempfile.mkdtemp(), 'q.cpp')
+    body = '#define VL_EMULATE 1\n#include "%s/mmq.cu"\n' % HERE
+    for name, _, _, _, _ in FORMATS:
+        body += ('extern "C" void run_mmq_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
+                 '  VL_LAUNCH_THREADED(vira_cu_mmq_%s, (N + 63) / 64, (M + 31) / 32, 128, xq, w, y, M, nb, N);\n}\n') % (name, name)
+    open(src, 'w').write(body)
+    subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
+    return ctypes.CDLL(out)
+
+
+def check_mmq(rng, oracle):
+    """Prompt-size products (M > 4) of every format against the CPU dequantiser."""
+    lib = build_mmq()
+    ok = True
+    for name, dt, size, qk, f16_at in FORMATS:
+        for M, K, N in [(5, 256, 7), (32, 512, 64), (40, 768, 70), (9, 1024, 130)]:
+            nbr = K // qk
+            raw = random_blocks(rng, name, N * nbr, size, f16_at)
+            wf = np.zeros(N * K, np.float32)
+            oracle.oracle(dt, raw.tobytes(), ctypes.c_size_t(N * nbr), wf.ctypes.data_as(ctypes.c_void_p))
+            xraw, xd, xq = q8_1_acts(rng, M, K)
+            xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
+            want = xf @ wf.reshape(N, K).astype(np.float64).T
+            y = np.full(M * N, np.nan, np.float32)
+            getattr(lib, 'run_mmq_' + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
+            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+            good = bool(err < 1e-4)
+            ok &= good
+            print('mmq_%-5s M=%2d K=%4d N=%3d  vs CPU dequant: max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def build():
     out = os.path.join(tempfile.mkdtemp(), 'k.so')
     src = os.path.join(tempfile.mkdtemp(), 'k.cpp')
@@ -114,6 +148,11 @@ extern "C" void run_mmvq2x_##fmt(const unsigned char *xq, const unsigned char *w
   VL_LAUNCH2(vira_cu_mmvq2x_##fmt, (N + 7) / 8, M, 32, 4, xq, w, y, M, nb, N); \
 }
 VL_RUN_X(q4_0) VL_RUN_X(q4_1) VL_RUN_X(q5_0) VL_RUN_X(q5_1) VL_RUN_X(q4_k) VL_RUN_X(q5_k) VL_RUN_X(q6_k)
+#define VL_RUN_Q(fmt) \
+extern "C" void run_mmvq2q_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) { \
+  VL_LAUNCH2(vira_cu_mmvq2q_##fmt, (N + 15) / 16, M, 32, 4, xq, w, y, M, nb, N); \
+}
+VL_RUN_Q(q4_0) VL_RUN_Q(q4_1) VL_RUN_Q(q5_0) VL_RUN_Q(q5_1) VL_RUN_Q(q4_k) VL_RUN_Q(q5_k) VL_RUN_Q(q6_k)
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
@@ -168,7 +207,7 @@ def main():
     # every format against the runtime's CPU dequantiser
     oracle = build_oracle()
     for name, dt, size, qk, f16_at in FORMATS:
-        for M, K, N in [(1, 256, 5), (1, 4096, 9), (2, 2048, 6), (4, 1536, 3), (1, 12288, 2)]:
+        for M, K, N in [(1, 256, 5), (1, 4096, 9), (2, 2048, 6), (4, 1536, 3), (1, 12288, 2), (1, 768, 19)]:
             nbr = K // qk
             raw = random_blocks(rng, name, N * nbr, size, f16_at)
             wf = np.zeros(N * K, np.float32)
@@ -176,8 +215,8 @@ def main():
             xraw, xd, xq = q8_1_acts(rng, M, K)
             xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
             want = xf @ wf.reshape(N, K).astype(np.float64).T
-            for kind in ('mmvq2w_', 'mmvq2x_'):
-                if kind == 'mmvq2x_' and name == 'q8_0':
+            for kind in ('mmvq2w_', 'mmvq2x_', 'mmvq2q_'):
+                if kind != 'mmvq2w_' and name == 'q8_0':
                     continue
                 y = np.full(M * N, np.nan, np.float32)
                 getattr(lib, 'run_' + kind + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
@@ -186,6 +225,7 @@ def main():
                 ok &= good
                 print('%s%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
     ok &= check_fused(rng)
+    ok &= check_mmq(rng, oracle)
     sys.exit(0 if ok else 1)
 
 

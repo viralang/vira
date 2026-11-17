@@ -70,7 +70,7 @@ __device__ __forceinline__ float vl_warp_reduce(float v) {
   }
   return v;
 }
-__device__ __forceinline__ float vl_warp_reduce2(float v) { return vl_warp_reduce(v); }
+__device__ __forceinline__ float vl_warp_reduce_r(float v, int) { return vl_warp_reduce(v); }
 #endif // VL_EMULATE
 
 extern "C" __global__ void __launch_bounds__(THREADS)
@@ -142,6 +142,20 @@ vira_cu_mmvq2w_q8_0(const unsigned char *__restrict__ xq, const unsigned char *_
 
 __device__ __forceinline__ int vl_load_int_b4(const unsigned char *p) { // 4-byte aligned
   return __ldg((const int *)p);
+}
+// Four ints from a 2-byte aligned address (Q6_K blocks are 210 bytes): five aligned words
+// and a shift by 0 or 16 bits, instead of eight 16-bit loads. The fifth word may lie up to
+// 4 bytes past the 16, still inside the 210-byte block for every caller below.
+__device__ __forceinline__ void vl_load4_b2(const unsigned char *p, int out[4]) {
+  const unsigned long long a = (unsigned long long)p;
+  const int *base = (const int *)(a & ~3ull);
+  const unsigned int sh = (unsigned int)(a & 2u) * 8u;
+  unsigned int w[5];
+#pragma unroll
+  for (int i = 0; i < 5; i++) w[i] = (unsigned int)__ldg(base + i);
+#pragma unroll
+  for (int i = 0; i < 4; i++)
+    out[i] = (int)(unsigned int)((((unsigned long long)w[i + 1] << 32) | w[i]) >> sh);
 }
 __device__ __forceinline__ int vl_sum_bytes(int x) { return vl_dp4a(x, 0x01010101, 0); }
 // bits base..base+3 of qh -> bit 4 of bytes 0..3
@@ -285,10 +299,13 @@ __device__ __forceinline__ float vd_q6_k(const unsigned char *wb, const vl_x8 &X
   const unsigned char *qh = wb + 128 + 32 * ip + h * 16;
   const int shl = (k >> 1) * 4, shh = 2 * k;
   int dot = 0, sx = 0;
+  int L[4], H[4];
+  vl_load4_b2(ql, L);
+  vl_load4_b2(qh, H);
 #pragma unroll
   for (int i = 0; i < 4; i++) {
-    const int lo = (vl_load_int_b2(ql + 4 * i) >> shl) & 0x0F0F0F0F;
-    const int hi = ((vl_load_int_b2(qh + 4 * i) >> shh) & 0x03030303) << 4;
+    const int lo = (L[i] >> shl) & 0x0F0F0F0F;
+    const int hi = ((H[i] >> shh) & 0x03030303) << 4;
     dot = vl_dp4a(lo | hi, X.q[i], dot);
     sx += vl_sum_bytes(X.q[i]);
   }
@@ -323,32 +340,33 @@ __device__ __forceinline__ float vd_q6_k(const unsigned char *wb, const vl_x8 &X
 // are merged). Q4_K weights are 18 bytes per 32 values but the activation is 40, so with
 // one row per warp the activation re-reads outweighed the weights (T4, Qwen3-14B Q4_K_M:
 // ~51% of bandwidth). Grid ((N + 7) / 8, M), block (32, 4).
-#define VL_MMVQ_WARP2_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE)                                    \
+#define VL_MMVQ_WARPR_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE, R)                             \
   extern "C" __global__ void __launch_bounds__(THREADS)                                       \
   NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
        float *__restrict__ y, int M, int nb, int N) {                                         \
-    const int row0 = (blockIdx.x * (THREADS / WARP) + threadIdx.y) * 2;                        \
+    const int row0 = (blockIdx.x * (THREADS / WARP) + threadIdx.y) * (R);                      \
     const int m = blockIdx.y;                                                                  \
     if (row0 >= N || m >= M) return;                                                           \
     const int lane = threadIdx.x;                                                              \
     const int t = lane % (TPU);                                                                \
-    const bool two = row0 + 1 < N;                                                             \
-    const unsigned char *w0 = w + (size_t)row0 * (size_t)nb * (BYTES);                         \
-    const unsigned char *w1 = two ? w0 + (size_t)nb * (BYTES) : w0;                            \
+    const unsigned char *wr[R];                                                                \
+    _Pragma("unroll") for (int r = 0; r < (R); r++)                                            \
+      wr[r] = w + (size_t)(row0 + r < N ? row0 + r : row0) * (size_t)nb * (BYTES);             \
     const unsigned char *xrow = xq + (size_t)m * (size_t)nb * (XSTRIDE);                       \
-    float acc0 = 0.0f, acc1 = 0.0f;                                                            \
+    float acc[R];                                                                              \
+    _Pragma("unroll") for (int r = 0; r < (R); r++) acc[r] = 0.0f;                             \
     _Pragma("unroll 2") for (int b = lane / (TPU); b < nb; b += WARP / (TPU)) {                \
       const vl_x8 X = VX(xrow + (size_t)b * (XSTRIDE), t);                                     \
-      acc0 += VD(w0 + (size_t)b * (BYTES), X, t);                                              \
-      acc1 += VD(w1 + (size_t)b * (BYTES), X, t);                                              \
+      _Pragma("unroll") for (int r = 0; r < (R); r++)                                          \
+        acc[r] += VD(wr[r] + (size_t)b * (BYTES), X, t);                                       \
     }                                                                                          \
-    const float t0 = vl_warp_reduce(acc0);                                                     \
-    const float t1 = vl_warp_reduce2(acc1);                                                    \
-    if (lane == VL_WARP_WRITER) {                                                              \
-      y[(size_t)m * (size_t)N + (size_t)row0] = t0;                                            \
-      if (two) y[(size_t)m * (size_t)N + (size_t)row0 + 1] = t1;                               \
+    _Pragma("unroll") for (int r = 0; r < (R); r++) {                                          \
+      const float tot = vl_warp_reduce_r(acc[r], r);                                           \
+      if (lane == VL_WARP_WRITER && row0 + r < N) y[(size_t)m * (size_t)N + (size_t)(row0 + r)] = tot; \
     }                                                                                          \
   }
+#define VL_MMVQ_WARP2_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE) VL_MMVQ_WARPR_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE, 2)
+#define VL_MMVQ_WARP4_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE) VL_MMVQ_WARPR_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE, 4)
 
 VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q4_0, vx_32, vd_q4_0, 4, 18u, 40u)
 VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q4_1, vx_32, vd_q4_1, 4, 20u, 40u)
@@ -357,6 +375,14 @@ VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q5_1, vx_32, vd_q5_1, 4, 24u, 40u)
 VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q4_k, vx_q4_k, vd_q4_k, 16, 144u, 320u)
 VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q5_k, vx_q4_k, vd_q5_k, 16, 176u, 320u)
 VL_MMVQ_WARP2_KERNEL(vira_cu_mmvq2x_q6_k, vx_q6_k, vd_q6_k, 16, 210u, 320u)
+// Four rows per warp (VIRA_GPU_MMVQ=w4), for A/B runs; grid ((N + 15) / 16, M).
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q4_0, vx_32, vd_q4_0, 4, 18u, 40u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q4_1, vx_32, vd_q4_1, 4, 20u, 40u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q5_0, vx_32, vd_q5_0, 4, 22u, 40u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q5_1, vx_32, vd_q5_1, 4, 24u, 40u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q4_k, vx_q4_k, vd_q4_k, 16, 144u, 320u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q5_k, vx_q4_k, vd_q5_k, 16, 176u, 320u)
+VL_MMVQ_WARP4_KERNEL(vira_cu_mmvq2q_q6_k, vx_q6_k, vd_q6_k, 16, 210u, 320u)
 
 VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_0, vx_32, vd_q4_0, 4, 18u, 40u)
 VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_1, vx_32, vd_q4_1, 4, 20u, 40u)

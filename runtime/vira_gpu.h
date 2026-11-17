@@ -9,6 +9,7 @@
 #include "vira_cuda_ptx.h"
 #include "vira_cuda_mmvq2_ptx.h"
 #include "vira_cuda_fused_ptx.h"
+#include "vira_cuda_mmq_ptx.h"
 #if defined(_WIN32) && !defined(_WIN64)
 #define VIRA_CL_API __stdcall
 #else
@@ -375,6 +376,8 @@ typedef struct {
   vira_cu_module cu_dp4a_module;
   vira_cu_module cu_mmvq2_module; // runtime/cuda/mmvq2.cu
   vira_cu_module cu_fused_module; // runtime/cuda/fused.cu
+  vira_cu_module cu_mmq_module;   // runtime/cuda/mmq.cu: prompt-size products (M > 4); VIRA_GPU_MMQ=0 disables
+  vira_cu_function cu_k_mmq[8];   // q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k
   vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
 
   // CUDA Compute kernels
@@ -429,6 +432,7 @@ typedef struct {
   vira_cu_function cu_k_mmvq2w_q4_0, cu_k_mmvq2w_q4_1, cu_k_mmvq2w_q5_0, cu_k_mmvq2w_q5_1;
   vira_cu_function cu_k_mmvq2w_q4_k, cu_k_mmvq2w_q5_k, cu_k_mmvq2w_q6_k; // warp per row, other formats
   bool mmvq2_two; // default: two rows per warp for the formats other than Q8_0; VIRA_GPU_MMVQ=w1: one
+  int mmvq2_rows; // rows per warp for those formats: 2 (default), 1 (w1) or 4 (w4)
   bool mmvq2_warp;                  // default: one warp per row, 4 rows per block; VIRA_GPU_MMVQ=row: 128 threads per row
   vira_cu_function cu_k_mmvq_q4_k;
   vira_cu_function cu_k_mmvq_q5_k;
@@ -4391,6 +4395,20 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
   g->cu_fused_module = NULL;
   g->cu_k_rmsnorm_q8_1 = NULL;
+  g->cu_mmq_module = NULL;
+  for (int i = 0; i < 8; i++) g->cu_k_mmq[i] = NULL;
+  {
+    const char *mq = getenv("VIRA_GPU_MMQ");
+    vira_cu_module qm = NULL;
+    if (g->has_dp4a && !(mq != NULL && strcmp(mq, "0") == 0) &&
+        g->cuModuleLoadData(&qm, _vira_cuda_mmq_ptx) == VIRA_CUDA_SUCCESS && qm != NULL) {
+      static const char *names[8] = {"vira_cu_mmq_q4_0", "vira_cu_mmq_q4_1", "vira_cu_mmq_q5_0",
+                                     "vira_cu_mmq_q5_1", "vira_cu_mmq_q8_0", "vira_cu_mmq_q4_k",
+                                     "vira_cu_mmq_q5_k", "vira_cu_mmq_q6_k"};
+      g->cu_mmq_module = qm;
+      for (int i = 0; i < 8; i++) (void)g->cuModuleGetFunction(&g->cu_k_mmq[i], qm, names[i]);
+    }
+  }
   {
     const char *fz = getenv("VIRA_GPU_FUSE");
     vira_cu_module fm = NULL;
@@ -4404,6 +4422,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_mmvq2_q8_0 = NULL;
   g->mmvq2_warp = false;
   g->mmvq2_two = false;
+  g->mmvq2_rows = 1;
   g->cu_k_mmvq2w_q4_0 = NULL;
   g->cu_k_mmvq2w_q4_1 = NULL;
   g->cu_k_mmvq2w_q5_0 = NULL;
@@ -4419,15 +4438,16 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       g->cu_mmvq2_module = m2;
       g->mmvq2_warp = !(mv != NULL && strcmp(mv, "row") == 0); // T4: warp 26 tok/s, row 25, old 13
       g->mmvq2_two = !(mv != NULL && strcmp(mv, "w1") == 0);
+      g->mmvq2_rows = !g->mmvq2_two ? 1 : (mv != NULL && strcmp(mv, "w4") == 0) ? 4 : 2;
       (void)g->cuModuleGetFunction(&g->cu_k_mmvq2_q8_0, m2,
                                    g->mmvq2_warp ? "vira_cu_mmvq2w_q8_0" : "vira_cu_mmvq2_q8_0");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_0, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q4_0" : "vira_cu_mmvq2w_q4_0");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_1, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q4_1" : "vira_cu_mmvq2w_q4_1");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_0, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q5_0" : "vira_cu_mmvq2w_q5_0");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_1, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q5_1" : "vira_cu_mmvq2w_q5_1");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_k, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q4_k" : "vira_cu_mmvq2w_q4_k");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_k, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q5_k" : "vira_cu_mmvq2w_q5_k");
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q6_k, m2, g->mmvq2_two ? "vira_cu_mmvq2x_q6_k" : "vira_cu_mmvq2w_q6_k");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_0, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q4_0" : g->mmvq2_two ? "vira_cu_mmvq2x_q4_0" : "vira_cu_mmvq2w_q4_0");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_1, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q4_1" : g->mmvq2_two ? "vira_cu_mmvq2x_q4_1" : "vira_cu_mmvq2w_q4_1");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_0, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q5_0" : g->mmvq2_two ? "vira_cu_mmvq2x_q5_0" : "vira_cu_mmvq2w_q5_0");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_1, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q5_1" : g->mmvq2_two ? "vira_cu_mmvq2x_q5_1" : "vira_cu_mmvq2w_q5_1");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q4_k, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q4_k" : g->mmvq2_two ? "vira_cu_mmvq2x_q4_k" : "vira_cu_mmvq2w_q4_k");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q5_k, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q5_k" : g->mmvq2_two ? "vira_cu_mmvq2x_q5_k" : "vira_cu_mmvq2w_q5_k");
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2w_q6_k, m2, g->mmvq2_rows == 4 ? "vira_cu_mmvq2q_q6_k" : g->mmvq2_two ? "vira_cu_mmvq2x_q6_k" : "vira_cu_mmvq2w_q6_k");
     } else if (want && getenv("VIRA_GPU_DEBUG") != NULL) {
       fprintf(stderr, "[vira gpu] mmvq2 PTX did not load; using the older decode kernels\n");
     }
@@ -4456,7 +4476,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (_vira_gpu_debug()) {
     fprintf(stderr,
             "vira gpu: [CUDA Driver API] %s (sm_%d%d%s%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s\n",
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s%s\n",
             g->device_name, g->compute_capability_major, g->compute_capability_minor,
             g->has_tensor_cores ? " + Tensor Cores" : "",
             g->has_dp4a ? " + DP4A" : "",
@@ -4465,9 +4485,10 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->warp_size, g->wg_size, g->tile_dim,
             g->has_tensor_cores ? " / WMMA" : "",
             g->has_dp4a ? " / MMVQ-Q8_1" : "",
-            g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_two ? (g->mmvq2_warp ? " / mmvq2w(Q8_0) mmvq2x(rest)" : " / mmvq2(Q8_0) mmvq2x(rest)")
+            g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_two ? (g->mmvq2_warp ? (g->mmvq2_rows == 4 ? " / mmvq2w(Q8_0) mmvq2q(rest)" : " / mmvq2w(Q8_0) mmvq2x(rest)") : " / mmvq2(Q8_0) mmvq2x(rest)")
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
-            g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "");
+            g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
+            g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "");
   }
 
   return true;
@@ -4982,6 +5003,11 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_dp4a_module);
         _vira_gpu.cu_dp4a_module = NULL;
       }
+      if (_vira_gpu.cu_mmq_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmq_module);
+        _vira_gpu.cu_mmq_module = NULL;
+      }
+      for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmq[i] = NULL;
       if (_vira_gpu.cu_fused_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_fused_module);
         _vira_gpu.cu_fused_module = NULL;
@@ -5386,6 +5412,38 @@ static inline bool _vira_gpu_ensure_act_q8_locked(
   return true;
 }
 
+// Prompt-size product (M > 4) with runtime/cuda/mmq.cu: x quantised to Q8_1, then one
+// launch of 64 weight rows x 32 activation rows per block. False: not available (format,
+// K % 256, VIRA_GPU_MMQ=0, no memory for the Q8_1 copy); *err is set when it launched.
+static inline bool _vira_gpu_mmq_locked(_vira_gpu_wfmt wfmt, _vira_gpu_act_entry *x_slot,
+                                        _vira_gpu_act_entry *y_slot, vira_cu_deviceptr w_buf,
+                                        int32_t M, int32_t K, int32_t N, vira_cu_deviceptr avoid_w_cu,
+                                        const void *pin_w, vira_cl_int *err) {
+  int idx;
+  switch (wfmt) {
+  case VIRA_WFMT_Q4_0: idx = 0; break;
+  case VIRA_WFMT_Q4_1: idx = 1; break;
+  case VIRA_WFMT_Q5_0: idx = 2; break;
+  case VIRA_WFMT_Q5_1: idx = 3; break;
+  case VIRA_WFMT_Q8_0: idx = 4; break;
+  case VIRA_WFMT_Q4_K: idx = 5; break;
+  case VIRA_WFMT_Q5_K: idx = 6; break;
+  case VIRA_WFMT_Q6_K: idx = 7; break;
+  default: return false;
+  }
+  vira_cu_function k = _vira_gpu.cu_k_mmq[idx];
+  if (k == NULL || (K & 255) != 0 || M <= 4) return false;
+  vira_cu_deviceptr q8 = 0;
+  if (!_vira_gpu_ensure_act_q8_locked(x_slot, M, K, y_slot, avoid_w_cu, pin_w, &q8)) return false;
+  int32_t nb = idx >= 5 ? (K >> 8) : (K >> 5); // units: super-blocks or 32-value blocks
+  vira_cu_deviceptr y_buf = y_slot->cu_buf;
+  void *args[] = {&q8, &w_buf, &y_buf, &M, &nb, &N};
+  *err = (_vira_gpu.cuLaunchKernel(k, (unsigned int)(((size_t)N + 63) / 64), (unsigned int)(((size_t)M + 31) / 32), 1,
+                                   128, 1, 1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+             ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+  return true;
+}
+
 static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
                                               vira_tensor_f32 x,
                                               vira_tensor_f32 w) {
@@ -5511,7 +5569,9 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
         default:             k_gemm = _vira_gpu.cu_k_gemm_q8_0; break;
         }
         void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
-        if (k_wmma != NULL) {
+        if (_vira_gpu_mmq_locked(wfmt, x_slot, y_slot, w_buf, M, K, N, avoid_w_cu, pin_w, &err)) {
+          // runtime/cuda/mmq.cu
+        } else if (k_wmma != NULL) {
           unsigned int gx = (unsigned int)(((size_t)N + 31) / 32);
           unsigned int gy = (unsigned int)(((size_t)M + 31) / 32);
           err = (_vira_gpu.cuLaunchKernel(k_wmma, gx, gy, 1, 128, 1, 1,
@@ -5572,7 +5632,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
             vira_cu_function k2 = wfmt == VIRA_WFMT_Q4_0 ? _vira_gpu.cu_k_mmvq2w_q4_0 :
                                   wfmt == VIRA_WFMT_Q4_1 ? _vira_gpu.cu_k_mmvq2w_q4_1 :
                                   wfmt == VIRA_WFMT_Q5_0 ? _vira_gpu.cu_k_mmvq2w_q5_0 : _vira_gpu.cu_k_mmvq2w_q5_1;
-            const size_t rows_per_block = _vira_gpu.mmvq2_two ? 8 : 4; // 4 warps, 1 or 2 rows each
+            const size_t rows_per_block = 4 * (size_t)_vira_gpu.mmvq2_rows; // 4 warps
             err = (_vira_gpu.cuLaunchKernel(k2, (unsigned int)(((size_t)N + rows_per_block - 1) / rows_per_block), gy, 1, 32, 4, 1, 0,
                                             _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
                       ? VIRA_CL_SUCCESS
@@ -5620,7 +5680,9 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
         default:             k_gemm = _vira_gpu.cu_k_gemm_q6_k; break;
         }
         void *args[] = {&x_buf, &w_buf, &y_buf, &M, &num_sb_k, &N};
-        if (k_wmma != NULL) {
+        if (_vira_gpu_mmq_locked(wfmt, x_slot, y_slot, w_buf, M, K, N, avoid_w_cu, pin_w, &err)) {
+          // runtime/cuda/mmq.cu
+        } else if (k_wmma != NULL) {
           unsigned int gx = (unsigned int)(((size_t)N + 31) / 32);
           unsigned int gy = (unsigned int)(((size_t)M + 31) / 32);
           err = (_vira_gpu.cuLaunchKernel(k_wmma, gx, gy, 1, 128, 1, 1,
@@ -5666,7 +5728,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
                                 wfmt == VIRA_WFMT_Q5_K ? _vira_gpu.cu_k_mmvq2w_q5_k : _vira_gpu.cu_k_mmvq2w_q6_k;
           if (k2 != NULL) { // runtime/cuda/mmvq2.cu: a warp per row, 4 rows per block
             k_mmvq = k2;
-            const size_t rows_per_block = _vira_gpu.mmvq2_two ? 8 : 4; // 4 warps, 1 or 2 rows each
+            const size_t rows_per_block = 4 * (size_t)_vira_gpu.mmvq2_rows; // 4 warps
             gx = (unsigned int)(((size_t)N + rows_per_block - 1) / rows_per_block);
             by = 4;
           }

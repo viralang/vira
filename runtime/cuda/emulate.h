@@ -42,11 +42,11 @@ static inline float vl_warp_reduce(float v) { // threads of a warp run lane 0..3
   vl_emul_warp[threadIdx.y] += v;
   return vl_emul_warp[threadIdx.y]; // complete at lane 31
 }
-static float vl_emul_warp2[64];
-static inline float vl_warp_reduce2(float v) { // second value per warp (two-row kernels)
-  if (threadIdx.x == 0) vl_emul_warp2[threadIdx.y] = 0.0f;
-  vl_emul_warp2[threadIdx.y] += v;
-  return vl_emul_warp2[threadIdx.y];
+static float vl_emul_warp_r[8][64];
+static inline float vl_warp_reduce_r(float v, int r) { // value r of R per warp (multi-row kernels)
+  if (threadIdx.x == 0) vl_emul_warp_r[r][threadIdx.y] = 0.0f;
+  vl_emul_warp_r[r][threadIdx.y] += v;
+  return vl_emul_warp_r[r][threadIdx.y];
 }
 // Runs kernel `k` over grid (gx, gy) with `threads` threads per block.
 #define VL_LAUNCH(k, gx, gy, threads, ...)                       \
