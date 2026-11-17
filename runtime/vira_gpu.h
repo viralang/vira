@@ -423,7 +423,7 @@ typedef struct {
   vira_cu_function cu_k_mmvq_q5_1;
   vira_cu_function cu_k_mmvq_q8_0;
   vira_cu_function cu_k_mmvq2_q8_0; // runtime/cuda/mmvq2.cu; VIRA_GPU_MMVQ=old disables
-  bool mmvq2_warp;                  // VIRA_GPU_MMVQ=warp: one warp per row, 4 rows per block
+  bool mmvq2_warp;                  // default: one warp per row, 4 rows per block; VIRA_GPU_MMVQ=row: 128 threads per row
   vira_cu_function cu_k_mmvq_q4_k;
   vira_cu_function cu_k_mmvq_q5_k;
   vira_cu_function cu_k_mmvq_q6_k;
@@ -4391,7 +4391,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
     vira_cu_module m2 = NULL;
     if (want && g->cuModuleLoadData(&m2, _vira_cuda_mmvq2_ptx) == VIRA_CUDA_SUCCESS && m2 != NULL) {
       g->cu_mmvq2_module = m2;
-      g->mmvq2_warp = (mv != NULL && strcmp(mv, "warp") == 0);
+      g->mmvq2_warp = !(mv != NULL && strcmp(mv, "row") == 0); // T4: warp 26 tok/s, row 25, old 13
       (void)g->cuModuleGetFunction(&g->cu_k_mmvq2_q8_0, m2,
                                    g->mmvq2_warp ? "vira_cu_mmvq2w_q8_0" : "vira_cu_mmvq2_q8_0");
     } else if (want && getenv("VIRA_GPU_DEBUG") != NULL) {

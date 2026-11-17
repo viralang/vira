@@ -100,7 +100,8 @@ vira_cu_mmvq2_q8_0(const unsigned char *__restrict__ xq, const unsigned char *__
   if (tid == VL_WRITER) y[(size_t)m * (size_t)N + (size_t)row] = total;
 }
 
-// Variant (VIRA_GPU_MMVQ=warp): one warp per output row, 4 rows per block of (32, 4).
+// Default since the T4 A/B (Qwen3-8B Q8_0: warp 26 tok/s, row kernel above 25, old 13):
+// one warp per output row, 4 rows per block of (32, 4). VIRA_GPU_MMVQ=row selects the one above.
 // For K = 4096 a 128-thread row block gives each thread one step; here each thread does
 // four, so more loads are in flight per thread. Same arguments; grid ((N + 3) / 4, M).
 extern "C" __global__ void __launch_bounds__(THREADS)
