@@ -494,6 +494,7 @@ static _vira_gpu_state _vira_gpu = {
 
 static inline void vira_gpu_init(void);
 static inline void vira_gpu_sync(void);
+static inline void vira_gpu_wait(void);
 static inline void vira_gpu_shutdown(void);
 static inline void _vira_gpu_evict_all_locked(void);
 static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr);
@@ -5269,6 +5270,25 @@ static inline void _vira_gpu_sync_all_dirty_locked(void) {
     if (e->dev_dirty && e->epoch == ep && e->host_ptr != NULL) {
       _vira_gpu_sync_slot_locked(e);
     }
+  }
+}
+
+// Waits for queued GPU work without copying device data back (gpu_wait). Host reads of a
+// tensor still copy it back on demand (_vira_tensor_sync_host_f32).
+static inline void vira_gpu_wait(void) {
+  if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) == 2 &&
+      _vira_gpu.available) {
+    pthread_mutex_lock(&_vira_gpu.lock);
+    if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
+      if (_vira_gpu_cuda_ensure_ctx_locked() && _vira_gpu.cu_stream && _vira_gpu.cuStreamSynchronize) {
+        _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
+      } else if (_vira_gpu.cuCtxSynchronize) {
+        _vira_gpu.cuCtxSynchronize();
+      }
+    } else {
+      if (_vira_gpu.queue) _vira_gpu.clFinish(_vira_gpu.queue);
+    }
+    pthread_mutex_unlock(&_vira_gpu.lock);
   }
 }
 

@@ -359,7 +359,8 @@ These run on CUDA (driver API + JIT PTX) or OpenCL when a device is available an
 | `gpu_set_enabled(b bool)`, `gpu_set_backend(name string)`, `gpu_set_device(dev string)` | `void` | Select `cuda` / `opencl` / `cpu` / `auto` and the device (index or name) |
 | `gpu_backend_name`, `gpu_device_name` | `() string` | Active backend / device |
 | `gpu_vram_bytes`, `gpu_allocated_bytes`, `gpu_oom_fallbacks` | `() i64` | VRAM size, bytes in use, number of OOM fallbacks to CPU |
-| `gpu_sync()`, `gpu_simulate_oom(b bool)` | `void` | Wait for queued work; force the OOM path (tests) |
+| `gpu_sync()`, `gpu_simulate_oom(b bool)` | `void` | Wait for queued work and copy every GPU-modified tensor back to the host; force the OOM path (tests) |
+| `gpu_wait()` | `void` | Wait for queued work without copying anything back (host reads still copy on demand); for timing |
 
 Weight types without a GPU kernel (BF16, Q2_K, Q3_K, MXFP4) stay on the CPU kernels even when the GPU is enabled.
 

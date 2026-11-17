@@ -29,7 +29,8 @@ In **Milestone v0.8**, Vira introduces a **Zero-SDK-Dependency Cross-Platform GP
 | **`gpu.vram_mb()`** | `fn vram_mb() i64` | Total device VRAM in megabytes |
 | **`gpu.allocated_kb()`** | `fn allocated_kb() i64` | Currently cached persistent weight buffer size in kilobytes |
 | **`gpu.set_enabled(b)`** | `fn set_enabled(enabled bool)` | Dynamically enables or disables GPU offload at runtime |
-| **`gpu.sync()`** | `fn sync()` | Waits for all in-flight GPU command queues to complete |
+| **`gpu.sync()`** | `fn sync()` | Waits for all in-flight GPU work and copies every GPU-modified tensor back to host memory |
+| **`gpu.wait()`** | `fn wait()` | Waits for in-flight GPU work without copying anything back (a tensor still copies back when the host reads it). Use it for timings: `sync()` after a prefill copies every KV cache back |
 | **`x.gpu_linear(w)`** / **`gpu.linear(x, w)`** | `fn linear(x, w tensor[f32]) tensor[f32]` | Computes $y = x W^T$ on the GPU with persistent weight caching and OOM fallback |
 | **`a.gpu_matmul(b)`** / **`gpu.matmul(a, b)`** | `fn matmul(a, b tensor[f32]) tensor[f32]` | Computes $C = A B$ on the GPU with persistent buffer caching and OOM fallback |
 | **`gpu.rmsnorm(x, w, eps)`** | `fn rmsnorm(x, w tensor[f32], eps f32) tensor[f32]` | Root Mean Square Layer Normalization |

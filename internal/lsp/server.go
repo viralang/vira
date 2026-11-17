@@ -1037,7 +1037,9 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	case "gpu_is_enabled":
 		return "**`gpu_is_enabled() -> bool`**\n\nReturns `true` if GPU compute dispatch is currently enabled."
 	case "gpu_sync":
-		return "**`gpu_sync()`**\n\nSynchronizes all in-flight GPU command queues."
+		return "**`gpu_sync()`**\n\nWaits for queued GPU work and copies every GPU-modified tensor back to host memory."
+	case "gpu_wait":
+		return "**`gpu_wait()`**\n\nWaits for queued GPU work without copying anything back (tensors still copy back when the host reads them). Use it around timings."
 	case "gpu_simulate_oom":
 		return "**`gpu_simulate_oom(enable: bool)`**\n\nEnables or disables simulated GPU VRAM Out-of-Memory (OOM) faults to test actor supervision and CPU SIMD fallback."
 	case "gpu_rmsnorm":

@@ -81,8 +81,15 @@ pub fn set_device(device string) {
 	gpu_set_device(device)
 }
 
+// Waits for queued GPU work and copies every GPU-modified tensor back to the host.
 pub fn sync() {
 	gpu_sync()
+}
+
+// Waits for queued GPU work without copying anything back; tensors still copy back when
+// the host reads them. Use it to time GPU work.
+pub fn wait() {
+	gpu_wait()
 }
 
 pub fn simulate_oom(enable bool) {

@@ -750,6 +750,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeVoid,
 	}
+	c.functions["gpu_wait"] = &FnSig{
+		Name:       "gpu_wait",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
 	c.functions["gpu_simulate_oom"] = &FnSig{
 		Name:       "gpu_simulate_oom",
 		IsPub:      true,
