@@ -1850,6 +1850,18 @@ static inline bool _vira_future_wait_or_detach(vira_future *f) {
   return false;
 }
 
+/**
+ * True once awaiting the future would return without waiting: its message has run (or failed),
+ * or it was already awaited. Does not consume the future. Lets code that is not an actor (an
+ * event loop in main) poll for a reply each turn instead of blocking on `.await()`.
+ */
+static inline bool vira_future_ready(const vira_future *f) {
+  if (f == NULL || f->env == NULL || f->task == NULL)
+    return true;
+  int32_t d = __atomic_load_n(&f->task->done, __ATOMIC_ACQUIRE);
+  return d != 0 && d != VIRA_TASK_RUNNING;
+}
+
 // Idempotent scope-exit cleanup injected by `internal/autofree` for Future[T]
 /**
  * Releases memory allocated for an asynchronous future structure.

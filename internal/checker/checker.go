@@ -3140,9 +3140,14 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 		// 2. Check if this is `.await()` on a `Future[T]`
 		if sig == nil {
 			recvType := c.checkExpr(callee.Left, scope)
-			if futType, isFut := recvType.(*FutureType); isFut {
+			if futType, isFut := recvType.(*FutureType); isFut && callee.Field.Name == "ready" {
+				// `.ready()`: true once `.await()` would return without waiting. It never
+				// consumes the future, so an event loop can poll it every turn.
+				callName = futType.String() + ".ready"
+				sig = &FnSig{Name: "ready", IsPub: true, ReturnType: TypeBool, Span: callee.SelSpan}
+			} else if futType, isFut := recvType.(*FutureType); isFut {
 				if callee.Field.Name != "await" {
-					c.errorf(callee.SelSpan, "type '%s' has no method '%s' (only '.await()' is supported)",
+					c.errorf(callee.SelSpan, "type '%s' has no method '%s' (only '.await()' and '.ready()' are supported)",
 						futType, callee.Field.Name)
 					return TypeVoid
 				}

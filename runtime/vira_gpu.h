@@ -235,6 +235,8 @@ typedef struct {
   bool unified_mem;
   bool has_tensor_cores;
   bool has_dp4a;
+  char cuda_fail[384]; // why CUDA setup failed (empty if it was not tried or succeeded)
+  int cuda_devices;    // CUDA devices the driver reported (0 if none / no driver)
   int compute_capability_major;
   int compute_capability_minor;
   bool vram_saturated;
@@ -3780,6 +3782,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (g->cuDeviceGetCount(&dev_count) != VIRA_CUDA_SUCCESS || dev_count <= 0) {
     return false;
   }
+  g->cuda_devices = dev_count;
 
   const char *env_dev = g->requested_device[0] ? g->requested_device : getenv("VIRA_GPU_DEVICE");
   vira_cu_device best_dev = -1;
@@ -3819,6 +3822,11 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
     g->cuDeviceGetAttribute(&cc_minor, VIRA_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, d);
 
     int64_t score = (int64_t)(vram >> 20) * (integrated == 0 ? 4LL : 1LL) + (int64_t)sm_count * 64LL;
+    if (_vira_gpu_debug()) {
+      fprintf(stderr, "vira gpu: CUDA device %d: %s | sm_%d%d | %lld MiB | %d SMs | %s | score %lld\n",
+              i, cur_dname, cc_major, cc_minor, (long long)(vram >> 20), sm_count,
+              integrated ? "integrated" : "dedicated", (long long)score);
+    }
     if (score > best_score) {
       best_score = score;
       best_dev = d;
@@ -3832,11 +3840,15 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
 
   if (best_dev == -1) {
+    snprintf(g->cuda_fail, sizeof(g->cuda_fail), "no CUDA device matches VIRA_GPU_DEVICE=%.64s",
+             env_dev != NULL ? env_dev : "");
     return false;
   }
 
   vira_cu_context ctx = NULL;
-  if (g->cuCtxCreate(&ctx, 0, best_dev) != VIRA_CUDA_SUCCESS || ctx == NULL) {
+  vira_cu_result cu_rc = g->cuCtxCreate(&ctx, 0, best_dev);
+  if (cu_rc != VIRA_CUDA_SUCCESS || ctx == NULL) {
+    snprintf(g->cuda_fail, sizeof(g->cuda_fail), "%.200s: cuCtxCreate failed (CUDA error %d)", best_name, (int)cu_rc);
     return false;
   }
 
@@ -3846,7 +3858,12 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
 
   vira_cu_module mod = NULL;
-  if (g->cuModuleLoadData(&mod, _vira_cuda_kernel_ptx) != VIRA_CUDA_SUCCESS || mod == NULL) {
+  cu_rc = g->cuModuleLoadData(&mod, _vira_cuda_kernel_ptx);
+  if (cu_rc != VIRA_CUDA_SUCCESS || mod == NULL) {
+    // 218/222 = the driver cannot JIT this PTX (driver too old for the PTX version).
+    snprintf(g->cuda_fail, sizeof(g->cuda_fail),
+             "%.200s: cuModuleLoadData failed (CUDA error %d%s)", best_name, (int)cu_rc,
+             (cu_rc == 218 || cu_rc == 222) ? ", the NVIDIA driver is too old for the embedded PTX" : "");
     if (stream && g->cuStreamDestroy) g->cuStreamDestroy(stream);
     g->cuCtxDestroy(ctx);
     _vira_tls_cu_ctx = NULL;
@@ -3887,6 +3904,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
 
   if (!required_ok) {
+    snprintf(g->cuda_fail, sizeof(g->cuda_fail), "%.200s: a required CUDA kernel is missing from the module", best_name);
     g->cuModuleUnload(mod);
     if (stream && g->cuStreamDestroy) g->cuStreamDestroy(stream);
     g->cuCtxDestroy(ctx);
@@ -4170,11 +4188,23 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
                          &gmem, NULL);
       g->clGetDeviceInfo(devs[d], VIRA_CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cu),
                          &cu, NULL);
-      g->clGetDeviceInfo(devs[d], VIRA_CL_DEVICE_HOST_UNIFIED_MEMORY,
-                         sizeof(um), &um, NULL);
+      // HOST_UNIFIED_MEMORY is deprecated since OpenCL 2.0 and some drivers fail the query.
+      // An integrated GPU reports a large share of system RAM as "global memory", so a
+      // failed query must not make it look like a big dedicated card: fall back to the name.
+      if (g->clGetDeviceInfo(devs[d], VIRA_CL_DEVICE_HOST_UNIFIED_MEMORY,
+                             sizeof(um), &um, NULL) != VIRA_CL_SUCCESS) {
+        um = (_vira_strcasestr_match(cur_dname, "intel") && !_vira_strcasestr_match(cur_dname, "arc")) ? 1 : 0;
+      }
 
       int64_t score =
           (int64_t)(gmem >> 20) * (um == 0 ? 4LL : 1LL) + (int64_t)cu * 64LL;
+      if (_vira_gpu_debug()) {
+        char plat_name[256] = {0};
+        g->clGetPlatformInfo(platforms[p], VIRA_CL_PLATFORM_NAME, sizeof(plat_name) - 1, plat_name, NULL);
+        fprintf(stderr, "vira gpu: OpenCL platform %u device %u: %s (%s) | %lld MiB | %u CU | %s | score %lld\n",
+                (unsigned)p, (unsigned)d, cur_dname, plat_name, (long long)(gmem >> 20), (unsigned)cu,
+                um ? "shared memory" : "dedicated", (long long)score);
+      }
       if (score > best_score) {
         best_score = score;
         best_dev = devs[d];
@@ -4448,10 +4478,19 @@ static inline void vira_gpu_init(void) {
 #endif
     }
     if (cuda_lib != NULL) {
+      _vira_gpu.cuda_fail[0] = '\0';
+      _vira_gpu.cuda_devices = 0;
       if (_vira_gpu_init_cuda_locked(cuda_lib)) {
         __atomic_store_n(&_vira_gpu.initialized, 2, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&_vira_gpu.lock);
         return;
+      }
+      // An NVIDIA GPU is present but CUDA could not be used: say so, instead of silently
+      // running on another device (OpenCL may then pick an integrated GPU or the CPU).
+      if (_vira_gpu.cuda_devices > 0) {
+        fprintf(stderr, "vira gpu: warning: CUDA is not used: %s. Trying %s.\n",
+                _vira_gpu.cuda_fail[0] ? _vira_gpu.cuda_fail : "setup failed",
+                allow_opencl ? "OpenCL, then the CPU" : "the CPU");
       }
 #ifdef _WIN32
       FreeLibrary((HMODULE)cuda_lib);

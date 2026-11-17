@@ -1,0 +1,48 @@
+// OUT: polled before ready: true
+// OUT: ready twice: true true
+// OUT: value 40
+// OUT: ready after await: true
+// OUT: dead ref future ready at once: true
+// OUT: err: actor is gone
+// OUT: [vira_rt] active_leaks=0
+
+// `fut.ready()`: true once `.await()` would return without waiting. Lets an event loop in
+// main poll a reply each turn instead of blocking on it. Never consumes the future.
+module main
+
+pub actor Slow {
+mut:
+	n int = 0
+}
+
+pub fn (mut s Slow) work(ms int) int {
+	time_sleep_ms(ms)
+	s.n = s.n + 1
+	return ms
+}
+
+fn gone() Ref[Slow] {
+	mut t := Slow{}
+	return t.ref()
+}
+
+fn main() {
+	mut s := Slow{}
+	f := s <- work(40)
+	mut polls := 0
+	for !f.ready() {
+		polls = polls + 1
+		time_sleep_ms(1)
+	}
+	println('polled before ready: ${polls > 0}')
+	println('ready twice: ${f.ready()} ${f.ready()}')
+	v := f.await() or { 0 }
+	println('value ${v}')
+	println('ready after await: ${f.ready()}')
+	g := gone() <- work(1)
+	println('dead ref future ready at once: ${g.ready()}')
+	_ := g.await() or {
+		println('err: ${err}')
+		0
+	}
+}

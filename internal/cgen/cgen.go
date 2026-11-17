@@ -3953,6 +3953,9 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 
 		// 2. Future[T].await() call
 		leftType := g.chk.ExprTypes[callee.Left]
+		if _, isFut := leftType.(*checker.FutureType); isFut && callee.Field.Name == "ready" {
+			return fmt.Sprintf("vira_future_ready(&%s)", g.emitLValue(callee.Left))
+		}
 		if futType, isFut := leftType.(*checker.FutureType); isFut && callee.Field.Name == "await" {
 			cRes := g.cResultName(futType.Inner)
 			return fmt.Sprintf("Future_%s_await(&%s)", cRes, g.emitLValue(callee.Left))
