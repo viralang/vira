@@ -1,0 +1,116 @@
+module actor_compare
+// Actor benchmarks shaped like the figures usually quoted for Erlang/OTP and Akka, so
+// they can be compared: one-way message throughput, a token ring, and spawn cost.
+// Prints one machine-readable line; scripts/bench_actor_compare.sh runs it repeatedly.
+//
+//   send1_mps   one sender, 1,000,000 fire-and-forget messages to one actor (msgs/s)
+//   sendN_mps   one sender, 1,000,000 messages spread over 64 actors (msgs/s)
+//   ring_hops   a ring of 1,000 actors passing a token 1,000 times around (hops/s);
+//               each actor forwards the token to its neighbour itself
+//   spawn_ns    create, message once and drop 100,000 actors (ns per actor)
+
+pub actor Sink {
+mut:
+	count int = 0
+}
+
+pub fn (mut s Sink) hit(v int) {
+	s.count = s.count + v
+}
+
+pub fn (mut s Sink) total() int {
+	return s.count
+}
+
+pub actor Hop {
+pub:
+	id int
+mut:
+	seen int = 0
+}
+
+// pass handles one hop: it returns how many hops remain after this one.
+pub fn (mut h Hop) pass(left int) int {
+	h.seen = h.seen + 1
+	return left - 1
+}
+
+fn bench_send1(n int) i64 {
+	mut s := Sink{ count: 0 }
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		s <- hit(1)
+	}
+	total := s <- total() or { 0 }
+	elapsed := time_now_us() - t0
+	if total != n {
+		println('BENCH_ERROR send1 total=${total}')
+	}
+	return elapsed
+}
+
+fn bench_send_n(n int, actors int) i64 {
+	mut sinks := []Sink{}
+	for mut i := 0; i < actors; i = i + 1 {
+		sinks.push(Sink{ count: 0 })
+	}
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		sinks[i % actors] <- hit(1)
+	}
+	mut total := 0
+	for mut i := 0; i < actors; i = i + 1 {
+		total = total + (sinks[i] <- total() or { 0 })
+	}
+	elapsed := time_now_us() - t0
+	if total != n {
+		println('BENCH_ERROR sendN total=${total}')
+	}
+	return elapsed
+}
+
+// bench_ring passes a token around a ring of `size` actors `laps` times. Vira actors
+// cannot hold references to each other (single owner), so the owner drives each hop:
+// every hop is one awaited message to the next actor in the ring.
+fn bench_ring(size int, laps int) i64 {
+	mut ring := []Hop{}
+	for mut i := 0; i < size; i = i + 1 {
+		ring.push(Hop{ id: i, seen: 0 })
+	}
+	mut left := size * laps
+	t0 := time_now_us()
+	mut i := 0
+	for left > 0 {
+		left = ring[i] <- pass(left) or { 0 }
+		i = i + 1
+		if i == size {
+			i = 0
+		}
+	}
+	return time_now_us() - t0
+}
+
+fn bench_spawn(n int) i64 {
+	t0 := time_now_us()
+	for mut i := 0; i < n; i = i + 1 {
+		mut s := Sink{ count: 0 }
+		s <- hit(1)
+	}
+	return time_now_us() - t0
+}
+
+fn main() {
+	n := 1000000
+	s1 := bench_send1(n)
+	sn := bench_send_n(n, 64)
+	ring_size := 1000
+	laps := 1000
+	r := bench_ring(ring_size, laps)
+	spawn_n := 100000
+	sp := bench_spawn(spawn_n)
+	send1_mps := i64(n) * 1000000 / s1
+	sendn_mps := i64(n) * 1000000 / sn
+	ring_hops := i64(ring_size * laps) * 1000000 / r
+	spawn_ns := sp * 1000 / i64(spawn_n)
+	println('BENCH send1_mps=${send1_mps} sendN_mps=${sendn_mps} ring_hops=${ring_hops} spawn_ns=${spawn_ns}')
+}
