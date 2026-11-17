@@ -3566,6 +3566,10 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			return "vira_gpu_vram_bytes()"
 		case "gpu_allocated_bytes":
 			return "vira_gpu_allocated_bytes()"
+		case "gpu_stats_reset":
+			return "vira_gpu_stats_reset()"
+		case "gpu_stats_print":
+			return fmt.Sprintf("vira_gpu_stats_print(%s)", strings.Join(argStrs, ", "))
 		case "gpu_oom_fallbacks":
 			return "vira_gpu_oom_fallbacks()"
 		case "gpu_set_enabled":

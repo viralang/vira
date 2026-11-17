@@ -44,6 +44,16 @@ pub fn oom_fallbacks() i64 {
 	return gpu_oom_fallbacks()
 }
 
+// GPU statistics (transfers, launches, waits, CPU fallbacks, peak device memory).
+// Reset before the part to measure, then print, optionally per unit (per token).
+pub fn stats_reset() {
+	gpu_stats_reset()
+}
+
+pub fn stats_print(label string, per i64) {
+	gpu_stats_print(label, per)
+}
+
 pub fn set_enabled(enabled bool) {
 	gpu_set_enabled(enabled)
 }

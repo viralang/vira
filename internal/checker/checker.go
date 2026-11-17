@@ -696,6 +696,18 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeI64,
 	}
+	c.functions["gpu_stats_reset"] = &FnSig{
+		Name:       "gpu_stats_reset",
+		IsPub:      true,
+		Params:     []ParamInfo{},
+		ReturnType: TypeVoid,
+	}
+	c.functions["gpu_stats_print"] = &FnSig{
+		Name:       "gpu_stats_print",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "label", Type: TypeString}, {Name: "per", Type: TypeI64}},
+		ReturnType: TypeVoid,
+	}
 	c.functions["gpu_oom_fallbacks"] = &FnSig{
 		Name:       "gpu_oom_fallbacks",
 		IsPub:      true,

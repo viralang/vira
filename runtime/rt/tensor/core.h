@@ -540,6 +540,52 @@ static inline bool _vira_gpu_slice_rows(vira_arena *opt_arena,
                                         vira_tensor_f32 *out_tensor);
 static __thread bool _vira_tls_gpu_fallback = false;
 
+// --- GPU STATISTICS (VIRA_GPU_STATS / gpu.stats_print) ---------------------------
+// Counted where data crosses between host and device, where kernels launch and where
+// the host waits, plus each GPU entry point that ran its CPU fallback. Driver calls
+// are counted by wrapping the loaded driver functions (vira_gpu.h), so no call site
+// needs to know. Cheap: a few relaxed atomics per transfer or launch.
+#define VIRA_GPU_STAT_OPS 64
+typedef struct {
+  int64_t h2d_w_bytes, h2d_w_n;   // weight uploads
+  int64_t h2d_a_bytes, h2d_a_n;   // activation / KV uploads
+  int64_t d2h_bytes, d2h_n, d2h_ns; // device -> host copies (each one waits for the device)
+  int64_t launches;
+  int64_t waits, wait_ns;         // explicit stream / context / queue synchronisations
+  int64_t peak_bytes;             // highest device allocation seen at a transfer or launch
+  const char *fb_name[VIRA_GPU_STAT_OPS];
+  int64_t fb_n[VIRA_GPU_STAT_OPS];
+} _vira_gpu_stats_t;
+static _vira_gpu_stats_t _vira_gpu_stats;
+static __thread int32_t _vira_tls_gpu_weight_upload = 0; // > 0 while uploading weights
+
+/** Records that GPU entry point `op` ran its CPU fallback. */
+static inline void _vira_gpu_stats_fallback(const char *op) {
+  for (int i = 0; i < VIRA_GPU_STAT_OPS; i++) {
+    const char *cur = __atomic_load_n(&_vira_gpu_stats.fb_name[i], __ATOMIC_ACQUIRE);
+    if (cur == NULL) {
+      const char *expected = NULL;
+      if (__atomic_compare_exchange_n(&_vira_gpu_stats.fb_name[i], &expected, op, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        cur = op;
+      } else {
+        cur = expected;
+      }
+    }
+    if (cur == op) {
+      __atomic_add_fetch(&_vira_gpu_stats.fb_n[i], 1, __ATOMIC_RELAXED);
+      return;
+    }
+  }
+}
+
+// Every `_vira_tls_gpu_fallback = true;` in a GPU entry point goes through this.
+#define _VIRA_GPU_FALLBACK()                    \
+  do {                                          \
+    _vira_gpu_stats_fallback(__func__);         \
+    _vira_tls_gpu_fallback = true;              \
+  } while (0)
+
 // --- GPU AUTO-DISPATCH FORWARD DECLARATIONS ---
 static inline bool vira_gpu_is_available(void);
 static inline bool vira_gpu_is_enabled(void);

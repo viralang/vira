@@ -5,6 +5,9 @@
 // PROCESS EXIT TELEMETRY & RUNTIME SHUTDOWN
 // ============================================================================
 
+static inline void _vira_gpu_stats_peak(void);
+static inline void vira_gpu_stats_print(vira_string label, int64_t per);
+
 /**
  * Prints the runtime diagnostics banner reporting memory leak verification, SIMD backend, and actor pool metrics.
  * Usage: Invoked automatically at process exit; verifies that `active_leaks == 0`.
@@ -39,12 +42,19 @@ static inline void vira_report_mem_stats(void) {
   if (vira_gpu_is_available()) {
     vira_string _dev_n = vira_gpu_device_name();
     vira_string _be_n = vira_gpu_backend_name();
-    printf("[vira_rt] gpu=%.*s (%.*s) | vram_used=%lld MiB / %lld MiB | oom_fallbacks=%lld\n",
+    // Peak, not the amount at exit: by now the program has freed its tensors, and
+    // freeing a tensor also frees its device copy.
+    _vira_gpu_stats_peak();
+    printf("[vira_rt] gpu=%.*s (%.*s) | vram_peak=%lld MiB / %lld MiB | oom_fallbacks=%lld\n",
            _dev_n.len, (const char *)_dev_n.data,
            _be_n.len, (const char *)_be_n.data,
-           (long long)(vira_gpu_allocated_bytes() >> 20),
+           (long long)(_vira_gpu_stats.peak_bytes >> 20),
            (long long)(vira_gpu_vram_bytes() >> 20),
            (long long)vira_gpu_oom_fallbacks());
+    const char *env_gs = getenv("VIRA_GPU_STATS");
+    if (env_gs != NULL && env_gs[0] != '\0' && env_gs[0] != '0') {
+      vira_gpu_stats_print(vira_str_lit("since last reset", 16), 0);
+    }
     vira_str_free(&_dev_n);
     vira_str_free(&_be_n);
   }
