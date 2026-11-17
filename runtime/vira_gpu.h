@@ -422,7 +422,8 @@ typedef struct {
   vira_cu_function cu_k_mmvq_q5_0;
   vira_cu_function cu_k_mmvq_q5_1;
   vira_cu_function cu_k_mmvq_q8_0;
-  vira_cu_function cu_k_mmvq2_q8_0; // one 128-thread block per row; VIRA_GPU_MMVQ=old disables
+  vira_cu_function cu_k_mmvq2_q8_0; // runtime/cuda/mmvq2.cu; VIRA_GPU_MMVQ=old disables
+  bool mmvq2_warp;                  // VIRA_GPU_MMVQ=warp: one warp per row, 4 rows per block
   vira_cu_function cu_k_mmvq_q4_k;
   vira_cu_function cu_k_mmvq_q5_k;
   vira_cu_function cu_k_mmvq_q6_k;
@@ -4383,13 +4384,16 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
   g->cu_mmvq2_module = NULL;
   g->cu_k_mmvq2_q8_0 = NULL;
+  g->mmvq2_warp = false;
   {
     const char *mv = getenv("VIRA_GPU_MMVQ");
     bool want = g->has_dp4a && !(mv != NULL && strcmp(mv, "old") == 0);
     vira_cu_module m2 = NULL;
     if (want && g->cuModuleLoadData(&m2, _vira_cuda_mmvq2_ptx) == VIRA_CUDA_SUCCESS && m2 != NULL) {
       g->cu_mmvq2_module = m2;
-      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2_q8_0, m2, "vira_cu_mmvq2_q8_0");
+      g->mmvq2_warp = (mv != NULL && strcmp(mv, "warp") == 0);
+      (void)g->cuModuleGetFunction(&g->cu_k_mmvq2_q8_0, m2,
+                                   g->mmvq2_warp ? "vira_cu_mmvq2w_q8_0" : "vira_cu_mmvq2_q8_0");
     } else if (want && getenv("VIRA_GPU_DEBUG") != NULL) {
       fprintf(stderr, "[vira gpu] mmvq2 PTX did not load; using the older decode kernels\n");
     }
@@ -4427,7 +4431,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->warp_size, g->wg_size, g->tile_dim,
             g->has_tensor_cores ? " / WMMA" : "",
             g->has_dp4a ? " / MMVQ-Q8_1" : "",
-            g->cu_k_mmvq2_q8_0 != NULL ? " / mmvq2(Q8_0)" : "");
+            g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_warp ? " / mmvq2w(Q8_0)" : " / mmvq2(Q8_0)");
   }
 
   return true;
@@ -4947,6 +4951,7 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cu_mmvq2_module = NULL;
       }
       _vira_gpu.cu_k_mmvq2_q8_0 = NULL;
+      _vira_gpu.mmvq2_warp = false;
       _vira_gpu.has_dp4a = false;
       _vira_gpu.cu_k_quantize_q8_1 = NULL;
       _vira_gpu.cu_k_mmvq_q4_0 = NULL;
@@ -5472,8 +5477,11 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
           void *args[] = {&q8_buf, &w_buf, &y_buf, &M, &num_blocks_k, &N};
           unsigned int gy = (unsigned int)M;
           if (wfmt == VIRA_WFMT_Q8_0 && _vira_gpu.cu_k_mmvq2_q8_0 != NULL) {
-            // one 128-thread block per output row (runtime/cuda/mmvq2.cu)
-            err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mmvq2_q8_0, (unsigned int)N, gy, 1, 128, 1, 1, 0,
+            // runtime/cuda/mmvq2.cu: a 128-thread block per row, or (warp) a warp per row
+            const bool wr = _vira_gpu.mmvq2_warp;
+            err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mmvq2_q8_0,
+                                            wr ? (unsigned int)(((size_t)N + 3) / 4) : (unsigned int)N, gy, 1,
+                                            wr ? 32 : 128, wr ? 4 : 1, 1, 0,
                                             _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
                       ? VIRA_CL_SUCCESS
                       : VIRA_CL_ERR_NO_ROOM;

@@ -18,6 +18,9 @@ def build():
 extern "C" void run_mmvq2_q8_0(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {
   VL_LAUNCH(vira_cu_mmvq2_q8_0, N, M, THREADS, xq, w, y, M, nb, N);
 }
+extern "C" void run_mmvq2w_q8_0(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {
+  VL_LAUNCH2(vira_cu_mmvq2w_q8_0, (N + 3) / 4, M, 32, 4, xq, w, y, M, nb, N);
+}
 ''')
     subprocess.check_call(['g++', '-O2', '-shared', '-fPIC', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
@@ -59,15 +62,16 @@ def main():
     for M, K, N in cases:
         wraw, wd, wq = q8_0_weights(rng, N, K)
         xraw, xd, xq = q8_1_acts(rng, M, K)
-        y = np.zeros(M * N, np.float32)
-        lib.run_mmvq2_q8_0(xraw, wraw, y.ctypes.data_as(ctypes.c_void_p), M, K // 32, N)
         # reference: sum over blocks of dw * dx * dot(qw, qx)
         dots = np.einsum('nbk,mbk->mnb', wq, xq).astype(np.float64)
         want = (dots * wd[None, :, :] * xd[:, None, :]).sum(axis=2)
-        err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
-        good = err < 1e-5
-        ok &= good
-        print('mmvq2_q8_0 M=%d K=%5d N=%3d  max rel err %.2e  %s' % (M, K, N, err, 'ok' if good else 'FAIL'))
+        for kname in ('mmvq2_q8_0', 'mmvq2w_q8_0'):
+            y = np.full(M * N, np.nan, np.float32)
+            getattr(lib, 'run_' + kname)(xraw, wraw, y.ctypes.data_as(ctypes.c_void_p), M, K // 32, N)
+            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+            good = bool(err < 1e-5)
+            ok &= good
+            print('%-12s M=%d K=%5d N=%3d  max rel err %.2e  %s' % (kname, M, K, N, err, 'ok' if good else 'FAIL'))
     sys.exit(0 if ok else 1)
 
 
