@@ -2,13 +2,51 @@
 
     python3 runtime/cuda/test_emulate.py
 
-Compiles the .cu sources as C++ with emulate.h, runs them on Q8_0 weights and Q8_1
-activations built here, and compares with a plain sum over the same quantized values.
+Compiles the .cu sources as C++ with emulate.h and runs them on Q8_1 activations and
+random weight blocks. Q8_0 is compared with a plain sum over the quantized values; every
+format (Q8_0 included) is compared with the runtime's CPU dequantiser
+(_vira_rt_dequant_blocks_to_fp32, checked against llama.cpp by ViraLama's reference
+tests), so the kernels are not tested against themselves.
 """
 import ctypes, os, subprocess, sys, tempfile
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+RUNTIME = os.path.dirname(HERE)
+# name, GGUF dtype, bytes per block, values per block, f16 fields (byte offsets)
+FORMATS = [
+    ('q4_0', 2, 18, 32, [0]),
+    ('q4_1', 3, 20, 32, [0, 2]),
+    ('q5_0', 6, 22, 32, [0]),
+    ('q5_1', 7, 24, 32, [0, 2]),
+    ('q8_0', 8, 34, 32, [0]),
+    ('q4_k', 12, 144, 256, [0, 2]),
+    ('q5_k', 13, 176, 256, [0, 2]),
+    ('q6_k', 14, 210, 256, [208]),
+]
+
+
+def build_oracle():
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, 'oracle.c')
+    open(src, 'w').write('#include "vira_rt.h"\n'
+                         'void oracle(unsigned dt, const unsigned char *raw, size_t nb, float *out)'
+                         ' { _vira_rt_dequant_blocks_to_fp32(dt, raw, 0, nb, out); }\n')
+    out = os.path.join(d, 'oracle.so')
+    subprocess.check_call(['gcc', '-O1', '-w', '-shared', '-fPIC', '-I', RUNTIME, src, '-o', out, '-lm', '-lpthread'])
+    return ctypes.CDLL(out)
+
+
+def random_blocks(rng, name, nblocks, size, f16_at):
+    raw = rng.integers(0, 256, size=(nblocks, size), dtype=np.uint8)
+    for off in f16_at:
+        v = rng.uniform(0.002, 0.05, size=nblocks).astype(np.float16)
+        if name.endswith('_1') and off == 2:
+            v = (-v).astype(np.float16)
+        raw[:, off:off + 2] = v.view(np.uint8).reshape(nblocks, 2)
+    return raw
 
 
 def build():
@@ -18,9 +56,12 @@ def build():
 extern "C" void run_mmvq2_q8_0(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {
   VL_LAUNCH(vira_cu_mmvq2_q8_0, N, M, THREADS, xq, w, y, M, nb, N);
 }
-extern "C" void run_mmvq2w_q8_0(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {
-  VL_LAUNCH2(vira_cu_mmvq2w_q8_0, (N + 3) / 4, M, 32, 4, xq, w, y, M, nb, N);
+#define VL_RUN_WARP(fmt) \
+extern "C" void run_mmvq2w_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) { \
+  VL_LAUNCH2(vira_cu_mmvq2w_##fmt, (N + 3) / 4, M, 32, 4, xq, w, y, M, nb, N); \
 }
+VL_RUN_WARP(q8_0) VL_RUN_WARP(q4_0) VL_RUN_WARP(q4_1) VL_RUN_WARP(q5_0) VL_RUN_WARP(q5_1)
+VL_RUN_WARP(q4_k) VL_RUN_WARP(q5_k) VL_RUN_WARP(q6_k)
 ''')
     subprocess.check_call(['g++', '-O2', '-shared', '-fPIC', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
@@ -72,6 +113,23 @@ def main():
             good = bool(err < 1e-5)
             ok &= good
             print('%-12s M=%d K=%5d N=%3d  max rel err %.2e  %s' % (kname, M, K, N, err, 'ok' if good else 'FAIL'))
+    # every format against the runtime's CPU dequantiser
+    oracle = build_oracle()
+    for name, dt, size, qk, f16_at in FORMATS:
+        for M, K, N in [(1, 256, 5), (1, 4096, 9), (2, 2048, 6), (4, 1536, 3), (1, 12288, 2)]:
+            nbr = K // qk
+            raw = random_blocks(rng, name, N * nbr, size, f16_at)
+            wf = np.zeros(N * K, np.float32)
+            oracle.oracle(dt, raw.tobytes(), ctypes.c_size_t(N * nbr), wf.ctypes.data_as(ctypes.c_void_p))
+            xraw, xd, xq = q8_1_acts(rng, M, K)
+            xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
+            want = xf @ wf.reshape(N, K).astype(np.float64).T
+            y = np.full(M * N, np.nan, np.float32)
+            getattr(lib, 'run_mmvq2w_' + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
+            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+            good = bool(err < 1e-4)
+            ok &= good
+            print('mmvq2w_%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
     sys.exit(0 if ok else 1)
 
 

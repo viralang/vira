@@ -131,3 +131,172 @@ vira_cu_mmvq2w_q8_0(const unsigned char *__restrict__ xq, const unsigned char *_
   const float total = vl_warp_reduce(acc);
   if (lane == VL_WARP_WRITER) y[(size_t)m * (size_t)N + (size_t)row] = total;
 }
+
+// ---------------------------------------------------------------------------------------
+// Warp-per-row kernels for the other GGUF formats, same arguments as the old
+// vira_cu_mmvq_<fmt> kernels: (xq8_1, w, y, M, nb, N), nb = blocks per row (K / 32 for the
+// 32-value formats, K / 256 for the K-quants). Grid ((N + 3) / 4, M), block (32, 4).
+// A "unit" is one weight block; TPU threads share a unit and the warp covers 32 / TPU
+// units per step, reading them contiguously. Block layouts follow ggml (ggml-common.h).
+
+__device__ __forceinline__ int vl_load_int_b4(const unsigned char *p) { // 4-byte aligned
+  return __ldg((const int *)p);
+}
+__device__ __forceinline__ int vl_sum_bytes(int x) { return vl_dp4a(x, 0x01010101, 0); }
+// bits base..base+3 of qh -> bit 4 of bytes 0..3
+__device__ __forceinline__ int vl_qh_nibble(unsigned int qh, int base) {
+  const unsigned int b = (qh >> base) & 0xFu;
+  return (int)(((b & 1u) << 4) | ((b & 2u) << 11) | ((b & 4u) << 18) | ((b & 8u) << 25));
+}
+__device__ __forceinline__ float vl_xd(const unsigned char *xb) { return __ldg((const float *)xb); }
+__device__ __forceinline__ float vl_xs(const unsigned char *xb) { return __ldg((const float *)(xb + 4)); }
+__device__ __forceinline__ int vl_xq(const unsigned char *xb, int i) { // int i of the 32 quants
+  return __ldg((const int *)(xb + 8) + i);
+}
+
+// Q4_0 (18 B): f16 d, qs[16]; v = (nibble - 8) * d; values 0..15 low nibbles, 16..31 high.
+// TPU 4: thread part p takes values 8p..8p+7.
+__device__ __forceinline__ float vd_q4_0(const unsigned char *wb, const unsigned char *xb, int p) {
+  const int sh = (p >> 1) * 4;
+  const int q0 = (vl_load_int_b2(wb + 2 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  const int q1 = (vl_load_int_b2(wb + 6 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  const int x0 = vl_xq(xb, 2 * p), x1 = vl_xq(xb, 2 * p + 1);
+  const int dot = vl_dp4a(q1, x1, vl_dp4a(q0, x0, 0));
+  const int sx = vl_sum_bytes(x0) + vl_sum_bytes(x1);
+  return vl_half_to_float(__ldg((const unsigned short *)wb)) * vl_xd(xb) * (float)(dot - 8 * sx);
+}
+// Q4_1 (20 B): f16 d, f16 m, qs[16]; v = nibble * d + m.
+__device__ __forceinline__ float vd_q4_1(const unsigned char *wb, const unsigned char *xb, int p) {
+  const int sh = (p >> 1) * 4;
+  const int q0 = (vl_load_int_b4(wb + 4 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  const int q1 = (vl_load_int_b4(wb + 8 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  const int dot = vl_dp4a(q1, vl_xq(xb, 2 * p + 1), vl_dp4a(q0, vl_xq(xb, 2 * p), 0));
+  float r = vl_half_to_float(__ldg((const unsigned short *)wb)) * vl_xd(xb) * (float)dot;
+  if (p == 0) r += vl_half_to_float(__ldg((const unsigned short *)wb + 1)) * vl_xs(xb);
+  return r;
+}
+// Q5_0 (22 B): f16 d, u32 qh, qs[16]; v = (nibble | qh bit << 4) - 16, times d.
+__device__ __forceinline__ float vd_q5_0(const unsigned char *wb, const unsigned char *xb, int p) {
+  const int sh = (p >> 1) * 4;
+  const unsigned int qh = (unsigned int)vl_load_int_b2(wb + 2);
+  const int q0 = ((vl_load_int_b2(wb + 6 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p);
+  const int q1 = ((vl_load_int_b2(wb + 10 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p + 4);
+  const int x0 = vl_xq(xb, 2 * p), x1 = vl_xq(xb, 2 * p + 1);
+  const int dot = vl_dp4a(q1, x1, vl_dp4a(q0, x0, 0));
+  const int sx = vl_sum_bytes(x0) + vl_sum_bytes(x1);
+  return vl_half_to_float(__ldg((const unsigned short *)wb)) * vl_xd(xb) * (float)(dot - 16 * sx);
+}
+// Q5_1 (24 B): f16 d, f16 m, u32 qh, qs[16]; v = (nibble | qh bit << 4) * d + m.
+__device__ __forceinline__ float vd_q5_1(const unsigned char *wb, const unsigned char *xb, int p) {
+  const int sh = (p >> 1) * 4;
+  const unsigned int qh = (unsigned int)vl_load_int_b4(wb + 4);
+  const int q0 = ((vl_load_int_b4(wb + 8 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p);
+  const int q1 = ((vl_load_int_b4(wb + 12 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p + 4);
+  const int dot = vl_dp4a(q1, vl_xq(xb, 2 * p + 1), vl_dp4a(q0, vl_xq(xb, 2 * p), 0));
+  float r = vl_half_to_float(__ldg((const unsigned short *)wb)) * vl_xd(xb) * (float)dot;
+  if (p == 0) r += vl_half_to_float(__ldg((const unsigned short *)wb + 1)) * vl_xs(xb);
+  return r;
+}
+
+// K-quant 6-bit scale and min of sub-block j (ggml get_scale_min_k4).
+__device__ __forceinline__ void vl_k4_scale_min(const unsigned char *sc, int j, int *s, int *m) {
+  if (j < 4) {
+    *s = __ldg(sc + j) & 63;
+    *m = __ldg(sc + j + 4) & 63;
+  } else {
+    *s = (__ldg(sc + j + 4) & 0xF) | ((__ldg(sc + j - 4) >> 6) << 4);
+    *m = (__ldg(sc + j + 4) >> 4) | ((__ldg(sc + j) >> 6) << 4);
+  }
+}
+// Q4_K (144 B): f16 d, f16 dmin, scales[12], qs[128]; 8 sub-blocks of 32, sub-block j uses
+// the low (j even) or high (j odd) nibbles of qs[32 * (j / 2) ...]; v = d*s*q - dmin*m.
+// TPU 16: thread t takes sub-block j = t / 2, values 16 * (t & 1) .. + 15.
+// xs = the 8 Q8_1 blocks of this super-block.
+__device__ __forceinline__ float vd_q4_k(const unsigned char *wb, const unsigned char *xs, int t) {
+  const int j = t >> 1, h = t & 1;
+  const unsigned char *xb = xs + j * 40;
+  const unsigned char *q = wb + 16 + (j >> 1) * 32 + h * 16;
+  const int sh = (j & 1) * 4;
+  int dot = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) dot = vl_dp4a((vl_load_int_b4(q + 4 * i) >> sh) & 0x0F0F0F0F, vl_xq(xb, 4 * h + i), dot);
+  int sc, mn;
+  vl_k4_scale_min(wb + 4, j, &sc, &mn);
+  const unsigned int dd = (unsigned int)vl_load_int_b4(wb);
+  float r = vl_half_to_float((unsigned short)(dd & 0xFFFF)) * (float)sc * vl_xd(xb) * (float)dot;
+  if (h == 0) r -= vl_half_to_float((unsigned short)(dd >> 16)) * (float)mn * vl_xs(xb);
+  return r;
+}
+// Q5_K (176 B): f16 d, f16 dmin, scales[12], qh[32], qs[128]; as Q4_K plus bit j of qh[l]
+// as bit 4 of value l of sub-block j.
+__device__ __forceinline__ float vd_q5_k(const unsigned char *wb, const unsigned char *xs, int t) {
+  const int j = t >> 1, h = t & 1;
+  const unsigned char *xb = xs + j * 40;
+  const unsigned char *q = wb + 48 + (j >> 1) * 32 + h * 16;
+  const unsigned char *qh = wb + 16 + h * 16;
+  const int sh = (j & 1) * 4;
+  int dot = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const int lo = (vl_load_int_b4(q + 4 * i) >> sh) & 0x0F0F0F0F;
+    const int hi = ((vl_load_int_b4(qh + 4 * i) >> j) & 0x01010101) << 4;
+    dot = vl_dp4a(lo | hi, vl_xq(xb, 4 * h + i), dot);
+  }
+  int sc, mn;
+  vl_k4_scale_min(wb + 4, j, &sc, &mn);
+  const unsigned int dd = (unsigned int)vl_load_int_b4(wb);
+  float r = vl_half_to_float((unsigned short)(dd & 0xFFFF)) * (float)sc * vl_xd(xb) * (float)dot;
+  if (h == 0) r -= vl_half_to_float((unsigned short)(dd >> 16)) * (float)mn * vl_xs(xb);
+  return r;
+}
+// Q6_K (210 B): ql[128], qh[64], int8 scales[16], f16 d at 208. Half ip (128 values) uses
+// ql[64 ip ..], qh[32 ip ..], scales[8 ip ..]; its quarter k (32 values, Q8_1 block 4 ip + k)
+// takes ql[(k & 1) * 32 + l] low (k < 2) or high nibble, bits 2k..2k+1 of qh[l], scale
+// 2k + l / 16; v = d * scale * (q - 32). TPU 16: thread t = (ip, k, h), 16 values each.
+__device__ __forceinline__ float vd_q6_k(const unsigned char *wb, const unsigned char *xs, int t) {
+  const int ip = t >> 3, k = (t >> 1) & 3, h = t & 1;
+  const unsigned char *xb = xs + (4 * ip + k) * 40;
+  const unsigned char *ql = wb + 64 * ip + (k & 1) * 32 + h * 16;
+  const unsigned char *qh = wb + 128 + 32 * ip + h * 16;
+  const int shl = (k >> 1) * 4, shh = 2 * k;
+  int dot = 0, sx = 0;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const int lo = (vl_load_int_b2(ql + 4 * i) >> shl) & 0x0F0F0F0F;
+    const int hi = ((vl_load_int_b2(qh + 4 * i) >> shh) & 0x03030303) << 4;
+    const int x = vl_xq(xb, 4 * h + i);
+    dot = vl_dp4a(lo | hi, x, dot);
+    sx += vl_sum_bytes(x);
+  }
+  const float sc = (float)(signed char)__ldg(wb + 192 + 8 * ip + 2 * k + h);
+  const float d = vl_half_to_float(__ldg((const unsigned short *)(wb + 208)));
+  return d * sc * vl_xd(xb) * (float)(dot - 32 * sx);
+}
+
+// TPU threads per unit, BYTES per unit, XSTRIDE = Q8_1 bytes per unit.
+#define VL_MMVQ_WARP_KERNEL(NAME, VD, TPU, BYTES, XSTRIDE)                                     \
+  extern "C" __global__ void __launch_bounds__(THREADS)                                       \
+  NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
+       float *__restrict__ y, int M, int nb, int N) {                                         \
+    const int row = blockIdx.x * (THREADS / WARP) + threadIdx.y;                               \
+    const int m = blockIdx.y;                                                                  \
+    if (row >= N || m >= M) return;                                                            \
+    const int lane = threadIdx.x;                                                              \
+    const int t = lane % (TPU);                                                                \
+    const unsigned char *wrow = w + (size_t)row * (size_t)nb * (BYTES);                        \
+    const unsigned char *xrow = xq + (size_t)m * (size_t)nb * (XSTRIDE);                       \
+    float acc = 0.0f;                                                                          \
+    _Pragma("unroll 2") for (int b = lane / (TPU); b < nb; b += WARP / (TPU)) {                \
+      acc += VD(wrow + (size_t)b * (BYTES), xrow + (size_t)b * (XSTRIDE), t);                  \
+    }                                                                                          \
+    const float total = vl_warp_reduce(acc);                                                   \
+    if (lane == VL_WARP_WRITER) y[(size_t)m * (size_t)N + (size_t)row] = total;                \
+  }
+
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_0, vd_q4_0, 4, 18u, 40u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_1, vd_q4_1, 4, 20u, 40u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q5_0, vd_q5_0, 4, 22u, 40u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q5_1, vd_q5_1, 4, 24u, 40u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_k, vd_q4_k, 16, 144u, 320u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q5_k, vd_q5_k, 16, 176u, 320u)
+VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q6_k, vd_q6_k, 16, 210u, 320u)
