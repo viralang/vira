@@ -37,8 +37,10 @@
 // Loads (T4 profile: the issue rate was limited by the number of load instructions): a
 // thread loads 32 values of a weight row per job with 16-byte loads (Q4_K, Q5_K: the host
 // keeps 16-byte aligned weights), aligned 4-byte words + funnel shifts (Q6_K, Q8_0, whose
-// blocks are only 2-byte aligned), or int by int (the other formats); activations with
-// 8-byte loads.
+// blocks are only 2-byte aligned), or int by int (the other formats). Activations come in
+// the x4 layout of vira_cu_quantize_q8_1x4 (below): per row and 128 values {f32 d[4], f32
+// s[4], int8 q[128]}, the same numbers as four Q8_1 blocks, so a row's step is 160
+// contiguous 16-byte aligned bytes: 10 16-byte loads.
 
 #define TQ_N 64   // weight rows per block
 #define TQ_M 64   // activation rows per block
@@ -97,6 +99,43 @@ __device__ __forceinline__ void vl_ldg_words(const unsigned char *p, int *o) {
   for (int k = 0; k < NW; k++) o[k] = __ldg((const int *)(q + 4 * k));
   o[NW] = 8 * (int)((size_t)p & 3);
 }
+// Q8_1 in the x4 layout: grid (K / 128, M), block 128; warp w quantizes values
+// 32 w .. 32 w + 31 of the 128-value group, with the arithmetic of vira_cu_quantize_q8_1
+// (warp absmax, q = rni(v * (127 / amax)) clamped to +-127, d = amax * (1 / 127), s = d *
+// sum(q)), so the numbers equal its 40-byte blocks.
+#ifndef VL_EMULATE
+__device__ __forceinline__ float vl_wmaxf(float v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
+  return v;
+}
+__device__ __forceinline__ int vl_wsumi(int v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+  return v;
+}
+#endif
+extern "C" __global__ void __launch_bounds__(128)
+vira_cu_quantize_q8_1x4(const float *__restrict__ x, unsigned char *__restrict__ q, int K) {
+  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, g = blockIdx.x, m = blockIdx.y;
+  const int ng = K / 128;
+  const float v = __ldg(x + (size_t)m * (size_t)K + (size_t)g * 128u + (size_t)(32 * w + lane));
+  const float amax = vl_wmaxf(fabsf(v));
+  int qi = 0;
+  if (amax > 0.0f) {
+    qi = __float2int_rn(__fmul_rn(v, __fdiv_rn(127.0f, amax)));
+    qi = max(min(qi, 127), -127);
+  }
+  const int sum = vl_wsumi(qi);
+  unsigned char *rec = q + ((size_t)m * (size_t)ng + (size_t)g) * 160u;
+  rec[32 + 32 * w + lane] = (unsigned char)(signed char)qi;
+  if (lane == 0) {
+    const float d = __fmul_rn(amax, __int_as_float(0x3C010204));
+    ((float *)rec)[w] = d;
+    ((float *)rec)[4 + w] = __fmul_rn(d, (float)sum);
+  }
+}
+
 // slice-local int i (0..31 of a 128-value step) -> its place in a shared row
 __device__ __forceinline__ int vl_perm(int i) { return (i & 3) * 8 + (i >> 2); }
 
@@ -233,11 +272,11 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
   const size_t rowb = (size_t)nb * (size_t)F::BYTES;
   const int nsteps = (nb / F::UPS) * 2;
   // registers holding the next step's raw words: 2 weight jobs (row, chunk), 2 scale jobs
-  // (row, sub-block), 2 activation jobs (row, Q8_1 block)
+  // (row, sub-block), 5 activation jobs (16 bytes p = job % 10 of row job / 10's record)
   int wr[2][F::RAW];
   int sr[2][4];
-  int xr[2][8];
-  float xf[2][2];
+  int xr[5][4];
+  const int ngx = nxb / 4; // 128-value records per activation row
   float acc[4][4][2];
 #pragma unroll
   for (int a = 0; a < 4; a++)
@@ -254,20 +293,10 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
         F::sload(w + (size_t)n * rowb, u_, 4 * hs_ + (job & 3), sr[q]);                        \
       }                                                                                        \
     }                                                                                          \
-    const int xb0_ = (u_ / F::UPS) * 8 + 4 * hs_; /* first Q8_1 block of this step */         \
-    _Pragma("unroll") for (int q = 0; q < 2; q++) {                                            \
-      const int job = tid + 128 * q, m = m0 + (job >> 2);                                      \
-      if (m < M) {                                                                             \
-        const unsigned char *xb = xq + ((size_t)m * (size_t)nxb + (size_t)xb0_ + (size_t)(job & 3)) * 40u; \
-        const float2 hd = __ldg((const float2 *)xb);                                           \
-        xf[q][0] = hd.x;                                                                       \
-        xf[q][1] = hd.y;                                                                       \
-        _Pragma("unroll") for (int i = 0; i < 4; i++) {                                        \
-          const int2 v = __ldg((const int2 *)(xb + 8u) + i);                                   \
-          xr[q][2 * i] = v.x;                                                                  \
-          xr[q][2 * i + 1] = v.y;                                                              \
-        }                                                                                      \
-      }                                                                                        \
+    const int g_ = (u_ / F::UPS) * 2 + hs_; /* 128-value record of this step */               \
+    _Pragma("unroll") for (int q = 0; q < 5; q++) {                                            \
+      const int job = tid + 128 * q, m = m0 + job / 10;                                        \
+      if (m < M) vl_ldg16(xq + ((size_t)m * (size_t)ngx + (size_t)g_) * 160u + 16u * (unsigned)(job % 10), xr[q]); \
     }                                                                                          \
   }
 
@@ -298,13 +327,19 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
       sC[r][c] = cb;
     }
 #pragma unroll
-    for (int q = 0; q < 2; q++) {
-      const int job = tid + 128 * q, c = job >> 2, part = job & 3;
+    for (int q = 0; q < 5; q++) {
+      const int job = tid + 128 * q, c = job / 10, p = job % 10;
       const bool ok = m0 + c < M;
+      if (p == 0) {
 #pragma unroll
-      for (int t = 0; t < 8; t++) sX[c][vl_perm(8 * part + t)] = ok ? xr[q][t] : 0;
-      sXd[part][c] = ok ? xf[q][0] : 0.0f;
-      sXs[part][c] = ok ? xf[q][1] : 0.0f;
+        for (int t = 0; t < 4; t++) sXd[t][c] = ok ? __int_as_float(xr[q][t]) : 0.0f;
+      } else if (p == 1) {
+#pragma unroll
+        for (int t = 0; t < 4; t++) sXs[t][c] = ok ? __int_as_float(xr[q][t]) : 0.0f;
+      } else {
+#pragma unroll
+        for (int t = 0; t < 4; t++) sX[c][vl_perm(4 * (p - 2) + t)] = ok ? xr[q][t] : 0;
+      }
     }
     VL_SYNC();
     if (step + 1 < nsteps) VL_MMQT_LOAD(step + 1)
@@ -373,10 +408,10 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
 }
 
 // nb is in units: 32-value blocks for the first five, super-blocks for the K-quants.
-// K % 256 == 0, activations 8-byte aligned, Q4_K / Q5_K weights 16-byte aligned (the host
-// checks and uses mmq.cu otherwise).
+// K % 256 == 0, activations in the x4 layout, 16-byte aligned; Q4_K / Q5_K weights 16-byte
+// aligned (the host checks and uses mmq.cu otherwise).
 #define VL_MMQT_KERNEL(NAME, T)                                                                \
-  extern "C" __global__ void __launch_bounds__(128)                                           \
+  extern "C" __global__ void __launch_bounds__(128, 3)                                        \
   NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
        float *__restrict__ y, int M, int nb, int N) {                                         \
     vl_mmqt<T>(xq, w, y, M, nb, N);                                                            \

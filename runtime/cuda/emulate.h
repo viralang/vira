@@ -9,7 +9,7 @@
 #define __device__
 #define __forceinline__ inline
 #define __restrict__
-#define __launch_bounds__(x)
+#define __launch_bounds__(...)
 struct vl_dim3 { int x, y, z; };
 static thread_local vl_dim3 threadIdx, blockIdx;
 static thread_local vl_dim3 blockDim = {256, 1, 1};
@@ -192,3 +192,7 @@ static inline void vl_mma_c(int &d0, int &d1, int a, int b, int c) {
   d1 = c;
   vl_mma(d0, d1, a, b);
 }
+static inline float vl_wmaxf(float v) { return vl_warp_max(v); }
+static inline int vl_wsumi(int v) { return vl_warp_sum_i(v); }
+static inline float __fmul_rn(float a, float b) { return a * b; }
+static inline float __fdiv_rn(float a, float b) { return a / b; }

@@ -150,9 +150,48 @@ def build_mmq(kind='mmq'):
         body += ('extern "C" void run_%s_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
                  '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (N + 63) / 64, (M + %d) / %d, 128, xq, w, y, M, nb, N);\n}\n') % (
                      kind, name, kind, name, tm - 1, tm)
+    if kind == 'mmqt':
+        body += ('extern "C" void run_quantize_x4(const float *x, unsigned char *q, int M, int K) {\n'
+                 '  VL_LAUNCH_THREADED(vira_cu_quantize_q8_1x4, K / 128, M, 128, x, q, K);\n}\n')
     open(src, 'w').write(body)
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
+
+
+def q8_1_to_x4(raw, M, K):
+    """40-byte Q8_1 blocks -> the x4 layout of mmqt.cu: per row and 128 values {d[4], s[4], q[128]}."""
+    b = np.frombuffer(raw, np.uint8).reshape(M, K // 128, 4, 40)
+    out = np.zeros((M, K // 128, 160), np.uint8)
+    out[..., 0:16] = b[..., 0:4].reshape(M, K // 128, 16)
+    out[..., 16:32] = b[..., 4:8].reshape(M, K // 128, 16)
+    out[..., 32:] = b[..., 8:].reshape(M, K // 128, 128)
+    return out.tobytes()
+
+
+def check_quantize_x4(rng):
+    """vira_cu_quantize_q8_1x4 against the GPU quantizer's arithmetic in float32."""
+    lib = build_mmq('mmqt')
+    ok = True
+    for M, K in [(3, 256), (5, 1024)]:
+        x = rng.standard_normal((M, K)).astype(np.float32)
+        x[1, 128:160] = 0.0  # an all-zero block
+        q = np.zeros(M * K // 128 * 160, np.uint8)
+        lib.run_quantize_x4(x.ctypes.data_as(ctypes.c_void_p), q.ctypes.data_as(ctypes.c_void_p), M, K)
+        b = x.reshape(M, K // 32, 32)
+        amax = np.abs(b).max(axis=2).astype(np.float32)
+        inv = np.where(amax > 0, np.float32(127.0) / np.where(amax > 0, amax, 1), 0).astype(np.float32)
+        qs = np.clip(np.rint((b * inv[..., None]).astype(np.float32)), -127, 127).astype(np.int8)
+        d = (amax * np.array([0x3C010204], np.uint32).view(np.float32)[0]).astype(np.float32)
+        s = (d * qs.astype(np.int32).sum(axis=2).astype(np.float32)).astype(np.float32)
+        raw = np.zeros((M, K // 32, 40), np.uint8)
+        raw[..., 0:4] = d.view(np.uint8).reshape(M, K // 32, 4)
+        raw[..., 4:8] = s.view(np.uint8).reshape(M, K // 32, 4)
+        raw[..., 8:] = qs.view(np.uint8)
+        want = np.frombuffer(q8_1_to_x4(raw.tobytes(), M, K), np.uint8)
+        good = bool(np.array_equal(q, want))
+        ok &= good
+        print('quantize_q8_1x4 M=%d K=%4d  bytes equal %s  %s' % (M, K, good, 'ok' if good else 'FAIL'))
+    return ok
 
 
 def check_mmq(rng, oracle, kind='mmq'):
@@ -168,6 +207,8 @@ def check_mmq(rng, oracle, kind='mmq'):
             xraw, xd, xq = q8_1_acts(rng, M, K)
             xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
             want = xf @ wf.reshape(N, K).astype(np.float64).T
+            if kind == 'mmqt':
+                xraw = q8_1_to_x4(xraw, M, K)
             y = np.full(M * N, np.nan, np.float32)
             getattr(lib, 'run_%s_%s' % (kind, name))(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
             err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
@@ -363,6 +404,7 @@ def main():
     ok &= check_fused(rng)
     ok &= check_mmq(rng, oracle)
     ok &= check_mmq(rng, oracle, 'mmqt')
+    ok &= check_quantize_x4(rng)
     ok &= check_attn(rng)
     sys.exit(0 if ok else 1)
 
