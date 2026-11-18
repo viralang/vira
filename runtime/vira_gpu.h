@@ -4694,13 +4694,16 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       }
       (void)g->cuModuleGetFunction(&g->cu_k_quantize_x4, tm, "vira_cu_quantize_q8_1x4");
       if (!(mq != NULL && strcmp(mq, "2") == 0)) { // VIRA_GPU_MMQ=2: mmqt tiles only
-        static const char *fmt8[8] = {"q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q4_k", "q5_k", "q6_k"};
+        // static strings: VIRA_GPU_PROFILE keeps the name pointer of every kernel looked up
+        static const char *n128[8] = {"vira_cu_mmqb128_q4_0", "vira_cu_mmqb128_q4_1", "vira_cu_mmqb128_q5_0",
+                                      "vira_cu_mmqb128_q5_1", "vira_cu_mmqb128_q8_0", "vira_cu_mmqb128_q4_k",
+                                      "vira_cu_mmqb128_q5_k", "vira_cu_mmqb128_q6_k"};
+        static const char *n64[8] = {"vira_cu_mmqb64_q4_0", "vira_cu_mmqb64_q4_1", "vira_cu_mmqb64_q5_0",
+                                     "vira_cu_mmqb64_q5_1", "vira_cu_mmqb64_q8_0", "vira_cu_mmqb64_q4_k",
+                                     "vira_cu_mmqb64_q5_k", "vira_cu_mmqb64_q6_k"};
         for (int i = 0; i < 8; i++) {
-          char nm[64];
-          snprintf(nm, sizeof(nm), "vira_cu_mmqb128_%s", fmt8[i]);
-          (void)g->cuModuleGetFunction(&g->cu_k_mmqb128[i], tm, nm);
-          snprintf(nm, sizeof(nm), "vira_cu_mmqb64_%s", fmt8[i]);
-          (void)g->cuModuleGetFunction(&g->cu_k_mmqb64[i], tm, nm);
+          (void)g->cuModuleGetFunction(&g->cu_k_mmqb128[i], tm, n128[i]);
+          (void)g->cuModuleGetFunction(&g->cu_k_mmqb64[i], tm, n64[i]);
         }
       }
       const char *why = g->cu_k_quantize_x4 == NULL ? "no x4 quantizer" : _vira_gpu_mmqt_selftest(g);
