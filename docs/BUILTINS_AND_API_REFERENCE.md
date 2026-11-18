@@ -351,6 +351,7 @@ These run on CUDA (driver API + JIT PTX) or OpenCL when a device is available an
 | `gpu_matmul` / `.gpu_matmul(b)` | `(a tensor[f32], b tensor[f32]) tensor[f32]` | $A B$ |
 | `gpu_rmsnorm` | `(x tensor[f32], w tensor[f32], eps f32) tensor[f32]` | Row-wise RMSNorm with weight |
 | `gpu_silu`, `gpu_softmax` | `(x tensor[f32]) tensor[f32]` | Element-wise SiLU; row-wise softmax |
+| `gpu_linear_swiglu` | `(x tensor[f32], w_gate tensor[f32], w_up tensor[f32]) tensor[f32]` | `silu(x.gpu_linear(w_gate)) * x.gpu_linear(w_up)`; prompt rows (>= 64) with both matrices in the same quantized format run as one CUDA launch (x read once, no gate / up tensors), otherwise the separate calls; same numbers |
 | `gpu_silu_mul` | `(gate tensor[f32], up tensor[f32]) tensor[f32]` | `silu(gate) * up` (SwiGLU, same shapes) in one CUDA launch; same numbers as `tensor_elemwise_mul(gpu_silu(gate), up)`, which it falls back to |
 | `gpu_rope`, `gpu_rope_norm` | `(q tensor[f32], pos int, freq_base f32) tensor[f32]` | RoPE of one token's heads (NeoX / adjacent-pair) |
 | `gpu_rope_seq`, `gpu_rope_seq_norm` | `(q tensor[f32], start_pos i64, n_heads int, freq_base f32) tensor[f32]` | RoPE of `[m, n_heads * head_dim]` rows at positions `start_pos ..` |

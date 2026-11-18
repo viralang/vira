@@ -3644,6 +3644,12 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 				arenaArg = g.activeArena
 			}
 			return fmt.Sprintf("vira_gpu_silu(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
+		case "gpu_linear_swiglu":
+			arenaArg := "NULL"
+			if g.activeArena != "" {
+				arenaArg = g.activeArena
+			}
+			return fmt.Sprintf("vira_gpu_linear_swiglu(%s, %s)", arenaArg, strings.Join(argStrs, ", "))
 		case "gpu_silu_mul":
 			arenaArg := "NULL"
 			if g.activeArena != "" {

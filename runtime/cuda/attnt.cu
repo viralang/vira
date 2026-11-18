@@ -49,10 +49,14 @@ __device__ __forceinline__ unsigned int vl_pack_h2(float lo, float hi) {
   return (unsigned int)vl_f2h(lo) | ((unsigned int)vl_f2h(hi) << 16);
 }
 
+// q4 != NULL ((n_heads * HD) % 128 == 0): the output rows are also written quantized in the
+// x4 layout of mmqt.cu (vira_cu_quantize_q8_1x4's arithmetic) for the output projection; a
+// 32-value block of a row is dims 32 b.. of one head, held by the 4 lanes of a quad.
 template <int HD>
 __device__ __forceinline__ void vl_attn_fa(const float *__restrict__ q, const unsigned short *__restrict__ kc,
                                            const unsigned short *__restrict__ vc, float *__restrict__ out,
-                                           int n_heads, int kv_mul, int kv_dim, int M, long long start, float scale) {
+                                           int n_heads, int kv_mul, int kv_dim, int M, long long start, float scale,
+                                           unsigned char *__restrict__ q4) {
   constexpr int KS = HD + 8;   // sK row stride in halves: (HD + 8) / 2 = 4 mod 32 words
   constexpr int VS = FA_K + 8; // sVt row stride in halves: 20 words
   constexpr int ND = HD / 8;   // 8-dim tiles of the output, 8-dim k-steps of Q K^T
@@ -170,33 +174,76 @@ __device__ __forceinline__ void vl_attn_fa(const float *__restrict__ q, const un
   l0 += vl_shfl_xor(l0, 2);
   l1 += vl_shfl_xor(l1, 1);
   l1 += vl_shfl_xor(l1, 2);
-  if (r0 < M) {
-    const float inv = 1.0f / l0;
-    float *orow = out + ((size_t)r0 * n_heads + h) * HD + 2 * tg;
+#pragma unroll
+  for (int rr = 0; rr < 2; rr++) {
+    const int row = rr == 0 ? r0 : r1;
+    const float inv = row < M ? 1.0f / (rr == 0 ? l0 : l1) : 0.0f;
+    float v[ND][2];
 #pragma unroll
     for (int d = 0; d < ND; d++) {
-      orow[8 * d] = o[d][0] * inv;
-      orow[8 * d + 1] = o[d][1] * inv;
+      v[d][0] = o[d][2 * rr] * inv;
+      v[d][1] = o[d][2 * rr + 1] * inv;
     }
-  }
-  if (r1 < M) {
-    const float inv = 1.0f / l1;
-    float *orow = out + ((size_t)r1 * n_heads + h) * HD + 2 * tg;
+    if (row < M) {
+      float *orow = out + ((size_t)row * n_heads + h) * HD + 2 * tg;
 #pragma unroll
-    for (int d = 0; d < ND; d++) {
-      orow[8 * d] = o[d][2] * inv;
-      orow[8 * d + 1] = o[d][3] * inv;
+      for (int d = 0; d < ND; d++) {
+        orow[8 * d] = v[d][0];
+        orow[8 * d + 1] = v[d][1];
+      }
+    }
+    if (q4 != NULL) { // uniform across the warp: every lane takes part in the shuffles
+      const int kt = n_heads * HD; // row length of the projection's input
+#pragma unroll
+      for (int b = 0; b < HD / 32; b++) { // 32-value block: dims 32 b.., tiles d = 4 b .. 4 b + 3
+        float amax = 0.0f;
+#pragma unroll
+        for (int dd = 0; dd < 4; dd++) amax = fmaxf(amax, fmaxf(fabsf(v[4 * b + dd][0]), fabsf(v[4 * b + dd][1])));
+        amax = fmaxf(amax, vl_shfl_xor(amax, 1));
+        amax = fmaxf(amax, vl_shfl_xor(amax, 2));
+        int qv[8], qs = 0;
+#pragma unroll
+        for (int dd = 0; dd < 4; dd++)
+#pragma unroll
+          for (int e = 0; e < 2; e++) {
+            int qq = 0;
+            if (amax > 0.0f) {
+              qq = __float2int_rn(__fmul_rn(v[4 * b + dd][e], __fdiv_rn(127.0f, amax)));
+              qq = max(min(qq, 127), -127);
+            }
+            qv[2 * dd + e] = qq;
+            qs += qq;
+          }
+        float sum = (float)qs; // |sum| <= 32 * 127: exact as a float
+        sum += vl_shfl_xor(sum, 1);
+        sum += vl_shfl_xor(sum, 2);
+        if (row < M) {
+          const int c0 = h * HD + 32 * b;
+          unsigned char *rec = q4 + ((size_t)row * (size_t)(kt / 128) + (size_t)(c0 / 128)) * 160u;
+          const int sub = (c0 % 128) / 32;
+#pragma unroll
+          for (int dd = 0; dd < 4; dd++)
+#pragma unroll
+            for (int e = 0; e < 2; e++) rec[32 + 32 * sub + 8 * dd + 2 * tg + e] = (unsigned char)(signed char)qv[2 * dd + e];
+          if (tg == 0) {
+            const float dsc = __fmul_rn(amax, __int_as_float(0x3C010204));
+            ((float *)rec)[sub] = dsc;
+            ((float *)rec)[4 + sub] = __fmul_rn(dsc, sum);
+          }
+        }
+      }
     }
   }
 }
 
-// Same arguments as vira_cu_attn_f16kv (head_dim fixed by the name).
+// Arguments of vira_cu_attn_f16kv (head_dim fixed by the name) plus q4 (NULL: none).
 #define VL_FA_KERNEL(NAME, HD)                                                                 \
   extern "C" __global__ void __launch_bounds__(128)                                           \
   NAME(const float *__restrict__ q, const unsigned short *__restrict__ kc, const unsigned short *__restrict__ vc, \
-       float *__restrict__ out, int n_heads, int kv_mul, int head_dim, int kv_dim, int M, long long start, float scale) { \
+       float *__restrict__ out, int n_heads, int kv_mul, int head_dim, int kv_dim, int M, long long start, float scale, \
+       unsigned char *__restrict__ q4) {                                                       \
     (void)head_dim;                                                                            \
-    vl_attn_fa<HD>(q, kc, vc, out, n_heads, kv_mul, kv_dim, M, start, scale);                  \
+    vl_attn_fa<HD>(q, kc, vc, out, n_heads, kv_mul, kv_dim, M, start, scale, q4);              \
   }
 VL_FA_KERNEL(vira_cu_attn_fa64, 64)
 VL_FA_KERNEL(vira_cu_attn_fa128, 128)

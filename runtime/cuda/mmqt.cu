@@ -251,6 +251,12 @@ struct vt_q6_k {
   }
   static __device__ __forceinline__ int vpos(int c, int t) { return 8 * ((c >> 1) + 2 * (t >> 2)) + 4 * (c & 1) + (t & 3); }
   VL_SCALES(mq_q6_k)
+  // the int8 scales of the sub-block's two halves and the super-block's d (vl_mmqb's integer path)
+  static __device__ __forceinline__ void sdec_int(const int *r, int *sc0, int *sc1, float *d) {
+    *sc0 = (int)(signed char)(r[0] & 0xFF);
+    *sc1 = (int)(signed char)((r[0] >> 8) & 0xFF);
+    *d = vl_half_to_float((unsigned short)r[1]);
+  }
 };
 
 template <class F>
@@ -435,11 +441,51 @@ VL_MMQT_KERNEL(vira_cu_mmqt_q6_k, vt_q6_k)
 // Loads, decoders, pipelining and the per-value arithmetic are those of vl_mmqt above, so
 // both give the same sums in the same order.
 // Grid ((N + 127) / 128, (M + J - 1) / J), block 256; ~46 KB shared (J = 128).
+template <bool B> struct vl_enable_if {};
+template <> struct vl_enable_if<true> { typedef void type; };
 #define TB_N 128
-template <class F, int J>
+// integer scales of an S16 format (only Q6_K); never called for the others
+template <class F> struct vl_has_sdec_int { enum { v = 0 }; };
+template <> struct vl_has_sdec_int<vt_q6_k> { enum { v = 1 }; };
+template <class F>
+__device__ __forceinline__ typename vl_enable_if<vl_has_sdec_int<F>::v>::type vl_sdec_int(const int *r, int *s0, int *s1, float *d) {
+  F::sdec_int(r, s0, s1, d);
+}
+template <class F>
+__device__ __forceinline__ typename vl_enable_if<!vl_has_sdec_int<F>::v>::type vl_sdec_int(const int *, int *, int *, float *) {}
+#ifndef VL_EMULATE
+__device__ __forceinline__ float vl_ex2a(float x) {
+  float r;
+  asm("ex2.approx.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
+#else
+static inline float vl_ex2a(float x) { return exp2f(x); }
+#endif
+#ifndef VL_EMULATE
+__device__ __forceinline__ float vl_shfl_xor(float v, int m) { return __shfl_xor_sync(0xffffffffu, v, m); }
+#endif
+// silu(g) * u with the arithmetic of vira_cu_silu_mul_f32 (fused.cu)
+__device__ __forceinline__ float vl_silu_mul(float g, float u) {
+  const float e = vl_ex2a(__fmul_rn(g, __int_as_float(0xBFB8AA3B)));
+  return __fmul_rn(__fdiv_rn(g, __fadd_rn(e, 1.0f)), u);
+}
+
+// GLU = false: y[m, n] = x . W[n] over 128 weight rows per block.
+// GLU = true (gpu_linear_swiglu): w and w2 are the gate and up matrices; a block takes 64
+// rows of each into its 128 shared rows (gate 0..63, up 64..127), warp w computes gate and up
+// for 32 rows (w & 1) x J / 4 activation rows (w >> 1), and writes silu(gate) * up. The sums
+// are those of the GLU = false kernel on each matrix (same order), so the result equals
+// vira_cu_mmqb + vira_cu_silu_mul_f32.
+// GLU with q4 != NULL (N % 128 == 0): the output is also written quantized in the x4 layout
+// (vira_cu_quantize_q8_1x4's arithmetic), which the down projection reads; a warp holds whole
+// 32-value blocks of an output row (its 32 rows of the 64), spread over the 8 lanes of a tg.
+template <class F, int J, bool GLU>
 __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,
-                                        float *__restrict__ y, int M, int nb, int N) {
-  constexpr int NBT = J / 16;                // activation tiles (8 rows) per warp
+                                        const unsigned char *__restrict__ w2, float *__restrict__ y, int M, int nb,
+                                        int N, unsigned char *__restrict__ q4 = NULL) {
+  constexpr int NA = GLU ? 8 : 4;            // A tiles (8 weight rows) per warp
+  constexpr int NBT = GLU ? J / 32 : J / 16; // activation tiles (8 rows) per warp
   constexpr int NXJ = (10 * J + 255) / 256;  // 16-byte activation jobs per thread
   __shared__ __align__(16) int sW[TB_N][TQ_S];
   __shared__ __align__(16) int sX[J][TQ_S];
@@ -449,8 +495,9 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
   __shared__ __align__(16) float sXs[4][J];
   const int tid = threadIdx.x, lane = tid & 31, wp = tid >> 5;
   const int gr = lane >> 2, tg = lane & 3;
-  const int wn = (wp & 3) * 32, wm = (wp >> 2) * (J / 2);
-  const int n0 = blockIdx.x * TB_N, m0 = blockIdx.y * J;
+  const int wn = GLU ? (wp & 1) * 32 : (wp & 3) * 32;
+  const int wm = GLU ? (wp >> 1) * (J / 4) : (wp >> 2) * (J / 2);
+  const int n0 = blockIdx.x * (GLU ? TB_N / 2 : TB_N), m0 = blockIdx.y * J;
   const int nxb = nb * (F::UPS == 8 ? 1 : 8);
   const int ngx = nxb / 4;
   const size_t rowb = (size_t)nb * (size_t)F::BYTES;
@@ -458,20 +505,24 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
   int wr[2][F::RAW];
   int sr[2][4];
   int xr[NXJ][4];
-  float acc[4][NBT][2];
+  float acc[NA][NBT][2];
 #pragma unroll
-  for (int a = 0; a < 4; a++)
+  for (int a = 0; a < NA; a++)
 #pragma unroll
     for (int b = 0; b < NBT; b++) acc[a][b][0] = acc[a][b][1] = 0.0f;
 
+  // shared row r -> its matrix row (GLU: rows 64.. are the up matrix)
+#define VL_ROW_N(r) (n0 + (GLU ? ((r) & 63) : (r)))
+#define VL_ROW_W(r) (GLU && (r) >= 64 ? w2 : w)
 #define VL_MMQB_LOAD(STEP)                                                                     \
   {                                                                                            \
     const int u_ = ((STEP) >> 1) * F::UPS, hs_ = (STEP) & 1;                                   \
     _Pragma("unroll") for (int q = 0; q < 2; q++) {                                            \
-      const int job = tid + 256 * q, n = n0 + (job >> 2);                                      \
+      const int job = tid + 256 * q, r_ = job >> 2, n = VL_ROW_N(r_);                          \
       if (n < N) {                                                                             \
-        F::vload(w + (size_t)n * rowb, u_, hs_, job & 3, wr[q]);                               \
-        F::sload(w + (size_t)n * rowb, u_, 4 * hs_ + (job & 3), sr[q]);                        \
+        const unsigned char *wrow_ = VL_ROW_W(r_) + (size_t)n * rowb;                          \
+        F::vload(wrow_, u_, hs_, job & 3, wr[q]);                                              \
+        F::sload(wrow_, u_, 4 * hs_ + (job & 3), sr[q]);                                       \
       }                                                                                        \
     }                                                                                          \
     const int g_ = (u_ / F::UPS) * 2 + hs_;                                                    \
@@ -488,20 +539,22 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
 #pragma unroll
     for (int q = 0; q < 2; q++) {
       const int job = tid + 256 * q, r = job >> 2, c = job & 3;
-      const bool ok = n0 + r < N;
+      const bool ok = VL_ROW_N(r) < N;
       int o[8];
 #pragma unroll
       for (int t = 0; t < 8; t++) o[t] = 0;
       float a0 = 0.0f, a1 = 0.0f, cb = 0.0f;
+      int i0 = 0, i1 = 0;
       if (ok) {
         F::vdec(wr[q], hs, c, o);
-        F::sdec(sr[q], 4 * hs + c, &a0, &a1, &cb);
+        if (F::S16) vl_sdec_int<F>(sr[q], &i0, &i1, &cb); // cb = the super-block's d
+        else F::sdec(sr[q], 4 * hs + c, &a0, &a1, &cb);
       }
 #pragma unroll
       for (int t = 0; t < 8; t++) sW[r][vl_perm(F::vpos(c, t))] = o[t];
-      if (F::S16) {
-        sA[r][2 * c] = a0;
-        sA[r][2 * c + 1] = a1;
+      if (F::S16) { // integer scales (bit patterns) and d: see the S16 branch below
+        sA[r][2 * c] = __int_as_float(i0);
+        sA[r][2 * c + 1] = __int_as_float(i1);
       } else {
         sA[r][c] = a0;
       }
@@ -528,14 +581,20 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
     if (step + 1 < nsteps) VL_MMQB_LOAD(step + 1)
 #pragma unroll 1
     for (int kb = 0; kb < 4; kb++) {
-      int af[4][2];
-      float s0[4], s1[4], cbv[4];
+      int af[NA][2];
+      float s0[NA], cbv[NA];
+      int si0[NA], si1[NA];
 #pragma unroll
-      for (int a = 0; a < 4; a++) {
-        const int r = wn + 8 * a + gr;
+      for (int a = 0; a < NA; a++) {
+        const int r = (a >= 4 ? 64 : 0) + wn + 8 * (a & 3) + gr;
         vl_lds2(&sW[r][8 * tg + 2 * kb], af[a]);
-        s0[a] = F::S16 ? sA[r][2 * kb] : sA[r][kb];
-        s1[a] = F::S16 ? sA[r][2 * kb + 1] : s0[a];
+        if (F::S16) {
+          si0[a] = __float_as_int(sA[r][2 * kb]);
+          si1[a] = __float_as_int(sA[r][2 * kb + 1]);
+          s0[a] = sC[r][kb]; // d
+        } else {
+          s0[a] = sA[r][kb];
+        }
         cbv[a] = F::HASC ? sC[r][kb] : 0.0f;
       }
 #pragma unroll
@@ -546,16 +605,20 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
         vl_lds2f(&sXd[kb][wm + 8 * b + 2 * tg], xd);
         if (F::HASC) vl_lds2f(&sXs[kb][wm + 8 * b + 2 * tg], xs);
 #pragma unroll
-        for (int a = 0; a < 4; a++) {
+        for (int a = 0; a < NA; a++) {
           int d0, d1;
-          vl_mma_c(d0, d1, af[a][0], bf[0], VL_MAGIC);
           if (F::S16) {
-            acc[a][b][0] += s0[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
-            acc[a][b][1] += s0[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
-            vl_mma_c(d0, d1, af[a][1], bf[1], VL_MAGIC);
-            acc[a][b][0] += s1[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
-            acc[a][b][1] += s1[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
+            // Q6_K, as llama.cpp's vec_dot_q6_K_q8_1_mma: the two 16-value dots times their
+            // int8 scales summed in integers (|t| <= 2 * 16 * 32 * 127 * 128 < 2^24, exact as a
+            // float), then one conversion and d * xd * t: 2 float ops instead of 6
+            int e0, e1;
+            vl_mma_c(d0, d1, af[a][0], bf[0], 0);
+            vl_mma_c(e0, e1, af[a][1], bf[1], 0);
+            const int t0 = d0 * si0[a] + e0 * si1[a], t1 = d1 * si0[a] + e1 * si1[a];
+            acc[a][b][0] += s0[a] * xd[0] * (float)t0;
+            acc[a][b][1] += s0[a] * xd[1] * (float)t1;
           } else {
+            vl_mma_c(d0, d1, af[a][0], bf[0], VL_MAGIC);
             vl_mma(d0, d1, af[a][1], bf[1]);
             acc[a][b][0] += s0[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
             acc[a][b][1] += s0[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
@@ -570,6 +633,58 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
     VL_SYNC();
   }
 #undef VL_MMQB_LOAD
+#undef VL_ROW_N
+#undef VL_ROW_W
+  if (GLU) {
+#pragma unroll
+    for (int b = 0; b < NBT; b++)
+#pragma unroll
+      for (int l = 0; l < 2; l++) {
+        const int m = m0 + wm + 8 * b + 2 * tg + l;
+        float v[4];
+        float amax = 0.0f;
+#pragma unroll
+        for (int a = 0; a < 4; a++) {
+          v[a] = vl_silu_mul(acc[a][b][l], acc[GLU ? a + 4 : a][b][l]);
+          const int n = n0 + wn + 8 * a + gr;
+          if (m < M && n < N) y[(size_t)m * (size_t)N + (size_t)n] = v[a];
+          amax = fmaxf(amax, fabsf(v[a]));
+        }
+        if (q4 != NULL) { // uniform: every lane takes part in the shuffles
+          amax = fmaxf(amax, vl_shfl_xor(amax, 4));
+          amax = fmaxf(amax, vl_shfl_xor(amax, 8));
+          amax = fmaxf(amax, vl_shfl_xor(amax, 16));
+          int qv[4], qs = 0;
+#pragma unroll
+          for (int a = 0; a < 4; a++) {
+            int q = 0;
+            if (amax > 0.0f) {
+              q = __float2int_rn(__fmul_rn(v[a], __fdiv_rn(127.0f, amax)));
+              q = max(min(q, 127), -127);
+            }
+            qv[a] = q;
+            qs += q;
+          }
+          float sum = (float)qs; // |sum| <= 32 * 127: exact as a float
+          sum += vl_shfl_xor(sum, 4);
+          sum += vl_shfl_xor(sum, 8);
+          sum += vl_shfl_xor(sum, 16);
+          if (m < M) {
+            const int c0 = n0 + wn; // first column of this warp's 32-value block
+            unsigned char *rec = q4 + ((size_t)m * (size_t)(N / 128) + (size_t)(c0 / 128)) * 160u;
+            const int sub = (c0 % 128) / 32;
+#pragma unroll
+            for (int a = 0; a < 4; a++) rec[32 + 32 * sub + 8 * a + gr] = (unsigned char)(signed char)qv[a];
+            if (gr == 0) {
+              const float d = __fmul_rn(amax, __int_as_float(0x3C010204));
+              ((float *)rec)[sub] = d;
+              ((float *)rec)[4 + sub] = __fmul_rn(d, sum);
+            }
+          }
+        }
+      }
+    return;
+  }
 #pragma unroll
   for (int a = 0; a < 4; a++) {
     const int n = n0 + wn + 8 * a + gr;
@@ -579,7 +694,7 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
 #pragma unroll
       for (int l = 0; l < 2; l++) {
         const int m = m0 + wm + 8 * b + 2 * tg + l;
-        if (m < M) y[(size_t)m * (size_t)N + (size_t)n] = acc[a][b][l];
+        if (m < M) y[(size_t)m * (size_t)N + (size_t)n] = GLU ? vl_silu_mul(acc[a][b][l], acc[GLU ? a + 4 : a][b][l]) : acc[a][b][l];
       }
   }
 }
@@ -587,8 +702,25 @@ __device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, co
   extern "C" __global__ void __launch_bounds__(256, 1)                                        \
   NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
        float *__restrict__ y, int M, int nb, int N) {                                         \
-    vl_mmqb<T, J>(xq, w, y, M, nb, N);                                                         \
+    vl_mmqb<T, J, false>(xq, w, NULL, y, M, nb, N);                                            \
   }
+// silu(x W_gate) * (x W_up) for gpu_linear_swiglu, and (q4 != NULL, N % 128 == 0) its x4 copy.
+// Grid ((N + 63) / 64, (M + J - 1) / J), block 256.
+#define VL_MMQG_KERNEL(NAME, T, J)                                                             \
+  extern "C" __global__ void __launch_bounds__(256, 1)                                        \
+  NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ wg,            \
+       const unsigned char *__restrict__ wu, float *__restrict__ y, int M, int nb, int N,      \
+       unsigned char *__restrict__ q4) {                                                       \
+    vl_mmqb<T, J, true>(xq, wg, wu, y, M, nb, N, q4);                                          \
+  }
+VL_MMQG_KERNEL(vira_cu_mmqg128_q4_0, vt_q4_0, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q4_1, vt_q4_1, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q5_0, vt_q5_0, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q5_1, vt_q5_1, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q8_0, vt_q8_0, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q4_k, vt_q4_k, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q5_k, vt_q5_k, 128)
+VL_MMQG_KERNEL(vira_cu_mmqg128_q6_k, vt_q6_k, 128)
 VL_MMQB_KERNEL(vira_cu_mmqb128_q4_0, vt_q4_0, 128)
 VL_MMQB_KERNEL(vira_cu_mmqb128_q4_1, vt_q4_1, 128)
 VL_MMQB_KERNEL(vira_cu_mmqb128_q5_0, vt_q5_0, 128)

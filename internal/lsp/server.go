@@ -1056,6 +1056,8 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`gpu_rope_seq_norm(q: tensor[f32], start_pos: i64, n_heads: int, freq_base: f32) -> tensor[f32]`**\n\nApplies batched GPU/SIMD classic interleaved RoPE across a prefill sequence starting at `start_pos`."
 	case "gpu_softmax":
 		return "**`gpu_softmax(logits: tensor[f32]) -> tensor[f32]`**\n\nComputes GPU/SIMD numerically stable row-wise Softmax."
+	case "gpu_linear_swiglu":
+		return "**`gpu_linear_swiglu(x: tensor[f32], w_gate: tensor[f32], w_up: tensor[f32]) -> tensor[f32]`**\n\n`silu(x.gpu_linear(w_gate)) * x.gpu_linear(w_up)` (a SwiGLU feed-forward's first half). Prompt rows with both matrices in the same quantized format run as one CUDA launch; the same numbers as the separate calls."
 	case "gpu_silu_mul":
 		return "**`gpu_silu_mul(gate: tensor[f32], up: tensor[f32]) -> tensor[f32]`**\n\n`silu(gate) * up` (SwiGLU) in one GPU launch; the same numbers as `tensor_elemwise_mul(gpu_silu(gate), up)`."
 	case "gpu_silu":

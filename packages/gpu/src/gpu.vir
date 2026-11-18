@@ -151,6 +151,12 @@ pub fn silu(x tensor[f32]) tensor[f32] {
 	return gpu_silu(x)
 }
 
+// silu(x W_gate^T) * (x W_up^T): one CUDA launch for prompt rows with quantized weights;
+// the same numbers as silu_mul(linear(x, w_gate), linear(x, w_up)).
+pub fn linear_swiglu(x tensor[f32], w_gate tensor[f32], w_up tensor[f32]) tensor[f32] {
+	return gpu_linear_swiglu(x, w_gate, w_up)
+}
+
 // silu(gate) * up (SwiGLU) in one GPU launch; the same numbers as tensor_elemwise_mul(silu(gate), up).
 pub fn silu_mul(gate tensor[f32], up tensor[f32]) tensor[f32] {
 	return gpu_silu_mul(gate, up)

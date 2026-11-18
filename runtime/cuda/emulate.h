@@ -234,3 +234,5 @@ static inline void vl_mma_f16(float *d, unsigned int a0, unsigned int a1, unsign
   }
 }
 static inline float vl_ex2_approx(float x) { return exp2f(x); }
+static inline int __float_as_int(float f) { int i; memcpy(&i, &f, 4); return i; }
+static inline float __fadd_rn(float a, float b) { return a + b; }

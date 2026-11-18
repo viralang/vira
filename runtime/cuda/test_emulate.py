@@ -183,6 +183,9 @@ def build_mmq(kind='mmq'):
                 body += ('extern "C" void run_mmqb%d_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
                          '  VL_LAUNCH_THREADED(vira_cu_mmqb%d_%s, (N + 127) / 128, (M + %d) / %d, 256, xq, w, y, M, nb, N);\n}\n') % (
                              J, name, J, name, J - 1, J)
+        for name, _, _, _, _ in FORMATS:
+            body += ('extern "C" void run_mmqg_%s(const unsigned char *xq, const unsigned char *wg, const unsigned char *wu, float *y, int M, int nb, int N, unsigned char *q4) {\n'
+                     '  VL_LAUNCH_THREADED(vira_cu_mmqg128_%s, (N + 63) / 64, (M + 127) / 128, 256, xq, wg, wu, y, M, nb, N, q4);\n}\n') % (name, name)
         body += ('extern "C" void run_quantize_x4(const float *x, unsigned char *q, int M, int K) {\n'
                  '  VL_LAUNCH_THREADED(vira_cu_quantize_q8_1x4, K / 128, M, 128, x, q, K);\n}\n')
     open(src, 'w').write(body)
@@ -198,6 +201,42 @@ def q8_1_to_x4(raw, M, K):
     out[..., 16:32] = b[..., 4:8].reshape(M, K // 128, 16)
     out[..., 32:] = b[..., 8:].reshape(M, K // 128, 128)
     return out.tobytes()
+
+
+def check_mmqg(rng, oracle):
+    """Fused gate/up + SwiGLU (vira_cu_mmqg128_<fmt>) against silu(x Wg) * (x Wu) from the CPU
+    dequantiser (SiLU in float64)."""
+    lib = build_mmq('mmqt')
+    ok = True
+    for name, dt, size, qk, f16_at in FORMATS:
+        for M, K, N in [(70, 512, 66), (133, 256, 70), (77, 256, 256)]:
+            nbr = K // qk
+            ws = []
+            for _ in range(2):
+                raw = random_blocks(rng, name, N * nbr, size, f16_at)
+                wf = np.zeros(N * K, np.float32)
+                oracle.oracle(dt, raw.tobytes(), ctypes.c_size_t(N * nbr), wf.ctypes.data_as(ctypes.c_void_p))
+                ws.append((raw, wf.reshape(N, K).astype(np.float64)))
+            xraw, xd, xq = q8_1_acts(rng, M, K)
+            xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
+            g = xf @ ws[0][1].T
+            u = xf @ ws[1][1].T
+            want = g / (1.0 + np.exp(-g)) * u
+            y = np.full(M * N, np.nan, np.float32)
+            q4 = np.zeros(M * N // 32 * 40, np.uint8) if N % 128 == 0 else None
+            getattr(lib, 'run_mmqg_' + name)(q8_1_to_x4(xraw, M, K), ws[0][0].tobytes(), ws[1][0].tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N,
+                                            q4.ctypes.data_as(ctypes.c_void_p) if q4 is not None else None)
+            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+            good = bool(err < 1e-4)
+            if q4 is not None:  # the x4 copy must be the quantize rule applied to y
+                qref = np.zeros(M * N // 32 * 40, np.uint8)
+                lib.run_quantize_x4(y.ctypes.data_as(ctypes.c_void_p), qref.ctypes.data_as(ctypes.c_void_p), M, N)
+                same = bool(np.array_equal(q4, qref))
+                print('mmqg128_%-5s M=%3d N=%3d  x4 copy equals quantize_q8_1x4(y): %s' % (name, M, N, same))
+                good &= same
+            ok &= good
+            print('mmqg128_%-5s M=%3d K=%4d N=%3d  vs silu(x Wg) * (x Wu): max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
+    return ok
 
 
 def check_quantize_x4(rng):
@@ -316,9 +355,9 @@ def check_attn_fa(rng):
     src = os.path.join(tempfile.mkdtemp(), 'fa.cpp')
     open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/attnt.cu"\n' % HERE + r'''
 extern "C" void run_fa(const float *q, const unsigned short *k, const unsigned short *v, float *o, int nh, int kvm,
-                       int hd, int kvd, int M, long long start, float scale) {
-  if (hd == 128) { VL_LAUNCH_THREADED(vira_cu_attn_fa128, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale); }
-  else { VL_LAUNCH_THREADED(vira_cu_attn_fa64, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale); }
+                       int hd, int kvd, int M, long long start, float scale, unsigned char *q4) {
+  if (hd == 128) { VL_LAUNCH_THREADED(vira_cu_attn_fa128, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale, q4); }
+  else { VL_LAUNCH_THREADED(vira_cu_attn_fa64, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale, q4); }
 }
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
@@ -332,9 +371,26 @@ extern "C" void run_fa(const float *q, const unsigned short *k, const unsigned s
         q = rng.standard_normal((M * nh, hd)).astype(np.float32)
         o = np.full((M * nh, hd), np.nan, np.float32)
         scale = 1.0 / np.sqrt(hd)
+        kt = nh * hd
+        q4 = np.zeros(M * kt // 32 * 40, np.uint8) if kt % 128 == 0 else None
         lib.run_fa(q.ctypes.data_as(ctypes.c_void_p), k16.view(np.uint16).ctypes.data_as(ctypes.c_void_p),
                    v16.view(np.uint16).ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p),
-                   nh, nh // nkv, hd, kvd, M, ctypes.c_longlong(start), ctypes.c_float(scale))
+                   nh, nh // nkv, hd, kvd, M, ctypes.c_longlong(start), ctypes.c_float(scale),
+                   q4.ctypes.data_as(ctypes.c_void_p) if q4 is not None else None)
+        if q4 is not None:  # the x4 copy of o (rows of nh * hd values) by the quantize rule
+            b = o.reshape(M, kt // 32, 32)
+            amax = np.abs(b).max(axis=2).astype(np.float32)
+            inv = np.where(amax > 0, np.float32(127.0) / np.where(amax > 0, amax, 1), 0).astype(np.float32)
+            qs = np.clip(np.rint((b * inv[..., None]).astype(np.float32)), -127, 127).astype(np.int8)
+            dd = (amax * np.array([0x3C010204], np.uint32).view(np.float32)[0]).astype(np.float32)
+            ss = (dd * qs.astype(np.int32).sum(axis=2).astype(np.float32)).astype(np.float32)
+            raw = np.zeros((M, kt // 32, 40), np.uint8)
+            raw[..., 0:4] = dd.view(np.uint8).reshape(M, kt // 32, 4)
+            raw[..., 4:8] = ss.view(np.uint8).reshape(M, kt // 32, 4)
+            raw[..., 8:] = qs.view(np.uint8)
+            same = bool(np.array_equal(q4, np.frombuffer(q8_1_to_x4(raw.tobytes(), M, kt), np.uint8)))
+            print('attn_fa    x4 copy of the output equals the quantize rule: %s' % same)
+            ok &= same
         K = k16.astype(np.float64)
         V = v16.astype(np.float64)
         want = np.zeros((M * nh, hd))
@@ -483,6 +539,7 @@ def main():
     ok &= check_mmq(rng, oracle)
     ok &= check_mmq(rng, oracle, 'mmqt')
     ok &= check_quantize_x4(rng)
+    ok &= check_mmqg(rng, oracle)
     ok &= check_attn(rng)
     ok &= check_attn_fa(rng)
     sys.exit(0 if ok else 1)
