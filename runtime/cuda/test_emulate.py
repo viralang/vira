@@ -53,6 +53,9 @@ def build_fused():
     out = os.path.join(tempfile.mkdtemp(), 'f.so')
     src = os.path.join(tempfile.mkdtemp(), 'f.cpp')
     open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/fused.cu"\n' % HERE + r'''
+extern "C" void run_moe_act(float *g, const float *u, int n, int act, float lim) {
+  VL_LAUNCH(vira_cu_moe_act_f32, (n + 255) / 256, 1, 256, g, u, n, act, lim);
+}
 extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsigned char *q8, int rows, int cols, float eps) {
   VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, (cols / 32 + 7) / 8, rows, 256, x, w, y, q8, cols, eps);
 }
@@ -61,10 +64,37 @@ extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsig
     return ctypes.CDLL(out)
 
 
+def check_moe_act(lib, rng):
+    """vira_cu_moe_act_f32 against the formulas of ViraLama's CPU MoE path (vl_moe_full)."""
+    ok = True
+    n = 1000
+    g0 = (rng.standard_normal(n) * 4).astype(np.float32)
+    u = (rng.standard_normal(n) * 4).astype(np.float32)
+    for act, lim in [(0, 0.0), (1, 0.0), (2, 0.0), (3, 2.5), (3, 0.0)]:
+        g = g0.copy()
+        lib.run_moe_act(g.ctypes.data_as(ctypes.c_void_p), u.ctypes.data_as(ctypes.c_void_p), n, act, ctypes.c_float(lim))
+        v, b = g0.astype(np.float64), u.astype(np.float64)
+        if act == 3:
+            a, c = (np.minimum(v, lim), np.clip(b, -lim, lim)) if lim > 1e-6 else (v, b)
+            want = a / (1 + np.exp(-a)) * c
+        elif act == 2:
+            xg, yu = np.minimum(v, 7.0), np.clip(b, -7.0, 7.0)
+            want = xg / (1 + np.exp(-1.702 * xg)) * (yu + 1)
+        elif act == 1:
+            want = 0.5 * v * (1 + np.tanh(0.7978845608028654 * (v + 0.044715 * v ** 3))) * b
+        else:
+            want = v / (1 + np.exp(-v)) * b
+        err = np.abs(g - want).max() / np.abs(want).max()
+        good = bool(err < 1e-5)
+        ok &= good
+        print('moe_act act=%d lim=%.1f  max rel err %.1e  %s' % (act, lim, err, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def check_fused(rng):
     """rmsnorm + Q8_1 against NumPy: the rmsnorm, then the Q8_1 rule of vira_cu_quantize_q8_1."""
     lib = build_fused()
-    ok = True
+    ok = check_moe_act(lib, rng)
     for rows, cols in [(1, 64), (1, 4096), (2, 1024), (4, 2048), (3, 96), (1, 5120)]:
         x = rng.standard_normal((rows, cols)).astype(np.float32)
         x[0, :32] = 0.0  # an all-zero Q8_1 block (amax == 0)

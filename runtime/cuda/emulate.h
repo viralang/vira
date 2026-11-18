@@ -12,6 +12,7 @@
 #define __launch_bounds__(x)
 struct vl_dim3 { int x, y, z; };
 static thread_local vl_dim3 threadIdx, blockIdx;
+static thread_local vl_dim3 blockDim = {256, 1, 1};
 template <typename T> static inline T __ldg(const T *p) { return *p; }
 #define VL_WRITER (THREADS - 1)
 #define VL_WARP_WRITER 31

@@ -83,3 +83,32 @@ vira_cu_rmsnorm_q8_1_f32(const float *__restrict__ x, const float *__restrict__ 
     }
   }
 }
+
+// MoE expert activation, in place: g[i] = act(g[i], u[i]) for i < n, the formulas of
+// ViraLama's CPU path (vl_moe_full): 0 SiLU(g) * u, 1 GELU-tanh(g) * u, 2 gpt-oss
+// (g clamped to 7, u to +-7: g * sigmoid(1.702 g) * (u + 1)), 3 DeepSeek-V4 clamped SwiGLU.
+extern "C" __global__ void vira_cu_moe_act_f32(float *__restrict__ g, const float *__restrict__ u,
+                                              int n, int act, float limit) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const float v = g[i], b = u[i];
+  float r;
+  if (act == 3) {
+    float a = v, c = b;
+    if (limit > 1e-6f) {
+      a = a < limit ? a : limit;
+      c = c < -limit ? -limit : (c > limit ? limit : c);
+    }
+    r = a / (1.0f + expf(-a)) * c;
+  } else if (act == 2) {
+    const float xg = v < 7.0f ? v : 7.0f;
+    const float yu = b < -7.0f ? -7.0f : (b > 7.0f ? 7.0f : b);
+    r = xg / (1.0f + expf(-1.702f * xg)) * (yu + 1.0f);
+  } else if (act == 1) {
+    const float k0 = 0.7978845608028654f;
+    r = 0.5f * v * (1.0f + tanhf(k0 * (v + 0.044715f * v * v * v))) * b;
+  } else {
+    r = v / (1.0f + expf(-v)) * b;
+  }
+  g[i] = r;
+}
