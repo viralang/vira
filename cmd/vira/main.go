@@ -1271,6 +1271,12 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		// (like AVX-512 on a Linux server) that could fault on the target machine.
 		archFlag = "-march=x86-64"
 	}
+	// VIRA_MARCH names the CPU the binary will run on, for a binary built on one machine
+	// and run on another (e.g. VIRA_MARCH=x86-64-v3: AVX2 + FMA + F16C, any x86 CPU since
+	// ~2015). -march=native would use the build machine's CPU instead.
+	if m := os.Getenv("VIRA_MARCH"); m != "" {
+		archFlag = "-march=" + m
+	}
 
 	incFlags, libFlags, hasRaylib, staticRaylibPath := resolveExternalLibPaths(targetOS)
 	if os.Getenv("VIRA_NO_RAYLIB") == "1" || os.Getenv("VIRA_GUI") == "native" || os.Getenv("VIRA_GUI") == "x11" {

@@ -104,6 +104,7 @@ vira <command> [flags] <file.vir>
 ### Compiler Flags
 
 - `-prod`: Enables maximum optimization flags (`-O3 -march=native -flto`).
+  `-march=native` targets the CPU of the machine that compiles. To run the binary on another machine, name its CPU with `VIRA_MARCH`, e.g. `VIRA_MARCH=x86-64-v3 vira build -prod ...` (AVX2 + FMA + F16C: any x86-64 CPU since about 2015, including cloud VMs), or `VIRA_MARCH=x86-64` for any x86-64 CPU.
 - `-sanitize`: Compiles with AddressSanitizer (`ASan`) and UndefinedBehaviorSanitizer (`UBSan`).
 - `-o <path>`: Specifies output binary filename.
 - `-cc <bin>`: Overrides backend C compiler (`gcc`, `clang`, `cc`, `tcc`).
