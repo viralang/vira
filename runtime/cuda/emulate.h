@@ -159,3 +159,12 @@ static inline void vl_mma(int &d0, int &d1, int a, int b) {
   d0 += s0;
   d1 += s1;
 }
+// vector types and helpers of mmqt.cu
+struct int2 { int x, y; };
+struct int4 { int x, y, z, w; };
+struct float2 { float x, y; };
+#define __align__(n)
+static inline int __funnelshift_r(int lo, int hi, int sh) {
+  const unsigned long long v = ((unsigned long long)(unsigned int)hi << 32) | (unsigned int)lo;
+  return (int)(unsigned int)(v >> (sh & 31));
+}

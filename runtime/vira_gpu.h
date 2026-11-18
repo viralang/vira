@@ -4069,13 +4069,13 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
   _vira_tls_gpu_weight_upload--;
 }
 
-// Runs the tensor-core and dp4a prompt kernels (Q8_0 and Q6_K, which covers both scale
-// paths) on the same random data and compares: the CPU emulation checks the kernel's index
+// Runs the tensor-core and dp4a prompt kernels (Q8_0, Q6_K and Q4_K: both scale paths and
+// the three ways mmqt.cu loads weights) on the same random data and compares: the CPU emulation checks the kernel's index
 // arithmetic, this checks that the GPU's mma fragment layout is the one it assumes. Returns
 // NULL when they agree, else the reason. Costs a few small launches at start-up.
 static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
   enum { M = 70, K = 512, N = 66 };
-  static const int fmts[2] = {4, 7}; // q8_0, q6_k
+  static const int fmts[3] = {4, 7, 5}; // q8_0, q6_k, q4_k
   const size_t xbytes = (size_t)M * (K / 32) * 40u;
   const size_t wbytes = (size_t)N * (K / 32) * 34u > (size_t)N * (K / 256) * 210u ? (size_t)N * (K / 32) * 34u
                                                                                   : (size_t)N * (K / 256) * 210u;
@@ -4105,14 +4105,17 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
       memcpy(p, &d, 4);
       memcpy(p + 4, &s, 4);
     }
-    for (int f = 0; f < 2 && why == NULL; f++) {
+    for (int f = 0; f < 3 && why == NULL; f++) {
       const int idx = fmts[f];
-      const bool q6 = idx == 7;
-      const size_t bs = q6 ? 210u : 34u, nbr = q6 ? (size_t)(K / 256) : (size_t)(K / 32);
+      const bool q6 = idx == 7, q4k = idx == 5;
+      static const char *fname[3] = {"Q8_0", "Q6_K", "Q4_K"};
+      const size_t bs = q6 ? 210u : q4k ? 144u : 34u, nbr = (q6 || q4k) ? (size_t)(K / 256) : (size_t)(K / 32);
       for (size_t i = 0; i < (size_t)N * nbr * bs; i++) hw[i] = (unsigned char)VL_RND();
-      for (size_t b = 0; b < (size_t)N * nbr; b++) { // f16 scale: a small positive normal half
-        const unsigned short h = (unsigned short)(0x1C00u + VL_RND() % 0x0C00u);
-        memcpy(hw + b * bs + (q6 ? 208u : 0u), &h, 2);
+      for (size_t b = 0; b < (size_t)N * nbr; b++) { // f16 scales: small positive normal halves
+        for (int k = 0; k < (q4k ? 2 : 1); k++) {
+          const unsigned short h = (unsigned short)(0x1C00u + VL_RND() % 0x0C00u);
+          memcpy(hw + b * bs + (q6 ? 208u : 2u * (unsigned)k), &h, 2);
+        }
       }
       int32_t m = M, nb = (int32_t)nbr, n = N;
       void *a0[] = {&dx, &dw, &dy0, &m, &nb, &n};
@@ -4131,9 +4134,10 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
         mx = fmax(mx, fabs((double)y0[i]));
         err = fmax(err, fabs((double)y0[i] - (double)y1[i]));
       }
-      if (!(mx > 0.0) || !(err <= 1e-4 * mx)) why = q6 ? "self-test mismatch (Q6_K)" : "self-test mismatch (Q8_0)";
+      static const char *bad[3] = {"self-test mismatch (Q8_0)", "self-test mismatch (Q6_K)", "self-test mismatch (Q4_K)"};
+      if (!(mx > 0.0) || !(err <= 1e-4 * mx)) why = bad[f];
       if (_vira_gpu_debug())
-        fprintf(stderr, "vira gpu: mmq-tc self-test %s: max rel diff %.2e\n", q6 ? "Q6_K" : "Q8_0", mx > 0.0 ? err / mx : -1.0);
+        fprintf(stderr, "vira gpu: mmq-tc self-test %s: max rel diff %.2e\n", fname[f], mx > 0.0 ? err / mx : -1.0);
     }
 #undef VL_RND
   }
@@ -5657,7 +5661,9 @@ static inline bool _vira_gpu_mmq_locked(_vira_gpu_wfmt wfmt, _vira_gpu_act_entry
   int32_t nb = idx >= 5 ? (K >> 8) : (K >> 5); // units: super-blocks or 32-value blocks
   vira_cu_deviceptr y_buf = y_slot->cu_buf;
   void *args[] = {&q8, &w_buf, &y_buf, &M, &nb, &N};
-  // tensor cores (mmqt.cu): tile 64 x 64; dp4a (mmq.cu): 64 x 32
+  // tensor cores (mmqt.cu): tile 64 x 64, 8-byte loads of the activations and 16-byte loads
+  // of Q4_K / Q5_K weights (else mmq.cu); dp4a (mmq.cu): 64 x 32
+  if (kt != NULL && (((size_t)q8 & 7u) != 0 || ((idx == 5 || idx == 6) && ((size_t)w_buf & 15u) != 0))) kt = NULL;
   const size_t tm = kt != NULL ? 64 : 32;
   *err = (_vira_gpu.cuLaunchKernel(kt != NULL ? kt : k, (unsigned int)(((size_t)N + 63) / 64),
                                    (unsigned int)(((size_t)M + tm - 1) / tm), 1, 128, 1, 1, 0, _vira_gpu.cu_stream,
