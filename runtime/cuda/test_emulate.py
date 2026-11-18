@@ -151,6 +151,11 @@ def build_mmq(kind='mmq'):
                  '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (N + 63) / 64, (M + %d) / %d, 128, xq, w, y, M, nb, N);\n}\n') % (
                      kind, name, kind, name, tm - 1, tm)
     if kind == 'mmqt':
+        for name, _, _, _, _ in FORMATS:
+            for J in (128, 64):
+                body += ('extern "C" void run_mmqb%d_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
+                         '  VL_LAUNCH_THREADED(vira_cu_mmqb%d_%s, (N + 127) / 128, (M + %d) / %d, 256, xq, w, y, M, nb, N);\n}\n') % (
+                             J, name, J, name, J - 1, J)
         body += ('extern "C" void run_quantize_x4(const float *x, unsigned char *q, int M, int K) {\n'
                  '  VL_LAUNCH_THREADED(vira_cu_quantize_q8_1x4, K / 128, M, 128, x, q, K);\n}\n')
     open(src, 'w').write(body)
@@ -199,7 +204,7 @@ def check_mmq(rng, oracle, kind='mmq'):
     lib = build_mmq(kind)
     ok = True
     for name, dt, size, qk, f16_at in FORMATS:
-        for M, K, N in [(5, 256, 7), (32, 512, 64), (40, 768, 70), (9, 1024, 130), (70, 512, 66)]:
+        for M, K, N in [(5, 256, 7), (32, 512, 64), (40, 768, 70), (9, 1024, 130), (70, 512, 66), (133, 256, 135)]:
             nbr = K // qk
             raw = random_blocks(rng, name, N * nbr, size, f16_at)
             wf = np.zeros(N * K, np.float32)
@@ -210,11 +215,14 @@ def check_mmq(rng, oracle, kind='mmq'):
             if kind == 'mmqt':
                 xraw = q8_1_to_x4(xraw, M, K)
             y = np.full(M * N, np.nan, np.float32)
-            getattr(lib, 'run_%s_%s' % (kind, name))(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
-            err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
-            good = bool(err < 1e-4)
-            ok &= good
-            print('%s_%-5s M=%2d K=%4d N=%3d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
+            kernels = [kind] if kind == 'mmq' else ['mmqt', 'mmqb128', 'mmqb64']
+            for kn in kernels:
+              y = np.full(M * N, np.nan, np.float32)
+              getattr(lib, 'run_%s_%s' % (kn, name))(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
+              err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
+              good = bool(err < 1e-4)
+              ok &= good
+              print('%s_%-5s M=%2d K=%4d N=%3d  vs CPU dequant: max rel err %.2e  %s' % (kn, name, M, K, N, err, 'ok' if good else 'FAIL'))
     return ok
 
 

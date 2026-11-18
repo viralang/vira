@@ -424,3 +424,184 @@ VL_MMQT_KERNEL(vira_cu_mmqt_q8_0, vt_q8_0)
 VL_MMQT_KERNEL(vira_cu_mmqt_q4_k, vt_q4_k)
 VL_MMQT_KERNEL(vira_cu_mmqt_q5_k, vt_q5_k)
 VL_MMQT_KERNEL(vira_cu_mmqt_q6_k, vt_q6_k)
+
+// ---- big tile (llama.cpp's Turing configuration, ggml-cuda/mmq-config-ampere.cuh): ----
+// 256 threads (8 warps), 128 weight rows x J activation rows (J = 128 or 64) per block, one
+// block per SM. Each decoded weight value is used by J activation rows and each loaded
+// activation by 128 weight rows (mmqt: 64 and 64), so the load and decode work per multiply
+// halves. Warp w: weight rows 32 (w & 3).., activation rows (J / 2) (w >> 2)..; its A
+// fragments (4 tiles of 8 rows) and scales stay in registers for a whole 32-value block while
+// it walks its J / 16 tiles of 8 activation rows (as llama.cpp's vec_dot_q8_1_q8_1_mma).
+// Loads, decoders, pipelining and the per-value arithmetic are those of vl_mmqt above, so
+// both give the same sums in the same order.
+// Grid ((N + 127) / 128, (M + J - 1) / J), block 256; ~46 KB shared (J = 128).
+#define TB_N 128
+template <class F, int J>
+__device__ __forceinline__ void vl_mmqb(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,
+                                        float *__restrict__ y, int M, int nb, int N) {
+  constexpr int NBT = J / 16;                // activation tiles (8 rows) per warp
+  constexpr int NXJ = (10 * J + 255) / 256;  // 16-byte activation jobs per thread
+  __shared__ __align__(16) int sW[TB_N][TQ_S];
+  __shared__ __align__(16) int sX[J][TQ_S];
+  __shared__ float sA[TB_N][F::S16 ? 9 : 5];
+  __shared__ float sC[TB_N][4];
+  __shared__ __align__(16) float sXd[4][J];
+  __shared__ __align__(16) float sXs[4][J];
+  const int tid = threadIdx.x, lane = tid & 31, wp = tid >> 5;
+  const int gr = lane >> 2, tg = lane & 3;
+  const int wn = (wp & 3) * 32, wm = (wp >> 2) * (J / 2);
+  const int n0 = blockIdx.x * TB_N, m0 = blockIdx.y * J;
+  const int nxb = nb * (F::UPS == 8 ? 1 : 8);
+  const int ngx = nxb / 4;
+  const size_t rowb = (size_t)nb * (size_t)F::BYTES;
+  const int nsteps = (nb / F::UPS) * 2;
+  int wr[2][F::RAW];
+  int sr[2][4];
+  int xr[NXJ][4];
+  float acc[4][NBT][2];
+#pragma unroll
+  for (int a = 0; a < 4; a++)
+#pragma unroll
+    for (int b = 0; b < NBT; b++) acc[a][b][0] = acc[a][b][1] = 0.0f;
+
+#define VL_MMQB_LOAD(STEP)                                                                     \
+  {                                                                                            \
+    const int u_ = ((STEP) >> 1) * F::UPS, hs_ = (STEP) & 1;                                   \
+    _Pragma("unroll") for (int q = 0; q < 2; q++) {                                            \
+      const int job = tid + 256 * q, n = n0 + (job >> 2);                                      \
+      if (n < N) {                                                                             \
+        F::vload(w + (size_t)n * rowb, u_, hs_, job & 3, wr[q]);                               \
+        F::sload(w + (size_t)n * rowb, u_, 4 * hs_ + (job & 3), sr[q]);                        \
+      }                                                                                        \
+    }                                                                                          \
+    const int g_ = (u_ / F::UPS) * 2 + hs_;                                                    \
+    _Pragma("unroll") for (int q = 0; q < NXJ; q++) {                                          \
+      const int job = tid + 256 * q, m = m0 + job / 10;                                        \
+      if (job < 10 * J && m < M)                                                               \
+        vl_ldg16(xq + ((size_t)m * (size_t)ngx + (size_t)g_) * 160u + 16u * (unsigned)(job % 10), xr[q]); \
+    }                                                                                          \
+  }
+
+  VL_MMQB_LOAD(0)
+  for (int step = 0; step < nsteps; step++) {
+    const int hs = step & 1;
+#pragma unroll
+    for (int q = 0; q < 2; q++) {
+      const int job = tid + 256 * q, r = job >> 2, c = job & 3;
+      const bool ok = n0 + r < N;
+      int o[8];
+#pragma unroll
+      for (int t = 0; t < 8; t++) o[t] = 0;
+      float a0 = 0.0f, a1 = 0.0f, cb = 0.0f;
+      if (ok) {
+        F::vdec(wr[q], hs, c, o);
+        F::sdec(sr[q], 4 * hs + c, &a0, &a1, &cb);
+      }
+#pragma unroll
+      for (int t = 0; t < 8; t++) sW[r][vl_perm(F::vpos(c, t))] = o[t];
+      if (F::S16) {
+        sA[r][2 * c] = a0;
+        sA[r][2 * c + 1] = a1;
+      } else {
+        sA[r][c] = a0;
+      }
+      sC[r][c] = cb;
+    }
+#pragma unroll
+    for (int q = 0; q < NXJ; q++) {
+      const int job = tid + 256 * q, c = job / 10, p = job % 10;
+      if (job < 10 * J) {
+        const bool ok = m0 + c < M;
+        if (p == 0) {
+#pragma unroll
+          for (int t = 0; t < 4; t++) sXd[t][c] = ok ? __int_as_float(xr[q][t]) : 0.0f;
+        } else if (p == 1) {
+#pragma unroll
+          for (int t = 0; t < 4; t++) sXs[t][c] = ok ? __int_as_float(xr[q][t]) : 0.0f;
+        } else {
+#pragma unroll
+          for (int t = 0; t < 4; t++) sX[c][vl_perm(4 * (p - 2) + t)] = ok ? xr[q][t] : 0;
+        }
+      }
+    }
+    VL_SYNC();
+    if (step + 1 < nsteps) VL_MMQB_LOAD(step + 1)
+#pragma unroll 1
+    for (int kb = 0; kb < 4; kb++) {
+      int af[4][2];
+      float s0[4], s1[4], cbv[4];
+#pragma unroll
+      for (int a = 0; a < 4; a++) {
+        const int r = wn + 8 * a + gr;
+        vl_lds2(&sW[r][8 * tg + 2 * kb], af[a]);
+        s0[a] = F::S16 ? sA[r][2 * kb] : sA[r][kb];
+        s1[a] = F::S16 ? sA[r][2 * kb + 1] : s0[a];
+        cbv[a] = F::HASC ? sC[r][kb] : 0.0f;
+      }
+#pragma unroll
+      for (int b = 0; b < NBT; b++) {
+        int bf[2];
+        float xd[2], xs[2];
+        vl_lds2(&sX[wm + 8 * b + gr][8 * tg + 2 * kb], bf);
+        vl_lds2f(&sXd[kb][wm + 8 * b + 2 * tg], xd);
+        if (F::HASC) vl_lds2f(&sXs[kb][wm + 8 * b + 2 * tg], xs);
+#pragma unroll
+        for (int a = 0; a < 4; a++) {
+          int d0, d1;
+          vl_mma_c(d0, d1, af[a][0], bf[0], VL_MAGIC);
+          if (F::S16) {
+            acc[a][b][0] += s0[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
+            acc[a][b][1] += s0[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
+            vl_mma_c(d0, d1, af[a][1], bf[1], VL_MAGIC);
+            acc[a][b][0] += s1[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
+            acc[a][b][1] += s1[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
+          } else {
+            vl_mma(d0, d1, af[a][1], bf[1]);
+            acc[a][b][0] += s0[a] * xd[0] * (__int_as_float(d0) - VL_MAGIC_F);
+            acc[a][b][1] += s0[a] * xd[1] * (__int_as_float(d1) - VL_MAGIC_F);
+          }
+          if (F::HASC) {
+            acc[a][b][0] += cbv[a] * xs[0];
+            acc[a][b][1] += cbv[a] * xs[1];
+          }
+        }
+      }
+    }
+    VL_SYNC();
+  }
+#undef VL_MMQB_LOAD
+#pragma unroll
+  for (int a = 0; a < 4; a++) {
+    const int n = n0 + wn + 8 * a + gr;
+    if (n >= N) continue;
+#pragma unroll
+    for (int b = 0; b < NBT; b++)
+#pragma unroll
+      for (int l = 0; l < 2; l++) {
+        const int m = m0 + wm + 8 * b + 2 * tg + l;
+        if (m < M) y[(size_t)m * (size_t)N + (size_t)n] = acc[a][b][l];
+      }
+  }
+}
+#define VL_MMQB_KERNEL(NAME, T, J)                                                             \
+  extern "C" __global__ void __launch_bounds__(256, 1)                                        \
+  NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
+       float *__restrict__ y, int M, int nb, int N) {                                         \
+    vl_mmqb<T, J>(xq, w, y, M, nb, N);                                                         \
+  }
+VL_MMQB_KERNEL(vira_cu_mmqb128_q4_0, vt_q4_0, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q4_1, vt_q4_1, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q5_0, vt_q5_0, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q5_1, vt_q5_1, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q8_0, vt_q8_0, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q4_k, vt_q4_k, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q5_k, vt_q5_k, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb128_q6_k, vt_q6_k, 128)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q4_0, vt_q4_0, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q4_1, vt_q4_1, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q5_0, vt_q5_0, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q5_1, vt_q5_1, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q8_0, vt_q8_0, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q4_k, vt_q4_k, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q5_k, vt_q5_k, 64)
+VL_MMQB_KERNEL(vira_cu_mmqb64_q6_k, vt_q6_k, 64)

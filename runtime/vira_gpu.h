@@ -389,6 +389,9 @@ typedef struct {
   vira_cu_module cu_mmqt_module;  // runtime/cuda/mmqt.cu: the same on int8 tensor cores (sm_75+); VIRA_GPU_MMQ=1 keeps dp4a
   vira_cu_function cu_k_mmqt[8];
   vira_cu_function cu_k_quantize_x4; // mmqt.cu: Q8_1 in the x4 layout the mmqt kernels read
+  vira_cu_function cu_k_mmqb128[8];  // mmqt.cu: big tile, 128 weight rows x 128 activation rows
+  vira_cu_function cu_k_mmqb64[8];   // the same with 64 activation rows
+  bool mmqb_bad;                     // a big-tile kernel disagreed in the self-test
   vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
   vira_cu_function cu_k_moe_act;      // MoE expert activation (runtime/cuda/fused.cu)
   vira_cu_function cu_k_moe_sum;      // MoE weighted sum of the pairs (runtime/cuda/fused.cu)
@@ -4149,6 +4152,22 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
       if (!(mx > 0.0) || !(err <= 1e-4 * mx)) why = bad[f];
       if (_vira_gpu_debug())
         fprintf(stderr, "vira gpu: mmq-tc self-test %s: max rel diff %.2e\n", fname[f], mx > 0.0 ? err / mx : -1.0);
+      // the big-tile kernels (128 x 128 and 128 x 64) on the same data; a mismatch drops only them
+      for (int jt = 0; jt < 2 && why == NULL && !g->mmqb_bad; jt++) {
+        vira_cu_function kb = jt == 0 ? g->cu_k_mmqb128[idx] : g->cu_k_mmqb64[idx];
+        const unsigned int tj = jt == 0 ? 128u : 64u;
+        if (kb == NULL) continue;
+        if (g->cuLaunchKernel(kb, (N + 127) / 128, (M + tj - 1) / tj, 1, 256, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
+            g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(y1, dy1, ybytes) != VIRA_CUDA_SUCCESS) {
+          g->mmqb_bad = true;
+          break;
+        }
+        double eb = 0.0;
+        for (int i = 0; i < M * N; i++) eb = fmax(eb, fabs((double)y0[i] - (double)y1[i]));
+        if (!(eb <= 1e-4 * mx)) g->mmqb_bad = true;
+        if (_vira_gpu_debug())
+          fprintf(stderr, "vira gpu: mmq-tc self-test %s big tile %u: max rel diff %.2e\n", fname[f], tj, mx > 0.0 ? eb / mx : -1.0);
+      }
     }
 #undef VL_RND
   }
@@ -4531,6 +4550,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_mmqt_module = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmqt[i] = NULL;
   g->cu_k_quantize_x4 = NULL;
+  for (int i = 0; i < 8; i++) g->cu_k_mmqb128[i] = g->cu_k_mmqb64[i] = NULL;
+  g->mmqb_bad = false;
   g->cu_attn_module = NULL;
   g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
   g->cu_k_attn_tile = NULL;
@@ -4575,13 +4596,27 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
         if (g->cu_k_mmqt[i] != NULL && g->cuFuncSetAttribute != NULL) (void)g->cuFuncSetAttribute(g->cu_k_mmqt[i], 9, 100);
       }
       (void)g->cuModuleGetFunction(&g->cu_k_quantize_x4, tm, "vira_cu_quantize_q8_1x4");
+      if (!(mq != NULL && strcmp(mq, "2") == 0)) { // VIRA_GPU_MMQ=2: mmqt tiles only
+        static const char *fmt8[8] = {"q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q4_k", "q5_k", "q6_k"};
+        for (int i = 0; i < 8; i++) {
+          char nm[64];
+          snprintf(nm, sizeof(nm), "vira_cu_mmqb128_%s", fmt8[i]);
+          (void)g->cuModuleGetFunction(&g->cu_k_mmqb128[i], tm, nm);
+          snprintf(nm, sizeof(nm), "vira_cu_mmqb64_%s", fmt8[i]);
+          (void)g->cuModuleGetFunction(&g->cu_k_mmqb64[i], tm, nm);
+        }
+      }
       const char *why = g->cu_k_quantize_x4 == NULL ? "no x4 quantizer" : _vira_gpu_mmqt_selftest(g);
       if (why != NULL) {
         fprintf(stderr, "vira gpu: tensor-core prompt kernel disabled (%s); using dp4a\n", why);
         for (int i = 0; i < 8; i++) g->cu_k_mmqt[i] = NULL;
         g->cu_k_quantize_x4 = NULL;
+        for (int i = 0; i < 8; i++) g->cu_k_mmqb128[i] = g->cu_k_mmqb64[i] = NULL;
         if (g->cuModuleUnload) g->cuModuleUnload(tm);
         g->cu_mmqt_module = NULL;
+      } else if (g->mmqb_bad) {
+        fprintf(stderr, "vira gpu: big-tile prompt kernel disabled (self-test mismatch); using 64 x 64 tiles\n");
+        for (int i = 0; i < 8; i++) g->cu_k_mmqb128[i] = g->cu_k_mmqb64[i] = NULL;
       }
     }
   }
@@ -4679,7 +4714,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_two ? (g->mmvq2_warp ? (g->mmvq2_rows == 4 ? " / mmvq2w(Q8_0) mmvq2q(rest)" : " / mmvq2w(Q8_0) mmvq2x(rest)") : " / mmvq2(Q8_0) mmvq2x(rest)")
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
             g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
-            g->cu_k_mmqt[4] != NULL ? " / mmq-tc(prompt)" : g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
+            g->cu_k_mmqb128[4] != NULL ? " / mmq-tc128(prompt)" : g->cu_k_mmqt[4] != NULL ? " / mmq-tc(prompt)" : g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
             g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
   }
 
@@ -5213,6 +5248,7 @@ static inline void vira_gpu_shutdown(void) {
       }
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmqt[i] = NULL;
       _vira_gpu.cu_k_quantize_x4 = NULL;
+      for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmqb128[i] = _vira_gpu.cu_k_mmqb64[i] = NULL;
       if (_vira_gpu.cu_fused_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_fused_module);
         _vira_gpu.cu_fused_module = NULL;
@@ -5705,6 +5741,27 @@ static inline bool _vira_gpu_mmq_locked(_vira_gpu_wfmt wfmt, _vira_gpu_act_entry
   int32_t nb = idx >= 5 ? (K >> 8) : (K >> 5); // units: super-blocks or 32-value blocks
   vira_cu_deviceptr y_buf = y_slot->cu_buf;
   void *args[] = {&q8, &w_buf, &y_buf, &M, &nb, &N};
+  if (kt != NULL) {
+    // big tiles (one 256-thread block per SM) when they still give at least two blocks per SM;
+    // narrow matrices (k / v projections) keep the 64 x 64 tiles, which fill more SMs
+    const size_t sms = _vira_gpu.compute_units > 0 ? (size_t)_vira_gpu.compute_units : 40u;
+    const size_t nbx = ((size_t)N + 127) / 128;
+    vira_cu_function kb = NULL;
+    unsigned int tj = 0;
+    if (_vira_gpu.cu_k_mmqb128[idx] != NULL && nbx * (((size_t)M + 127) / 128) >= 2 * sms) {
+      kb = _vira_gpu.cu_k_mmqb128[idx];
+      tj = 128;
+    } else if (_vira_gpu.cu_k_mmqb64[idx] != NULL && nbx * (((size_t)M + 63) / 64) >= 2 * sms) {
+      kb = _vira_gpu.cu_k_mmqb64[idx];
+      tj = 64;
+    }
+    if (kb != NULL) {
+      *err = (_vira_gpu.cuLaunchKernel(kb, (unsigned int)nbx, (unsigned int)(((size_t)M + tj - 1) / tj), 1, 256, 1,
+                                       1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                 ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+      return true;
+    }
+  }
   const size_t tm = kt != NULL ? 64 : 32;
   *err = (_vira_gpu.cuLaunchKernel(kt != NULL ? kt : k, (unsigned int)(((size_t)N + 63) / 64),
                                    (unsigned int)(((size_t)M + tm - 1) / tm), 1, 128, 1, 1, 0, _vira_gpu.cu_stream,
