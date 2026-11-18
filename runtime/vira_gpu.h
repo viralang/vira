@@ -168,6 +168,7 @@ typedef vira_cu_result(VIRA_CL_API *pfn_cuCtxSynchronize)(void);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuModuleLoadData)(vira_cu_module *, const void *);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuModuleUnload)(vira_cu_module);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuModuleGetFunction)(vira_cu_function *, vira_cu_module, const char *);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuFuncSetAttribute)(vira_cu_function, int, int);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuMemAlloc_v2)(vira_cu_deviceptr *, size_t);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuMemFree_v2)(vira_cu_deviceptr);
 typedef vira_cu_result(VIRA_CL_API *pfn_cuMemcpyHtoD_v2)(vira_cu_deviceptr, const void *, size_t);
@@ -357,6 +358,7 @@ typedef struct {
   pfn_cuModuleLoadData cuModuleLoadData;
   pfn_cuModuleUnload cuModuleUnload;
   pfn_cuModuleGetFunction cuModuleGetFunction;
+  pfn_cuFuncSetAttribute cuFuncSetAttribute; // optional
   pfn_cuMemAlloc_v2 cuMemAlloc;
   pfn_cuMemFree_v2 cuMemFree;
   pfn_cuMemcpyHtoD_v2 cuMemcpyHtoD;
@@ -4177,6 +4179,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   (void)_vira_gpu_load_sym(lib, "cuModuleLoadData", (void **)&g->cuModuleLoadData);
   (void)_vira_gpu_load_sym(lib, "cuModuleUnload", (void **)&g->cuModuleUnload);
   (void)_vira_gpu_load_sym(lib, "cuModuleGetFunction", (void **)&g->cuModuleGetFunction);
+  g->cuFuncSetAttribute = NULL;
+  (void)_vira_gpu_load_sym(lib, "cuFuncSetAttribute", (void **)&g->cuFuncSetAttribute);
   if (g->cuModuleGetFunction != NULL && _vira_real_cuModuleGetFunction == NULL) {
     _vira_real_cuModuleGetFunction = g->cuModuleGetFunction;
     g->cuModuleGetFunction = _vira_stat_cuModuleGetFunction;
@@ -4544,7 +4548,12 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
                                       "vira_cu_mmqt_q5_1", "vira_cu_mmqt_q8_0", "vira_cu_mmqt_q4_k",
                                       "vira_cu_mmqt_q5_k", "vira_cu_mmqt_q6_k"};
       g->cu_mmqt_module = tm;
-      for (int i = 0; i < 8; i++) (void)g->cuModuleGetFunction(&g->cu_k_mmqt[i], tm, tnames[i]);
+      for (int i = 0; i < 8; i++) {
+        (void)g->cuModuleGetFunction(&g->cu_k_mmqt[i], tm, tnames[i]);
+        // 24.5 KB of shared memory per block: ask for the largest shared carve-out so two
+        // blocks fit on an SM (CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9)
+        if (g->cu_k_mmqt[i] != NULL && g->cuFuncSetAttribute != NULL) (void)g->cuFuncSetAttribute(g->cu_k_mmqt[i], 9, 100);
+      }
       const char *why = _vira_gpu_mmqt_selftest(g);
       if (why != NULL) {
         fprintf(stderr, "vira gpu: tensor-core prompt kernel disabled (%s); using dp4a\n", why);
