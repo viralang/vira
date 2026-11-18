@@ -140,24 +140,27 @@ def check_fused(rng):
     return ok
 
 
-def build_mmq():
+def build_mmq(kind='mmq'):
+    """kind 'mmq' (dp4a, tile 64 x 32) or 'mmqt' (tensor cores, tile 64 x 64)."""
     out = os.path.join(tempfile.mkdtemp(), 'q.so')
     src = os.path.join(tempfile.mkdtemp(), 'q.cpp')
-    body = '#define VL_EMULATE 1\n#include "%s/mmq.cu"\n' % HERE
+    body = '#define VL_EMULATE 1\n#include "%s/%s.cu"\n' % (HERE, kind)
+    tm = 32 if kind == 'mmq' else 64
     for name, _, _, _, _ in FORMATS:
-        body += ('extern "C" void run_mmq_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
-                 '  VL_LAUNCH_THREADED(vira_cu_mmq_%s, (N + 63) / 64, (M + 31) / 32, 128, xq, w, y, M, nb, N);\n}\n') % (name, name)
+        body += ('extern "C" void run_%s_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
+                 '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (N + 63) / 64, (M + %d) / %d, 128, xq, w, y, M, nb, N);\n}\n') % (
+                     kind, name, kind, name, tm - 1, tm)
     open(src, 'w').write(body)
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
 
 
-def check_mmq(rng, oracle):
+def check_mmq(rng, oracle, kind='mmq'):
     """Prompt-size products (M > 4) of every format against the CPU dequantiser."""
-    lib = build_mmq()
+    lib = build_mmq(kind)
     ok = True
     for name, dt, size, qk, f16_at in FORMATS:
-        for M, K, N in [(5, 256, 7), (32, 512, 64), (40, 768, 70), (9, 1024, 130)]:
+        for M, K, N in [(5, 256, 7), (32, 512, 64), (40, 768, 70), (9, 1024, 130), (70, 512, 66)]:
             nbr = K // qk
             raw = random_blocks(rng, name, N * nbr, size, f16_at)
             wf = np.zeros(N * K, np.float32)
@@ -166,11 +169,11 @@ def check_mmq(rng, oracle):
             xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
             want = xf @ wf.reshape(N, K).astype(np.float64).T
             y = np.full(M * N, np.nan, np.float32)
-            getattr(lib, 'run_mmq_' + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
+            getattr(lib, 'run_%s_%s' % (kind, name))(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
             err = np.abs(y.reshape(M, N) - want).max() / max(1e-9, np.abs(want).max())
             good = bool(err < 1e-4)
             ok &= good
-            print('mmq_%-5s M=%2d K=%4d N=%3d  vs CPU dequant: max rel err %.2e  %s' % (name, M, K, N, err, 'ok' if good else 'FAIL'))
+            print('%s_%-5s M=%2d K=%4d N=%3d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
     return ok
 
 
@@ -351,6 +354,7 @@ def main():
                 print('%s%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
     ok &= check_fused(rng)
     ok &= check_mmq(rng, oracle)
+    ok &= check_mmq(rng, oracle, 'mmqt')
     ok &= check_attn(rng)
     sys.exit(0 if ok else 1)
 

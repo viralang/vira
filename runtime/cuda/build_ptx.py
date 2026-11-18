@@ -4,7 +4,9 @@
     python3 runtime/cuda/build_ptx.py [--check]
 
 NVRTC 11.8 on purpose: drivers refuse PTX newer than they know (CUDA error 222), and
-11.8 PTX loads on every driver from 520 on. Target compute_61 (dp4a); the driver
+11.8 PTX loads on every driver from 520 on. Target compute_61 (dp4a), or what a file's
+first line '// nvrtc-arch: compute_75' asks for (the runtime loads such a module only on
+GPUs that new); the driver
 compiles the PTX for the GPU it runs on. With --check, ptxas (pip
 nvidia-cuda-nvcc-cu12) also assembles the PTX for sm_61, sm_75 and sm_86.
 """
@@ -23,6 +25,14 @@ def find_nvrtc():
     sys.exit('libnvrtc.so.11 not found: pip install nvidia-cuda-nvrtc-cu11==11.8.89')
 
 
+def file_arch(path):
+    """A first line '// nvrtc-arch: compute_75' overrides ARCH (mmqt.cu: mma needs sm_75)."""
+    first = open(path).readline()
+    if first.startswith('// nvrtc-arch:'):
+        return first.split(':', 1)[1].strip()
+    return ARCH
+
+
 def compile_ptx(lib, path):
     src = open(path, 'rb').read()
     prog = ctypes.c_void_p()
@@ -31,7 +41,8 @@ def compile_ptx(lib, path):
     assert rc == 0, 'nvrtcCreateProgram %d' % rc
     # No --use_fast_math: it flushes denormals (.ftz), and the fused kernels must repeat
     # the arithmetic of the separate kernels exactly.
-    opts = [('--gpu-architecture=%s' % ARCH).encode(), b'--std=c++14', b'-default-device']
+    opts = [('--gpu-architecture=%s' % file_arch(path)).encode(), b'--std=c++14', b'-default-device',
+            ('--include-path=%s' % HERE).encode()]
     arr = (ctypes.c_char_p * len(opts))(*opts)
     rc = lib.nvrtcCompileProgram(prog, len(opts), arr)
     log_size = ctypes.c_size_t()
@@ -56,7 +67,7 @@ def c_string(ptx):
     return '\n'.join(lines)
 
 
-def ptxas_check(ptx, stem):
+def ptxas_check(ptx, stem, arch):
     import site
     ptxas = None
     for base in site.getsitepackages():
@@ -69,6 +80,8 @@ def ptxas_check(ptx, stem):
     tmp = '/tmp/%s.ptx' % stem
     open(tmp, 'w').write(ptx)
     for sm in ('sm_61', 'sm_75', 'sm_86'):
+        if int(sm[3:]) < int(arch.split('_')[1]):
+            continue
         r = subprocess.run([ptxas, '-arch=' + sm, '-v', tmp, '-o', '/dev/null'],
                            capture_output=True, text=True)
         regs = [l.strip() for l in r.stderr.splitlines() if 'registers' in l]
@@ -90,7 +103,7 @@ def main():
             f.write('static const char *_vira_cuda_%s_ptx =\n%s;\n\n#endif\n' % (stem, c_string(ptx)))
         print('%s -> %s (%d bytes of PTX)' % (os.path.relpath(path, RUNTIME), os.path.relpath(out, RUNTIME), len(ptx)))
         if '--check' in sys.argv:
-            ptxas_check(ptx, stem)
+            ptxas_check(ptx, stem, file_arch(path))
 
 
 if __name__ == '__main__':

@@ -138,3 +138,24 @@ static inline float vl_wsum(float v) {
   vl_warp_bar[w]->arrive_and_wait();
   return s;
 }
+
+// mmqt.cu: mma.sync.m8n8k16.row.col.s32.s8.s8.s32 (warp-wide). Written from the PTX ISA
+// fragment tables (llama.cpp ggml-cuda/mma.cuh tile<8, 4, int> / tile<16, 8, int>), not from
+// the kernel: lane 4 r + j holds int j (values 4j..4j+3) of A row r and of B column r;
+// the lane's D elements are row lane / 4, columns 2 (lane % 4) and 2 (lane % 4) + 1.
+static int vl_mma_a[2048], vl_mma_b[2048];
+static inline void vl_mma(int &d0, int &d1, int a, int b) {
+  const int t = threadIdx.x, w = t / WARP_EMU, lane = t % WARP_EMU, base = w * WARP_EMU;
+  vl_mma_a[t] = a;
+  vl_mma_b[t] = b;
+  vl_warp_bar[w]->arrive_and_wait();
+  const int row = lane / 4;
+  int s0 = 0, s1 = 0;
+  for (int j = 0; j < 4; j++) {
+    s0 = vl_dp4a(vl_mma_a[base + 4 * row + j], vl_mma_b[base + 4 * (2 * (lane % 4)) + j], s0);
+    s1 = vl_dp4a(vl_mma_a[base + 4 * row + j], vl_mma_b[base + 4 * (2 * (lane % 4) + 1) + j], s1);
+  }
+  vl_warp_bar[w]->arrive_and_wait();
+  d0 += s0;
+  d1 += s1;
+}

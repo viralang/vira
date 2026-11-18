@@ -10,6 +10,7 @@
 #include "vira_cuda_mmvq2_ptx.h"
 #include "vira_cuda_fused_ptx.h"
 #include "vira_cuda_mmq_ptx.h"
+#include "vira_cuda_mmqt_ptx.h"
 #include "vira_cuda_attn_ptx.h"
 #if defined(_WIN32) && !defined(_WIN64)
 #define VIRA_CL_API __stdcall
@@ -382,6 +383,8 @@ typedef struct {
   vira_cu_function cu_k_kv_store, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv;
   vira_cu_module cu_mmq_module;   // runtime/cuda/mmq.cu: prompt-size products (M > 4); VIRA_GPU_MMQ=0 disables
   vira_cu_function cu_k_mmq[8];   // q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k
+  vira_cu_module cu_mmqt_module;  // runtime/cuda/mmqt.cu: the same on int8 tensor cores (sm_75+); VIRA_GPU_MMQ=1 keeps dp4a
+  vira_cu_function cu_k_mmqt[8];
   vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
   vira_cu_function cu_k_moe_act;      // MoE expert activation (runtime/cuda/fused.cu)
   vira_cu_function cu_k_moe_sum;      // MoE weighted sum of the pairs (runtime/cuda/fused.cu)
@@ -4064,6 +4067,86 @@ static inline void _vira_gpu_register_quant(const vira_f32 *host_ptr,
   _vira_tls_gpu_weight_upload--;
 }
 
+// Runs the tensor-core and dp4a prompt kernels (Q8_0 and Q6_K, which covers both scale
+// paths) on the same random data and compares: the CPU emulation checks the kernel's index
+// arithmetic, this checks that the GPU's mma fragment layout is the one it assumes. Returns
+// NULL when they agree, else the reason. Costs a few small launches at start-up.
+static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
+  enum { M = 70, K = 512, N = 66 };
+  static const int fmts[2] = {4, 7}; // q8_0, q6_k
+  const size_t xbytes = (size_t)M * (K / 32) * 40u;
+  const size_t wbytes = (size_t)N * (K / 32) * 34u > (size_t)N * (K / 256) * 210u ? (size_t)N * (K / 32) * 34u
+                                                                                  : (size_t)N * (K / 256) * 210u;
+  const size_t ybytes = (size_t)M * N * sizeof(float);
+  unsigned char *hx = (unsigned char *)malloc(xbytes), *hw = (unsigned char *)malloc(wbytes);
+  float *y0 = (float *)malloc(ybytes), *y1 = (float *)malloc(ybytes);
+  vira_cu_deviceptr dx = 0, dw = 0, dy0 = 0, dy1 = 0;
+  const char *why = NULL;
+  if (!hx || !hw || !y0 || !y1 || g->cuMemAlloc(&dx, xbytes) != VIRA_CUDA_SUCCESS ||
+      g->cuMemAlloc(&dw, wbytes) != VIRA_CUDA_SUCCESS || g->cuMemAlloc(&dy0, ybytes) != VIRA_CUDA_SUCCESS ||
+      g->cuMemAlloc(&dy1, ybytes) != VIRA_CUDA_SUCCESS) {
+    why = "no memory for the self-test";
+    goto done;
+  }
+  {
+    uint32_t r = 12345u;
+#define VL_RND() (r = r * 1664525u + 1013904223u, (r >> 8))
+    for (size_t b = 0; b < xbytes / 40u; b++) { // Q8_1: d, d * sum, q[32]
+      unsigned char *p = hx + b * 40u;
+      int sum = 0;
+      for (int i = 0; i < 32; i++) {
+        const signed char q = (signed char)((int)(VL_RND() % 255u) - 127);
+        p[8 + i] = (unsigned char)q;
+        sum += q;
+      }
+      const float d = 0.01f + (float)(VL_RND() % 100u) * 1e-4f, s = d * (float)sum;
+      memcpy(p, &d, 4);
+      memcpy(p + 4, &s, 4);
+    }
+    for (int f = 0; f < 2 && why == NULL; f++) {
+      const int idx = fmts[f];
+      const bool q6 = idx == 7;
+      const size_t bs = q6 ? 210u : 34u, nbr = q6 ? (size_t)(K / 256) : (size_t)(K / 32);
+      for (size_t i = 0; i < (size_t)N * nbr * bs; i++) hw[i] = (unsigned char)VL_RND();
+      for (size_t b = 0; b < (size_t)N * nbr; b++) { // f16 scale: a small positive normal half
+        const unsigned short h = (unsigned short)(0x1C00u + VL_RND() % 0x0C00u);
+        memcpy(hw + b * bs + (q6 ? 208u : 0u), &h, 2);
+      }
+      int32_t m = M, nb = (int32_t)nbr, n = N;
+      void *a0[] = {&dx, &dw, &dy0, &m, &nb, &n};
+      void *a1[] = {&dx, &dw, &dy1, &m, &nb, &n};
+      if (g->cuMemcpyHtoD(dx, hx, xbytes) != VIRA_CUDA_SUCCESS ||
+          g->cuMemcpyHtoD(dw, hw, (size_t)N * nbr * bs) != VIRA_CUDA_SUCCESS ||
+          g->cuLaunchKernel(g->cu_k_mmq[idx], (N + 63) / 64, (M + 31) / 32, 1, 128, 1, 1, 0, NULL, a0, NULL) != VIRA_CUDA_SUCCESS ||
+          g->cuLaunchKernel(g->cu_k_mmqt[idx], (N + 63) / 64, (M + 63) / 64, 1, 128, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
+          g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(y0, dy0, ybytes) != VIRA_CUDA_SUCCESS ||
+          g->cuMemcpyDtoH(y1, dy1, ybytes) != VIRA_CUDA_SUCCESS) {
+        why = "self-test launch failed";
+        break;
+      }
+      double mx = 0.0, err = 0.0;
+      for (int i = 0; i < M * N; i++) {
+        mx = fmax(mx, fabs((double)y0[i]));
+        err = fmax(err, fabs((double)y0[i] - (double)y1[i]));
+      }
+      if (!(mx > 0.0) || !(err <= 1e-4 * mx)) why = q6 ? "self-test mismatch (Q6_K)" : "self-test mismatch (Q8_0)";
+      if (_vira_gpu_debug())
+        fprintf(stderr, "vira gpu: mmq-tc self-test %s: max rel diff %.2e\n", q6 ? "Q6_K" : "Q8_0", mx > 0.0 ? err / mx : -1.0);
+    }
+#undef VL_RND
+  }
+done:
+  if (dx) g->cuMemFree(dx);
+  if (dw) g->cuMemFree(dw);
+  if (dy0) g->cuMemFree(dy0);
+  if (dy1) g->cuMemFree(dy1);
+  free(hx);
+  free(hw);
+  free(y0);
+  free(y1);
+  return why;
+}
+
 static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   _vira_gpu_state *g = &_vira_gpu;
   bool ok = true;
@@ -4424,6 +4507,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->moe_placed = 0;
   g->cu_mmq_module = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmq[i] = NULL;
+  g->cu_mmqt_module = NULL;
+  for (int i = 0; i < 8; i++) g->cu_k_mmqt[i] = NULL;
   g->cu_attn_module = NULL;
   g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
   {
@@ -4448,6 +4533,25 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
                                      "vira_cu_mmq_q5_k", "vira_cu_mmq_q6_k"};
       g->cu_mmq_module = qm;
       for (int i = 0; i < 8; i++) (void)g->cuModuleGetFunction(&g->cu_k_mmq[i], qm, names[i]);
+    }
+    // Tensor-core version (compute_75 PTX): Turing and newer, unless VIRA_GPU_MMQ=1. Kept
+    // only if it agrees with the dp4a kernel on this GPU (_vira_gpu_mmqt_selftest).
+    vira_cu_module tm = NULL;
+    const int cc = g->compute_capability_major * 10 + g->compute_capability_minor;
+    if (qm != NULL && cc >= 75 && !(mq != NULL && strcmp(mq, "1") == 0) &&
+        g->cuModuleLoadData(&tm, _vira_cuda_mmqt_ptx) == VIRA_CUDA_SUCCESS && tm != NULL) {
+      static const char *tnames[8] = {"vira_cu_mmqt_q4_0", "vira_cu_mmqt_q4_1", "vira_cu_mmqt_q5_0",
+                                      "vira_cu_mmqt_q5_1", "vira_cu_mmqt_q8_0", "vira_cu_mmqt_q4_k",
+                                      "vira_cu_mmqt_q5_k", "vira_cu_mmqt_q6_k"};
+      g->cu_mmqt_module = tm;
+      for (int i = 0; i < 8; i++) (void)g->cuModuleGetFunction(&g->cu_k_mmqt[i], tm, tnames[i]);
+      const char *why = _vira_gpu_mmqt_selftest(g);
+      if (why != NULL) {
+        fprintf(stderr, "vira gpu: tensor-core prompt kernel disabled (%s); using dp4a\n", why);
+        for (int i = 0; i < 8; i++) g->cu_k_mmqt[i] = NULL;
+        if (g->cuModuleUnload) g->cuModuleUnload(tm);
+        g->cu_mmqt_module = NULL;
+      }
     }
   }
   {
@@ -4544,7 +4648,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_two ? (g->mmvq2_warp ? (g->mmvq2_rows == 4 ? " / mmvq2w(Q8_0) mmvq2q(rest)" : " / mmvq2w(Q8_0) mmvq2x(rest)") : " / mmvq2(Q8_0) mmvq2x(rest)")
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
             g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
-            g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
+            g->cu_k_mmqt[4] != NULL ? " / mmq-tc(prompt)" : g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
             g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
   }
 
@@ -5071,6 +5175,11 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cu_mmq_module = NULL;
       }
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmq[i] = NULL;
+      if (_vira_gpu.cu_mmqt_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmqt_module);
+        _vira_gpu.cu_mmqt_module = NULL;
+      }
+      for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmqt[i] = NULL;
       if (_vira_gpu.cu_fused_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_fused_module);
         _vira_gpu.cu_fused_module = NULL;
@@ -5532,14 +5641,18 @@ static inline bool _vira_gpu_mmq_locked(_vira_gpu_wfmt wfmt, _vira_gpu_act_entry
   default: return false;
   }
   vira_cu_function k = _vira_gpu.cu_k_mmq[idx];
+  vira_cu_function kt = _vira_gpu.cu_k_mmqt[idx];
   if (k == NULL || (K & 255) != 0 || M <= 4) return false;
   vira_cu_deviceptr q8 = 0;
   if (!_vira_gpu_ensure_act_q8_locked(x_slot, M, K, y_slot, avoid_w_cu, pin_w, &q8)) return false;
   int32_t nb = idx >= 5 ? (K >> 8) : (K >> 5); // units: super-blocks or 32-value blocks
   vira_cu_deviceptr y_buf = y_slot->cu_buf;
   void *args[] = {&q8, &w_buf, &y_buf, &M, &nb, &N};
-  *err = (_vira_gpu.cuLaunchKernel(k, (unsigned int)(((size_t)N + 63) / 64), (unsigned int)(((size_t)M + 31) / 32), 1,
-                                   128, 1, 1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+  // tensor cores (mmqt.cu): tile 64 x 64; dp4a (mmq.cu): 64 x 32
+  const size_t tm = kt != NULL ? 64 : 32;
+  *err = (_vira_gpu.cuLaunchKernel(kt != NULL ? kt : k, (unsigned int)(((size_t)N + 63) / 64),
+                                   (unsigned int)(((size_t)M + tm - 1) / tm), 1, 128, 1, 1, 0, _vira_gpu.cu_stream,
+                                   args, NULL) == VIRA_CUDA_SUCCESS)
              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
   return true;
 }
