@@ -12,6 +12,7 @@
 #include "vira_cuda_mmq_ptx.h"
 #include "vira_cuda_mmqt_ptx.h"
 #include "vira_cuda_attn_ptx.h"
+#include "vira_cuda_attnt_ptx.h"
 #if defined(_WIN32) && !defined(_WIN64)
 #define VIRA_CL_API __stdcall
 #else
@@ -384,6 +385,8 @@ typedef struct {
   vira_cu_module cu_attn_module;  // runtime/cuda/attn.cu: FP16 KV cache (vira_gpu_kv_f16)
   vira_cu_function cu_k_kv_store, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv;
   vira_cu_function cu_k_attn_tile; // prompt rows (M > 4): 16 rows per block share each K/V tile
+  vira_cu_module cu_attnt_module;  // runtime/cuda/attnt.cu: prompt attention on tensor cores (sm_75+)
+  vira_cu_function cu_k_attn_fa64, cu_k_attn_fa128; // VIRA_GPU_FA=0 disables
   vira_cu_module cu_mmq_module;   // runtime/cuda/mmq.cu: prompt-size products (M > 4); VIRA_GPU_MMQ=0 disables
   vira_cu_function cu_k_mmq[8];   // q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k
   vira_cu_module cu_mmqt_module;  // runtime/cuda/mmqt.cu: the same on int8 tensor cores (sm_75+); VIRA_GPU_MMQ=1 keeps dp4a
@@ -4185,6 +4188,79 @@ done:
   return why;
 }
 
+// Tensor-core prompt attention (attnt.cu) against the tiled f32 kernel (attn.cu) on random
+// data: GQA 4 heads on 2, 70 query rows after 30 cached ones, head_dim 128 and 64. Q and P
+// pass through f16 in the tensor-core kernel, so the bound is f16-sized. NULL when they agree.
+static const char *_vira_gpu_fa_selftest(_vira_gpu_state *g) {
+  enum { NH = 4, NKV = 2, M = 70, START = 30, CTX = START + M };
+  const char *why = NULL;
+  for (int pass = 0; pass < 2 && why == NULL; pass++) {
+    const int hd = pass == 0 ? 128 : 64;
+    vira_cu_function fa = pass == 0 ? g->cu_k_attn_fa128 : g->cu_k_attn_fa64;
+    if (fa == NULL) {
+      why = "kernel missing";
+      break;
+    }
+    const int kvd = NKV * hd;
+    const size_t qn = (size_t)M * NH * hd, kn = (size_t)CTX * kvd;
+    float *hq = (float *)malloc(qn * sizeof(float)), *o0 = (float *)malloc(qn * sizeof(float)),
+          *o1 = (float *)malloc(qn * sizeof(float));
+    unsigned short *hk = (unsigned short *)malloc(kn * 2), *hv = (unsigned short *)malloc(kn * 2);
+    vira_cu_deviceptr dq = 0, dk = 0, dv = 0, do0 = 0, do1 = 0;
+    if (!hq || !o0 || !o1 || !hk || !hv || g->cuMemAlloc(&dq, qn * 4) != VIRA_CUDA_SUCCESS ||
+        g->cuMemAlloc(&dk, kn * 2) != VIRA_CUDA_SUCCESS || g->cuMemAlloc(&dv, kn * 2) != VIRA_CUDA_SUCCESS ||
+        g->cuMemAlloc(&do0, qn * 4) != VIRA_CUDA_SUCCESS || g->cuMemAlloc(&do1, qn * 4) != VIRA_CUDA_SUCCESS) {
+      why = "no memory for the self-test";
+    } else {
+      uint32_t r = 777u;
+#define VL_RNDF() ((float)((r = r * 1664525u + 1013904223u) >> 9) / 4194304.0f - 1.0f) /* [-1, 1) */
+      for (size_t i = 0; i < qn; i++) hq[i] = 2.0f * VL_RNDF();
+      for (size_t i = 0; i < kn; i++) {
+        float fk = VL_RNDF(), fv = VL_RNDF();
+        uint32_t bk, bv;
+        memcpy(&bk, &fk, 4);
+        memcpy(&bv, &fv, 4);
+        hk[i] = _vira_f32_bits_to_f16(bk);
+        hv[i] = _vira_f32_bits_to_f16(bv);
+      }
+#undef VL_RNDF
+      int32_t nh = NH, km = NH / NKV, hdi = hd, kvdi = kvd, m = M;
+      long long st = START;
+      float sc = 1.0f / sqrtf((float)hd);
+      void *a0[] = {&dq, &dk, &dv, &do0, &nh, &km, &hdi, &kvdi, &m, &st, &sc};
+      void *a1[] = {&dq, &dk, &dv, &do1, &nh, &km, &hdi, &kvdi, &m, &st, &sc};
+      if (g->cuMemcpyHtoD(dq, hq, qn * 4) != VIRA_CUDA_SUCCESS || g->cuMemcpyHtoD(dk, hk, kn * 2) != VIRA_CUDA_SUCCESS ||
+          g->cuMemcpyHtoD(dv, hv, kn * 2) != VIRA_CUDA_SUCCESS ||
+          g->cuLaunchKernel(g->cu_k_attn_tile, NH, (M + 15) / 16, 1, 256, 1, 1, 0, NULL, a0, NULL) != VIRA_CUDA_SUCCESS ||
+          g->cuLaunchKernel(fa, NH, (M + 63) / 64, 1, 128, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
+          g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(o0, do0, qn * 4) != VIRA_CUDA_SUCCESS ||
+          g->cuMemcpyDtoH(o1, do1, qn * 4) != VIRA_CUDA_SUCCESS) {
+        why = "self-test launch failed";
+      } else {
+        double mx = 0.0, err = 0.0;
+        for (size_t i = 0; i < qn; i++) {
+          mx = fmax(mx, fabs((double)o0[i]));
+          err = fmax(err, fabs((double)o0[i] - (double)o1[i]));
+        }
+        if (!(mx > 0.0) || !(err <= 5e-3 * mx)) why = "self-test mismatch";
+        if (_vira_gpu_debug())
+          fprintf(stderr, "vira gpu: fa-tc self-test head_dim %d: max rel diff %.2e\n", hd, mx > 0.0 ? err / mx : -1.0);
+      }
+    }
+    if (dq) g->cuMemFree(dq);
+    if (dk) g->cuMemFree(dk);
+    if (dv) g->cuMemFree(dv);
+    if (do0) g->cuMemFree(do0);
+    if (do1) g->cuMemFree(do1);
+    free(hq);
+    free(o0);
+    free(o1);
+    free(hk);
+    free(hv);
+  }
+  return why;
+}
+
 static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   _vira_gpu_state *g = &_vira_gpu;
   bool ok = true;
@@ -4555,6 +4631,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_attn_module = NULL;
   g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
   g->cu_k_attn_tile = NULL;
+  g->cu_attnt_module = NULL;
+  g->cu_k_attn_fa64 = g->cu_k_attn_fa128 = NULL;
   {
     const char *kf = getenv("VIRA_GPU_KV_F16");
     vira_cu_module am = NULL;
@@ -4566,6 +4644,22 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       (void)g->cuModuleGetFunction(&g->cu_k_kv_zero, am, "vira_cu_kv_zero");
       (void)g->cuModuleGetFunction(&g->cu_k_attn_f16kv, am, "vira_cu_attn_f16kv");
       (void)g->cuModuleGetFunction(&g->cu_k_attn_tile, am, "vira_cu_attn_f16kv_tile");
+    }
+    const char *fa = getenv("VIRA_GPU_FA");
+    vira_cu_module fm = NULL;
+    const int cc = g->compute_capability_major * 10 + g->compute_capability_minor;
+    if (am != NULL && g->cu_k_attn_tile != NULL && cc >= 75 && !(fa != NULL && strcmp(fa, "0") == 0) &&
+        g->cuModuleLoadData(&fm, _vira_cuda_attnt_ptx) == VIRA_CUDA_SUCCESS && fm != NULL) {
+      g->cu_attnt_module = fm;
+      (void)g->cuModuleGetFunction(&g->cu_k_attn_fa64, fm, "vira_cu_attn_fa64");
+      (void)g->cuModuleGetFunction(&g->cu_k_attn_fa128, fm, "vira_cu_attn_fa128");
+      const char *why = _vira_gpu_fa_selftest(g);
+      if (why != NULL) {
+        fprintf(stderr, "vira gpu: tensor-core attention disabled (%s); using the tiled kernel\n", why);
+        g->cu_k_attn_fa64 = g->cu_k_attn_fa128 = NULL;
+        if (g->cuModuleUnload) g->cuModuleUnload(fm);
+        g->cu_attnt_module = NULL;
+      }
     }
   }
   {
@@ -4715,7 +4809,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
             g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
             g->cu_k_mmqb128[4] != NULL ? " / mmq-tc128(prompt)" : g->cu_k_mmqt[4] != NULL ? " / mmq-tc(prompt)" : g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
-            g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
+            g->cu_k_attn_fa128 != NULL ? " / kv-f16 / fa-tc(prompt)" : g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
   }
 
   return true;
@@ -5237,6 +5331,11 @@ static inline void vira_gpu_shutdown(void) {
       }
       _vira_gpu.cu_k_kv_store = _vira_gpu.cu_k_kv_load = _vira_gpu.cu_k_kv_zero = _vira_gpu.cu_k_attn_f16kv = NULL;
       _vira_gpu.cu_k_attn_tile = NULL;
+      if (_vira_gpu.cu_attnt_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_attnt_module);
+        _vira_gpu.cu_attnt_module = NULL;
+      }
+      _vira_gpu.cu_k_attn_fa64 = _vira_gpu.cu_k_attn_fa128 = NULL;
       if (_vira_gpu.cu_mmq_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmq_module);
         _vira_gpu.cu_mmq_module = NULL;
@@ -8273,11 +8372,16 @@ static inline int _vira_gpu_kv_attention(vira_arena *opt_arena, vira_tensor_f32 
       long long st = (long long)start;
       float sc = scale;
       void *args[] = {&qd, &kd, &vd, &od, &nh, &km, &hd, &kvd, &m_, &st, &sc};
-      // prompt rows: the tiled kernel (runtime/cuda/attn.cu, head_dim % 32 == 0 and <= 128)
-      const bool tile = _vira_gpu.cu_k_attn_tile != NULL && M > 4 && head_dim % 32 == 0 && head_dim <= 128 &&
-                        kv_dim % 2 == 0;
-      if (_vira_gpu.cuLaunchKernel(tile ? _vira_gpu.cu_k_attn_tile : _vira_gpu.cu_k_attn_f16kv, (unsigned int)n_heads,
-                                   tile ? (unsigned int)((M + 15) / 16) : (unsigned int)M, 1, 256, 1, 1, 0,
+      // prompt rows: tensor cores (runtime/cuda/attnt.cu, head_dim 64 / 128), else the tiled
+      // kernel (runtime/cuda/attn.cu, head_dim % 32 == 0 and <= 128)
+      vira_cu_function fa = M > 4 && kv_dim % 2 == 0
+                                ? (head_dim == 128 ? _vira_gpu.cu_k_attn_fa128 : head_dim == 64 ? _vira_gpu.cu_k_attn_fa64 : NULL)
+                                : NULL;
+      const bool tile = fa == NULL && _vira_gpu.cu_k_attn_tile != NULL && M > 4 && head_dim % 32 == 0 &&
+                        head_dim <= 128 && kv_dim % 2 == 0;
+      vira_cu_function kfn = fa != NULL ? fa : tile ? _vira_gpu.cu_k_attn_tile : _vira_gpu.cu_k_attn_f16kv;
+      const unsigned int gy = fa != NULL ? (unsigned int)((M + 63) / 64) : tile ? (unsigned int)((M + 15) / 16) : (unsigned int)M;
+      if (_vira_gpu.cuLaunchKernel(kfn, (unsigned int)n_heads, gy, 1, fa != NULL ? 128 : 256, 1, 1, 0,
                                    _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS) {
         int32_t dims[2] = {M * n_heads, head_dim};
         *out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)

@@ -196,3 +196,40 @@ static inline float vl_wmaxf(float v) { return vl_warp_max(v); }
 static inline int vl_wsumi(int v) { return vl_warp_sum_i(v); }
 static inline float __fmul_rn(float a, float b) { return a * b; }
 static inline float __fdiv_rn(float a, float b) { return a / b; }
+// attnt.cu: warp xor shuffle and mma.m16n8k8 f16 x f16 -> f32 (layout as in attnt.cu's
+// header, from the PTX fragment tables / llama.cpp mma.cuh; written independently of it)
+static float vl_wbuf_xo[2048];
+static inline float vl_shfl_xor(float v, int m) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_xo[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  const float r = vl_wbuf_xo[w * WARP_EMU + ((t % WARP_EMU) ^ m)];
+  vl_warp_bar[w]->arrive_and_wait();
+  return r;
+}
+static unsigned int vl_mmaf_a0[2048], vl_mmaf_a1[2048], vl_mmaf_b[2048];
+static inline void vl_mma_f16(float *d, unsigned int a0, unsigned int a1, unsigned int b) {
+  const int t = threadIdx.x, w = t / WARP_EMU, lane = t % WARP_EMU, base = w * WARP_EMU;
+  vl_mmaf_a0[t] = a0;
+  vl_mmaf_a1[t] = a1;
+  vl_mmaf_b[t] = b;
+  vl_warp_bar[w]->arrive_and_wait();
+  float A[16][8], B[8][8];
+  for (int L = 0; L < 32; L++) {
+    const int g = L / 4, q = L % 4;
+    A[g][2 * q] = vl_h2f((unsigned short)(vl_mmaf_a0[base + L] & 0xFFFF));
+    A[g][2 * q + 1] = vl_h2f((unsigned short)(vl_mmaf_a0[base + L] >> 16));
+    A[g + 8][2 * q] = vl_h2f((unsigned short)(vl_mmaf_a1[base + L] & 0xFFFF));
+    A[g + 8][2 * q + 1] = vl_h2f((unsigned short)(vl_mmaf_a1[base + L] >> 16));
+    B[2 * q][g] = vl_h2f((unsigned short)(vl_mmaf_b[base + L] & 0xFFFF));
+    B[2 * q + 1][g] = vl_h2f((unsigned short)(vl_mmaf_b[base + L] >> 16));
+  }
+  vl_warp_bar[w]->arrive_and_wait();
+  const int g = lane / 4, q = lane % 4;
+  for (int e = 0; e < 4; e++) {
+    const int row = g + (e >= 2 ? 8 : 0), col = 2 * q + (e & 1);
+    float acc = 0.0f;
+    for (int k = 0; k < 8; k++) acc += A[row][k] * B[k][col];
+    d[e] += acc;
+  }
+}

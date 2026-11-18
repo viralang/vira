@@ -282,6 +282,49 @@ extern "C" void run_store(const float *s, unsigned short *d, long long row0, int
     return ok
 
 
+def check_attn_fa(rng):
+    """Tensor-core prompt attention (attnt.cu) against NumPy on the half-rounded cache. Q and P
+    go through f16 inside the kernel, so the tolerance is f16-sized."""
+    out = os.path.join(tempfile.mkdtemp(), 'fa.so')
+    src = os.path.join(tempfile.mkdtemp(), 'fa.cpp')
+    open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/attnt.cu"\n' % HERE + r'''
+extern "C" void run_fa(const float *q, const unsigned short *k, const unsigned short *v, float *o, int nh, int kvm,
+                       int hd, int kvd, int M, long long start, float scale) {
+  if (hd == 128) { VL_LAUNCH_THREADED(vira_cu_attn_fa128, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale); }
+  else { VL_LAUNCH_THREADED(vira_cu_attn_fa64, nh, (M + 63) / 64, 128, q, k, v, o, nh, kvm, hd, kvd, M, start, scale); }
+}
+''')
+    subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
+    lib = ctypes.CDLL(out)
+    ok = True
+    for nh, nkv, hd, ctx, M, start in [(4, 2, 128, 64, 5, 30), (5, 1, 128, 80, 80, 0), (4, 2, 64, 120, 70, 33),
+                                       (2, 2, 128, 200, 37, 150), (8, 2, 64, 40, 33, 0)]:
+        kvd = nkv * hd
+        k16 = rng.standard_normal((ctx, kvd)).astype(np.float16)
+        v16 = rng.standard_normal((ctx, kvd)).astype(np.float16)
+        q = rng.standard_normal((M * nh, hd)).astype(np.float32)
+        o = np.full((M * nh, hd), np.nan, np.float32)
+        scale = 1.0 / np.sqrt(hd)
+        lib.run_fa(q.ctypes.data_as(ctypes.c_void_p), k16.view(np.uint16).ctypes.data_as(ctypes.c_void_p),
+                   v16.view(np.uint16).ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p),
+                   nh, nh // nkv, hd, kvd, M, ctypes.c_longlong(start), ctypes.c_float(scale))
+        K = k16.astype(np.float64)
+        V = v16.astype(np.float64)
+        want = np.zeros((M * nh, hd))
+        for t in range(M):
+            n = start + t + 1
+            for h in range(nh):
+                kh = (h // (nh // nkv)) * hd
+                s = K[:n, kh:kh + hd] @ q[t * nh + h].astype(np.float64) * scale
+                p = np.exp(s - s.max()); p /= p.sum()
+                want[t * nh + h] = p @ V[:n, kh:kh + hd]
+        err = np.abs(o - want).max() / np.abs(want).max()
+        good = bool(err < 5e-3)
+        ok &= good
+        print('attn_fa    nh=%d kv=%d hd=%3d M=%2d start=%3d  rel err %.1e  %s' % (nh, nkv, hd, M, start, err, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def build():
     out = os.path.join(tempfile.mkdtemp(), 'k.so')
     src = os.path.join(tempfile.mkdtemp(), 'k.cpp')
@@ -414,6 +457,7 @@ def main():
     ok &= check_mmq(rng, oracle, 'mmqt')
     ok &= check_quantize_x4(rng)
     ok &= check_attn(rng)
+    ok &= check_attn_fa(rng)
     sys.exit(0 if ok else 1)
 
 
