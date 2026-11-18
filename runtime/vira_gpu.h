@@ -397,6 +397,8 @@ typedef struct {
   bool mmqb_bad;                     // a big-tile kernel disagreed in the self-test
   vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
   vira_cu_function cu_k_moe_act;      // MoE expert activation (runtime/cuda/fused.cu)
+  vira_cu_function cu_k_silu_mul;     // fused.cu: silu(g) * u in one launch (gpu_silu_mul)
+  vira_cu_function cu_k_rmsnorm_x4;   // fused.cu: prompt-row RMSNorm + the x4 copy for mmqt
   vira_cu_function cu_k_moe_sum;      // MoE weighted sum of the pairs (runtime/cuda/fused.cu)
   vira_cu_function cu_k_mmvq_id[8];   // MoE pair kernels q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k (mmvq2.cu)
   vira_cu_function cu_k_mmvqb[8];     // 2..4 activation rows, weights read once (mmvq2.cu); VIRA_GPU_MMVQB=0 off
@@ -4614,6 +4616,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_fused_module = NULL;
   g->cu_k_rmsnorm_q8_1 = NULL;
   g->cu_k_moe_act = NULL;
+  g->cu_k_silu_mul = g->cu_k_rmsnorm_x4 = NULL;
   g->cu_k_moe_sum = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmvq_id[i] = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmvqb[i] = NULL;
@@ -4722,6 +4725,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       g->cu_fused_module = fm;
       (void)g->cuModuleGetFunction(&g->cu_k_rmsnorm_q8_1, fm, "vira_cu_rmsnorm_q8_1_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_moe_act, fm, "vira_cu_moe_act_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_silu_mul, fm, "vira_cu_silu_mul_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_rmsnorm_x4, fm, "vira_cu_rmsnorm_x4_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_moe_sum, fm, "vira_cu_moe_sum_f32");
     }
   }
@@ -5354,6 +5359,7 @@ static inline void vira_gpu_shutdown(void) {
       }
       _vira_gpu.cu_k_rmsnorm_q8_1 = NULL;
       _vira_gpu.cu_k_moe_act = NULL;
+      _vira_gpu.cu_k_silu_mul = _vira_gpu.cu_k_rmsnorm_x4 = NULL;
       _vira_gpu.cu_k_moe_sum = NULL;
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmvq_id[i] = NULL;
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmvqb[i] = NULL;
@@ -6931,6 +6937,21 @@ static inline vira_tensor_f32 vira_gpu_rmsnorm(vira_arena *opt_arena,
         }
       }
     }
+    // Prompt rows feeding a prompt-size product: write the x4 copy the tensor-core kernels
+    // read (runtime/cuda/fused.cu), saving a quantize launch per norm. q / k head norms
+    // (short rows) are left alone.
+    if (fused_q8_bytes == 0 && _vira_gpu.cu_k_rmsnorm_x4 != NULL && _vira_gpu.cu_k_quantize_x4 != NULL &&
+        rows > 4 && cols >= 512 && (cols & 255) == 0) {
+      size_t qb = (size_t)rows * (size_t)(cols >> 5) * 40ULL;
+      if (_vira_gpu_act_q8_reserve_locked(y_slot, qb, x_slot->cu_buf, w_buf, pin_w) &&
+          ((size_t)y_slot->cu_q8_buf & 15u) == 0) {
+        void *fargs[] = {&x_slot->cu_buf, &w_buf, &y_slot->cu_buf, &y_slot->cu_q8_buf, &cols, &eps};
+        if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rmsnorm_x4, (unsigned int)rows, 1, 1, 256, 1, 1, 0,
+                                     _vira_gpu.cu_stream, fargs, NULL) == VIRA_CUDA_SUCCESS) {
+          fused_q8_bytes = qb + 1u; // + 1: x4 layout (see _vira_gpu_ensure_act_q8x_locked)
+        }
+      }
+    }
     if (fused_q8_bytes == 0) {
       void *args[] = {&x_slot->cu_buf, &w_buf, &y_slot->cu_buf, &cols, &eps};
       err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rmsnorm, (unsigned int)rows, 1, 1,
@@ -7974,6 +7995,59 @@ static inline vira_tensor_f32 vira_gpu_elemwise_mul(vira_arena *opt_arena,
                                                     vira_tensor_f32 a,
                                                     vira_tensor_f32 b) {
   return _vira_gpu_binary_elemwise(opt_arena, a, b, true);
+}
+
+/** silu(gate) * up (same shapes): one CUDA launch (runtime/cuda/fused.cu) with the
+ *  arithmetic of vira_gpu_silu followed by vira_gpu_elemwise_mul; otherwise exactly those two. */
+static inline vira_tensor_f32 vira_gpu_silu_mul(vira_arena *opt_arena, vira_tensor_f32 gate, vira_tensor_f32 up) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&gate);
+  _vira_tensor_norm_shape(&up);
+  const int64_t total64 = (int64_t)gate.rows * gate.cols;
+  bool fast = _vira_gpu.available && _vira_gpu.enabled && !_vira_gpu.simulate_oom &&
+              _vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA && _vira_gpu.cu_k_silu_mul != NULL &&
+              gate.data != NULL && up.data != NULL && gate.data != up.data && gate.rows == up.rows &&
+              gate.cols == up.cols && total64 > 0 && total64 <= INT32_MAX;
+  if (fast) {
+    pthread_mutex_lock(&_vira_gpu.lock);
+    const size_t bytes = (size_t)total64 * sizeof(vira_f32);
+    vira_cl_int err = 0;
+    bool hit = false;
+    _vira_gpu_act_entry *g_slot = NULL, *u_slot = NULL, *y_slot = NULL;
+    if (_vira_gpu_cuda_ensure_ctx_locked()) {
+      g_slot = _vira_gpu_get_or_upload_activation_locked(gate.data, bytes, !gate.is_arena, &hit, NULL, NULL, 0, 0,
+                                                         NULL, &err);
+    }
+    if (err == VIRA_CL_SUCCESS && g_slot != NULL) {
+      u_slot = _vira_gpu_get_or_upload_activation_locked(up.data, bytes, !up.is_arena, &hit, g_slot->dev_buf, NULL,
+                                                         g_slot->cu_buf, 0, NULL, &err);
+    }
+    if (err == VIRA_CL_SUCCESS && u_slot != NULL) {
+      y_slot = _vira_gpu_alloc_activation_slot_locked(bytes, g_slot->dev_buf, u_slot->dev_buf, NULL, g_slot->cu_buf,
+                                                      u_slot->cu_buf, 0, NULL, NULL, &err);
+    }
+    if (err == VIRA_CL_SUCCESS && y_slot != NULL) {
+      int32_t n = (int32_t)total64;
+      void *args[] = {&g_slot->cu_buf, &u_slot->cu_buf, &y_slot->cu_buf, &n};
+      if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_silu_mul, (unsigned int)(((size_t)n + 255) / 256), 1, 1, 256, 1, 1,
+                                   0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS) {
+        const vira_tensor_f32 *sh = gate.n_dims >= up.n_dims ? &gate : &up;
+        vira_tensor_f32 out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, sh->n_dims, sh->dims)
+                                        : _vira_tensor_f32_alloc_uninit_nd(sh->n_dims, sh->dims);
+        _vira_gpu_act_bind_locked(y_slot, out.data, bytes, y_slot->epoch, y_slot->last_used, !out.is_arena);
+        _vira_gpu_mark_act_dirty_locked(y_slot, out.data);
+        pthread_mutex_unlock(&_vira_gpu.lock);
+        return out;
+      }
+      _vira_gpu_act_entry_reset(y_slot);
+    }
+    pthread_mutex_unlock(&_vira_gpu.lock);
+  }
+  // the two separate operations (GPU or CPU, with their own fallbacks)
+  vira_tensor_f32 s = vira_gpu_silu(opt_arena, gate);
+  vira_tensor_f32 r = vira_gpu_elemwise_mul(opt_arena, s, up);
+  if (!s.is_arena) vira_tensor_f32_free(&s);
+  return r;
 }
 
 static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,

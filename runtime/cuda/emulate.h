@@ -233,3 +233,4 @@ static inline void vl_mma_f16(float *d, unsigned int a0, unsigned int a1, unsign
     d[e] += acc;
   }
 }
+static inline float vl_ex2_approx(float x) { return exp2f(x); }

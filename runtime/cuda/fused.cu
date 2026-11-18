@@ -25,6 +25,11 @@ __device__ __forceinline__ int vl_warp_sum_i(int v) {
   for (int o = WARP / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
   return v;
 }
+__device__ __forceinline__ float vl_ex2_approx(float x) {
+  float r;
+  asm("ex2.approx.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
 #define VL_SYNC() __syncthreads()
 #endif
 
@@ -127,4 +132,68 @@ extern "C" __global__ void vira_cu_moe_sum_f32(const float *__restrict__ y, cons
     acc += wt[i] * y[(size_t)pos[i] * (size_t)D + d];
   }
   out[(size_t)t * (size_t)D + d] = acc;
+}
+
+// out[i] = silu(g[i]) * u[i], i < n: one launch instead of vira_cu_silu_f32 and
+// vira_cu_elemwise_mul_f32 (gpu_silu_mul). Same arithmetic as the two (silu: x / (1 +
+// ex2.approx(x * -log2 e)) with an IEEE division, then one IEEE multiply), so results do not
+// change. Grid (n + 255) / 256, block 256.
+extern "C" __global__ void vira_cu_silu_mul_f32(const float *__restrict__ g, const float *__restrict__ u,
+                                               float *__restrict__ out, int n) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const float x = g[i];
+  const float e = vl_ex2_approx(vl_mul(x, __int_as_float(0xBFB8AA3B)));
+  out[i] = vl_mul(vl_div(x, vl_add(e, 1.0f)), u[i]);
+}
+
+// RMSNorm of prompt rows that also writes the rows quantized in the x4 layout of mmqt.cu
+// (per row and 128 values {f32 d[4], f32 s[4], int8 q[128]}), so the next prompt-size
+// product needs no quantize launch. Norm arithmetic as vira_cu_rmsnorm_f32 (strided fma sum,
+// shared-memory tree, sum / cols, + eps, rsqrt.approx, (r * x) * w), quantization as
+// vira_cu_quantize_q8_1x4 (warp absmax, q = rni(v * (127 / amax)) clamped to +-127, d = amax
+// * (1 / 127), s = d * sum(q)). cols % 128 == 0. Grid rows, block 256: warp k quantizes the
+// row's 32-value blocks k, k + 8, ...
+extern "C" __global__ void __launch_bounds__(256)
+vira_cu_rmsnorm_x4_f32(const float *__restrict__ x, const float *__restrict__ w, float *__restrict__ y,
+                       unsigned char *__restrict__ q4, int cols, float eps) {
+  __shared__ float sdata[256];
+  const int tid = threadIdx.x;
+  const int row = blockIdx.x;
+  const float *xr = x + (size_t)row * (size_t)cols;
+  float *yr = y + (size_t)row * (size_t)cols;
+  float acc = 0.0f;
+  for (int i = tid; i < cols; i += 256) {
+    const float v = __ldg(xr + i);
+    acc = vl_fma(v, v, acc);
+  }
+  sdata[tid] = acc;
+  VL_SYNC();
+  for (int o = 128; o > 0; o >>= 1) {
+    if (tid < o) sdata[tid] = vl_add(sdata[tid + o], sdata[tid]);
+    VL_SYNC();
+  }
+  const float r = vl_rsqrt_approx(vl_add(eps, vl_div(sdata[0], (float)cols)));
+  const int lane = tid & (WARP - 1), wp = tid / WARP;
+  const int nblk = cols / 32;
+  unsigned char *qr = q4 + (size_t)row * (size_t)(cols / 128) * 160u;
+  for (int blk = wp; blk < nblk; blk += 256 / WARP) {
+    const int i = blk * 32 + lane;
+    const float v = vl_mul(vl_mul(r, __ldg(xr + i)), __ldg(w + i));
+    yr[i] = v;
+    const float amax = vl_warp_max(fabsf(v));
+    int q = 0;
+    if (amax > 0.0f) {
+      q = __float2int_rn(vl_mul(v, vl_div(127.0f, amax)));
+      q = max(min(q, 127), -127);
+    }
+    const int sum = vl_warp_sum_i(q);
+    unsigned char *rec = qr + (size_t)(blk / 4) * 160u;
+    rec[32 + 32 * (blk % 4) + lane] = (unsigned char)(signed char)q;
+    if (lane == 0) {
+      const float d = vl_mul(amax, __int_as_float(0x3C010204));
+      ((float *)rec)[blk % 4] = d;
+      ((float *)rec)[4 + blk % 4] = vl_mul(d, (float)sum);
+    }
+  }
 }

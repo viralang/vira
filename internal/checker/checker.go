@@ -822,6 +822,15 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{{Name: "x", Type: &TensorType{DType: TypeF32}}},
 		ReturnType: &TensorType{DType: TypeF32},
 	}
+	c.functions["gpu_silu_mul"] = &FnSig{
+		Name:  "gpu_silu_mul",
+		IsPub: true,
+		Params: []ParamInfo{
+			{Name: "gate", Type: &TensorType{DType: TypeF32}},
+			{Name: "up", Type: &TensorType{DType: TypeF32}},
+		},
+		ReturnType: &TensorType{DType: TypeF32},
+	}
 	c.functions["gpu_gqa_attention"] = &FnSig{
 		Name:  "gpu_gqa_attention",
 		IsPub: true,

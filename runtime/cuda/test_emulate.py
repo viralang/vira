@@ -62,6 +62,12 @@ extern "C" void run_moe_sum(const float *y, const float *wt, const int *pos, flo
 extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsigned char *q8, int rows, int cols, float eps) {
   VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, (cols / 32 + 7) / 8, rows, 256, x, w, y, q8, cols, eps);
 }
+extern "C" void run_rmsnorm_x4(const float *x, const float *w, float *y, unsigned char *q4, int rows, int cols, float eps) {
+  VL_LAUNCH_THREADED(vira_cu_rmsnorm_x4_f32, rows, 1, 256, x, w, y, q4, cols, eps);
+}
+extern "C" void run_silu_mul(const float *g, const float *u, float *o, int n) {
+  VL_LAUNCH(vira_cu_silu_mul_f32, (n + 255) / 256, 1, 256, g, u, o, n);
+}
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     return ctypes.CDLL(out)
@@ -137,6 +143,27 @@ def check_fused(rng):
         ok &= good
         print('rmsnorm_q8_1 rows=%d cols=%5d  y rel err %.1e  q8 matches the quantize rule: %s  %s'
               % (rows, cols, e_y, exact, 'ok' if good else 'FAIL'))
+        if cols % 128 == 0:  # prompt rows: the same y and the same numbers in the x4 layout
+            y4 = np.zeros((rows, cols), np.float32)
+            q4 = np.zeros(rows * cols // 32 * 40, np.uint8)
+            lib.run_rmsnorm_x4(x.ctypes.data_as(ctypes.c_void_p), w.ctypes.data_as(ctypes.c_void_p),
+                               y4.ctypes.data_as(ctypes.c_void_p), q4.ctypes.data_as(ctypes.c_void_p),
+                               rows, cols, ctypes.c_float(eps))
+            same = bool(np.array_equal(y4, y) and np.array_equal(q4, np.frombuffer(q8_1_to_x4(q8.tobytes(), rows, cols), np.uint8)))
+            ok &= same
+            print('rmsnorm_x4   rows=%d cols=%5d  y and q bytes equal rmsnorm_q8_1 (x4 order): %s  %s'
+                  % (rows, cols, same, 'ok' if same else 'FAIL'))
+    for n in (1, 255, 1000):
+        g = (3.0 * rng.standard_normal(n)).astype(np.float32)
+        u = rng.standard_normal(n).astype(np.float32)
+        o = np.zeros(n, np.float32)
+        lib.run_silu_mul(g.ctypes.data_as(ctypes.c_void_p), u.ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p), n)
+        e2 = np.exp2((g * np.array([0xBFB8AA3B], np.uint32).view(np.float32)[0]).astype(np.float32)).astype(np.float32)
+        want = ((g / (e2 + np.float32(1.0))).astype(np.float32) * u).astype(np.float32)
+        e = float(np.abs(o - want).max() / max(1e-30, np.abs(want).max()))
+        same = e < 1e-6  # exp2 of NumPy vs the C library: an ulp apart at most
+        ok &= same
+        print('silu_mul n=%4d  vs silu then multiply in float32: rel err %.1e  %s' % (n, e, 'ok' if same else 'FAIL'))
     return ok
 
 

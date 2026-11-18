@@ -1012,7 +1012,7 @@ func (a *Analyzer) isAllocatedOnArena(kind ast.CleanupKind, rhs ast.Expr) bool {
 				case "tensor_fill", "tensor_fill_3d", "tensor_fill_4d", "tensor_relu", "tensor_add", "tensor_scale", "tensor_load_bin",
 					"tensor_rmsnorm", "tensor_rope", "tensor_rope_norm", "tensor_silu", "tensor_elemwise_mul", "tensor_softmax", "tensor_embedding",
 					"tensor_embedding_batch", "gpu_linear", "gpu_matmul", "gpu_rmsnorm", "gpu_rope", "gpu_rope_norm", "gpu_rope_seq", "gpu_rope_seq_norm",
-					"gpu_softmax", "gpu_silu", "gpu_gqa_attention", "gpu_gqa_prefill":
+					"gpu_softmax", "gpu_silu", "gpu_silu_mul", "gpu_gqa_attention", "gpu_gqa_prefill":
 					return true
 				}
 			}

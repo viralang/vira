@@ -151,6 +151,11 @@ pub fn silu(x tensor[f32]) tensor[f32] {
 	return gpu_silu(x)
 }
 
+// silu(gate) * up (SwiGLU) in one GPU launch; the same numbers as tensor_elemwise_mul(silu(gate), up).
+pub fn silu_mul(gate tensor[f32], up tensor[f32]) tensor[f32] {
+	return gpu_silu_mul(gate, up)
+}
+
 pub fn gqa_attention(q_heads tensor[f32], k_cache tensor[f32], v_cache tensor[f32], kv_pos i64, scale f32) tensor[f32] {
 	return gpu_gqa_attention(q_heads, k_cache, v_cache, kv_pos, scale)
 }
