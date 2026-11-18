@@ -10,6 +10,7 @@
 #include "vira_cuda_mmvq2_ptx.h"
 #include "vira_cuda_fused_ptx.h"
 #include "vira_cuda_mmq_ptx.h"
+#include "vira_cuda_attn_ptx.h"
 #if defined(_WIN32) && !defined(_WIN64)
 #define VIRA_CL_API __stdcall
 #else
@@ -377,6 +378,8 @@ typedef struct {
   vira_cu_module cu_dp4a_module;
   vira_cu_module cu_mmvq2_module; // runtime/cuda/mmvq2.cu
   vira_cu_module cu_fused_module; // runtime/cuda/fused.cu
+  vira_cu_module cu_attn_module;  // runtime/cuda/attn.cu: FP16 KV cache (vira_gpu_kv_f16)
+  vira_cu_function cu_k_kv_store, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv;
   vira_cu_module cu_mmq_module;   // runtime/cuda/mmq.cu: prompt-size products (M > 4); VIRA_GPU_MMQ=0 disables
   vira_cu_function cu_k_mmq[8];   // q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k
   vira_cu_function cu_k_rmsnorm_q8_1; // rmsnorm + Q8_1 copy for decode; VIRA_GPU_FUSE=0 disables
@@ -511,6 +514,10 @@ static inline void vira_gpu_wait(void);
 static inline void vira_gpu_shutdown(void);
 static inline void _vira_gpu_evict_all_locked(void);
 static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr);
+static inline bool _vira_gpu_kv_sync_host(const vira_f32 *ptr);
+static inline void _vira_gpu_kv_host_newer_locked(const vira_f32 *ptr);
+static inline void _vira_gpu_kv_sync_all_locked(void);
+static inline void _vira_gpu_kv_reset_locked(void);
 static inline void _vira_gpu_evict_weight_ptr_locked(const vira_f32 *host_ptr);
 static inline void _vira_gpu_evict_lru_bytes_locked(size_t needed_bytes);
 static inline void _vira_gpu_invalidate_activations(const void *arena_ptr);
@@ -3001,6 +3008,7 @@ static inline bool _vira_gpu_is_ptr_dirty(const vira_f32 *ptr) {
 }
 
 static inline void _vira_gpu_sync_host(const vira_f32 *ptr) {
+  if (_vira_gpu_kv_sync_host(ptr)) return; // FP16 KV cache: converted back on read
   if (ptr == NULL ||
       __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
       !_vira_gpu.available) {
@@ -3450,6 +3458,7 @@ static inline void _vira_gpu_evict_ptr_locked(const vira_f32 *host_ptr) {
   }
   _vira_gpu_dedup_host_ptr_locked(host_ptr, NULL);
   _vira_gpu_evict_weight_ptr_locked(host_ptr);
+  _vira_gpu_kv_host_newer_locked(host_ptr); // the host wrote an FP16 KV cache tensor
 }
 
 static inline void _vira_gpu_evict_ptr(const vira_f32 *host_ptr) {
@@ -4413,6 +4422,20 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->moe_placed = 0;
   g->cu_mmq_module = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmq[i] = NULL;
+  g->cu_attn_module = NULL;
+  g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
+  {
+    const char *kf = getenv("VIRA_GPU_KV_F16");
+    vira_cu_module am = NULL;
+    if (!(kf != NULL && strcmp(kf, "0") == 0) &&
+        g->cuModuleLoadData(&am, _vira_cuda_attn_ptx) == VIRA_CUDA_SUCCESS && am != NULL) {
+      g->cu_attn_module = am;
+      (void)g->cuModuleGetFunction(&g->cu_k_kv_store, am, "vira_cu_kv_store_f16");
+      (void)g->cuModuleGetFunction(&g->cu_k_kv_load, am, "vira_cu_kv_load_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_kv_zero, am, "vira_cu_kv_zero");
+      (void)g->cuModuleGetFunction(&g->cu_k_attn_f16kv, am, "vira_cu_attn_f16kv");
+    }
+  }
   {
     const char *mq = getenv("VIRA_GPU_MMQ");
     vira_cu_module qm = NULL;
@@ -4500,7 +4523,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (_vira_gpu_debug()) {
     fprintf(stderr,
             "vira gpu: [CUDA Driver API] %s (sm_%d%d%s%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s%s\n",
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s%s%s\n",
             g->device_name, g->compute_capability_major, g->compute_capability_minor,
             g->has_tensor_cores ? " + Tensor Cores" : "",
             g->has_dp4a ? " + DP4A" : "",
@@ -4512,7 +4535,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
             g->cu_k_mmvq2_q8_0 == NULL ? "" : g->mmvq2_two ? (g->mmvq2_warp ? (g->mmvq2_rows == 4 ? " / mmvq2w(Q8_0) mmvq2q(rest)" : " / mmvq2w(Q8_0) mmvq2x(rest)") : " / mmvq2(Q8_0) mmvq2x(rest)")
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
             g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
-            g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "");
+            g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
+            g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
   }
 
   return true;
@@ -5027,6 +5051,12 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_dp4a_module);
         _vira_gpu.cu_dp4a_module = NULL;
       }
+      _vira_gpu_kv_reset_locked();
+      if (_vira_gpu.cu_attn_module && _vira_gpu.cuModuleUnload) {
+        _vira_gpu.cuModuleUnload(_vira_gpu.cu_attn_module);
+        _vira_gpu.cu_attn_module = NULL;
+      }
+      _vira_gpu.cu_k_kv_store = _vira_gpu.cu_k_kv_load = _vira_gpu.cu_k_kv_zero = _vira_gpu.cu_k_attn_f16kv = NULL;
       if (_vira_gpu.cu_mmq_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmq_module);
         _vira_gpu.cu_mmq_module = NULL;
@@ -5359,6 +5389,7 @@ static inline void vira_gpu_sync(void) {
       _vira_gpu.available) {
     pthread_mutex_lock(&_vira_gpu.lock);
     _vira_gpu_sync_all_dirty_locked();
+    _vira_gpu_kv_sync_all_locked();
     if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
       if (_vira_gpu_cuda_ensure_ctx_locked() && _vira_gpu.cuCtxSynchronize) {
         _vira_gpu.cuCtxSynchronize();
@@ -7768,6 +7799,234 @@ static inline vira_tensor_f32 _vira_cpu_gqa_attention(
   return out;
 }
 
+// ---- FP16 KV cache (vira_gpu_kv_f16; runtime/cuda/attn.cu) ----
+// A registered cache tensor (host f32 [ctx, kv_dim]) lives on the GPU as half floats and the
+// device copy is the authoritative one: copy_row(s) convert rows into it, attention reads it,
+// and the host copy is refreshed only when host code reads it (_vira_gpu_sync_host) or on
+// gpu_sync. A host write (evict) marks the device copy stale; it is re-uploaded on next use.
+typedef struct {
+  const vira_f32 *host;
+  int64_t rows;
+  int32_t cols;
+  vira_cu_deviceptr dev;
+  size_t bytes;
+  int state; // 0 in step, 1 device newer, 2 host newer
+} _vira_gpu_kv_entry;
+#define VIRA_GPU_KV_CAP 1024
+static _vira_gpu_kv_entry _vira_gpu_kv[VIRA_GPU_KV_CAP];
+static int _vira_gpu_kv_n = 0;
+static vira_cu_deviceptr _vira_gpu_kv_tmp = 0;
+static size_t _vira_gpu_kv_tmp_cap = 0;
+
+static inline _vira_gpu_kv_entry *_vira_gpu_kv_find_locked(const vira_f32 *p) {
+  for (int i = 0; i < _vira_gpu_kv_n; i++)
+    if (_vira_gpu_kv[i].host == p) return &_vira_gpu_kv[i];
+  return NULL;
+}
+static inline bool _vira_gpu_kv_tmp_locked(size_t bytes) {
+  if (bytes <= _vira_gpu_kv_tmp_cap) return true;
+  if (_vira_gpu_kv_tmp != 0) {
+    _vira_gpu.cuMemFree(_vira_gpu_kv_tmp);
+    __atomic_sub_fetch(&_vira_gpu.allocated_bytes, (int64_t)_vira_gpu_kv_tmp_cap, __ATOMIC_RELAXED);
+    _vira_gpu_kv_tmp = 0;
+    _vira_gpu_kv_tmp_cap = 0;
+  }
+  vira_cu_deviceptr b = 0;
+  if (_vira_gpu.cuMemAlloc(&b, bytes) != VIRA_CUDA_SUCCESS || b == 0) return false;
+  _vira_gpu_kv_tmp = b;
+  _vira_gpu_kv_tmp_cap = bytes;
+  __atomic_add_fetch(&_vira_gpu.allocated_bytes, (int64_t)bytes, __ATOMIC_RELAXED);
+  return true;
+}
+static inline bool _vira_gpu_kv_store_locked(vira_cu_deviceptr src, vira_cu_deviceptr dst, long long row0,
+                                             int32_t cols, long long n) {
+  void *args[] = {&src, &dst, &row0, &cols, &n};
+  return _vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_kv_store, (unsigned int)((n + 255) / 256), 1, 1, 256, 1, 1, 0,
+                                  _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS;
+}
+// device -> host (f16 -> f32) when the device copy is newer
+static inline bool _vira_gpu_kv_download_locked(_vira_gpu_kv_entry *e) {
+  if (e->state != 1) return true;
+  const long long n = (long long)e->rows * e->cols;
+  if (!_vira_gpu_kv_tmp_locked((size_t)n * 4)) return false;
+  vira_cu_deviceptr src = e->dev, dst = _vira_gpu_kv_tmp;
+  void *args[] = {&src, &dst, (void *)&n};
+  if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_kv_load, (unsigned int)((n + 255) / 256), 1, 1, 256, 1, 1, 0,
+                               _vira_gpu.cu_stream, args, NULL) != VIRA_CUDA_SUCCESS)
+    return false;
+  if (_vira_gpu.cuStreamSynchronize && _vira_gpu.cu_stream) _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
+  if (_vira_gpu.cuMemcpyDtoH((void *)e->host, _vira_gpu_kv_tmp, (size_t)n * 4) != VIRA_CUDA_SUCCESS) return false;
+  e->state = 0;
+  return true;
+}
+// host -> device (f32 -> f16) when the host copy is newer
+static inline bool _vira_gpu_kv_ready_locked(_vira_gpu_kv_entry *e) {
+  if (e->state != 2) return true;
+  const long long n = (long long)e->rows * e->cols;
+  if (!_vira_gpu_kv_tmp_locked((size_t)n * 4)) return false;
+  if (_vira_gpu.cuMemcpyHtoD(_vira_gpu_kv_tmp, e->host, (size_t)n * 4) != VIRA_CUDA_SUCCESS) return false;
+  if (!_vira_gpu_kv_store_locked(_vira_gpu_kv_tmp, e->dev, 0, e->cols, n)) return false;
+  e->state = 0;
+  return true;
+}
+static inline bool _vira_gpu_kv_sync_host(const vira_f32 *ptr) {
+  if (ptr == NULL || _vira_gpu_kv_n == 0 || __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2)
+    return false;
+  pthread_mutex_lock(&_vira_gpu.lock);
+  _vira_gpu_kv_entry *e = _vira_gpu_kv_find_locked(ptr);
+  if (e != NULL && _vira_gpu_cuda_ensure_ctx_locked()) (void)_vira_gpu_kv_download_locked(e);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return e != NULL;
+}
+static inline void _vira_gpu_kv_host_newer_locked(const vira_f32 *ptr) {
+  if (_vira_gpu_kv_n == 0) return;
+  _vira_gpu_kv_entry *e = _vira_gpu_kv_find_locked(ptr);
+  if (e != NULL) e->state = 2;
+}
+static inline void _vira_gpu_kv_sync_all_locked(void) {
+  for (int i = 0; i < _vira_gpu_kv_n; i++) (void)_vira_gpu_kv_download_locked(&_vira_gpu_kv[i]);
+}
+static inline void _vira_gpu_kv_reset_locked(void) {
+  for (int i = 0; i < _vira_gpu_kv_n; i++) {
+    (void)_vira_gpu_kv_download_locked(&_vira_gpu_kv[i]);
+    if (_vira_gpu_kv[i].dev != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu_kv[i].dev);
+  }
+  _vira_gpu_kv_n = 0;
+  if (_vira_gpu_kv_tmp != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu_kv_tmp);
+  _vira_gpu_kv_tmp = 0;
+  _vira_gpu_kv_tmp_cap = 0;
+}
+// Marks a [ctx, kv_dim] KV cache tensor to live on the GPU in FP16 (half the memory; no
+// upload when it is still all zeros). False: not CUDA, VIRA_GPU_KV_F16=0, no memory; the
+// tensor then works as before.
+static inline bool vira_gpu_kv_f16(vira_tensor_f32 t) {
+  vira_gpu_init();
+  _vira_tensor_norm_shape(&t);
+  if (t.data == NULL || t.n_dims != 2 || t.rows <= 0 || t.cols <= 0 || !_vira_gpu.available || !_vira_gpu.enabled ||
+      _vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA || _vira_gpu.cu_k_attn_f16kv == NULL ||
+      _vira_gpu.cu_k_kv_zero == NULL)
+    return false;
+  pthread_mutex_lock(&_vira_gpu.lock);
+  bool ok = false;
+  if (!_vira_gpu_cuda_ensure_ctx_locked()) goto done;
+  if (_vira_gpu_kv_find_locked(t.data) != NULL) { ok = true; goto done; }
+  if (_vira_gpu_kv_n >= VIRA_GPU_KV_CAP) goto done;
+  {
+    const long long n = (long long)t.rows * t.cols;
+    const size_t bytes = ((size_t)n * 2 + 3) & ~(size_t)3;
+    if (_vira_gpu.vram_budget_bytes > 0 &&
+        __atomic_load_n(&_vira_gpu.allocated_bytes, __ATOMIC_RELAXED) + (int64_t)bytes > _vira_gpu.vram_budget_bytes)
+      goto done;
+    vira_cu_deviceptr dev = 0;
+    if (_vira_gpu.cuMemAlloc(&dev, bytes) != VIRA_CUDA_SUCCESS || dev == 0) goto done;
+    long long words = (long long)(bytes / 4);
+    void *args[] = {&dev, &words};
+    if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_kv_zero, (unsigned int)((words + 255) / 256), 1, 1, 256, 1, 1, 0,
+                                 _vira_gpu.cu_stream, args, NULL) != VIRA_CUDA_SUCCESS) {
+      _vira_gpu.cuMemFree(dev);
+      goto done;
+    }
+    // an f32 device copy made earlier is dropped; the host copy decides the start state
+    _vira_gpu_dedup_host_ptr_locked(t.data, NULL);
+    bool zero = true;
+    for (long long i = 0; i < n && zero; i++) zero = t.data[i] == 0.0f;
+    _vira_gpu_kv_entry *e = &_vira_gpu_kv[_vira_gpu_kv_n++];
+    e->host = t.data;
+    e->rows = t.rows;
+    e->cols = t.cols;
+    e->dev = dev;
+    e->bytes = bytes;
+    e->state = zero ? 0 : 2;
+    __atomic_add_fetch(&_vira_gpu.allocated_bytes, (int64_t)bytes, __ATOMIC_RELAXED);
+    ok = true;
+  }
+done:
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return ok;
+}
+// copy_row(s) into a registered cache: -1 not registered, 1 done, 0 failed (after the host
+// copy was brought up to date, so the CPU path may run).
+static inline int _vira_gpu_kv_copy_rows(vira_tensor_f32 dst, int32_t row0, vira_tensor_f32 src, int32_t nrows) {
+  if (_vira_gpu_kv_n == 0 || __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2) return -1;
+  pthread_mutex_lock(&_vira_gpu.lock);
+  _vira_gpu_kv_entry *e = _vira_gpu_kv_find_locked(dst.data);
+  if (e == NULL) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return -1;
+  }
+  int r = 0;
+  if (_vira_gpu_cuda_ensure_ctx_locked() && _vira_gpu_kv_ready_locked(e) && row0 >= 0 &&
+      (int64_t)row0 + nrows <= e->rows && src.cols == e->cols) {
+    vira_cl_int err = VIRA_CL_SUCCESS;
+    bool hit = false;
+    const size_t sb = (size_t)src.rows * (size_t)src.cols * sizeof(vira_f32);
+    _vira_gpu_act_entry *ss = _vira_gpu_get_or_upload_activation_locked(src.data, sb, !src.is_arena, &hit, NULL,
+                                                                        NULL, 0, 0, NULL, &err);
+    if (err == VIRA_CL_SUCCESS && ss != NULL &&
+        _vira_gpu_kv_store_locked(ss->cu_buf, e->dev, row0, e->cols, (long long)nrows * e->cols)) {
+      e->state = 1;
+      r = 1;
+    }
+  }
+  if (r == 0) (void)_vira_gpu_kv_download_locked(e);
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return r;
+}
+// Attention over registered FP16 caches (decode M = 1 at start = kv_pos; prompt M = seq_len).
+// -1: k / v not registered (or only one: brought to the host for the CPU path), 1: done (*out).
+static inline int _vira_gpu_kv_attention(vira_arena *opt_arena, vira_tensor_f32 q, vira_tensor_f32 kc,
+                                         vira_tensor_f32 vc, int64_t start, int32_t M, int32_t n_heads, float scale,
+                                         vira_tensor_f32 *out) {
+  if (_vira_gpu_kv_n == 0 || __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2) return -1;
+  pthread_mutex_lock(&_vira_gpu.lock);
+  _vira_gpu_kv_entry *ek = _vira_gpu_kv_find_locked(kc.data), *ev = _vira_gpu_kv_find_locked(vc.data);
+  if (ek == NULL || ev == NULL) {
+    if (ek) (void)_vira_gpu_kv_download_locked(ek);
+    if (ev) (void)_vira_gpu_kv_download_locked(ev);
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return -1;
+  }
+  const int32_t head_dim = q.cols, kv_dim = kc.cols;
+  int r = 0;
+  if (_vira_gpu_cuda_ensure_ctx_locked() && head_dim <= 256 && kv_dim % head_dim == 0 &&
+      _vira_gpu_kv_ready_locked(ek) && _vira_gpu_kv_ready_locked(ev)) {
+    const int32_t kv_mul = n_heads / (kv_dim / head_dim);
+    const size_t qb = (size_t)M * n_heads * head_dim * sizeof(vira_f32);
+    vira_cl_int err = VIRA_CL_SUCCESS;
+    bool hit = false;
+    _vira_gpu_act_entry *qs = _vira_gpu_get_or_upload_activation_locked(q.data, qb, !q.is_arena, &hit, NULL, NULL, 0, 0,
+                                                                        NULL, &err);
+    _vira_gpu_act_entry *os = (err == VIRA_CL_SUCCESS && qs != NULL)
+                                  ? _vira_gpu_alloc_activation_slot_locked(qb, qs->dev_buf, NULL, NULL, qs->cu_buf, 0,
+                                                                           0, NULL, NULL, &err)
+                                  : NULL;
+    if (err == VIRA_CL_SUCCESS && os != NULL) {
+      vira_cu_deviceptr qd = qs->cu_buf, kd = ek->dev, vd = ev->dev, od = os->cu_buf;
+      int32_t nh = n_heads, km = kv_mul, hd = head_dim, kvd = kv_dim, m_ = M;
+      long long st = (long long)start;
+      float sc = scale;
+      void *args[] = {&qd, &kd, &vd, &od, &nh, &km, &hd, &kvd, &m_, &st, &sc};
+      if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_attn_f16kv, (unsigned int)n_heads, (unsigned int)M, 1, 256, 1, 1, 0,
+                                   _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS) {
+        int32_t dims[2] = {M * n_heads, head_dim};
+        *out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)
+                         : _vira_tensor_f32_alloc_uninit_nd(2, dims);
+        _vira_gpu_act_bind_locked(os, out->data, qb, os->epoch, os->last_used, !out->is_arena);
+        _vira_gpu_mark_act_dirty_locked(os, out->data);
+        r = 1;
+      } else {
+        _vira_gpu_act_entry_reset(os);
+      }
+    }
+  }
+  if (r == 0) {
+    (void)_vira_gpu_kv_download_locked(ek);
+    (void)_vira_gpu_kv_download_locked(ev);
+  }
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return r == 1 ? 1 : -1;
+}
+
 static inline vira_tensor_f32 vira_gpu_gqa_attention(
     vira_arena *opt_arena, vira_tensor_f32 q_heads, vira_tensor_f32 k_cache,
     vira_tensor_f32 v_cache, int64_t kv_pos, float scale) {
@@ -7788,6 +8047,11 @@ static inline vira_tensor_f32 vira_gpu_gqa_attention(
   int32_t n_kv_heads = kv_dim / head_dim;
   if (n_kv_heads <= 0 || (n_heads % n_kv_heads) != 0) {
     return _vira_cpu_gqa_attention(opt_arena, q_heads, k_cache, v_cache, kv_pos, scale);
+  }
+  {
+    vira_tensor_f32 kv_out;
+    if (_vira_gpu_kv_attention(opt_arena, q_heads, k_cache, v_cache, kv_pos, 1, n_heads, scale, &kv_out) == 1)
+      return kv_out;
   }
   if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
       head_dim > 256) {
@@ -8017,6 +8281,11 @@ static inline vira_tensor_f32 vira_gpu_gqa_prefill(
     return _vira_cpu_gqa_prefill(opt_arena, q_seq, k_cache, v_cache, start_pos,
                                  seq_len, n_heads, scale);
   }
+  {
+    vira_tensor_f32 kv_out;
+    if (_vira_gpu_kv_attention(opt_arena, q_seq, k_cache, v_cache, start_pos, seq_len, n_heads, scale, &kv_out) == 1)
+      return kv_out;
+  }
   if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
       head_dim > 256) {
     if (_vira_gpu.simulate_oom) {
@@ -8150,6 +8419,10 @@ static inline vira_tensor_f32 vira_gpu_gqa_prefill(
 
 static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
                                       vira_tensor_f32 src) {
+  {
+    const int kr = _vira_gpu_kv_copy_rows(dst, dst_row, src, 1);
+    if (kr >= 0) return kr == 1;
+  }
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
       !_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
       dst.data == NULL || src.data == NULL || dst.data == src.data) {
@@ -8227,6 +8500,10 @@ static inline bool _vira_gpu_copy_row(vira_tensor_f32 dst, int32_t dst_row,
 static inline bool _vira_gpu_copy_rows(vira_tensor_f32 dst,
                                        int32_t dst_row_start,
                                        vira_tensor_f32 src) {
+  {
+    const int kr = _vira_gpu_kv_copy_rows(dst, dst_row_start, src, src.rows);
+    if (kr >= 0) return kr == 1;
+  }
   if (__atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) != 2 ||
       !_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
       dst.data == NULL || src.data == NULL || dst.data == src.data ||

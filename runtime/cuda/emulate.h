@@ -123,3 +123,18 @@ static inline int vl_warp_sum_i(int v) {
     for (auto &t_ : th_) t_.join();                                              \
     for (auto *p_ : wb_) delete p_;                                              \
   }
+
+// attn.cu helpers
+#define __expf(x) expf(x)
+static inline float vl_h2f(unsigned short h) { _Float16 f; memcpy(&f, &h, 2); return (float)f; }
+static inline unsigned short vl_f2h(float x) { _Float16 f = (_Float16)x; unsigned short h; memcpy(&h, &f, 2); return h; }
+static float vl_wbuf_s[2048];
+static inline float vl_wsum(float v) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_s[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  float s = 0.0f;
+  for (int i = 0; i < WARP_EMU; i++) s += vl_wbuf_s[w * WARP_EMU + i];
+  vl_warp_bar[w]->arrive_and_wait();
+  return s;
+}

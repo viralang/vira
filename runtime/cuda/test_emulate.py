@@ -174,6 +174,54 @@ def check_mmq(rng, oracle):
     return ok
 
 
+def check_attn(rng):
+    """FP16-KV attention (decode and causal prompt rows, GQA) against NumPy on the same
+    half-rounded cache; and the f32 -> f16 row store."""
+    out = os.path.join(tempfile.mkdtemp(), 'a.so')
+    src = os.path.join(tempfile.mkdtemp(), 'a.cpp')
+    open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/attn.cu"\n' % HERE + r'''
+extern "C" void run_attn(const float *q, const unsigned short *k, const unsigned short *v, float *o, int nh, int kvm,
+                         int hd, int kvd, int M, long long start, float scale) {
+  VL_LAUNCH_THREADED(vira_cu_attn_f16kv, nh, M, 256, q, k, v, o, nh, kvm, hd, kvd, M, start, scale);
+}
+extern "C" void run_store(const float *s, unsigned short *d, long long row0, int cols, long long n) {
+  VL_LAUNCH(vira_cu_kv_store_f16, (int)((n + 255) / 256), 1, 256, s, d, row0, cols, n);
+}
+''')
+    subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
+    lib = ctypes.CDLL(out)
+    ok = True
+    for nh, nkv, hd, ctx, M, start in [(4, 2, 64, 40, 1, 20), (8, 2, 128, 64, 5, 30), (2, 1, 256, 16, 3, 0), (6, 3, 80, 33, 1, 0), (4, 4, 32, 300, 1, 299)]:
+        kvd = nkv * hd
+        kf = rng.standard_normal((ctx, kvd)).astype(np.float32)
+        vf = rng.standard_normal((ctx, kvd)).astype(np.float32)
+        k16 = np.zeros(ctx * kvd, np.uint16)
+        lib.run_store(kf.ctypes.data_as(ctypes.c_void_p), k16.ctypes.data_as(ctypes.c_void_p), ctypes.c_longlong(0), kvd, ctypes.c_longlong(ctx * kvd))
+        good_store = bool(np.array_equal(k16, kf.astype(np.float16).view(np.uint16).ravel()))
+        v16 = vf.astype(np.float16)
+        q = rng.standard_normal((M * nh, hd)).astype(np.float32)
+        o = np.full((M * nh, hd), np.nan, np.float32)
+        scale = 1.0 / np.sqrt(hd)
+        lib.run_attn(q.ctypes.data_as(ctypes.c_void_p), k16.ctypes.data_as(ctypes.c_void_p),
+                     v16.view(np.uint16).ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p),
+                     nh, nh // nkv, hd, kvd, M, ctypes.c_longlong(start), ctypes.c_float(scale))
+        K = kf.astype(np.float16).astype(np.float64)
+        V = v16.astype(np.float64)
+        want = np.zeros((M * nh, hd))
+        for t in range(M):
+            n = start + t + 1
+            for h in range(nh):
+                kh = (h // (nh // nkv)) * hd
+                s = K[:n, kh:kh + hd] @ q[t * nh + h].astype(np.float64) * scale
+                p = np.exp(s - s.max()); p /= p.sum()
+                want[t * nh + h] = p @ V[:n, kh:kh + hd]
+        err = np.abs(o - want).max() / np.abs(want).max()
+        good = bool(err < 1e-5) and good_store
+        ok &= good
+        print('attn_f16kv nh=%d kv=%d hd=%3d M=%d start=%3d  rel err %.1e  store %s  %s' % (nh, nkv, hd, M, start, err, good_store, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def build():
     out = os.path.join(tempfile.mkdtemp(), 'k.so')
     src = os.path.join(tempfile.mkdtemp(), 'k.cpp')
@@ -296,6 +344,7 @@ def main():
                 print('%s%-5s M=%d K=%5d N=%d  vs CPU dequant: max rel err %.2e  %s' % (kind, name, M, K, N, err, 'ok' if good else 'FAIL'))
     ok &= check_fused(rng)
     ok &= check_mmq(rng, oracle)
+    ok &= check_attn(rng)
     sys.exit(0 if ok else 1)
 
 

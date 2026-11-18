@@ -1038,6 +1038,8 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 		return "**`gpu_is_enabled() -> bool`**\n\nReturns `true` if GPU compute dispatch is currently enabled."
 	case "gpu_sync":
 		return "**`gpu_sync()`**\n\nWaits for queued GPU work and copies every GPU-modified tensor back to host memory."
+	case "gpu_kv_f16":
+		return "**`gpu_kv_f16(t: tensor[f32]) -> bool`**\n\nKeeps a [ctx, kv_dim] KV cache tensor on the GPU in FP16 (half the memory, no upload while it is still zero). Attention and `copy_row(s)` use it there; the host copy is refreshed when host code reads it. `false`: not CUDA or no memory (the tensor works as before)."
 	case "gpu_wait":
 		return "**`gpu_wait()`**\n\nWaits for queued GPU work without copying anything back (tensors still copy back when the host reads them). Use it around timings."
 	case "gpu_simulate_oom":

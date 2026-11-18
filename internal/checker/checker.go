@@ -750,6 +750,12 @@ func (c *Checker) registerBuiltins() {
 		Params:     []ParamInfo{},
 		ReturnType: TypeVoid,
 	}
+	c.functions["gpu_kv_f16"] = &FnSig{
+		Name:       "gpu_kv_f16",
+		IsPub:      true,
+		Params:     []ParamInfo{{Name: "t", Type: &TensorType{DType: TypeF32}}},
+		ReturnType: TypeBool,
+	}
 	c.functions["gpu_wait"] = &FnSig{
 		Name:       "gpu_wait",
 		IsPub:      true,

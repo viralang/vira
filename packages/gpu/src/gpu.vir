@@ -86,6 +86,12 @@ pub fn sync() {
 	gpu_sync()
 }
 
+// Keeps a [ctx, kv_dim] KV cache tensor on the GPU in FP16 (CUDA): half the memory, and no
+// upload while it is still zero. Returns false (tensor unchanged) without CUDA or memory.
+pub fn kv_f16(t tensor[f32]) bool {
+	return gpu_kv_f16(t)
+}
+
 // Waits for queued GPU work without copying anything back; tensors still copy back when
 // the host reads them. Use it to time GPU work.
 pub fn wait() {
