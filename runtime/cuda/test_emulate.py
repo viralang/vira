@@ -187,6 +187,10 @@ extern "C" void run_attn(const float *q, const unsigned short *k, const unsigned
                          int hd, int kvd, int M, long long start, float scale) {
   VL_LAUNCH_THREADED(vira_cu_attn_f16kv, nh, M, 256, q, k, v, o, nh, kvm, hd, kvd, M, start, scale);
 }
+extern "C" void run_attn_tile(const float *q, const unsigned short *k, const unsigned short *v, float *o, int nh, int kvm,
+                              int hd, int kvd, int M, long long start, float scale) {
+  VL_LAUNCH_THREADED(vira_cu_attn_f16kv_tile, nh, (M + 15) / 16, 256, q, k, v, o, nh, kvm, hd, kvd, M, start, scale);
+}
 extern "C" void run_store(const float *s, unsigned short *d, long long row0, int cols, long long n) {
   VL_LAUNCH(vira_cu_kv_store_f16, (int)((n + 255) / 256), 1, 256, s, d, row0, cols, n);
 }
@@ -194,7 +198,11 @@ extern "C" void run_store(const float *s, unsigned short *d, long long row0, int
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
     lib = ctypes.CDLL(out)
     ok = True
-    for nh, nkv, hd, ctx, M, start in [(4, 2, 64, 40, 1, 20), (8, 2, 128, 64, 5, 30), (2, 1, 256, 16, 3, 0), (6, 3, 80, 33, 1, 0), (4, 4, 32, 300, 1, 299)]:
+    cases = [(4, 2, 64, 40, 1, 20, 'attn_f16kv'), (8, 2, 128, 64, 5, 30, 'attn_f16kv'), (2, 1, 256, 16, 3, 0, 'attn_f16kv'),
+             (6, 3, 80, 33, 1, 0, 'attn_f16kv'), (4, 4, 32, 300, 1, 299, 'attn_f16kv'),
+             (8, 2, 128, 64, 5, 30, 'attn_tile'), (4, 2, 64, 80, 37, 3, 'attn_tile'), (5, 1, 128, 70, 70, 0, 'attn_tile'),
+             (2, 2, 96, 120, 17, 100, 'attn_tile'), (4, 4, 32, 40, 33, 0, 'attn_tile')]
+    for nh, nkv, hd, ctx, M, start, kname in cases:
         kvd = nkv * hd
         kf = rng.standard_normal((ctx, kvd)).astype(np.float32)
         vf = rng.standard_normal((ctx, kvd)).astype(np.float32)
@@ -205,7 +213,7 @@ extern "C" void run_store(const float *s, unsigned short *d, long long row0, int
         q = rng.standard_normal((M * nh, hd)).astype(np.float32)
         o = np.full((M * nh, hd), np.nan, np.float32)
         scale = 1.0 / np.sqrt(hd)
-        lib.run_attn(q.ctypes.data_as(ctypes.c_void_p), k16.ctypes.data_as(ctypes.c_void_p),
+        getattr(lib, 'run_attn' if kname == 'attn_f16kv' else 'run_attn_tile')(q.ctypes.data_as(ctypes.c_void_p), k16.ctypes.data_as(ctypes.c_void_p),
                      v16.view(np.uint16).ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p),
                      nh, nh // nkv, hd, kvd, M, ctypes.c_longlong(start), ctypes.c_float(scale))
         K = kf.astype(np.float16).astype(np.float64)
@@ -221,7 +229,7 @@ extern "C" void run_store(const float *s, unsigned short *d, long long row0, int
         err = np.abs(o - want).max() / np.abs(want).max()
         good = bool(err < 1e-5) and good_store
         ok &= good
-        print('attn_f16kv nh=%d kv=%d hd=%3d M=%d start=%3d  rel err %.1e  store %s  %s' % (nh, nkv, hd, M, start, err, good_store, 'ok' if good else 'FAIL'))
+        print('%-10s nh=%d kv=%d hd=%3d M=%2d start=%3d  rel err %.1e  store %s  %s' % (kname, nh, nkv, hd, M, start, err, good_store, 'ok' if good else 'FAIL'))
     return ok
 
 

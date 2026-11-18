@@ -383,6 +383,7 @@ typedef struct {
   vira_cu_module cu_fused_module; // runtime/cuda/fused.cu
   vira_cu_module cu_attn_module;  // runtime/cuda/attn.cu: FP16 KV cache (vira_gpu_kv_f16)
   vira_cu_function cu_k_kv_store, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv;
+  vira_cu_function cu_k_attn_tile; // prompt rows (M > 4): 16 rows per block share each K/V tile
   vira_cu_module cu_mmq_module;   // runtime/cuda/mmq.cu: prompt-size products (M > 4); VIRA_GPU_MMQ=0 disables
   vira_cu_function cu_k_mmq[8];   // q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k
   vira_cu_module cu_mmqt_module;  // runtime/cuda/mmqt.cu: the same on int8 tensor cores (sm_75+); VIRA_GPU_MMQ=1 keeps dp4a
@@ -4519,6 +4520,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   for (int i = 0; i < 8; i++) g->cu_k_mmqt[i] = NULL;
   g->cu_attn_module = NULL;
   g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
+  g->cu_k_attn_tile = NULL;
   {
     const char *kf = getenv("VIRA_GPU_KV_F16");
     vira_cu_module am = NULL;
@@ -4529,6 +4531,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       (void)g->cuModuleGetFunction(&g->cu_k_kv_load, am, "vira_cu_kv_load_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_kv_zero, am, "vira_cu_kv_zero");
       (void)g->cuModuleGetFunction(&g->cu_k_attn_f16kv, am, "vira_cu_attn_f16kv");
+      (void)g->cuModuleGetFunction(&g->cu_k_attn_tile, am, "vira_cu_attn_f16kv_tile");
     }
   }
   {
@@ -5183,6 +5186,7 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cu_attn_module = NULL;
       }
       _vira_gpu.cu_k_kv_store = _vira_gpu.cu_k_kv_load = _vira_gpu.cu_k_kv_zero = _vira_gpu.cu_k_attn_f16kv = NULL;
+      _vira_gpu.cu_k_attn_tile = NULL;
       if (_vira_gpu.cu_mmq_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_mmq_module);
         _vira_gpu.cu_mmq_module = NULL;
@@ -8175,7 +8179,11 @@ static inline int _vira_gpu_kv_attention(vira_arena *opt_arena, vira_tensor_f32 
       long long st = (long long)start;
       float sc = scale;
       void *args[] = {&qd, &kd, &vd, &od, &nh, &km, &hd, &kvd, &m_, &st, &sc};
-      if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_attn_f16kv, (unsigned int)n_heads, (unsigned int)M, 1, 256, 1, 1, 0,
+      // prompt rows: the tiled kernel (runtime/cuda/attn.cu, head_dim % 32 == 0 and <= 128)
+      const bool tile = _vira_gpu.cu_k_attn_tile != NULL && M > 4 && head_dim % 32 == 0 && head_dim <= 128 &&
+                        kv_dim % 2 == 0;
+      if (_vira_gpu.cuLaunchKernel(tile ? _vira_gpu.cu_k_attn_tile : _vira_gpu.cu_k_attn_f16kv, (unsigned int)n_heads,
+                                   tile ? (unsigned int)((M + 15) / 16) : (unsigned int)M, 1, 256, 1, 1, 0,
                                    _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS) {
         int32_t dims[2] = {M * n_heads, head_dim};
         *out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)

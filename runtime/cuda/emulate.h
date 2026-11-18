@@ -168,3 +168,22 @@ static inline int __funnelshift_r(int lo, int hi, int sh) {
   const unsigned long long v = ((unsigned long long)(unsigned int)hi << 32) | (unsigned int)lo;
   return (int)(unsigned int)(v >> (sh & 31));
 }
+// attn.cu tile kernel: warp max / broadcast
+static float vl_wbuf_x[2048];
+static inline float vl_wmax_all(float v) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_x[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  float m = vl_wbuf_x[w * WARP_EMU];
+  for (int i = 1; i < WARP_EMU; i++) m = fmaxf(m, vl_wbuf_x[w * WARP_EMU + i]);
+  vl_warp_bar[w]->arrive_and_wait();
+  return m;
+}
+static inline float vl_shfl(float v, int src) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_x[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  const float r = vl_wbuf_x[w * WARP_EMU + src];
+  vl_warp_bar[w]->arrive_and_wait();
+  return r;
+}

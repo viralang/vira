@@ -127,3 +127,107 @@ extern "C" __global__ void vira_cu_kv_zero(unsigned int *__restrict__ dst, long 
   const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) dst[i] = 0u;
 }
+
+// Prompt attention (M > 4 query rows), same contract as vira_cu_attn_f16kv. The decode
+// kernel re-reads K and V for every query row; here a block of 256 threads takes 16 query
+// rows of one head (warp w: rows 2w, 2w + 1) and walks the keys in tiles of 32: each tile of
+// K and V is read from memory once (as half2 words), converted to float in shared memory,
+// and used by all 16 rows. Scores: lane = key, both rows of the warp share the K reads;
+// online softmax per tile (one max and one sum per row and tile); P x V: lanes hold
+// head_dim / 32 dimensions. head_dim % 32 == 0 and <= 128 (the host checks).
+// Grid (n_heads, (M + 15) / 16), block 256; shared 16.5 + 16 + 8 KB.
+#define AQ 16  // query rows per block
+#define AK 32  // keys per tile
+#define AD 128 // max head_dim
+#ifndef VL_EMULATE
+__device__ __forceinline__ float vl_wmax_all(float v) {
+#pragma unroll
+  for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
+  return v;
+}
+__device__ __forceinline__ float vl_shfl(float v, int src) { return __shfl_sync(0xffffffffu, v, src); }
+#endif
+extern "C" __global__ void __launch_bounds__(256)
+vira_cu_attn_f16kv_tile(const float *__restrict__ q, const unsigned short *__restrict__ kc,
+                        const unsigned short *__restrict__ vc, float *__restrict__ out, int n_heads, int kv_mul,
+                        int head_dim, int kv_dim, int M, long long start, float scale) {
+  __shared__ float sQ[AQ][AD];
+  __shared__ float sK[AK][AD + 1]; // +1: lane j reads row j, all lanes in different banks
+  __shared__ float sV[AK][AD];
+  const int h = blockIdx.x, t0 = blockIdx.y * AQ;
+  const int tid = threadIdx.x, lane = tid & (WARP - 1), wp = tid / WARP;
+  const int kvh = h / kv_mul, nd = head_dim / WARP, hw = head_dim / 2;
+  for (int i = tid; i < AQ * head_dim; i += 256) {
+    const int r = i / head_dim, d = i - r * head_dim;
+    sQ[r][d] = t0 + r < M ? q[((size_t)(t0 + r) * n_heads + h) * head_dim + d] * scale : 0.0f;
+  }
+  const int rows = M - t0 < AQ ? M - t0 : AQ;
+  const long long last = start + t0 + rows - 1; // last key a row of the block sees
+  float mx[2] = {AT_NEG_INF, AT_NEG_INF}, l[2] = {0.0f, 0.0f}, acc[2][AD / WARP];
+#pragma unroll
+  for (int r = 0; r < 2; r++)
+#pragma unroll
+    for (int k = 0; k < AD / WARP; k++) acc[r][k] = 0.0f;
+  for (long long j0 = 0; j0 <= last; j0 += AK) {
+    VL_SYNC(); // the previous tile is used up (and sQ written)
+    for (int i = tid; i < AK * hw; i += 256) {
+      const int jj = i / hw, d2 = i - jj * hw;
+      const long long j = j0 + jj;
+      unsigned int kw = 0u, vw = 0u;
+      if (j <= last) {
+        const size_t off = (size_t)j * (size_t)kv_dim + (size_t)kvh * head_dim + 2 * (size_t)d2;
+        kw = __ldg((const unsigned int *)(kc + off));
+        vw = __ldg((const unsigned int *)(vc + off));
+      }
+      sK[jj][2 * d2] = vl_h2f((unsigned short)(kw & 0xFFFFu));
+      sK[jj][2 * d2 + 1] = vl_h2f((unsigned short)(kw >> 16));
+      sV[jj][2 * d2] = vl_h2f((unsigned short)(vw & 0xFFFFu));
+      sV[jj][2 * d2 + 1] = vl_h2f((unsigned short)(vw >> 16));
+    }
+    VL_SYNC();
+    float s[2] = {0.0f, 0.0f};
+    for (int d = 0; d < head_dim; d++) {
+      const float kd = sK[lane][d];
+      s[0] += sQ[2 * wp][d] * kd;
+      s[1] += sQ[2 * wp + 1][d] * kd;
+    }
+    float p[2];
+#pragma unroll
+    for (int r = 0; r < 2; r++) {
+      const int t = t0 + 2 * wp + r;
+      if (t >= M || j0 + lane > start + t) s[r] = AT_NEG_INF; // causal (and rows past M)
+      const float mn = fmaxf(mx[r], vl_wmax_all(s[r]));
+      float corr = 1.0f;
+      p[r] = 0.0f;
+      if (mn != AT_NEG_INF) { // a row past M sees no key
+        corr = __expf(mx[r] - mn);
+        p[r] = __expf(s[r] - mn);
+      }
+      l[r] = l[r] * corr + vl_wsum(p[r]);
+      mx[r] = mn;
+#pragma unroll
+      for (int k = 0; k < AD / WARP; k++) acc[r][k] *= corr;
+    }
+    for (int jj = 0; jj < AK; jj++) {
+      const float p0 = vl_shfl(p[0], jj), p1 = vl_shfl(p[1], jj);
+#pragma unroll
+      for (int k = 0; k < AD / WARP; k++) {
+        if (k < nd) {
+          const float v = sV[jj][lane + WARP * k];
+          acc[0][k] += p0 * v;
+          acc[1][k] += p1 * v;
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < 2; r++) {
+    const int t = t0 + 2 * wp + r;
+    if (t >= M) continue;
+    float *orow = out + ((size_t)t * n_heads + h) * head_dim;
+    const float inv = 1.0f / l[r];
+#pragma unroll
+    for (int k = 0; k < AD / WARP; k++)
+      if (k < nd) orow[lane + WARP * k] = acc[r][k] * inv;
+  }
+}
