@@ -440,3 +440,163 @@ VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q8_0, vx_32, vd_q8_0, 4, 34u, 40u)
 VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q4_k, vx_q4_k, vd_q4_k, 16, 144u, 320u)
 VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q5_k, vx_q4_k, vd_q5_k, 16, 176u, 320u)
 VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q6_k, vx_q6_k, vd_q6_k, 16, 210u, 320u)
+
+// ---- several activation rows per launch (batched decode: 2..4 rows) ----
+// The decode kernels above launch one grid row per activation row, so each weight row is
+// read once per activation row. Here a warp decodes its two weight rows once per block
+// into vl_w8 (signed quants, scale a, bias b for the Q8_1 block's d * sum term) and applies
+// them to up to 4 activation rows: partial = a * X.d * dot(q, X.q) + b * X.s.
+// Grid ((N + 7) / 8, 1), block (32, 4), M <= 4.
+struct vl_w8 {
+  int q[4];
+  float a, b;
+};
+__device__ __forceinline__ int vl_sub8(int q, unsigned int o4) { // bytes 0..127 minus o, signed
+  return (int)((((unsigned int)q | 0x80808080u) - o4) ^ 0x80808080u);
+}
+__device__ __forceinline__ vl_w8 vw_q4_0(const unsigned char *wb, int p) {
+  vl_w8 W;
+  const int sh = (p >> 1) * 4;
+  W.q[0] = vl_sub8((vl_load_int_b2(wb + 2 + (p & 1) * 8) >> sh) & 0x0F0F0F0F, 0x08080808u);
+  W.q[1] = vl_sub8((vl_load_int_b2(wb + 6 + (p & 1) * 8) >> sh) & 0x0F0F0F0F, 0x08080808u);
+  W.q[2] = W.q[3] = 0;
+  W.a = vl_half_to_float(__ldg((const unsigned short *)wb));
+  W.b = 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q4_1(const unsigned char *wb, int p) {
+  vl_w8 W;
+  const int sh = (p >> 1) * 4;
+  W.q[0] = (vl_load_int_b4(wb + 4 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  W.q[1] = (vl_load_int_b4(wb + 8 + (p & 1) * 8) >> sh) & 0x0F0F0F0F;
+  W.q[2] = W.q[3] = 0;
+  W.a = vl_half_to_float(__ldg((const unsigned short *)wb));
+  W.b = p == 0 ? vl_half_to_float(__ldg((const unsigned short *)wb + 1)) : 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q5_0(const unsigned char *wb, int p) {
+  vl_w8 W;
+  const int sh = (p >> 1) * 4;
+  const unsigned int qh = (unsigned int)vl_load_int_b2(wb + 2);
+  W.q[0] = vl_sub8(((vl_load_int_b2(wb + 6 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p), 0x10101010u);
+  W.q[1] = vl_sub8(((vl_load_int_b2(wb + 10 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p + 4), 0x10101010u);
+  W.q[2] = W.q[3] = 0;
+  W.a = vl_half_to_float(__ldg((const unsigned short *)wb));
+  W.b = 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q5_1(const unsigned char *wb, int p) {
+  vl_w8 W;
+  const int sh = (p >> 1) * 4;
+  const unsigned int qh = (unsigned int)vl_load_int_b4(wb + 4);
+  W.q[0] = ((vl_load_int_b4(wb + 8 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p);
+  W.q[1] = ((vl_load_int_b4(wb + 12 + (p & 1) * 8) >> sh) & 0x0F0F0F0F) | vl_qh_nibble(qh, 8 * p + 4);
+  W.q[2] = W.q[3] = 0;
+  W.a = vl_half_to_float(__ldg((const unsigned short *)wb));
+  W.b = p == 0 ? vl_half_to_float(__ldg((const unsigned short *)wb + 1)) : 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q8_0(const unsigned char *wb, int p) {
+  vl_w8 W;
+  W.q[0] = vl_load_int_b2(wb + 2 + 8 * p);
+  W.q[1] = vl_load_int_b2(wb + 6 + 8 * p);
+  W.q[2] = W.q[3] = 0;
+  W.a = vl_half_to_float(__ldg((const unsigned short *)wb));
+  W.b = 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q4_k(const unsigned char *wb, int t) {
+  vl_w8 W;
+  const int j = t >> 1, h = t & 1;
+  const unsigned char *q = wb + 16 + (j >> 1) * 32 + h * 16;
+  const int sh = (j & 1) * 4;
+#pragma unroll
+  for (int i = 0; i < 4; i++) W.q[i] = (vl_load_int_b4(q + 4 * i) >> sh) & 0x0F0F0F0F;
+  int sc, mn;
+  vl_k4_scale_min(wb + 4, j, &sc, &mn);
+  const unsigned int dd = (unsigned int)vl_load_int_b4(wb);
+  W.a = vl_half_to_float((unsigned short)(dd & 0xFFFF)) * (float)sc;
+  W.b = h == 0 ? -vl_half_to_float((unsigned short)(dd >> 16)) * (float)mn : 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q5_k(const unsigned char *wb, int t) {
+  vl_w8 W;
+  const int j = t >> 1, h = t & 1;
+  const unsigned char *q = wb + 48 + (j >> 1) * 32 + h * 16;
+  const unsigned char *qh = wb + 16 + h * 16;
+  const int sh = (j & 1) * 4;
+#pragma unroll
+  for (int i = 0; i < 4; i++)
+    W.q[i] = ((vl_load_int_b4(q + 4 * i) >> sh) & 0x0F0F0F0F) | (((vl_load_int_b4(qh + 4 * i) >> j) & 0x01010101) << 4);
+  int sc, mn;
+  vl_k4_scale_min(wb + 4, j, &sc, &mn);
+  const unsigned int dd = (unsigned int)vl_load_int_b4(wb);
+  W.a = vl_half_to_float((unsigned short)(dd & 0xFFFF)) * (float)sc;
+  W.b = h == 0 ? -vl_half_to_float((unsigned short)(dd >> 16)) * (float)mn : 0.0f;
+  return W;
+}
+__device__ __forceinline__ vl_w8 vw_q6_k(const unsigned char *wb, int t) {
+  vl_w8 W;
+  const int ip = t >> 3, k = (t >> 1) & 3, h = t & 1;
+  int L[4], H[4];
+  vl_load4_b2(wb + 64 * ip + (k & 1) * 32 + h * 16, L);
+  vl_load4_b2(wb + 128 + 32 * ip + h * 16, H);
+#pragma unroll
+  for (int i = 0; i < 4; i++)
+    W.q[i] = vl_sub8(((L[i] >> ((k >> 1) * 4)) & 0x0F0F0F0F) | (((H[i] >> (2 * k)) & 0x03030303) << 4), 0x20202020u);
+  W.a = vl_half_to_float(__ldg((const unsigned short *)(wb + 208))) *
+        (float)(signed char)__ldg(wb + 192 + 8 * ip + 2 * k + h);
+  W.b = 0.0f;
+  return W;
+}
+// NQ ints per thread: 2 for the 32-value formats, 4 for the K-quants
+#define VL_MMVQ_BATCH_KERNEL(NAME, VX, VW, TPU, BYTES, XSTRIDE, NQ)                             \
+  extern "C" __global__ void __launch_bounds__(THREADS)                                       \
+  NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
+       float *__restrict__ y, int M, int nb, int N) {                                         \
+    const int row0 = (blockIdx.x * (THREADS / WARP) + threadIdx.y) * 2;                        \
+    if (row0 >= N) return;                                                                     \
+    const int lane = threadIdx.x;                                                              \
+    const int t = lane % (TPU);                                                                \
+    const bool two = row0 + 1 < N;                                                             \
+    const unsigned char *w0 = w + (size_t)row0 * (size_t)nb * (BYTES);                         \
+    const unsigned char *w1 = two ? w0 + (size_t)nb * (BYTES) : w0;                            \
+    const size_t xs = (size_t)nb * (XSTRIDE);                                                  \
+    float acc[2][4];                                                                           \
+    _Pragma("unroll") for (int r = 0; r < 2; r++)                                              \
+      _Pragma("unroll") for (int m = 0; m < 4; m++) acc[r][m] = 0.0f;                          \
+    for (int b = lane / (TPU); b < nb; b += WARP / (TPU)) {                                    \
+      const vl_w8 W0 = VW(w0 + (size_t)b * (BYTES), t);                                        \
+      const vl_w8 W1 = VW(w1 + (size_t)b * (BYTES), t);                                        \
+      _Pragma("unroll") for (int m = 0; m < 4; m++) {                                          \
+        if (m < M) {                                                                           \
+          const vl_x8 X = VX(xq + (size_t)m * xs + (size_t)b * (XSTRIDE), t);                  \
+          int d0 = 0, d1 = 0;                                                                  \
+          _Pragma("unroll") for (int i = 0; i < (NQ); i++) {                                   \
+            d0 = vl_dp4a(W0.q[i], X.q[i], d0);                                                 \
+            d1 = vl_dp4a(W1.q[i], X.q[i], d1);                                                 \
+          }                                                                                    \
+          acc[0][m] += W0.a * X.d * (float)d0 + W0.b * X.s;                                    \
+          acc[1][m] += W1.a * X.d * (float)d1 + W1.b * X.s;                                    \
+        }                                                                                      \
+      }                                                                                        \
+    }                                                                                          \
+    _Pragma("unroll") for (int m = 0; m < 4; m++) {                                            \
+      if (m < M) {                                                                             \
+        const float t0 = vl_warp_reduce_r(acc[0][m], 2 * m);                                   \
+        const float t1 = vl_warp_reduce_r(acc[1][m], 2 * m + 1);                               \
+        if (lane == VL_WARP_WRITER) {                                                          \
+          y[(size_t)m * (size_t)N + (size_t)row0] = t0;                                        \
+          if (two) y[(size_t)m * (size_t)N + (size_t)row0 + 1] = t1;                           \
+        }                                                                                      \
+      }                                                                                        \
+    }                                                                                          \
+  }
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q4_0, vx_32, vw_q4_0, 4, 18u, 40u, 2)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q4_1, vx_32, vw_q4_1, 4, 20u, 40u, 2)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q5_0, vx_32, vw_q5_0, 4, 22u, 40u, 2)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q5_1, vx_32, vw_q5_1, 4, 24u, 40u, 2)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q8_0, vx_32, vw_q8_0, 4, 34u, 40u, 2)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q4_k, vx_q4_k, vw_q4_k, 16, 144u, 320u, 4)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q5_k, vx_q4_k, vw_q5_k, 16, 176u, 320u, 4)
+VL_MMVQ_BATCH_KERNEL(vira_cu_mmvqb_q6_k, vx_q6_k, vw_q6_k, 16, 210u, 320u, 4)

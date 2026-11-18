@@ -248,6 +248,11 @@ extern "C" void run_mmvq2q_##fmt(const unsigned char *xq, const unsigned char *w
 extern "C" void run_mmvq_id_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N, const int *ids, const int *xrow, long long es) { \
   VL_LAUNCH2(vira_cu_mmvq_id_##fmt, (N + 7) / 8, M, 32, 4, xq, w, y, M, nb, N, ids, xrow, es); \
 }
+#define VL_RUN_B(fmt) \
+extern "C" void run_mmvqb_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) { \
+  VL_LAUNCH2(vira_cu_mmvqb_##fmt, (N + 7) / 8, 1, 32, 4, xq, w, y, M, nb, N); \
+}
+VL_RUN_B(q4_0) VL_RUN_B(q4_1) VL_RUN_B(q5_0) VL_RUN_B(q5_1) VL_RUN_B(q8_0) VL_RUN_B(q4_k) VL_RUN_B(q5_k) VL_RUN_B(q6_k)
 VL_RUN_ID(q4_0) VL_RUN_ID(q4_1) VL_RUN_ID(q5_0) VL_RUN_ID(q5_1) VL_RUN_ID(q8_0) VL_RUN_ID(q4_k) VL_RUN_ID(q5_k) VL_RUN_ID(q6_k)
 VL_RUN_Q(q4_0) VL_RUN_Q(q4_1) VL_RUN_Q(q5_0) VL_RUN_Q(q5_1) VL_RUN_Q(q4_k) VL_RUN_Q(q5_k) VL_RUN_Q(q6_k)
 ''')
@@ -333,8 +338,10 @@ def main():
             xraw, xd, xq = q8_1_acts(rng, M, K)
             xf = (xq.astype(np.float64) * xd[..., None]).reshape(M, K)
             want = xf @ wf.reshape(N, K).astype(np.float64).T
-            for kind in ('mmvq2w_', 'mmvq2x_', 'mmvq2q_'):
-                if kind != 'mmvq2w_' and name == 'q8_0':
+            for kind in ('mmvq2w_', 'mmvq2x_', 'mmvq2q_', 'mmvqb_'):
+                if kind in ('mmvq2x_', 'mmvq2q_') and name == 'q8_0':
+                    continue
+                if kind == 'mmvqb_' and M > 4:
                     continue
                 y = np.full(M * N, np.nan, np.float32)
                 getattr(lib, 'run_' + kind + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), M, nbr, N)
