@@ -179,25 +179,29 @@ __device__ __forceinline__ void mq_q6_k_s(const unsigned char *row, int u, float
     for (int step = 0; step < (nunits / UPS) * 2; step++) {                                    \
       const int u = (step >> 1) * UPS; /* first unit of the 256-value slice */                  \
       const int hs = step & 1;          /* which half of it */                                  \
-      /* weights: thread fills ints of row tid / 2, half tid & 1 */                            \
+      /* weights: warp k fills rows k, k + 4, ..; lane i reads int i of the row, so a warp  */ \
+      /* reads 128 contiguous values (a thread per row made 16 scattered rows per load). */ \
       {                                                                                        \
-        const int r = tid >> 1, half = tid & 1;                                                \
-        const int n = n0 + r;                                                                  \
-        if (n < N) {                                                                           \
-          const unsigned char *row = w + (size_t)n * (size_t)nb * (BYTES);                    \
-          _Pragma("unroll 8") for (int i = half * 16; i < half * 16 + 16; i++)                   \
-            sW[r][i] = F##_q(row, u, 32 * hs + i);                                             \
-          if (half == 0) {                                                                     \
+        const int i = tid & 31;                                                                \
+        _Pragma("unroll 4") for (int r = tid >> 5; r < MQ_N; r += 4) {                         \
+          const int n = n0 + r;                                                                \
+          sW[r][i] = n < N ? F##_q(w + (size_t)n * (size_t)nb * (BYTES), u, 32 * hs + i) : 0;  \
+        }                                                                                      \
+        if (tid < MQ_N) { /* scales of row tid */                                              \
+          const int n = n0 + tid;                                                              \
+          if (n < N) {                                                                         \
             float a[16], c[8];                                                                 \
-            F##_s(row, u, a, c);                                                               \
-            _Pragma("unroll") for (int g = 0; g < 8; g++) sA[r][g] = a[8 * hs + g];            \
-            _Pragma("unroll") for (int g = 0; g < 4; g++) sC[r][g] = c[4 * hs + g];            \
-          }                                                                                    \
-        } else {                                                                               \
-          for (int i = half * 16; i < half * 16 + 16; i++) sW[r][i] = 0;                       \
-          if (half == 0) {                                                                     \
-            for (int g = 0; g < 8; g++) sA[r][g] = 0.0f;                                       \
-            for (int g = 0; g < 4; g++) sC[r][g] = 0.0f;                                       \
+            F##_s(w + (size_t)n * (size_t)nb * (BYTES), u, a, c);                              \
+            if (hs) { /* constant indices keep a / c in registers */                           \
+              _Pragma("unroll") for (int g = 0; g < 8; g++) sA[tid][g] = a[8 + g];             \
+              _Pragma("unroll") for (int g = 0; g < 4; g++) sC[tid][g] = c[4 + g];             \
+            } else {                                                                           \
+              _Pragma("unroll") for (int g = 0; g < 8; g++) sA[tid][g] = a[g];                 \
+              _Pragma("unroll") for (int g = 0; g < 4; g++) sC[tid][g] = c[g];                 \
+            }                                                                                  \
+          } else {                                                                             \
+            for (int g = 0; g < 8; g++) sA[tid][g] = 0.0f;                                     \
+            for (int g = 0; g < 4; g++) sC[tid][g] = 0.0f;                                     \
           }                                                                                    \
         }                                                                                      \
       }                                                                                        \
