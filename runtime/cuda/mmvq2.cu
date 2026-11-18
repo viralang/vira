@@ -227,6 +227,13 @@ __device__ __forceinline__ float vd_q5_1(const unsigned char *wb, const vl_x8 &X
   return r;
 }
 
+// Q8_0 (34 B): f16 d, int8 qs[32]; v = d * q. TPU 4: thread part p takes values 8p..8p+7.
+__device__ __forceinline__ float vd_q8_0(const unsigned char *wb, const vl_x8 &X, int p) {
+  const int q0 = vl_load_int_b2(wb + 2 + 8 * p), q1 = vl_load_int_b2(wb + 6 + 8 * p);
+  const int dot = vl_dp4a(q1, X.q[1], vl_dp4a(q0, X.q[0], 0));
+  return vl_half_to_float(__ldg((const unsigned short *)wb)) * X.d * (float)dot;
+}
+
 // K-quant 6-bit scale and min of sub-block j (ggml get_scale_min_k4).
 __device__ __forceinline__ void vl_k4_scale_min(const unsigned char *sc, int j, int *s, int *m) {
   if (j < 4) {
@@ -391,3 +398,45 @@ VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q5_1, vx_32, vd_q5_1, 4, 24u, 40u)
 VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q4_k, vx_q4_k, vd_q4_k, 16, 144u, 320u)
 VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q5_k, vx_q4_k, vd_q5_k, 16, 176u, 320u)
 VL_MMVQ_WARP_KERNEL(vira_cu_mmvq2w_q6_k, vx_q6_k, vd_q6_k, 16, 210u, 320u)
+
+// ---- MoE: all (token, expert) pairs of a layer in one launch ----
+// Row m of the output uses expert ids[m] (weights at w + ids[m] * estride bytes, the expert's
+// [N, K] slice of a [n_expert, N, K] tensor) and activation row xrow[m] (xrow == NULL: m).
+// Two rows per warp as the decode kernels; grid ((N + 7) / 8, pairs), block (32, 4).
+#define VL_MMVQ_ID_KERNEL(NAME, VX, VD, TPU, BYTES, XSTRIDE)                                   \
+  extern "C" __global__ void __launch_bounds__(THREADS)                                       \
+  NAME(const unsigned char *__restrict__ xq, const unsigned char *__restrict__ w,             \
+       float *__restrict__ y, int M, int nb, int N, const int *__restrict__ ids,              \
+       const int *__restrict__ xrow, long long estride) {                                     \
+    const int row0 = (blockIdx.x * (THREADS / WARP) + threadIdx.y) * 2;                        \
+    const int m = blockIdx.y;                                                                  \
+    if (row0 >= N || m >= M) return;                                                           \
+    const int lane = threadIdx.x;                                                              \
+    const int t = lane % (TPU);                                                                \
+    const unsigned char *we = w + (size_t)__ldg(ids + m) * (size_t)estride;                    \
+    const bool two = row0 + 1 < N;                                                             \
+    const unsigned char *w0 = we + (size_t)row0 * (size_t)nb * (BYTES);                        \
+    const unsigned char *w1 = two ? w0 + (size_t)nb * (BYTES) : w0;                            \
+    const int xr = xrow ? __ldg(xrow + m) : m;                                                 \
+    const unsigned char *xp = xq + (size_t)xr * (size_t)nb * (XSTRIDE);                        \
+    float acc0 = 0.0f, acc1 = 0.0f;                                                            \
+    _Pragma("unroll 2") for (int b = lane / (TPU); b < nb; b += WARP / (TPU)) {                \
+      const vl_x8 X = VX(xp + (size_t)b * (XSTRIDE), t);                                       \
+      acc0 += VD(w0 + (size_t)b * (BYTES), X, t);                                              \
+      acc1 += VD(w1 + (size_t)b * (BYTES), X, t);                                              \
+    }                                                                                          \
+    const float t0 = vl_warp_reduce_r(acc0, 0);                                                \
+    const float t1 = vl_warp_reduce_r(acc1, 1);                                                \
+    if (lane == VL_WARP_WRITER) {                                                              \
+      y[(size_t)m * (size_t)N + (size_t)row0] = t0;                                            \
+      if (two) y[(size_t)m * (size_t)N + (size_t)row0 + 1] = t1;                               \
+    }                                                                                          \
+  }
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q4_0, vx_32, vd_q4_0, 4, 18u, 40u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q4_1, vx_32, vd_q4_1, 4, 20u, 40u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q5_0, vx_32, vd_q5_0, 4, 22u, 40u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q5_1, vx_32, vd_q5_1, 4, 24u, 40u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q8_0, vx_32, vd_q8_0, 4, 34u, 40u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q4_k, vx_q4_k, vd_q4_k, 16, 144u, 320u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q5_k, vx_q4_k, vd_q5_k, 16, 176u, 320u)
+VL_MMVQ_ID_KERNEL(vira_cu_mmvq_id_q6_k, vx_q6_k, vd_q6_k, 16, 210u, 320u)

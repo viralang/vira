@@ -112,3 +112,19 @@ extern "C" __global__ void vira_cu_moe_act_f32(float *__restrict__ g, const floa
   }
   g[i] = r;
 }
+
+// MoE weighted sum: out[t, d] = sum_k wt[t * n_used + k] * y[pos[t * n_used + k], d].
+// Grid ((D + 255) / 256, M), block 256.
+extern "C" __global__ void vira_cu_moe_sum_f32(const float *__restrict__ y, const float *__restrict__ wt,
+                                              const int *__restrict__ pos, float *__restrict__ out,
+                                              int M, int n_used, int D) {
+  const int d = blockIdx.x * blockDim.x + threadIdx.x;
+  const int t = blockIdx.y;
+  if (d >= D || t >= M) return;
+  float acc = 0.0f;
+  for (int k = 0; k < n_used; k++) {
+    const int i = t * n_used + k;
+    acc += wt[i] * y[(size_t)pos[i] * (size_t)D + d];
+  }
+  out[(size_t)t * (size_t)D + d] = acc;
+}

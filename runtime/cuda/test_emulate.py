@@ -56,6 +56,9 @@ def build_fused():
 extern "C" void run_moe_act(float *g, const float *u, int n, int act, float lim) {
   VL_LAUNCH(vira_cu_moe_act_f32, (n + 255) / 256, 1, 256, g, u, n, act, lim);
 }
+extern "C" void run_moe_sum(const float *y, const float *wt, const int *pos, float *out, int M, int n_used, int D) {
+  VL_LAUNCH(vira_cu_moe_sum_f32, (D + 255) / 256, M, 256, y, wt, pos, out, M, n_used, D);
+}
 extern "C" void run_rmsnorm_q8_1(const float *x, const float *w, float *y, unsigned char *q8, int rows, int cols, float eps) {
   VL_LAUNCH_THREADED(vira_cu_rmsnorm_q8_1_f32, (cols / 32 + 7) / 8, rows, 256, x, w, y, q8, cols, eps);
 }
@@ -95,6 +98,17 @@ def check_fused(rng):
     """rmsnorm + Q8_1 against NumPy: the rmsnorm, then the Q8_1 rule of vira_cu_quantize_q8_1."""
     lib = build_fused()
     ok = check_moe_act(lib, rng)
+    M, nu, D, P = 3, 4, 300, 12
+    yv = rng.standard_normal((P, D)).astype(np.float32)
+    wt = rng.random(M * nu).astype(np.float32)
+    pos = rng.permutation(P).astype(np.int32)
+    out = np.zeros((M, D), np.float32)
+    lib.run_moe_sum(yv.ctypes.data_as(ctypes.c_void_p), wt.ctypes.data_as(ctypes.c_void_p), pos.ctypes.data_as(ctypes.c_void_p),
+                    out.ctypes.data_as(ctypes.c_void_p), M, nu, D)
+    want = np.stack([sum(wt[t * nu + k] * yv[pos[t * nu + k]].astype(np.float64) for k in range(nu)) for t in range(M)])
+    e = np.abs(out - want).max() / np.abs(want).max()
+    ok &= bool(e < 1e-6)
+    print('moe_sum  max rel err %.1e  %s' % (e, 'ok' if e < 1e-6 else 'FAIL'))
     for rows, cols in [(1, 64), (1, 4096), (2, 1024), (4, 2048), (3, 96), (1, 5120)]:
         x = rng.standard_normal((rows, cols)).astype(np.float32)
         x[0, :32] = 0.0  # an all-zero Q8_1 block (amax == 0)
@@ -182,6 +196,11 @@ VL_RUN_X(q4_0) VL_RUN_X(q4_1) VL_RUN_X(q5_0) VL_RUN_X(q5_1) VL_RUN_X(q4_k) VL_RU
 extern "C" void run_mmvq2q_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) { \
   VL_LAUNCH2(vira_cu_mmvq2q_##fmt, (N + 15) / 16, M, 32, 4, xq, w, y, M, nb, N); \
 }
+#define VL_RUN_ID(fmt) \
+extern "C" void run_mmvq_id_##fmt(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N, const int *ids, const int *xrow, long long es) { \
+  VL_LAUNCH2(vira_cu_mmvq_id_##fmt, (N + 7) / 8, M, 32, 4, xq, w, y, M, nb, N, ids, xrow, es); \
+}
+VL_RUN_ID(q4_0) VL_RUN_ID(q4_1) VL_RUN_ID(q5_0) VL_RUN_ID(q5_1) VL_RUN_ID(q8_0) VL_RUN_ID(q4_k) VL_RUN_ID(q5_k) VL_RUN_ID(q6_k)
 VL_RUN_Q(q4_0) VL_RUN_Q(q4_1) VL_RUN_Q(q5_0) VL_RUN_Q(q5_1) VL_RUN_Q(q4_k) VL_RUN_Q(q5_k) VL_RUN_Q(q6_k)
 ''')
     subprocess.check_call(['g++', '-std=c++20', '-O2', '-shared', '-fPIC', '-pthread', '-I', HERE, src, '-o', out])
@@ -234,8 +253,29 @@ def main():
             good = bool(err < 1e-5)
             ok &= good
             print('%-12s M=%d K=%5d N=%3d  max rel err %.2e  %s' % (kname, M, K, N, err, 'ok' if good else 'FAIL'))
-    # every format against the runtime's CPU dequantiser
     oracle = build_oracle()
+    # MoE: pairs (expert ids[m], activation row xrow[m]) in one launch
+    for name, dt, size, qk, f16_at in FORMATS:
+        n_exp, K, N, T, P = 5, 512, 11, 3, 7
+        nbr = K // qk
+        raw = random_blocks(rng, name, n_exp * N * nbr, size, f16_at)
+        wf = np.zeros(n_exp * N * K, np.float32)
+        oracle.oracle(dt, raw.tobytes(), ctypes.c_size_t(n_exp * N * nbr), wf.ctypes.data_as(ctypes.c_void_p))
+        wf = wf.reshape(n_exp, N, K).astype(np.float64)
+        xraw, xd, xq = q8_1_acts(rng, T, K)
+        xf = (xq.astype(np.float64) * xd[..., None]).reshape(T, K)
+        ids = rng.integers(0, n_exp, P).astype(np.int32)
+        xrow = rng.integers(0, T, P).astype(np.int32)
+        want = np.stack([wf[ids[m]] @ xf[xrow[m]] for m in range(P)])
+        y = np.full(P * N, np.nan, np.float32)
+        getattr(lib, 'run_mmvq_id_' + name)(xraw, raw.tobytes(), y.ctypes.data_as(ctypes.c_void_p), P, nbr, N,
+                                            ids.ctypes.data_as(ctypes.c_void_p), xrow.ctypes.data_as(ctypes.c_void_p),
+                                            ctypes.c_longlong(N * nbr * size))
+        err = np.abs(y.reshape(P, N) - want).max() / max(1e-9, np.abs(want).max())
+        good = bool(err < 1e-4)
+        ok &= good
+        print('mmvq_id_%-5s pairs=%d  vs CPU dequant: max rel err %.2e  %s' % (name, P, err, 'ok' if good else 'FAIL'))
+    # every format against the runtime's CPU dequantiser
     for name, dt, size, qk, f16_at in FORMATS:
         for M, K, N in [(1, 256, 5), (1, 4096, 9), (2, 2048, 6), (4, 1536, 3), (1, 12288, 2), (1, 768, 19)]:
             nbr = K // qk
