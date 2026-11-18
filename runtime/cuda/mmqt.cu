@@ -55,6 +55,13 @@ __device__ __forceinline__ void vl_mma(int &d0, int &d1, int a, int b) {
       : "+r"(d0), "+r"(d1)
       : "r"(a), "r"(b));
 }
+// d0, d1 = A x B + c (c in both): the first mma of a group starts at the magic constant
+// without a register move per accumulator
+__device__ __forceinline__ void vl_mma_c(int &d0, int &d1, int a, int b, int c) {
+  asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%4, %4};"
+      : "=r"(d0), "=r"(d1)
+      : "r"(a), "r"(b), "r"(c));
+}
 #endif
 
 #define VL_MAGIC 0x4B400000
@@ -313,15 +320,14 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
       for (int b = 0; b < 4; b++) vl_lds2(&sX[wm + 8 * b + gr][8 * tg + 2 * kb], bf[b]);
       int dot[4][4][2];
 #pragma unroll
-      for (int a = 0; a < 4; a++)
-#pragma unroll
-        for (int b = 0; b < 4; b++) dot[a][b][0] = dot[a][b][1] = VL_MAGIC;
-#pragma unroll
       for (int h = 0; h < 2; h++) {
 #pragma unroll
         for (int a = 0; a < 4; a++)
 #pragma unroll
-          for (int b = 0; b < 4; b++) vl_mma(dot[a][b][0], dot[a][b][1], af[a][h], bf[b][h]);
+          for (int b = 0; b < 4; b++) {
+            if (h == 0 || F::S16) vl_mma_c(dot[a][b][0], dot[a][b][1], af[a][h], bf[b][h], VL_MAGIC);
+            else vl_mma(dot[a][b][0], dot[a][b][1], af[a][h], bf[b][h]);
+          }
         if (F::S16 || h == 1) { // float step: per 16 values (Q6_K) or per 32
 #pragma unroll
           for (int a = 0; a < 4; a++) {
@@ -331,7 +337,6 @@ __device__ __forceinline__ void vl_mmqt(const unsigned char *__restrict__ xq, co
 #pragma unroll
               for (int l = 0; l < 2; l++) {
                 acc[a][b][l] += s * xd[b][l] * (__int_as_float(dot[a][b][l]) - VL_MAGIC_F);
-                dot[a][b][l] = VL_MAGIC;
               }
           }
         }

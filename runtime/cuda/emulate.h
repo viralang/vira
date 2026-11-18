@@ -187,3 +187,8 @@ static inline float vl_shfl(float v, int src) {
   vl_warp_bar[w]->arrive_and_wait();
   return r;
 }
+static inline void vl_mma_c(int &d0, int &d1, int a, int b, int c) {
+  d0 = c;
+  d1 = c;
+  vl_mma(d0, d1, a, b);
+}
