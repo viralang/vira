@@ -108,6 +108,15 @@ static inline int vl_warp_sum_i(int v) {
   vl_warp_bar[w]->arrive_and_wait();
   return s;
 }
+static inline float vl_warp_sum_f(float v) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_f[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  float s = 0.0f;
+  for (int i = 0; i < WARP_EMU; i++) s += vl_wbuf_f[w * WARP_EMU + i];
+  vl_warp_bar[w]->arrive_and_wait();
+  return s;
+}
 // 1-D blocks of `threads` threads, grid (gx, gy).
 #define VL_LAUNCH_THREADED(k, gx, gy, threads, ...)                              \
   for (int by_ = 0; by_ < (gy); by_++)                                           \

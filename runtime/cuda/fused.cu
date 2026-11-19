@@ -25,6 +25,11 @@ __device__ __forceinline__ int vl_warp_sum_i(int v) {
   for (int o = WARP / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
   return v;
 }
+__device__ __forceinline__ float vl_warp_sum_f(float v) {
+#pragma unroll
+  for (int o = WARP / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+  return v;
+}
 __device__ __forceinline__ float vl_ex2_approx(float x) {
   float r;
   asm("ex2.approx.f32 %0, %1;" : "=f"(r) : "f"(x));
@@ -230,4 +235,141 @@ extern "C" __global__ void vira_cu_rope_norm_dpos_f32(const float *__restrict__ 
   const float q1 = q[base + 1u];
   out[base] = q0 * c - q1 * s;
   out[base + 1u] = q0 * s + q1 * c;
+}
+
+// Squared ReLU in place: x[i] = max(x[i], 0)^2 (Nemotron-H MLP). Grid (n + 255) / 256, block 256.
+extern "C" __global__ void vira_cu_relu_sqr_f32(float *__restrict__ x, int n) {
+  const int i = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+  if (i >= n) return;
+  const float v = x[i] > 0.0f ? x[i] : 0.0f;
+  x[i] = v * v;
+}
+
+// Mamba-2 stage 1: causal 1D depthwise conv + optional bias + SiLU across M tokens.
+// One thread per channel c in [0, d_conv_ch); conv_state [d_conv - 1, d_conv_ch] stays in
+// registers across all M tokens and is written back once. Requires 1 <= d_conv <= 8.
+// Grid (d_conv_ch + 255) / 256, block 256.
+extern "C" __global__ void vira_cu_mamba2_conv_f32(const float *__restrict__ zxBCdt,
+                                                   const float *__restrict__ conv_w,
+                                                   const float *__restrict__ conv_b, int has_conv_b,
+                                                   float *__restrict__ conv_state,
+                                                   float *__restrict__ xbc_act,
+                                                   int M, int start_pos, int d_inner,
+                                                   int d_conv_ch, int d_in_proj, int d_conv) {
+  const int c = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+  if (c >= d_conv_ch) return;
+  const int hist = d_conv - 1;
+  float cw[8];
+  const float *cwp = conv_w + (size_t)c * (size_t)d_conv;
+  for (int k = 0; k < d_conv; k++) cw[k] = cwp[k];
+  const float bias = has_conv_b ? conv_b[c] : 0.0f;
+  float st[8];
+  for (int k = 0; k < hist; k++) {
+    st[k] = (start_pos == 0) ? 0.0f : conv_state[(size_t)k * (size_t)d_conv_ch + (size_t)c];
+  }
+  for (int t = 0; t < M; t++) {
+    const float x_in = zxBCdt[(size_t)t * (size_t)d_in_proj + (size_t)d_inner + (size_t)c];
+    float acc = bias;
+    for (int k = 0; k < hist; k++) acc += st[k] * cw[k];
+    acc += x_in * cw[hist];
+    xbc_act[(size_t)t * (size_t)d_conv_ch + (size_t)c] = acc / (1.0f + expf(-acc));
+    for (int k = 0; k < hist - 1; k++) st[k] = st[k + 1];
+    if (hist > 0) st[hist - 1] = x_in;
+  }
+  for (int k = 0; k < hist; k++) {
+    conv_state[(size_t)k * (size_t)d_conv_ch + (size_t)c] = st[k];
+  }
+}
+
+// Mamba-2 stage 2: SSM recurrence + D skip + z SwiGLU gate across M tokens.
+// One warp (32 lanes) per output channel idx in [0, d_inner); block 128 = 4 warps.
+// Each lane holds up to 8 state elements (d_state <= 256) in registers across all M tokens.
+// Grid (d_inner + 3) / 4, block 128.
+extern "C" __global__ void __launch_bounds__(128)
+vira_cu_mamba2_ssm_f32(const float *__restrict__ zxBCdt, const float *__restrict__ xbc_act,
+                       const float *__restrict__ dt_b, const float *__restrict__ ssm_a,
+                       const float *__restrict__ ssm_d, float *__restrict__ ssm_state,
+                       float *__restrict__ out, int M, int start_pos, int d_inner,
+                       int d_state, int n_head, int n_group, int d_conv_ch, int d_in_proj) {
+  const int wp = (int)threadIdx.x / WARP;
+  const int lane = (int)threadIdx.x & (WARP - 1);
+  const int idx = (int)blockIdx.x * 4 + wp;
+  if (idx >= d_inner) return;
+
+  const int head_dim = d_inner / n_head;
+  const int h = idx / head_dim;
+  const int g = h / (n_head / n_group);
+  const float a_h = ssm_a[h];
+  const float d_h = ssm_d[h];
+  const float dtb_h = dt_b[h];
+  const int n_chunks = (d_state + WARP - 1) / WARP;
+
+  float s[8];
+  float *st_row = ssm_state + (size_t)idx * (size_t)d_state;
+  for (int k = 0; k < n_chunks; k++) {
+    const int n = lane + k * WARP;
+    s[k] = (start_pos == 0 || n >= d_state) ? 0.0f : st_row[n];
+  }
+
+  for (int t = 0; t < M; t++) {
+    const float *zx_row = zxBCdt + (size_t)t * (size_t)d_in_proj;
+    const float *act_row = xbc_act + (size_t)t * (size_t)d_conv_ch;
+    const float dt_raw = zx_row[d_inner + d_conv_ch + h] + dtb_h;
+    const float dt_h = dt_raw > 20.0f ? dt_raw : log1pf(expf(dt_raw));
+    const float dA = expf(dt_h * a_h);
+    const float x_hp = act_row[idx];
+    const float dt_x = dt_h * x_hp;
+    const float *Bg = act_row + d_inner + (size_t)g * (size_t)d_state;
+    const float *Cg = act_row + d_inner + (size_t)(n_group + g) * (size_t)d_state;
+
+    float acc = 0.0f;
+    for (int k = 0; k < n_chunks; k++) {
+      const int n = lane + k * WARP;
+      if (n < d_state) {
+        s[k] = s[k] * dA + dt_x * Bg[n];
+        acc += s[k] * Cg[n];
+      }
+    }
+    const float sum_y = vl_warp_sum_f(acc);
+    if (lane == 0) {
+      const float z_v = zx_row[idx];
+      const float y_hp = sum_y + d_h * x_hp;
+      out[(size_t)t * (size_t)d_inner + (size_t)idx] = (z_v / (1.0f + expf(-z_v))) * y_hp;
+    }
+  }
+
+  for (int k = 0; k < n_chunks; k++) {
+    const int n = lane + k * WARP;
+    if (n < d_state) st_row[n] = s[k];
+  }
+}
+
+// Mamba-2 stage 3: optional grouped RMSNorm in place on out [M, d_inner] with n_group groups.
+// Grid (n_group, M), block 256.
+extern "C" __global__ void __launch_bounds__(256)
+vira_cu_mamba2_norm_f32(float *__restrict__ out, const float *__restrict__ w,
+                        int d_inner, int n_group, float eps) {
+  __shared__ float sdata[256];
+  const int tid = (int)threadIdx.x;
+  const int g = (int)blockIdx.x;
+  const int t = (int)blockIdx.y;
+  const int gsize = d_inner / n_group;
+  float *yg = out + (size_t)t * (size_t)d_inner + (size_t)g * (size_t)gsize;
+  const float *wg = w + (size_t)g * (size_t)gsize;
+
+  float acc = 0.0f;
+  for (int i = tid; i < gsize; i += 256) {
+    const float v = yg[i];
+    acc += v * v;
+  }
+  sdata[tid] = acc;
+  VL_SYNC();
+  for (int o = 128; o > 0; o >>= 1) {
+    if (tid < o) sdata[tid] += sdata[tid + o];
+    VL_SYNC();
+  }
+  const float inv = vl_rsqrt_approx(sdata[0] / (float)gsize + eps);
+  for (int i = tid; i < gsize; i += 256) {
+    yg[i] = yg[i] * inv * wg[i];
+  }
 }
