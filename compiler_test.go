@@ -328,6 +328,12 @@ func buildTestCFlags(cCompiler, runtimeDir, cFile, binFile string, useSanitizer 
 		flags = append(flags, "-fsanitize=address,undefined")
 	}
 	flags = append(flags, "-pthread", "-I"+runtimeDir, cFile, "-o", binFile)
+	if runtime.GOOS != "windows" {
+		flags = append(flags, "-lm")
+		if runtime.GOOS == "linux" {
+			flags = append(flags, "-ldl")
+		}
+	}
 	return flags
 }
 

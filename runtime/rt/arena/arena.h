@@ -117,7 +117,9 @@ static inline bool vira_arena_contains(const vira_arena *a, const void *ptr) {
   return false;
 }
 
+#ifndef VIRA_NO_GPU
 static inline void _vira_gpu_invalidate_activations(const void *arena_ptr);
+#endif
 
 /**
  * Resets an arena's allocation offset back to zero, reusing allocated memory without system frees.
@@ -127,7 +129,9 @@ static inline void _vira_gpu_invalidate_activations(const void *arena_ptr);
 static inline void vira_arena_reset(vira_arena *a) {
   if (!a)
     return;
+#ifndef VIRA_NO_GPU
   _vira_gpu_invalidate_activations(a);
+#endif
   vira_arena_slab *cur = a->overflow_slabs;
   while (cur != NULL) {
     vira_arena_slab *next = cur->next;

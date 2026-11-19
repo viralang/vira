@@ -3506,9 +3506,12 @@ func (c *Checker) checkCallExpr(call *ast.CallExpr, scope *Scope) Type {
 				}
 			} else if tt, isTensor := recvType.(*TensorType); isTensor {
 				switch callee.Field.Name {
-				case "rows", "cols", "ndim", "numel":
+				case "rows", "cols", "ndim":
 					sig = &FnSig{Name: callee.Field.Name, Params: nil, ReturnType: TypeInt, Span: callee.SelSpan}
 					callName = "tensor." + callee.Field.Name
+				case "numel":
+					sig = &FnSig{Name: "numel", Params: nil, ReturnType: TypeI64, Span: callee.SelSpan}
+					callName = "tensor.numel"
 				case "dim", "stride":
 					sig = &FnSig{
 						Name:       callee.Field.Name,

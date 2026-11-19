@@ -25,7 +25,10 @@ static inline void vira_scheduler_submit_async(vira_task *task);
 static inline void vira_scheduler_await(vira_task *task);
 static inline int32_t vira_scheduler_num_workers(void);
 
+#ifndef _VIRA_TEAM_FN_DEFINED
+#define _VIRA_TEAM_FN_DEFINED
 typedef void (*_vira_team_fn)(void *ctx, int32_t tid, int32_t n_threads);
+#endif
 static inline void _vira_team_run(_vira_team_fn fn, void *ctx, int32_t max_threads);
 static inline void _vira_team_shutdown(void);
 static inline void vira_scheduler_shutdown(void);

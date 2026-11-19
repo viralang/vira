@@ -1001,7 +1001,7 @@ func (s *Server) computeBuiltinHover(text string, pos Position, word string) str
 	case "ndim":
 		return "**`tensor.ndim -> int`**\n\nReturns the active rank (`1` to `4`) of the strided tensor."
 	case "numel":
-		return "**`tensor.numel() -> int`**\n\nReturns the total element count across all active dimensions of the tensor."
+		return "**`tensor.numel() -> i64`**\n\nReturns the total 64-bit element count across all active dimensions of the tensor."
 	case "dim":
 		return "**`tensor.dim(axis: int) -> int`**\n\nReturns the extent of dimension `axis` (`0 <= axis < tensor.ndim`)."
 	case "stride":
@@ -1455,7 +1455,7 @@ func (s *Server) computeCompletions(uri string, text string, pos Position) []Com
 				CompletionItem{Label: "ndim", Kind: 10, Detail: "ndim: int", Documentation: "Active rank (1 to 4) of the strided tensor"},
 				CompletionItem{Label: "rows", Kind: 10, Detail: "rows: int", Documentation: "Leading row count (2D compatibility view)"},
 				CompletionItem{Label: "cols", Kind: 10, Detail: "cols: int", Documentation: "Trailing column count (2D compatibility view)"},
-				CompletionItem{Label: "numel", Kind: 2, Detail: "numel() -> int", Documentation: "Total element count across all active dimensions"},
+				CompletionItem{Label: "numel", Kind: 2, Detail: "numel() -> i64", Documentation: "Total 64-bit element count across all active dimensions"},
 				CompletionItem{Label: "dim", Kind: 2, Detail: "dim(axis: int) -> int", Documentation: "Dimension size along axis (0 <= axis < ndim)"},
 				CompletionItem{Label: "stride", Kind: 2, Detail: "stride(axis: int) -> int", Documentation: "Row-major element stride along axis"},
 				CompletionItem{Label: "reshape_2d", Kind: 2, Detail: "reshape_2d(d0: int, d1: int) -> tensor[f32]", Documentation: "Reshape to 2D (O(1) zero-copy view inside arena)"},

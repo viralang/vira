@@ -346,7 +346,17 @@ func (g *Generator) EmitFile(file *ast.File) string {
 		}
 	}
 
-	return strings.Replace(out.String(), mapOpsMarker, g.emitMapOpsDefinitions(), 1)
+	res := strings.Replace(out.String(), mapOpsMarker, g.emitMapOpsDefinitions(), 1)
+	if len(file.CIncludes) == 0 &&
+		!strings.Contains(res, "vira_tensor") &&
+		!strings.Contains(res, "vira_gpu") &&
+		!strings.Contains(res, "vira_gguf") &&
+		!strings.Contains(res, "vira_safetensors") &&
+		!strings.Contains(res, "vira_bin_") &&
+		!strings.Contains(res, "_vira_rt_quant") {
+		res = strings.Replace(res, "#include \"vira_rt.h\"\n", "#define VIRA_NO_GPU 1\n#include \"vira_rt.h\"\n", 1)
+	}
+	return res
 }
 
 // enumNameFn is the C helper that maps an enum value to its variant name.
@@ -4212,7 +4222,7 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			case "ndim":
 				return fmt.Sprintf("(%s).n_dims", tExpr)
 			case "numel":
-				return fmt.Sprintf("vira_tensor_numel(%s)", tExpr)
+				return fmt.Sprintf("vira_tensor_numel64(%s)", tExpr)
 			case "dim":
 				return fmt.Sprintf("vira_tensor_dim(%s, %s)", tExpr, argStrs[0])
 			case "stride":

@@ -12,28 +12,34 @@
 #include "rt/closure/closure.h"
 #include "rt/arena/arena.h"
 
+#ifndef VIRA_NO_GPU
 #include "rt/tensor/core.h"
 #include "rt/tensor/quant_registry.h"
 #include "rt/tensor/quant_simd.h"
 #include "rt/tensor/ops.h"
 #include "rt/tensor/autograd.h"
+#endif
 
 #include "rt/scheduler/scheduler.h"
 #include "rt/io/io.h"
 #include "rt/net/net.h"
 #include "rt/json/json.h"
 
+#ifndef VIRA_NO_GPU
 #include "rt/weights/bin.h"
 #include "rt/weights/safetensors.h"
 #include "rt/weights/gguf.h"
 
 #include "rt/llm/llm.h"
+#endif
 #include "rt/stdlib/stdlib.h"
 #include "rt/sys/sys.h"
 
 #include "rt/platform/telemetry.h"
 
+#ifndef VIRA_NO_GPU
 #include "vira_gpu.h"
+#endif
 #include "vira_gui.h"
 
 #endif // VIRA_RT_H

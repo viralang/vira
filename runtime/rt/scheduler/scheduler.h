@@ -58,6 +58,12 @@ typedef enum {
   VIRA_ACTOR_STOPPED = 2,
 } vira_actor_state;
 
+#ifndef _VIRA_TEAM_FN_DEFINED
+#define _VIRA_TEAM_FN_DEFINED
+typedef void (*_vira_team_fn)(void *ctx, int32_t tid, int32_t n_threads);
+#endif
+typedef struct _vira_actor_ctx vira_actor_ctx;
+
 struct _vira_actor_ctx {
   int32_t id;
   const char *name;
