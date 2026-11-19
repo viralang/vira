@@ -6229,7 +6229,10 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
     _vira_tls_gpu_fallback = false;
     return res;
   }
-  bool prefer_half = ((M <= 4) && (K >= 32)) || (_vira_gpu.has_tensor_cores && (M >= 16) && (N >= 16) && ((K & 15) == 0));
+  // Keep F32 weights in F32 (actual F16 GGUF tensors already take VIRA_WFMT_F16 via
+  // use_quant = true). Downcasting F32 weights (e.g. MoE routers, DeepSeek-V4 projections)
+  // to FP16 silently flips top-k routing / sparse-attention decisions.
+  bool prefer_half = false;
   _vira_gpu_wfmt wfmt = VIRA_WFMT_F32;
   vira_cl_int err = 0;
 
