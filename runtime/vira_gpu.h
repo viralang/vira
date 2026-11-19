@@ -6298,7 +6298,7 @@ static inline vira_tensor_f32 vira_gpu_linear(vira_arena *opt_arena,
          wfmt == VIRA_WFMT_Q5_0 || wfmt == VIRA_WFMT_Q5_1 ||
          wfmt == VIRA_WFMT_Q8_0) && ((K & 31) == 0)) {
       int32_t num_blocks_k = K >> 5;
-      if (M > 4) {
+      if (M > 4 && ((K & 255) == 0)) {
         vira_cu_function k_wmma = NULL;
         if (_vira_gpu.has_tensor_cores) {
           switch (wfmt) {
