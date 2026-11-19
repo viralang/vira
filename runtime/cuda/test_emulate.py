@@ -174,18 +174,23 @@ def build_mmq(kind='mmq'):
     body = '#define VL_EMULATE 1\n#include "%s/%s.cu"\n' % (HERE, kind)
     tm = 32 if kind == 'mmq' else 64
     for name, _, _, _, _ in FORMATS:
-        body += ('extern "C" void run_%s_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
-                 '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (N + 63) / 64, (M + %d) / %d, 128, xq, w, y, M, nb, N);\n}\n') % (
-                     kind, name, kind, name, tm - 1, tm)
+        if kind == 'mmqt':
+            body += ('extern "C" void run_%s_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
+                     '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (M + %d) / %d, (N + 63) / 64, 128, xq, w, y, M, nb, N);\n}\n') % (
+                         kind, name, kind, name, tm - 1, tm)
+        else:
+            body += ('extern "C" void run_%s_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
+                     '  VL_LAUNCH_THREADED(vira_cu_%s_%s, (N + 63) / 64, (M + %d) / %d, 128, xq, w, y, M, nb, N);\n}\n') % (
+                         kind, name, kind, name, tm - 1, tm)
     if kind == 'mmqt':
         for name, _, _, _, _ in FORMATS:
             for J in (128, 64):
                 body += ('extern "C" void run_mmqb%d_%s(const unsigned char *xq, const unsigned char *w, float *y, int M, int nb, int N) {\n'
-                         '  VL_LAUNCH_THREADED(vira_cu_mmqb%d_%s, (N + 127) / 128, (M + %d) / %d, 256, xq, w, y, M, nb, N);\n}\n') % (
+                         '  VL_LAUNCH_THREADED(vira_cu_mmqb%d_%s, (M + %d) / %d, (N + 127) / 128, 256, xq, w, y, M, nb, N);\n}\n') % (
                              J, name, J, name, J - 1, J)
         for name, _, _, _, _ in FORMATS:
             body += ('extern "C" void run_mmqg_%s(const unsigned char *xq, const unsigned char *wg, const unsigned char *wu, float *y, int M, int nb, int N, unsigned char *q4) {\n'
-                     '  VL_LAUNCH_THREADED(vira_cu_mmqg128_%s, (N + 63) / 64, (M + 127) / 128, 256, xq, wg, wu, y, M, nb, N, q4);\n}\n') % (name, name)
+                     '  VL_LAUNCH_THREADED(vira_cu_mmqg128_%s, (M + 127) / 128, (N + 63) / 64, 256, xq, wg, wu, y, M, nb, N, q4);\n}\n') % (name, name)
         body += ('extern "C" void run_quantize_x4(const float *x, unsigned char *q, int M, int K) {\n'
                  '  VL_LAUNCH_THREADED(vira_cu_quantize_q8_1x4, K / 128, M, 128, x, q, K);\n}\n')
     open(src, 'w').write(body)

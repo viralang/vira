@@ -126,8 +126,34 @@ static inline int vl_warp_sum_i(int v) {
 
 // attn.cu helpers
 #define __expf(x) expf(x)
+#if defined(__FLT16_MAX__)
 static inline float vl_h2f(unsigned short h) { _Float16 f; memcpy(&f, &h, 2); return (float)f; }
 static inline unsigned short vl_f2h(float x) { _Float16 f = (_Float16)x; unsigned short h; memcpy(&h, &f, 2); return h; }
+#else
+static inline float vl_h2f(unsigned short h) { return vl_half_to_float(h); }
+static inline unsigned short vl_f2h(float x) {
+  unsigned int u;
+  memcpy(&u, &x, 4);
+  const unsigned int sign = (u >> 16) & 0x8000u;
+  const int exp = (int)((u >> 23) & 0xFFu) - 127 + 15;
+  unsigned int mant = u & 0x7FFFFFu;
+  if (exp <= 0) {
+    if (exp < -10) return (unsigned short)sign;
+    mant |= 0x800000u;
+    const int sh = 14 - exp;
+    const unsigned int r = (mant >> (sh - 1)) & 1u;
+    const unsigned int s = (mant & ((1u << (sh - 1)) - 1u)) != 0u;
+    mant >>= sh;
+    if (r && (s || (mant & 1u))) mant++;
+    return (unsigned short)(sign | mant);
+  }
+  if (exp >= 31) return (unsigned short)(sign | 0x7C00u | (mant ? 1u : 0u));
+  const unsigned int r = (mant >> 12) & 1u, s = (mant & 0xFFFu) != 0u;
+  mant >>= 13;
+  if (r && (s || (mant & 1u))) mant++;
+  return (unsigned short)(sign + (((unsigned int)exp << 10) + mant));
+}
+#endif
 static float vl_wbuf_s[2048];
 static inline float vl_wsum(float v) {
   const int t = threadIdx.x, w = t / WARP_EMU;
@@ -236,3 +262,13 @@ static inline void vl_mma_f16(float *d, unsigned int a0, unsigned int a1, unsign
 static inline float vl_ex2_approx(float x) { return exp2f(x); }
 static inline int __float_as_int(float f) { int i; memcpy(&i, &f, 4); return i; }
 static inline float __fadd_rn(float a, float b) { return a + b; }
+static inline float __fmaf_rn(float a, float b, float c) { return fmaf(a, b, c); }
+static int vl_wbuf_xoi[2048];
+static inline int vl_shfl_xor_i(int v, int m) {
+  const int t = threadIdx.x, w = t / WARP_EMU;
+  vl_wbuf_xoi[t] = v;
+  vl_warp_bar[w]->arrive_and_wait();
+  const int r = vl_wbuf_xoi[w * WARP_EMU + ((t % WARP_EMU) ^ m)];
+  vl_warp_bar[w]->arrive_and_wait();
+  return r;
+}

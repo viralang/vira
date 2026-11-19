@@ -4143,7 +4143,7 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
       if (g->cuMemcpyHtoD(dx, hx, xbytes) != VIRA_CUDA_SUCCESS || g->cuMemcpyHtoD(dx4, hx4, xbytes) != VIRA_CUDA_SUCCESS ||
           g->cuMemcpyHtoD(dw, hw, (size_t)N * nbr * bs) != VIRA_CUDA_SUCCESS ||
           g->cuLaunchKernel(g->cu_k_mmq[idx], (N + 63) / 64, (M + 31) / 32, 1, 128, 1, 1, 0, NULL, a0, NULL) != VIRA_CUDA_SUCCESS ||
-          g->cuLaunchKernel(g->cu_k_mmqt[idx], (N + 63) / 64, (M + 63) / 64, 1, 128, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
+          g->cuLaunchKernel(g->cu_k_mmqt[idx], (M + 63) / 64, (N + 63) / 64, 1, 128, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
           g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(y0, dy0, ybytes) != VIRA_CUDA_SUCCESS ||
           g->cuMemcpyDtoH(y1, dy1, ybytes) != VIRA_CUDA_SUCCESS) {
         why = "self-test launch failed";
@@ -4163,7 +4163,7 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
         vira_cu_function kb = jt == 0 ? g->cu_k_mmqb128[idx] : g->cu_k_mmqb64[idx];
         const unsigned int tj = jt == 0 ? 128u : 64u;
         if (kb == NULL) continue;
-        if (g->cuLaunchKernel(kb, (N + 127) / 128, (M + tj - 1) / tj, 1, 256, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
+        if (g->cuLaunchKernel(kb, (M + tj - 1) / tj, (N + 127) / 128, 1, 256, 1, 1, 0, NULL, a1, NULL) != VIRA_CUDA_SUCCESS ||
             g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(y1, dy1, ybytes) != VIRA_CUDA_SUCCESS) {
           g->mmqb_bad = true;
           break;
@@ -4178,7 +4178,7 @@ static const char *_vira_gpu_mmqt_selftest(_vira_gpu_state *g) {
       if (why == NULL && !g->mmqb_bad && g->cu_k_mmqg128[idx] != NULL) {
         vira_cu_deviceptr q4none = 0;
         void *ag[] = {&dx4, &dw, &dw, &dy1, &m, &nb, &n, &q4none};
-        if (g->cuLaunchKernel(g->cu_k_mmqg128[idx], (N + 63) / 64, (M + 127) / 128, 1, 256, 1, 1, 0, NULL, ag, NULL) !=
+        if (g->cuLaunchKernel(g->cu_k_mmqg128[idx], (M + 127) / 128, (N + 63) / 64, 1, 256, 1, 1, 0, NULL, ag, NULL) !=
                 VIRA_CUDA_SUCCESS ||
             g->cuCtxSynchronize() != VIRA_CUDA_SUCCESS || g->cuMemcpyDtoH(y1, dy1, ybytes) != VIRA_CUDA_SUCCESS) {
           g->mmqb_bad = true;
@@ -4726,10 +4726,12 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
         static const char *ng[8] = {"vira_cu_mmqg128_q4_0", "vira_cu_mmqg128_q4_1", "vira_cu_mmqg128_q5_0",
                                     "vira_cu_mmqg128_q5_1", "vira_cu_mmqg128_q8_0", "vira_cu_mmqg128_q4_k",
                                     "vira_cu_mmqg128_q5_k", "vira_cu_mmqg128_q6_k"};
+        const char *mg = getenv("VIRA_GPU_MMQG");
+        const bool use_mmqg = !(mg != NULL && strcmp(mg, "0") == 0);
         for (int i = 0; i < 8; i++) {
           (void)g->cuModuleGetFunction(&g->cu_k_mmqb128[i], tm, n128[i]);
           (void)g->cuModuleGetFunction(&g->cu_k_mmqb64[i], tm, n64[i]);
-          (void)g->cuModuleGetFunction(&g->cu_k_mmqg128[i], tm, ng[i]);
+          if (use_mmqg) (void)g->cuModuleGetFunction(&g->cu_k_mmqg128[i], tm, ng[i]);
         }
       }
       const char *why = g->cu_k_quantize_x4 == NULL ? "no x4 quantizer" : _vira_gpu_mmqt_selftest(g);
@@ -5890,15 +5892,15 @@ static inline bool _vira_gpu_mmq_locked(_vira_gpu_wfmt wfmt, _vira_gpu_act_entry
       tj = 64;
     }
     if (kb != NULL) {
-      *err = (_vira_gpu.cuLaunchKernel(kb, (unsigned int)nbx, (unsigned int)(((size_t)M + tj - 1) / tj), 1, 256, 1,
+      *err = (_vira_gpu.cuLaunchKernel(kb, (unsigned int)(((size_t)M + tj - 1) / tj), (unsigned int)nbx, 1, 256, 1,
                                        1, 0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
                  ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
       return true;
     }
   }
-  const size_t tm = kt != NULL ? 64 : 32;
-  *err = (_vira_gpu.cuLaunchKernel(kt != NULL ? kt : k, (unsigned int)(((size_t)N + 63) / 64),
-                                   (unsigned int)(((size_t)M + tm - 1) / tm), 1, 128, 1, 1, 0, _vira_gpu.cu_stream,
+  const unsigned int gx = kt != NULL ? (unsigned int)(((size_t)M + 63) / 64) : (unsigned int)(((size_t)N + 63) / 64);
+  const unsigned int gy = kt != NULL ? (unsigned int)(((size_t)N + 63) / 64) : (unsigned int)(((size_t)M + 31) / 32);
+  *err = (_vira_gpu.cuLaunchKernel(kt != NULL ? kt : k, gx, gy, 1, 128, 1, 1, 0, _vira_gpu.cu_stream,
                                    args, NULL) == VIRA_CUDA_SUCCESS)
              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
   return true;
@@ -8147,8 +8149,8 @@ static inline vira_tensor_f32 vira_gpu_linear_swiglu(vira_arena *opt_arena, vira
             q4 = ys->cu_q8_buf;
           }
           void *args[] = {&q8, &wgb, &wub, &yb, &m, &nbu, &n, &q4};
-          if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mmqg128[idx], (unsigned int)(((size_t)N + 63) / 64),
-                                       (unsigned int)(((size_t)M + 127) / 128), 1, 256, 1, 1, 0, _vira_gpu.cu_stream,
+          if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mmqg128[idx], (unsigned int)(((size_t)M + 127) / 128),
+                                       (unsigned int)(((size_t)N + 63) / 64), 1, 256, 1, 1, 0, _vira_gpu.cu_stream,
                                        args, NULL) == VIRA_CUDA_SUCCESS) {
             int32_t dims[2] = {M, N};
             out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)
