@@ -197,3 +197,37 @@ vira_cu_rmsnorm_x4_f32(const float *__restrict__ x, const float *__restrict__ w,
     }
   }
 }
+
+// RoPE (NeoX half-split and Norm adjacent-pair) reading pos from a 4-byte device pointer
+// so CUDA Graphs can replay decode tokens without re-capturing when pos increments.
+// Grid ((half_dim + 15) / 16, (rows + 15) / 16), block (16, 16).
+extern "C" __global__ void vira_cu_rope_dpos_f32(const float *__restrict__ q, float *__restrict__ out,
+                                                 int rows, int cols, int half_dim,
+                                                 const int *__restrict__ pos_ptr, float freq_base) {
+  const int i = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+  const int r = (int)blockIdx.y * (int)blockDim.y + (int)threadIdx.y;
+  if (i >= half_dim || r >= rows) return;
+  const float pos_f = (float)(*pos_ptr);
+  const float angle = pos_f * powf(freq_base, -(2.0f * (float)i) / (float)cols);
+  const float c = cosf(angle), s = sinf(angle);
+  const size_t base = (size_t)r * (size_t)cols;
+  const float q0 = q[base + (size_t)i];
+  const float q1 = q[base + (size_t)(i + half_dim)];
+  out[base + (size_t)i] = q0 * c - q1 * s;
+  out[base + (size_t)(i + half_dim)] = q0 * s + q1 * c;
+}
+extern "C" __global__ void vira_cu_rope_norm_dpos_f32(const float *__restrict__ q, float *__restrict__ out,
+                                                      int rows, int cols, int half_dim,
+                                                      const int *__restrict__ pos_ptr, float freq_base) {
+  const int i = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+  const int r = (int)blockIdx.y * (int)blockDim.y + (int)threadIdx.y;
+  if (i >= half_dim || r >= rows) return;
+  const float pos_f = (float)(*pos_ptr);
+  const float angle = pos_f * powf(freq_base, -(2.0f * (float)i) / (float)cols);
+  const float c = cosf(angle), s = sinf(angle);
+  const size_t base = (size_t)r * (size_t)cols + (size_t)(2 * i);
+  const float q0 = q[base];
+  const float q1 = q[base + 1u];
+  out[base] = q0 * c - q1 * s;
+  out[base + 1u] = q0 * s + q1 * c;
+}

@@ -186,6 +186,15 @@ typedef vira_cu_result(VIRA_CL_API *pfn_cuLaunchKernel)(vira_cu_function,
                                                         unsigned int, unsigned int, unsigned int,
                                                         unsigned int, vira_cu_stream,
                                                         void **, void **);
+typedef void *vira_cu_graph;
+typedef void *vira_cu_graph_exec;
+typedef vira_cu_result(VIRA_CL_API *pfn_cuStreamBeginCapture)(vira_cu_stream, int);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuStreamEndCapture)(vira_cu_stream, vira_cu_graph *);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuGraphInstantiateWithFlags)(vira_cu_graph_exec *, vira_cu_graph, unsigned long long);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuGraphInstantiate)(vira_cu_graph_exec *, vira_cu_graph, void *, char *, size_t);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuGraphLaunch)(vira_cu_graph_exec, vira_cu_stream);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuGraphDestroy)(vira_cu_graph);
+typedef vira_cu_result(VIRA_CL_API *pfn_cuGraphExecDestroy)(vira_cu_graph_exec);
 
 typedef enum {
   VIRA_GPU_BACKEND_CPU = 0,
@@ -372,6 +381,13 @@ typedef struct {
   pfn_cuStreamDestroy_v2 cuStreamDestroy;
   pfn_cuStreamSynchronize cuStreamSynchronize;
   pfn_cuLaunchKernel cuLaunchKernel;
+  pfn_cuStreamBeginCapture cuStreamBeginCapture;
+  pfn_cuStreamEndCapture cuStreamEndCapture;
+  pfn_cuGraphInstantiateWithFlags cuGraphInstantiateWithFlags;
+  pfn_cuGraphInstantiate cuGraphInstantiate;
+  pfn_cuGraphLaunch cuGraphLaunch;
+  pfn_cuGraphDestroy cuGraphDestroy;
+  pfn_cuGraphExecDestroy cuGraphExecDestroy;
 
   vira_cu_device cu_device;
   vira_cu_context cu_context;
@@ -383,7 +399,14 @@ typedef struct {
   vira_cu_module cu_mmvq2_module; // runtime/cuda/mmvq2.cu
   vira_cu_module cu_fused_module; // runtime/cuda/fused.cu
   vira_cu_module cu_attn_module;  // runtime/cuda/attn.cu: FP16 KV cache (vira_gpu_kv_f16)
-  vira_cu_function cu_k_kv_store, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv;
+  vira_cu_function cu_k_kv_store, cu_k_kv_store_dpos, cu_k_kv_load, cu_k_kv_zero, cu_k_attn_f16kv, cu_k_attn_f16kv_dpos;
+  vira_cu_function cu_k_rope_dpos, cu_k_rope_norm_dpos;
+  vira_cu_deviceptr cu_graph_pos; // 4-byte int32 pos on device for CUDA Graph decode replay
+  vira_cu_graph_exec cu_graph_exec;
+  uint64_t cu_graph_key, cu_graph_warmup_key, cu_graph_failed_key;
+  vira_cu_deviceptr cu_graph_in_buf, cu_graph_out_buf;
+  size_t cu_graph_in_bytes, cu_graph_out_bytes;
+  bool cu_graph_ready, cu_graph_capturing, cu_graph_aborted;
   vira_cu_function cu_k_attn_tile; // prompt rows (M > 4): 16 rows per block share each K/V tile
   vira_cu_module cu_attnt_module;  // runtime/cuda/attnt.cu: prompt attention on tensor cores (sm_75+)
   vira_cu_function cu_k_attn_fa64, cu_k_attn_fa128; // VIRA_GPU_FA=0 disables
@@ -2967,11 +2990,34 @@ static inline void _vira_gpu_act_bind_locked(_vira_gpu_act_entry *slot,
   _vira_gpu_act_hash_link_locked(slot, ptr);
 }
 
+static inline void _vira_gpu_graph_invalidate_locked(void) {
+  if (_vira_gpu.cu_graph_exec != NULL && _vira_gpu.cuGraphExecDestroy != NULL) {
+    _vira_gpu.cuGraphExecDestroy(_vira_gpu.cu_graph_exec);
+    _vira_gpu.cu_graph_exec = NULL;
+  }
+  _vira_gpu.cu_graph_key = 0;
+  _vira_gpu.cu_graph_in_buf = 0;
+  _vira_gpu.cu_graph_out_buf = 0;
+}
+static inline void _vira_gpu_graph_abort_locked(void) {
+  if (!_vira_gpu.cu_graph_capturing) return;
+  _vira_gpu.cu_graph_capturing = false;
+  _vira_gpu.cu_graph_aborted = true;
+  if (_vira_gpu.cuStreamEndCapture != NULL && _vira_gpu.cu_stream != NULL) {
+    vira_cu_graph g = NULL;
+    if (_vira_gpu.cuStreamEndCapture(_vira_gpu.cu_stream, &g) == VIRA_CUDA_SUCCESS && g != NULL &&
+        _vira_gpu.cuGraphDestroy != NULL) {
+      _vira_gpu.cuGraphDestroy(g);
+    }
+  }
+}
+
 static inline bool _vira_gpu_sync_slot_locked(_vira_gpu_act_entry *e) {
   if (e == NULL || !e->dev_dirty || e->host_ptr == NULL || e->bytes == 0) {
     if (e) _vira_gpu_clear_act_dirty_locked(e);
     return true;
   }
+  if (_vira_gpu.cu_graph_capturing) _vira_gpu_graph_abort_locked();
   bool has_buf = (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA)
                      ? (e->cu_buf != 0)
                      : (e->dev_buf != NULL);
@@ -3347,6 +3393,8 @@ static inline _vira_gpu_act_entry *_vira_gpu_find_or_alloc_act_slot_locked(
     }
     if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
       vira_cu_deviceptr nb = 0;
+      if (_vira_gpu.cu_graph_capturing) _vira_gpu_graph_abort_locked();
+      _vira_gpu_graph_invalidate_locked();
       if (_vira_gpu.cuMemAlloc(&nb, new_cap) != VIRA_CUDA_SUCCESS || nb == 0) {
         *out_err = VIRA_CL_ERR_NO_ROOM;
         return NULL;
@@ -3924,6 +3972,8 @@ static inline _vira_gpu_cache_entry *_vira_gpu_get_or_upload_weight_locked_impl(
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
     vira_cu_deviceptr cu_b = 0;
+    if (_vira_gpu.cu_graph_capturing) _vira_gpu_graph_abort_locked();
+    _vira_gpu_graph_invalidate_locked();
     if (_vira_gpu.cuMemAlloc(&cu_b, bytes) != VIRA_CUDA_SUCCESS || cu_b == 0) {
       _vira_gpu.vram_saturated = true;
       _vira_gpu_cache_entry_reset(slot);
@@ -4360,6 +4410,15 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   }
   (void)_vira_gpu_load_sym(lib, "cuStreamSynchronize", (void **)&g->cuStreamSynchronize);
   (void)_vira_gpu_load_sym(lib, "cuLaunchKernel", (void **)&g->cuLaunchKernel);
+  (void)_vira_gpu_load_sym(lib, "cuStreamBeginCapture_v2", (void **)&g->cuStreamBeginCapture);
+  if (!g->cuStreamBeginCapture) (void)_vira_gpu_load_sym(lib, "cuStreamBeginCapture", (void **)&g->cuStreamBeginCapture);
+  (void)_vira_gpu_load_sym(lib, "cuStreamEndCapture", (void **)&g->cuStreamEndCapture);
+  (void)_vira_gpu_load_sym(lib, "cuGraphInstantiateWithFlags", (void **)&g->cuGraphInstantiateWithFlags);
+  (void)_vira_gpu_load_sym(lib, "cuGraphInstantiate_v2", (void **)&g->cuGraphInstantiate);
+  if (!g->cuGraphInstantiate) (void)_vira_gpu_load_sym(lib, "cuGraphInstantiate", (void **)&g->cuGraphInstantiate);
+  (void)_vira_gpu_load_sym(lib, "cuGraphLaunch", (void **)&g->cuGraphLaunch);
+  (void)_vira_gpu_load_sym(lib, "cuGraphDestroy", (void **)&g->cuGraphDestroy);
+  (void)_vira_gpu_load_sym(lib, "cuGraphExecDestroy", (void **)&g->cuGraphExecDestroy);
 
   if (!g->cuCtxCreate || !g->cuModuleLoadData || !g->cuLaunchKernel ||
       !g->cuMemAlloc || !g->cuMemFree || !g->cuMemcpyHtoD || !g->cuMemcpyDtoH) {
@@ -4654,7 +4713,14 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   for (int i = 0; i < 8; i++) g->cu_k_mmqb128[i] = g->cu_k_mmqb64[i] = g->cu_k_mmqg128[i] = NULL;
   g->mmqb_bad = false;
   g->cu_attn_module = NULL;
-  g->cu_k_kv_store = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = NULL;
+  g->cu_k_kv_store = g->cu_k_kv_store_dpos = g->cu_k_kv_load = g->cu_k_kv_zero = g->cu_k_attn_f16kv = g->cu_k_attn_f16kv_dpos = NULL;
+  g->cu_k_rope_dpos = g->cu_k_rope_norm_dpos = NULL;
+  g->cu_graph_pos = 0;
+  g->cu_graph_exec = NULL;
+  g->cu_graph_key = g->cu_graph_warmup_key = g->cu_graph_failed_key = 0;
+  g->cu_graph_in_buf = g->cu_graph_out_buf = 0;
+  g->cu_graph_in_bytes = g->cu_graph_out_bytes = 0;
+  g->cu_graph_ready = g->cu_graph_capturing = g->cu_graph_aborted = false;
   g->cu_k_attn_tile = NULL;
   g->cu_attnt_module = NULL;
   g->cu_k_attn_fa64 = g->cu_k_attn_fa128 = NULL;
@@ -4665,9 +4731,11 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
         g->cuModuleLoadData(&am, _vira_cuda_attn_ptx) == VIRA_CUDA_SUCCESS && am != NULL) {
       g->cu_attn_module = am;
       (void)g->cuModuleGetFunction(&g->cu_k_kv_store, am, "vira_cu_kv_store_f16");
+      (void)g->cuModuleGetFunction(&g->cu_k_kv_store_dpos, am, "vira_cu_kv_store_f16_dpos");
       (void)g->cuModuleGetFunction(&g->cu_k_kv_load, am, "vira_cu_kv_load_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_kv_zero, am, "vira_cu_kv_zero");
       (void)g->cuModuleGetFunction(&g->cu_k_attn_f16kv, am, "vira_cu_attn_f16kv");
+      (void)g->cuModuleGetFunction(&g->cu_k_attn_f16kv_dpos, am, "vira_cu_attn_f16kv_dpos");
       (void)g->cuModuleGetFunction(&g->cu_k_attn_tile, am, "vira_cu_attn_f16kv_tile");
     }
     const char *fa = getenv("VIRA_GPU_FA");
@@ -4759,6 +4827,22 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       (void)g->cuModuleGetFunction(&g->cu_k_silu_mul, fm, "vira_cu_silu_mul_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_rmsnorm_x4, fm, "vira_cu_rmsnorm_x4_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_moe_sum, fm, "vira_cu_moe_sum_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_rope_dpos, fm, "vira_cu_rope_dpos_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_rope_norm_dpos, fm, "vira_cu_rope_norm_dpos_f32");
+    }
+  }
+  {
+    const char *ge = getenv("VIRA_GPU_GRAPH");
+    if (!(ge != NULL && strcmp(ge, "0") == 0) && g->cu_stream != NULL &&
+        g->cuStreamBeginCapture != NULL && g->cuStreamEndCapture != NULL &&
+        (g->cuGraphInstantiateWithFlags != NULL || g->cuGraphInstantiate != NULL) &&
+        g->cuGraphLaunch != NULL && g->cuGraphDestroy != NULL && g->cuGraphExecDestroy != NULL &&
+        g->cuMemcpyHtoDAsync != NULL && g->cuMemcpyDtoHAsync != NULL &&
+        g->cu_k_kv_store_dpos != NULL && g->cu_k_attn_f16kv_dpos != NULL &&
+        g->cu_k_rope_dpos != NULL && g->cu_k_rope_norm_dpos != NULL) {
+      if (g->cuMemAlloc(&g->cu_graph_pos, 4u) == VIRA_CUDA_SUCCESS && g->cu_graph_pos != 0) {
+        g->cu_graph_ready = true;
+      }
     }
   }
   g->cu_mmvq2_module = NULL;
@@ -4780,7 +4864,10 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
     if (want && g->cuModuleLoadData(&m2, _vira_cuda_mmvq2_ptx) == VIRA_CUDA_SUCCESS && m2 != NULL) {
       g->cu_mmvq2_module = m2;
       g->mmvq2_warp = !(mv != NULL && strcmp(mv, "row") == 0); // T4: warp 26 tok/s, row 25, old 13
-      g->mmvq2_two = !(mv != NULL && strcmp(mv, "w1") == 0);
+      // High-SM GPUs (A100 108 SMs, 3090/4090/H100) get +39% decode from 1 row/warp (w1)
+      // because 2 rows/warp halves the block count and starves SMs; override via VIRA_GPU_MMVQ.
+      const bool auto_w1 = (mv == NULL && best_sm >= 64);
+      g->mmvq2_two = !auto_w1 && !(mv != NULL && strcmp(mv, "w1") == 0);
       g->mmvq2_rows = !g->mmvq2_two ? 1 : (mv != NULL && strcmp(mv, "w4") == 0) ? 4 : 2;
       (void)g->cuModuleGetFunction(&g->cu_k_mmvq2_q8_0, m2,
                                    g->mmvq2_warp ? "vira_cu_mmvq2w_q8_0" : "vira_cu_mmvq2_q8_0");
@@ -4832,7 +4919,7 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   if (_vira_gpu_debug()) {
     fprintf(stderr,
             "vira gpu: [CUDA Driver API] %s (sm_%d%d%s%s) | %lld MiB VRAM (budget %lld MiB) | %d SMs | "
-            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s%s%s\n",
+            "warp=%d, wg=%d, tile=%d | GGUF Q4_0..Q6_K / FP16%s%s%s%s%s%s%s\n",
             g->device_name, g->compute_capability_major, g->compute_capability_minor,
             g->has_tensor_cores ? " + Tensor Cores" : "",
             g->has_dp4a ? " + DP4A" : "",
@@ -4845,7 +4932,8 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
                                                             : (g->mmvq2_warp ? " / mmvq2w(all)" : " / mmvq2(Q8_0) mmvq2w(rest)"),
             g->cu_k_rmsnorm_q8_1 != NULL ? " / fused(norm+q8)" : "",
             g->cu_k_mmqb128[4] != NULL ? " / mmq-tc128(prompt)" : g->cu_k_mmqt[4] != NULL ? " / mmq-tc(prompt)" : g->cu_k_mmq[0] != NULL ? " / mmq(prompt)" : "",
-            g->cu_k_attn_fa128 != NULL ? " / kv-f16 / fa-tc(prompt)" : g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "");
+            g->cu_k_attn_fa128 != NULL ? " / kv-f16 / fa-tc(prompt)" : g->cu_k_attn_f16kv != NULL ? " / kv-f16" : "",
+            g->cu_graph_ready ? " / graph(decode)" : "");
   }
 
   return true;
@@ -5365,7 +5453,18 @@ static inline void vira_gpu_shutdown(void) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_attn_module);
         _vira_gpu.cu_attn_module = NULL;
       }
-      _vira_gpu.cu_k_kv_store = _vira_gpu.cu_k_kv_load = _vira_gpu.cu_k_kv_zero = _vira_gpu.cu_k_attn_f16kv = NULL;
+      _vira_gpu.cu_k_kv_store = _vira_gpu.cu_k_kv_store_dpos = _vira_gpu.cu_k_kv_load = _vira_gpu.cu_k_kv_zero = _vira_gpu.cu_k_attn_f16kv = _vira_gpu.cu_k_attn_f16kv_dpos = NULL;
+      _vira_gpu.cu_k_rope_dpos = _vira_gpu.cu_k_rope_norm_dpos = NULL;
+      if (_vira_gpu.cu_graph_exec && _vira_gpu.cuGraphExecDestroy) {
+        _vira_gpu.cuGraphExecDestroy(_vira_gpu.cu_graph_exec);
+        _vira_gpu.cu_graph_exec = NULL;
+      }
+      if (_vira_gpu.cu_graph_pos && _vira_gpu.cuMemFree) {
+        _vira_gpu.cuMemFree(_vira_gpu.cu_graph_pos);
+        _vira_gpu.cu_graph_pos = 0;
+      }
+      _vira_gpu.cu_graph_ready = _vira_gpu.cu_graph_capturing = _vira_gpu.cu_graph_aborted = false;
+      _vira_gpu.cu_graph_key = _vira_gpu.cu_graph_warmup_key = _vira_gpu.cu_graph_failed_key = 0;
       _vira_gpu.cu_k_attn_tile = NULL;
       if (_vira_gpu.cu_attnt_module && _vira_gpu.cuModuleUnload) {
         _vira_gpu.cuModuleUnload(_vira_gpu.cu_attnt_module);
@@ -5752,6 +5851,8 @@ static inline bool _vira_gpu_act_q8_reserve_locked(_vira_gpu_act_entry *x_slot, 
       return false;
     }
     vira_cu_deviceptr nb = 0;
+    if (_vira_gpu.cu_graph_capturing) _vira_gpu_graph_abort_locked();
+    _vira_gpu_graph_invalidate_locked();
     if (_vira_gpu.cuMemAlloc(&nb, new_cap) != VIRA_CUDA_SUCCESS || nb == 0) {
       return false;
     }
@@ -7101,12 +7202,20 @@ static inline vira_tensor_f32 vira_gpu_rope(vira_arena *opt_arena,
   }
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
-    void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &pos_f, &freq_base};
     unsigned int gx = (unsigned int)((half_dim + 15) / 16);
     unsigned int gy = (unsigned int)((rows + 15) / 16);
-    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope, gx, gy, 1, 16, 16, 1,
-                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    if (_vira_gpu.cu_graph_capturing && _vira_gpu.cu_k_rope_dpos != NULL) {
+      vira_cu_deviceptr dp = _vira_gpu.cu_graph_pos;
+      void *args_d[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &dp, &freq_base};
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_dpos, gx, gy, 1, 16, 16, 1,
+                                      0, _vira_gpu.cu_stream, args_d, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    } else {
+      void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &pos_f, &freq_base};
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope, gx, gy, 1, 16, 16, 1,
+                                      0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    }
   } else {
     err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
     err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope, 1, sizeof(vira_cl_mem), &y_slot->dev_buf);
@@ -7385,12 +7494,20 @@ static inline vira_tensor_f32 vira_gpu_rope_norm(vira_arena *opt_arena,
   }
 
   if (_vira_gpu.active_backend == VIRA_GPU_BACKEND_CUDA) {
-    void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &pos_f, &freq_base};
     unsigned int gx = (unsigned int)((half_dim + 15) / 16);
     unsigned int gy = (unsigned int)((rows + 15) / 16);
-    err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_norm, gx, gy, 1, 16, 16, 1,
-                                    0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
-              ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    if (_vira_gpu.cu_graph_capturing && _vira_gpu.cu_k_rope_norm_dpos != NULL) {
+      vira_cu_deviceptr dp = _vira_gpu.cu_graph_pos;
+      void *args_d[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &dp, &freq_base};
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_norm_dpos, gx, gy, 1, 16, 16, 1,
+                                      0, _vira_gpu.cu_stream, args_d, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    } else {
+      void *args[] = {&q_slot->cu_buf, &y_slot->cu_buf, &rows, &cols, &half_dim, &pos_f, &freq_base};
+      err = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_rope_norm, gx, gy, 1, 16, 16, 1,
+                                      0, _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS)
+                ? VIRA_CL_SUCCESS : VIRA_CL_ERR_NO_ROOM;
+    }
   } else {
     err = _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 0, sizeof(vira_cl_mem), &q_slot->dev_buf);
     err |= _vira_gpu.clSetKernelArg(_vira_gpu.kernel_rope_norm, 1, sizeof(vira_cl_mem), &y_slot->dev_buf);
@@ -8416,6 +8533,12 @@ static inline bool _vira_gpu_kv_tmp_locked(size_t bytes) {
 }
 static inline bool _vira_gpu_kv_store_locked(vira_cu_deviceptr src, vira_cu_deviceptr dst, long long row0,
                                              int32_t cols, long long n) {
+  if (_vira_gpu.cu_graph_capturing && _vira_gpu.cu_k_kv_store_dpos != NULL && n == (long long)cols) {
+    vira_cu_deviceptr dp = _vira_gpu.cu_graph_pos;
+    void *args_d[] = {&src, &dst, &dp, &cols, &n};
+    return _vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_kv_store_dpos, (unsigned int)((n + 255) / 256), 1, 1, 256, 1, 1, 0,
+                                    _vira_gpu.cu_stream, args_d, NULL) == VIRA_CUDA_SUCCESS;
+  }
   void *args[] = {&src, &dst, &row0, &cols, &n};
   return _vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_kv_store, (unsigned int)((n + 255) / 256), 1, 1, 256, 1, 1, 0,
                                   _vira_gpu.cu_stream, args, NULL) == VIRA_CUDA_SUCCESS;
@@ -8463,6 +8586,7 @@ static inline void _vira_gpu_kv_sync_all_locked(void) {
   for (int i = 0; i < _vira_gpu_kv_n; i++) (void)_vira_gpu_kv_download_locked(&_vira_gpu_kv[i]);
 }
 static inline void _vira_gpu_kv_reset_locked(void) {
+  _vira_gpu_graph_invalidate_locked();
   for (int i = 0; i < _vira_gpu_kv_n; i++) {
     (void)_vira_gpu_kv_download_locked(&_vira_gpu_kv[i]);
     if (_vira_gpu_kv[i].dev != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu_kv[i].dev);
@@ -8589,7 +8713,12 @@ static inline int _vira_gpu_kv_attention(vira_arena *opt_arena, vira_tensor_f32 
                                 : NULL;
       const bool tile = fa == NULL && _vira_gpu.cu_k_attn_tile != NULL && M > 4 && head_dim % 32 == 0 &&
                         head_dim <= 128 && kv_dim % 2 == 0;
-      vira_cu_function kfn = fa != NULL ? fa : tile ? _vira_gpu.cu_k_attn_tile : _vira_gpu.cu_k_attn_f16kv;
+      const bool use_dpos = _vira_gpu.cu_graph_capturing && M == 1 && fa == NULL && !tile &&
+                            _vira_gpu.cu_k_attn_f16kv_dpos != NULL;
+      vira_cu_deviceptr dp = _vira_gpu.cu_graph_pos;
+      void *args_dpos[] = {&qd, &kd, &vd, &od, &nh, &km, &hd, &kvd, &m_, &dp, &sc};
+      vira_cu_function kfn = use_dpos ? _vira_gpu.cu_k_attn_f16kv_dpos
+                                      : (fa != NULL ? fa : tile ? _vira_gpu.cu_k_attn_tile : _vira_gpu.cu_k_attn_f16kv);
       const unsigned int gy = fa != NULL ? (unsigned int)((M + 63) / 64) : tile ? (unsigned int)((M + 15) / 16) : (unsigned int)M;
       // tensor-core attention also writes the output's x4 copy for the output projection
       vira_cu_deviceptr q4 = 0;
@@ -8600,7 +8729,7 @@ static inline int _vira_gpu_kv_attention(vira_arena *opt_arena, vira_tensor_f32 
       }
       void *args_fa[] = {&qd, &kd, &vd, &od, &nh, &km, &hd, &kvd, &m_, &st, &sc, &q4};
       if (_vira_gpu.cuLaunchKernel(kfn, (unsigned int)n_heads, gy, 1, fa != NULL ? 128 : 256, 1, 1, 0,
-                                   _vira_gpu.cu_stream, fa != NULL ? args_fa : args, NULL) == VIRA_CUDA_SUCCESS) {
+                                   _vira_gpu.cu_stream, fa != NULL ? args_fa : (use_dpos ? args_dpos : args), NULL) == VIRA_CUDA_SUCCESS) {
         int32_t dims[2] = {M * n_heads, head_dim};
         *out = opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, dims)
                          : _vira_tensor_f32_alloc_uninit_nd(2, dims);
@@ -9437,6 +9566,138 @@ static inline int64_t _vira_gpu_argmax_f32(vira_tensor_f32 logits) {
   }
   pthread_mutex_unlock(&_vira_gpu.lock);
   return best_idx;
+}
+
+// ---- CUDA Graph capture & replay for single-token (m == 1) dense decode ----
+// Eliminates ~960 host kernel-launch round-trips per token across 64 layers (big win on
+// high-SM GPUs like A100/H100/4090). Uses only CUDA Driver API symbols loaded via dlsym
+// (no CUDA toolkit required). Set VIRA_GPU_GRAPH=0 to disable.
+static inline int vira_gpu_decode_graph_try_replay(int64_t key, const float *x_in, int32_t x_elems,
+                                                   int32_t pos, float *logits_out, int32_t logits_elems) {
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA ||
+      !_vira_gpu.cu_graph_ready || x_in == NULL || logits_out == NULL || x_elems <= 0 || logits_elems <= 0) {
+    return 0;
+  }
+  const size_t x_bytes = (size_t)x_elems * sizeof(float);
+  const size_t y_bytes = (size_t)logits_elems * sizeof(float);
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (_vira_gpu.cu_graph_exec == NULL || _vira_gpu.cu_graph_key != (uint64_t)key ||
+      _vira_gpu.cu_graph_in_buf == 0 || _vira_gpu.cu_graph_out_buf == 0 ||
+      _vira_gpu.cu_graph_in_bytes != x_bytes || _vira_gpu.cu_graph_out_bytes != y_bytes ||
+      !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  bool ok =
+      (_vira_gpu.cuMemcpyHtoDAsync(_vira_gpu.cu_graph_in_buf, x_in, x_bytes, _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS) &&
+      (_vira_gpu.cuMemcpyHtoDAsync(_vira_gpu.cu_graph_pos, &pos, sizeof(int32_t), _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS) &&
+      (_vira_gpu.cuGraphLaunch(_vira_gpu.cu_graph_exec, _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS) &&
+      (_vira_gpu.cuMemcpyDtoHAsync(logits_out, _vira_gpu.cu_graph_out_buf, y_bytes, _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS) &&
+      (_vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS);
+  if (!ok) {
+    _vira_gpu_graph_invalidate_locked();
+    _vira_gpu.cu_graph_failed_key = (uint64_t)key;
+  }
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return ok ? 1 : 0;
+}
+
+static inline int vira_gpu_decode_graph_begin(int64_t key, const float *x_in, int32_t x_elems, int32_t pos) {
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA ||
+      !_vira_gpu.cu_graph_ready || x_in == NULL || x_elems <= 0) {
+    return 0;
+  }
+  const size_t x_bytes = (size_t)x_elems * sizeof(float);
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (_vira_gpu.cu_graph_failed_key == (uint64_t)key || _vira_gpu.cu_graph_capturing ||
+      !_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  // Token 0 warms up all weights, KV cache entries, and activation slots eagerly so
+  // token 1 can capture with zero cuMemAlloc calls.
+  if (_vira_gpu.cu_graph_warmup_key != (uint64_t)key) {
+    _vira_gpu.cu_graph_warmup_key = (uint64_t)key;
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  // Upload input embedding and pos BEFORE starting capture so the graph itself has fixed
+  // device pointers and no host-dependent uploads.
+  vira_cl_int err = 0;
+  bool hit = false;
+  _vira_gpu_act_entry *xs = _vira_gpu_get_or_upload_activation_locked(
+      x_in, x_bytes, false, &hit, NULL, NULL, 0, 0, NULL, &err);
+  if (err != VIRA_CL_SUCCESS || xs == NULL || xs->cu_buf == 0 ||
+      _vira_gpu.cuMemcpyHtoDAsync(_vira_gpu.cu_graph_pos, &pos, sizeof(int32_t), _vira_gpu.cu_stream) != VIRA_CUDA_SUCCESS) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  // CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 2
+  if (_vira_gpu.cuStreamBeginCapture(_vira_gpu.cu_stream, 2) != VIRA_CUDA_SUCCESS) {
+    _vira_gpu.cu_graph_failed_key = (uint64_t)key;
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  _vira_gpu.cu_graph_in_buf = xs->cu_buf;
+  _vira_gpu.cu_graph_in_bytes = x_bytes;
+  _vira_gpu.cu_graph_capturing = true;
+  _vira_gpu.cu_graph_aborted = false;
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return 1;
+}
+
+static inline int vira_gpu_decode_graph_end(int64_t key, float *logits_out, int32_t logits_elems) {
+  if (!_vira_gpu.available || _vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA) return 0;
+  const size_t y_bytes = (size_t)logits_elems * sizeof(float);
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (!_vira_gpu.cu_graph_capturing) {
+    if (_vira_gpu.cu_graph_aborted) {
+      _vira_gpu.cu_graph_aborted = false;
+      _vira_gpu.cu_graph_failed_key = (uint64_t)key;
+    }
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  _vira_gpu.cu_graph_capturing = false;
+  vira_cu_graph graph = NULL;
+  bool ok = (_vira_gpu.cuStreamEndCapture(_vira_gpu.cu_stream, &graph) == VIRA_CUDA_SUCCESS && graph != NULL &&
+             !_vira_gpu.cu_graph_aborted);
+  _vira_gpu_act_entry *ys = (ok && logits_out != NULL) ? _vira_gpu_act_hash_find_locked(logits_out) : NULL;
+  if (ok && ys != NULL && ys->cu_buf != 0 && ys->bytes == y_bytes) {
+    vira_cu_graph_exec exec = NULL;
+    vira_cu_result ir = _vira_gpu.cuGraphInstantiateWithFlags != NULL
+                            ? _vira_gpu.cuGraphInstantiateWithFlags(&exec, graph, 0ULL)
+                            : _vira_gpu.cuGraphInstantiate(&exec, graph, NULL, NULL, 0);
+    _vira_gpu.cuGraphDestroy(graph);
+    graph = NULL;
+    if (ir == VIRA_CUDA_SUCCESS && exec != NULL) {
+      // Execute the newly captured graph once for the current token and copy logits back.
+      if (_vira_gpu.cuGraphLaunch(exec, _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS &&
+          _vira_gpu.cuMemcpyDtoHAsync(logits_out, ys->cu_buf, y_bytes, _vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS &&
+          _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream) == VIRA_CUDA_SUCCESS) {
+        _vira_gpu_clear_act_dirty_locked(ys);
+        if (_vira_gpu.cu_graph_exec != NULL) _vira_gpu.cuGraphExecDestroy(_vira_gpu.cu_graph_exec);
+        _vira_gpu.cu_graph_exec = exec;
+        _vira_gpu.cu_graph_key = (uint64_t)key;
+        _vira_gpu.cu_graph_out_buf = ys->cu_buf;
+        _vira_gpu.cu_graph_out_bytes = y_bytes;
+        if (_vira_gpu_debug()) {
+          fprintf(stderr, "vira gpu: captured CUDA decode graph (in=%zu B, out=%zu B)\n",
+                  _vira_gpu.cu_graph_in_bytes, _vira_gpu.cu_graph_out_bytes);
+        }
+        pthread_mutex_unlock(&_vira_gpu.lock);
+        return 1;
+      }
+      _vira_gpu.cuGraphExecDestroy(exec);
+    }
+  }
+  if (graph != NULL && _vira_gpu.cuGraphDestroy != NULL) _vira_gpu.cuGraphDestroy(graph);
+  _vira_gpu.cu_graph_failed_key = (uint64_t)key;
+  if (_vira_gpu_debug()) {
+    fprintf(stderr, "vira gpu: CUDA decode graph capture aborted/unsupported; falling back to eager\n");
+  }
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return 0;
 }
 
 #endif // VIRA_GPU_H

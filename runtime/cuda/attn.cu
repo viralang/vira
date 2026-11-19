@@ -39,6 +39,14 @@ extern "C" __global__ void vira_cu_kv_store_f16(const float *__restrict__ src, u
   if (i >= n) return;
   dst[row0 * cols + i] = vl_f2h(src[i]);
 }
+// Same with row0 read from a 4-byte device pointer (CUDA Graph decode capture).
+extern "C" __global__ void vira_cu_kv_store_f16_dpos(const float *__restrict__ src, unsigned short *__restrict__ dst,
+                                                    const int *__restrict__ pos_ptr, int cols, long long n) {
+  const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const long long row0 = (long long)(*pos_ptr);
+  dst[row0 * cols + i] = vl_f2h(src[i]);
+}
 // dst[i] = float(src[i]) for i < n (cache read back to the host).
 extern "C" __global__ void vira_cu_kv_load_f32(const unsigned short *__restrict__ src, float *__restrict__ dst,
                                               long long n) {
@@ -51,10 +59,11 @@ extern "C" __global__ void vira_cu_kv_load_f32(const unsigned short *__restrict_
 // q / out rows t * n_heads + h (decode: one row of n_heads). One block per (head, query row):
 // grid (n_heads, M), block 256. Each warp walks every 8th key with an online softmax (its own
 // running max and sum), lanes hold head_dim / 32 dimensions; warps merge in shared memory.
-extern "C" __global__ void __launch_bounds__(AT_THREADS)
-vira_cu_attn_f16kv(const float *__restrict__ q, const unsigned short *__restrict__ kc,
-                   const unsigned short *__restrict__ vc, float *__restrict__ out, int n_heads, int kv_mul,
-                   int head_dim, int kv_dim, int M, long long start, float scale) {
+__device__ __forceinline__ void vl_attn_f16kv_body(const float *__restrict__ q,
+                                                    const unsigned short *__restrict__ kc,
+                                                    const unsigned short *__restrict__ vc, float *__restrict__ out,
+                                                    int n_heads, int kv_mul, int head_dim, int kv_dim, int M,
+                                                    long long start, float scale) {
   __shared__ float s_m[AT_WARPS], s_l[AT_WARPS];
   __shared__ float s_acc[AT_WARPS][AT_MAX_D * WARP];
   const int h = blockIdx.x, t = blockIdx.y;
@@ -120,6 +129,18 @@ vira_cu_attn_f16kv(const float *__restrict__ q, const unsigned short *__restrict
       if (i < nd && d < head_dim) orow[d] = o[i] * inv;
     }
   }
+}
+extern "C" __global__ void __launch_bounds__(AT_THREADS)
+vira_cu_attn_f16kv(const float *__restrict__ q, const unsigned short *__restrict__ kc,
+                   const unsigned short *__restrict__ vc, float *__restrict__ out, int n_heads, int kv_mul,
+                   int head_dim, int kv_dim, int M, long long start, float scale) {
+  vl_attn_f16kv_body(q, kc, vc, out, n_heads, kv_mul, head_dim, kv_dim, M, start, scale);
+}
+extern "C" __global__ void __launch_bounds__(AT_THREADS)
+vira_cu_attn_f16kv_dpos(const float *__restrict__ q, const unsigned short *__restrict__ kc,
+                        const unsigned short *__restrict__ vc, float *__restrict__ out, int n_heads, int kv_mul,
+                        int head_dim, int kv_dim, int M, const int *__restrict__ pos_ptr, float scale) {
+  vl_attn_f16kv_body(q, kc, vc, out, n_heads, kv_mul, head_dim, kv_dim, M, (long long)(*pos_ptr), scale);
 }
 
 // dst[i] = 0 for i < n (32-bit words): a new FP16 cache starts at zero without an upload.
