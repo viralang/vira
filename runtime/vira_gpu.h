@@ -430,6 +430,13 @@ typedef struct {
   vira_cu_function cu_k_mamba2_norm;  // fused.cu: Mamba-2 grouped RMSNorm
   vira_cu_deviceptr cu_m2_scratch;    // scratch buffer for xbc_act [M, d_conv_ch]
   size_t cu_m2_scratch_cap;
+  vira_cu_function cu_k_mla_kv_store; // fused.cu: DeepSeek MLA cache RMSNorm + YaRN RoPE
+  vira_cu_function cu_k_mla_q_split;  // fused.cu: DeepSeek MLA Q split + YaRN RoPE
+  vira_cu_function cu_k_mla_proj_f32; // fused.cu: DeepSeek MLA F32 per-head batched GEMV
+  vira_cu_function cu_k_mla_attn;     // fused.cu: DeepSeek MLA online-softmax latent attention
+  vira_cu_function cu_k_mla_hmd_to_mhd; // fused.cu: transpose [nh, M, D] -> [M, nh, D]
+  vira_cu_deviceptr cu_mla_scratch;
+  size_t cu_mla_scratch_cap;
   vira_cu_function cu_k_mmvq_id[8];   // MoE pair kernels q4_0 q4_1 q5_0 q5_1 q8_0 q4_k q5_k q6_k (mmvq2.cu)
   vira_cu_function cu_k_mmvqb[8];     // 2..4 activation rows, weights read once (mmvq2.cu); VIRA_GPU_MMVQB=0 off
   vira_cu_deviceptr moe_scratch;      // vira_gpu_moe_layer buffers
@@ -4708,6 +4715,10 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
   g->cu_k_relu_sqr = g->cu_k_mamba2_conv = g->cu_k_mamba2_ssm = g->cu_k_mamba2_norm = NULL;
   g->cu_m2_scratch = 0;
   g->cu_m2_scratch_cap = 0;
+  g->cu_k_mla_kv_store = g->cu_k_mla_q_split = g->cu_k_mla_proj_f32 = NULL;
+  g->cu_k_mla_attn = g->cu_k_mla_hmd_to_mhd = NULL;
+  g->cu_mla_scratch = 0;
+  g->cu_mla_scratch_cap = 0;
   for (int i = 0; i < 8; i++) g->cu_k_mmvq_id[i] = NULL;
   for (int i = 0; i < 8; i++) g->cu_k_mmvqb[i] = NULL;
   g->moe_scratch = 0;
@@ -4842,6 +4853,11 @@ static inline bool _vira_gpu_init_cuda_locked(void *lib) {
       (void)g->cuModuleGetFunction(&g->cu_k_mamba2_conv, fm, "vira_cu_mamba2_conv_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_mamba2_ssm, fm, "vira_cu_mamba2_ssm_f32");
       (void)g->cuModuleGetFunction(&g->cu_k_mamba2_norm, fm, "vira_cu_mamba2_norm_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_mla_kv_store, fm, "vira_cu_mla_kv_store_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_mla_q_split, fm, "vira_cu_mla_q_split_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_mla_proj_f32, fm, "vira_cu_mla_proj_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_mla_attn, fm, "vira_cu_mla_attn_f32");
+      (void)g->cuModuleGetFunction(&g->cu_k_mla_hmd_to_mhd, fm, "vira_cu_mla_hmd_to_mhd_f32");
     }
   }
   {
@@ -5508,6 +5524,11 @@ static inline void vira_gpu_shutdown(void) {
       if (_vira_gpu.cu_m2_scratch != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu.cu_m2_scratch);
       _vira_gpu.cu_m2_scratch = 0;
       _vira_gpu.cu_m2_scratch_cap = 0;
+      _vira_gpu.cu_k_mla_kv_store = _vira_gpu.cu_k_mla_q_split = _vira_gpu.cu_k_mla_proj_f32 = NULL;
+      _vira_gpu.cu_k_mla_attn = _vira_gpu.cu_k_mla_hmd_to_mhd = NULL;
+      if (_vira_gpu.cu_mla_scratch != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu.cu_mla_scratch);
+      _vira_gpu.cu_mla_scratch = 0;
+      _vira_gpu.cu_mla_scratch_cap = 0;
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmvq_id[i] = NULL;
       for (int i = 0; i < 8; i++) _vira_gpu.cu_k_mmvqb[i] = NULL;
       if (_vira_gpu.moe_scratch != 0 && _vira_gpu.cuMemFree) _vira_gpu.cuMemFree(_vira_gpu.moe_scratch);
@@ -6229,9 +6250,9 @@ static inline bool vira_gpu_moe_layer(const float *wg, const float *wu, const fl
   const size_t elems = (size_t)n_expert * (size_t)F * (size_t)D;
   const int P = M * n_used;
   bool ok = false;
-  // host staging: x | ids | xrow | pos | wt, uploaded in one copy
+  // host staging: ids | xrow | pos | wt (tiny metadata only; x & out stay resident on GPU!)
   const size_t a = 256, sx = (size_t)M * D * 4, si = (size_t)P * 4;
-  const size_t hx = 0, hid = (hx + sx + a - 1) / a * a, hxr = (hid + si + a - 1) / a * a,
+  const size_t hid = 0, hxr = (hid + si + a - 1) / a * a,
                hpos = (hxr + si + a - 1) / a * a, hwt = (hpos + si + a - 1) / a * a, hend = hwt + si;
   unsigned char *stage = (unsigned char *)malloc(hend);
   if (stage == NULL) return false;
@@ -6251,7 +6272,6 @@ static inline bool vira_gpu_moe_layer(const float *wg, const float *wu, const fl
       pos[i] = m;
     }
     free(count);
-    memcpy(stage + hx, x, sx);
     memcpy(stage + hwt, wt, si);
   }
   pthread_mutex_lock(&_vira_gpu.lock);
@@ -6264,20 +6284,30 @@ static inline bool vira_gpu_moe_layer(const float *wg, const float *wu, const fl
     vira_cu_deviceptr dev[3] = {0, 0, 0};
     _vira_gpu_wfmt fmt[3] = {VIRA_WFMT_F32, VIRA_WFMT_F32, VIRA_WFMT_F32};
     if (!_vira_gpu_moe_resident_locked(w3, n_w, elems, dev, fmt)) goto done;
+    vira_cl_int aerr = 0;
+    bool hit = false;
+    _vira_gpu_act_entry *s_x = _vira_gpu_get_or_upload_activation_locked(x, sx, false, &hit, NULL, NULL, 0, 0, NULL, &aerr);
+    if (aerr != VIRA_CL_SUCCESS || s_x == NULL || s_x->cu_buf == 0) goto done;
+    _vira_gpu_act_entry *s_out = _vira_gpu_act_hash_find_locked(out);
+    if (s_out == NULL || s_out->bytes != sx || s_out->cu_buf == 0) {
+      s_out = _vira_gpu_alloc_activation_slot_locked(sx, s_x->dev_buf, NULL, NULL, s_x->cu_buf, 0, 0, NULL, NULL, &aerr);
+      if (aerr != VIRA_CL_SUCCESS || s_out == NULL || s_out->cu_buf == 0) goto done;
+      _vira_gpu_act_bind_locked(s_out, out, sx, s_out->epoch, s_out->last_used, false);
+    }
     if (ungated) {
       if (_vira_gpu.cu_k_relu_sqr == NULL) goto done;
       const size_t ru = _vira_gpu_wfmt_row_bytes(fmt[0], D), rd = _vira_gpu_wfmt_row_bytes(fmt[1], F);
       if (ru == 0 || rd == 0) goto done;
-      // device: staging copy | xq [M, D/32] | g [P, F] | hq [P, F/32] | y [P, D] | out [M, D]
+      // device: staging copy | xq [M, D/32] | g [P, F] | hq [P, F/32] | y [P, D]
       const size_t sxq = (size_t)M * (D / 32) * 40, sg = (size_t)P * F * 4, shq = (size_t)P * (F / 32) * 40,
                    sy = (size_t)P * D * 4;
       const size_t oxq = (hend + a - 1) / a * a, og = (oxq + sxq + a - 1) / a * a,
                    ohq = (og + sg + a - 1) / a * a, oy = (ohq + shq + a - 1) / a * a,
-                   oout = (oy + sy + a - 1) / a * a, total = oout + sx;
+                   total = oy + sy;
       if (!_vira_gpu_moe_scratch_locked(total)) goto done;
       const vira_cu_deviceptr b = _vira_gpu.moe_scratch;
       if (_vira_gpu.cuMemcpyHtoD(b, stage, hend) != VIRA_CUDA_SUCCESS) goto done;
-      if (!_vira_gpu_quantize_q8_1_launch_locked(b + hx, b + oxq, M, D)) goto done;
+      if (!_vira_gpu_quantize_q8_1_launch_locked(s_x->cu_buf, b + oxq, M, D)) goto done;
       if (!_vira_gpu_mmvq_id_launch_locked(fmt[0], b + oxq, dev[0], b + og, P, D, F, b + hid, b + hxr,
                                            (long long)((size_t)F * ru)))
         goto done;
@@ -6294,30 +6324,29 @@ static inline bool vira_gpu_moe_layer(const float *wg, const float *wu, const fl
                                            (long long)((size_t)D * rd)))
         goto done;
       {
-        vira_cu_deviceptr yp = b + oy, wp = b + hwt, pp = b + hpos, op = b + oout;
+        vira_cu_deviceptr yp = b + oy, wp = b + hwt, pp = b + hpos, op = s_out->cu_buf;
         int32_t m_ = M, nu = n_used, d_ = D;
         void *args[] = {&yp, &wp, &pp, &op, &m_, &nu, &d_};
         if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_moe_sum, (unsigned int)((D + 255) / 256), (unsigned int)M, 1, 256,
                                      1, 1, 0, _vira_gpu.cu_stream, args, NULL) != VIRA_CUDA_SUCCESS)
           goto done;
       }
-      if (_vira_gpu.cuStreamSynchronize && _vira_gpu.cu_stream) _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
-      ok = _vira_gpu.cuMemcpyDtoH(out, b + oout, sx) == VIRA_CUDA_SUCCESS;
+      _vira_gpu_mark_act_dirty_locked(s_out, out);
+      ok = true;
       goto done;
     }
     const size_t rg = _vira_gpu_wfmt_row_bytes(fmt[0], D), ru = _vira_gpu_wfmt_row_bytes(fmt[1], D),
                  rd = _vira_gpu_wfmt_row_bytes(fmt[2], F);
     if (rg == 0 || ru == 0 || rd == 0) goto done;
-    // device: staging copy | xq [M, D/32] | g [P, F] | u [P, F] | hq [P, F/32] | y [P, D] | out [M, D]
+    // device: staging copy | xq [M, D/32] | g [P, F] | u [P, F] | hq [P, F/32] | y [P, D]
     const size_t sxq = (size_t)M * (D / 32) * 40, sg = (size_t)P * F * 4, shq = (size_t)P * (F / 32) * 40,
                  sy = (size_t)P * D * 4;
     const size_t oxq = (hend + a - 1) / a * a, og = (oxq + sxq + a - 1) / a * a, ou = (og + sg + a - 1) / a * a,
-                 ohq = (ou + sg + a - 1) / a * a, oy = (ohq + shq + a - 1) / a * a,
-                 oout = (oy + sy + a - 1) / a * a, total = oout + sx;
+                 ohq = (ou + sg + a - 1) / a * a, oy = (ohq + shq + a - 1) / a * a, total = oy + sy;
     if (!_vira_gpu_moe_scratch_locked(total)) goto done;
     const vira_cu_deviceptr b = _vira_gpu.moe_scratch;
     if (_vira_gpu.cuMemcpyHtoD(b, stage, hend) != VIRA_CUDA_SUCCESS) goto done;
-    if (!_vira_gpu_quantize_q8_1_launch_locked(b + hx, b + oxq, M, D)) goto done;
+    if (!_vira_gpu_quantize_q8_1_launch_locked(s_x->cu_buf, b + oxq, M, D)) goto done;
     if (!_vira_gpu_mmvq_id_launch_locked(fmt[0], b + oxq, dev[0], b + og, P, D, F, b + hid, b + hxr,
                                          (long long)((size_t)F * rg)))
       goto done;
@@ -6338,15 +6367,15 @@ static inline bool vira_gpu_moe_layer(const float *wg, const float *wu, const fl
                                          (long long)((size_t)D * rd)))
       goto done;
     {
-      vira_cu_deviceptr yp = b + oy, wp = b + hwt, pp = b + hpos, op = b + oout;
+      vira_cu_deviceptr yp = b + oy, wp = b + hwt, pp = b + hpos, op = s_out->cu_buf;
       int32_t m_ = M, nu = n_used, d_ = D;
       void *args[] = {&yp, &wp, &pp, &op, &m_, &nu, &d_};
       if (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_moe_sum, (unsigned int)((D + 255) / 256), (unsigned int)M, 1, 256,
                                    1, 1, 0, _vira_gpu.cu_stream, args, NULL) != VIRA_CUDA_SUCCESS)
         goto done;
     }
-    if (_vira_gpu.cuStreamSynchronize && _vira_gpu.cu_stream) _vira_gpu.cuStreamSynchronize(_vira_gpu.cu_stream);
-    ok = _vira_gpu.cuMemcpyDtoH(out, b + oout, sx) == VIRA_CUDA_SUCCESS;
+    _vira_gpu_mark_act_dirty_locked(s_out, out);
+    ok = true;
   }
 done:
   pthread_mutex_unlock(&_vira_gpu.lock);
@@ -9902,6 +9931,205 @@ static inline int vira_gpu_mamba2_step(float *out, const float *zxBCdt, const fl
   if (ok) {
     _vira_gpu_mark_act_dirty_locked(s_cs, conv_state);
     _vira_gpu_mark_act_dirty_locked(s_ss, ssm_state);
+    _vira_gpu_mark_act_dirty_locked(s_out, out);
+  }
+  pthread_mutex_unlock(&_vira_gpu.lock);
+  return ok ? 1 : 0;
+}
+
+static inline int vira_gpu_mla_attention(float *out, const float *q, const float *kvpe,
+                                         const float *kv_norm_w, float *cache,
+                                         const float *wkb, const float *wvb,
+                                         int M, int pos0, int ctx_rows, int nh,
+                                         int nope, int rope, int kv_lora, int hdv, float eps,
+                                         float base, float fscale, float ext, float attn_factor,
+                                         float bf, float bsl, int ctx_orig, float scale,
+                                         const float *mask, int has_mask) {
+  const char *env_mla = getenv("VIRA_GPU_MLA");
+  if (env_mla != NULL && strcmp(env_mla, "0") == 0) return 0;
+  if (!_vira_gpu.available || !_vira_gpu.enabled || _vira_gpu.simulate_oom ||
+      _vira_gpu.active_backend != VIRA_GPU_BACKEND_CUDA ||
+      _vira_gpu.cu_k_mla_kv_store == NULL || _vira_gpu.cu_k_mla_q_split == NULL ||
+      _vira_gpu.cu_k_mla_proj_f32 == NULL || _vira_gpu.cu_k_mla_attn == NULL ||
+      _vira_gpu.cu_k_mla_hmd_to_mhd == NULL ||
+      out == NULL || q == NULL || kvpe == NULL || kv_norm_w == NULL || cache == NULL ||
+      wkb == NULL || wvb == NULL || M <= 0 || nh <= 0 || ctx_rows <= 0 ||
+      kv_lora <= 0 || kv_lora > 1024 || rope <= 0 || rope > 256 || (rope & 1) != 0) {
+    return 0;
+  }
+  const int stride = kv_lora + rope;
+  const int qd = nope + rope;
+  const int P = nh * M;
+  const size_t q_bytes = (size_t)M * (size_t)nh * (size_t)qd * sizeof(float);
+  const size_t kvpe_bytes = (size_t)M * (size_t)stride * sizeof(float);
+  const size_t cache_bytes = (size_t)ctx_rows * (size_t)stride * sizeof(float);
+  const size_t out_bytes = (size_t)M * (size_t)nh * (size_t)hdv * sizeof(float);
+  const size_t mask_bytes = has_mask ? (size_t)M * (size_t)(pos0 + M) * sizeof(float) : 0;
+
+  pthread_mutex_lock(&_vira_gpu.lock);
+  if (!_vira_gpu_cuda_ensure_ctx_locked()) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+
+  vira_cl_int err = 0;
+  _vira_gpu_wfmt fmt_nw = VIRA_WFMT_F32, fmt_kb = VIRA_WFMT_F32, fmt_vb = VIRA_WFMT_F32;
+  _vira_gpu_cache_entry *w_nw = _vira_gpu_get_or_upload_weight_locked(kv_norm_w, (size_t)kv_lora, false, false, &fmt_nw, &err);
+  _vira_gpu_cache_entry *w_kb = (err == VIRA_CL_SUCCESS)
+      ? _vira_gpu_get_or_upload_weight_locked(wkb, (size_t)nh * (size_t)kv_lora * (size_t)nope, false, true, &fmt_kb, &err) : NULL;
+  _vira_gpu_cache_entry *w_vb = (err == VIRA_CL_SUCCESS)
+      ? _vira_gpu_get_or_upload_weight_locked(wvb, (size_t)nh * (size_t)hdv * (size_t)kv_lora, false, true, &fmt_vb, &err) : NULL;
+  if (err != VIRA_CL_SUCCESS || !w_nw || !w_kb || !w_vb) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+  const size_t rkb = (fmt_kb == VIRA_WFMT_F32) ? 0 : _vira_gpu_wfmt_row_bytes(fmt_kb, nope);
+  const size_t rvb = (fmt_vb == VIRA_WFMT_F32) ? 0 : _vira_gpu_wfmt_row_bytes(fmt_vb, kv_lora);
+  if ((fmt_kb != VIRA_WFMT_F32 && (rkb == 0 || (nope & 31) != 0)) ||
+      (fmt_vb != VIRA_WFMT_F32 && (rvb == 0 || (kv_lora & 31) != 0))) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+
+  // Scratch layout: ids [P] | qn [P, nope] | qpe [P, rope] | qa [P, kv_lora] | ctx [P, kv_lora] | otmp [P, hdv] | q8
+  const size_t a = 256;
+  const size_t s_ids = (size_t)P * sizeof(int32_t);
+  const size_t s_qn  = (size_t)P * (size_t)nope * sizeof(float);
+  const size_t s_qpe = (size_t)P * (size_t)rope * sizeof(float);
+  const size_t s_qa  = (size_t)P * (size_t)kv_lora * sizeof(float);
+  const size_t s_ctx = (size_t)P * (size_t)kv_lora * sizeof(float);
+  const size_t s_ot  = (size_t)P * (size_t)hdv * sizeof(float);
+  const int max_qk = nope > kv_lora ? nope : kv_lora;
+  const size_t s_q8  = (size_t)P * (size_t)((max_qk + 31) / 32) * 40u;
+  const size_t o_ids = 0;
+  const size_t o_qn  = (o_ids + s_ids + a - 1) / a * a;
+  const size_t o_qpe = (o_qn  + s_qn  + a - 1) / a * a;
+  const size_t o_qa  = (o_qpe + s_qpe + a - 1) / a * a;
+  const size_t o_ctx = (o_qa  + s_qa  + a - 1) / a * a;
+  const size_t o_ot  = (o_ctx + s_ctx + a - 1) / a * a;
+  const size_t o_q8  = (o_ot  + s_ot  + a - 1) / a * a;
+  const size_t total = o_q8 + s_q8;
+  if (_vira_gpu.cu_mla_scratch_cap < total) {
+    if (_vira_gpu.cu_mla_scratch != 0 && _vira_gpu.cuMemFree) {
+      _vira_gpu.cuMemFree(_vira_gpu.cu_mla_scratch);
+      _vira_gpu.cu_mla_scratch = 0;
+      _vira_gpu.cu_mla_scratch_cap = 0;
+    }
+    if (_vira_gpu.cuMemAlloc(&_vira_gpu.cu_mla_scratch, total) != VIRA_CUDA_SUCCESS ||
+        _vira_gpu.cu_mla_scratch == 0) {
+      pthread_mutex_unlock(&_vira_gpu.lock);
+      return 0;
+    }
+    _vira_gpu.cu_mla_scratch_cap = total;
+  }
+
+  bool hit = false;
+  _vira_gpu_act_entry *s_q = _vira_gpu_get_or_upload_activation_locked(q, q_bytes, false, &hit, NULL, NULL, 0, 0, NULL, &err);
+  _vira_gpu_act_entry *s_kv = (err == VIRA_CL_SUCCESS && s_q)
+      ? _vira_gpu_get_or_upload_activation_locked(kvpe, kvpe_bytes, false, &hit, s_q->dev_buf, NULL, s_q->cu_buf, 0, NULL, &err) : NULL;
+  _vira_gpu_act_entry *s_cache = (err == VIRA_CL_SUCCESS && s_kv)
+      ? _vira_gpu_get_or_upload_activation_locked(cache, cache_bytes, true, &hit, s_q->dev_buf, s_kv->dev_buf, s_q->cu_buf, s_kv->cu_buf, NULL, &err) : NULL;
+  _vira_gpu_act_entry *s_mask = (err == VIRA_CL_SUCCESS && s_cache && has_mask && mask != NULL)
+      ? _vira_gpu_get_or_upload_activation_locked(mask, mask_bytes, false, &hit, s_cache->dev_buf, s_q->dev_buf, s_cache->cu_buf, s_q->cu_buf, NULL, &err) : NULL;
+  _vira_gpu_act_entry *s_out = NULL;
+  if (err == VIRA_CL_SUCCESS && s_cache && (!has_mask || s_mask != NULL)) {
+    s_out = _vira_gpu_act_hash_find_locked(out);
+    if (s_out == NULL || s_out->bytes != out_bytes || s_out->cu_buf == 0) {
+      s_out = _vira_gpu_alloc_activation_slot_locked(out_bytes, s_q->dev_buf, s_kv->dev_buf, s_cache->dev_buf,
+                                                     s_q->cu_buf, s_kv->cu_buf, s_cache->cu_buf, NULL, NULL, &err);
+      if (err == VIRA_CL_SUCCESS && s_out != NULL) {
+        _vira_gpu_act_bind_locked(s_out, out, out_bytes, s_out->epoch, s_out->last_used, false);
+      }
+    }
+  }
+  if (err != VIRA_CL_SUCCESS || !s_q || !s_kv || !s_cache || !s_out || (has_mask && !s_mask)) {
+    pthread_mutex_unlock(&_vira_gpu.lock);
+    return 0;
+  }
+
+  const vira_cu_deviceptr b = _vira_gpu.cu_mla_scratch;
+  bool ok = true;
+  if (fmt_kb != VIRA_WFMT_F32 || fmt_vb != VIRA_WFMT_F32) {
+    int32_t *h_ids = (int32_t *)malloc(s_ids);
+    if (!h_ids) { pthread_mutex_unlock(&_vira_gpu.lock); return 0; }
+    for (int h = 0; h < nh; h++)
+      for (int t = 0; t < M; t++) h_ids[h * M + t] = h;
+    ok = (_vira_gpu.cuMemcpyHtoD(b + o_ids, h_ids, s_ids) == VIRA_CUDA_SUCCESS);
+    free(h_ids);
+  }
+
+  // YaRN correction dimensions
+  float corr0 = 0.0f, corr1 = (float)(rope - 1);
+  if (ext != 0.0f && ctx_orig > 0 && base > 1.0f) {
+    const float pi2 = 6.28318530717958647692f;
+    float st = floorf((float)rope * logf((float)ctx_orig / (bf * pi2)) / (2.0f * logf(base)));
+    float en = ceilf((float)rope * logf((float)ctx_orig / (bsl * pi2)) / (2.0f * logf(base)));
+    corr0 = st > 0.0f ? st : 0.0f;
+    corr1 = en < (float)(rope - 1) ? en : (float)(rope - 1);
+  }
+
+  int32_t m32 = M, pos32 = pos0, nh32 = nh, nope32 = nope, rope32 = rope, kvl32 = kv_lora, hdv32 = hdv;
+  int32_t hm32 = has_mask ? 1 : 0, tm0 = 0, tm1 = 1;
+  float eps32 = eps, base32 = base, fsc32 = fscale, ext32 = ext, af32 = attn_factor, sc32 = scale;
+  vira_cu_deviceptr p_qn = b + o_qn, p_qpe = b + o_qpe, p_qa = b + o_qa, p_ctx = b + o_ctx;
+  vira_cu_deviceptr p_ot = b + o_ot, p_mask = s_mask ? s_mask->cu_buf : s_cache->cu_buf;
+
+  // 1. Cache RMSNorm + YaRN RoPE
+  if (ok) {
+    void *a1[] = {&s_kv->cu_buf, &w_nw->cu_buf, &s_cache->cu_buf, &pos32, &kvl32, &rope32, &eps32,
+                  &base32, &fsc32, &ext32, &af32, &corr0, &corr1};
+    ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_kv_store, (unsigned int)M, 1, 1,
+                                   256, 1, 1, 0, _vira_gpu.cu_stream, a1, NULL) == VIRA_CUDA_SUCCESS);
+  }
+  // 2. Q split + YaRN RoPE
+  if (ok) {
+    void *a2[] = {&s_q->cu_buf, &p_qn, &p_qpe, &m32, &nh32, &nope32, &rope32, &pos32,
+                  &base32, &fsc32, &ext32, &af32, &corr0, &corr1};
+    ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_q_split, (unsigned int)nh, (unsigned int)M, 1,
+                                   128, 1, 1, 0, _vira_gpu.cu_stream, a2, NULL) == VIRA_CUDA_SUCCESS);
+  }
+  // 3. Q absorb: qn [nh, M, nope] * wkb [nh, kv_lora, nope]^T -> qa [nh, M, kv_lora]
+  if (ok) {
+    if (fmt_kb == VIRA_WFMT_F32) {
+      void *a3[] = {&p_qn, &w_kb->cu_buf, &p_qa, &m32, &nh32, &nope32, &kvl32, &tm0};
+      ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_proj_f32,
+                                     (unsigned int)(((size_t)kv_lora + 3u) / 4u), (unsigned int)P, 1,
+                                     128, 1, 1, 0, _vira_gpu.cu_stream, a3, NULL) == VIRA_CUDA_SUCCESS);
+    } else {
+      ok = _vira_gpu_quantize_q8_1_launch_locked(p_qn, b + o_q8, P, nope) &&
+           _vira_gpu_mmvq_id_launch_locked(fmt_kb, b + o_q8, w_kb->cu_buf, p_qa, P, nope, kv_lora,
+                                           b + o_ids, 0, (long long)((size_t)kv_lora * rkb));
+    }
+  }
+  // 4. Online-softmax latent attention -> ctx [nh, M, kv_lora]
+  if (ok) {
+    void *a4[] = {&p_qa, &p_qpe, &s_cache->cu_buf, &p_mask, &hm32, &p_ctx,
+                  &m32, &pos32, &nh32, &kvl32, &rope32, &sc32};
+    ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_attn, (unsigned int)nh, (unsigned int)M, 1,
+                                   256, 1, 1, 0, _vira_gpu.cu_stream, a4, NULL) == VIRA_CUDA_SUCCESS);
+  }
+  // 5. Value up-projection: ctx [nh, M, kv_lora] * wvb [nh, hdv, kv_lora]^T -> out [M, nh, hdv]
+  if (ok) {
+    if (fmt_vb == VIRA_WFMT_F32) {
+      void *a5[] = {&p_ctx, &w_vb->cu_buf, &s_out->cu_buf, &m32, &nh32, &kvl32, &hdv32, &tm1};
+      ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_proj_f32,
+                                     (unsigned int)(((size_t)hdv + 3u) / 4u), (unsigned int)P, 1,
+                                     128, 1, 1, 0, _vira_gpu.cu_stream, a5, NULL) == VIRA_CUDA_SUCCESS);
+    } else {
+      vira_cu_deviceptr dst_vb = (M == 1) ? s_out->cu_buf : p_ot;
+      ok = _vira_gpu_quantize_q8_1_launch_locked(p_ctx, b + o_q8, P, kv_lora) &&
+           _vira_gpu_mmvq_id_launch_locked(fmt_vb, b + o_q8, w_vb->cu_buf, dst_vb, P, kv_lora, hdv,
+                                           b + o_ids, 0, (long long)((size_t)hdv * rvb));
+      if (ok && M > 1) {
+        void *a6[] = {&p_ot, &s_out->cu_buf, &m32, &nh32, &hdv32};
+        ok = (_vira_gpu.cuLaunchKernel(_vira_gpu.cu_k_mla_hmd_to_mhd,
+                                       (unsigned int)(((size_t)P * (size_t)hdv + 255u) / 256u), 1, 1,
+                                       256, 1, 1, 0, _vira_gpu.cu_stream, a6, NULL) == VIRA_CUDA_SUCCESS);
+      }
+    }
+  }
+  if (ok) {
+    _vira_gpu_mark_act_dirty_locked(s_cache, cache);
     _vira_gpu_mark_act_dirty_locked(s_out, out);
   }
   pthread_mutex_unlock(&_vira_gpu.lock);

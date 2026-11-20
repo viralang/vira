@@ -373,3 +373,226 @@ vira_cu_mamba2_norm_f32(float *__restrict__ out, const float *__restrict__ w,
     yg[i] = yg[i] * inv * wg[i];
   }
 }
+
+// ============================================================================
+// DeepSeek MLA attention kernels (T-128): keep latent cache + Q/K/V on GPU.
+// ============================================================================
+
+__device__ __forceinline__ void vl_mla_yarn_cs(int pair_idx, int pos, int n_rot,
+                                               float freq_base, float freq_scale,
+                                               float ext_factor, float attn_factor,
+                                               float corr0, float corr1,
+                                               float &cs, float &sn) {
+  const float theta_extrap = (float)pos * powf(freq_base, -(2.0f * (float)pair_idx) / (float)n_rot);
+  const float theta_interp = freq_scale * theta_extrap;
+  float th = theta_interp;
+  float mscale = attn_factor;
+  if (ext_factor != 0.0f) {
+    float denom = corr1 - corr0;
+    if (denom < 0.001f) denom = 0.001f;
+    float y = ((float)pair_idx - corr0) / denom;
+    float ramp = 1.0f - fminf(1.0f, fmaxf(0.0f, y));
+    float mix = ramp * ext_factor;
+    th = theta_interp * (1.0f - mix) + theta_extrap * mix;
+    mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+  }
+  cs = cosf(th) * mscale;
+  sn = sinf(th) * mscale;
+}
+
+// MLA stage 1: cache[pos0+t, 0..kv_lora] = rmsnorm(kvpe[t, 0..kv_lora], kv_norm_w, eps),
+//              cache[pos0+t, kv_lora..stride] = rope_norm_yarn(kvpe[t, kv_lora..stride], pos0+t).
+// Grid M, block 256.
+extern "C" __global__ void __launch_bounds__(256)
+vira_cu_mla_kv_store_f32(const float *__restrict__ kvpe, const float *__restrict__ kv_norm_w,
+                         float *__restrict__ cache, int pos0, int kv_lora, int rope, float eps,
+                         float freq_base, float freq_scale, float ext_factor, float attn_factor,
+                         float corr0, float corr1) {
+  __shared__ float sdata[256];
+  const int tid = (int)threadIdx.x;
+  const int t = (int)blockIdx.x;
+  const int stride = kv_lora + rope;
+  const float *src = kvpe + (size_t)t * (size_t)stride;
+  float *dst = cache + (size_t)(pos0 + t) * (size_t)stride;
+
+  float acc = 0.0f;
+  for (int c = tid; c < kv_lora; c += 256) {
+    const float v = src[c];
+    acc += v * v;
+  }
+  sdata[tid] = acc;
+  VL_SYNC();
+  for (int o = 128; o > 0; o >>= 1) {
+    if (tid < o) sdata[tid] += sdata[tid + o];
+    VL_SYNC();
+  }
+  const float inv = vl_rsqrt_approx(sdata[0] / (float)kv_lora + eps);
+  for (int c = tid; c < kv_lora; c += 256) {
+    dst[c] = src[c] * inv * kv_norm_w[c];
+  }
+  const int half_r = rope / 2;
+  for (int j = tid; j < half_r; j += 256) {
+    float cs, sn;
+    vl_mla_yarn_cs(j, pos0 + t, rope, freq_base, freq_scale, ext_factor, attn_factor, corr0, corr1, cs, sn);
+    const float x0 = src[kv_lora + 2 * j];
+    const float x1 = src[kv_lora + 2 * j + 1];
+    dst[kv_lora + 2 * j]     = x0 * cs - x1 * sn;
+    dst[kv_lora + 2 * j + 1] = x0 * sn + x1 * cs;
+  }
+}
+
+// MLA stage 2: split q [M, nh, nope + rope] into qn [nh, M, nope] and roped qpe [M, nh, rope].
+// Grid (nh, M), block 128.
+extern "C" __global__ void __launch_bounds__(128)
+vira_cu_mla_q_split_f32(const float *__restrict__ q, float *__restrict__ qn, float *__restrict__ qpe,
+                        int M, int nh, int nope, int rope, int pos0,
+                        float freq_base, float freq_scale, float ext_factor, float attn_factor,
+                        float corr0, float corr1) {
+  const int tid = (int)threadIdx.x;
+  const int h = (int)blockIdx.x;
+  const int t = (int)blockIdx.y;
+  const int qd = nope + rope;
+  const float *qr = q + ((size_t)t * (size_t)nh + (size_t)h) * (size_t)qd;
+  float *qnr = qn + ((size_t)h * (size_t)M + (size_t)t) * (size_t)nope;
+  float *qper = qpe + ((size_t)t * (size_t)nh + (size_t)h) * (size_t)rope;
+
+  for (int i = tid; i < nope; i += 128) qnr[i] = qr[i];
+  const int half_r = rope / 2;
+  for (int j = tid; j < half_r; j += 128) {
+    float cs, sn;
+    vl_mla_yarn_cs(j, pos0 + t, rope, freq_base, freq_scale, ext_factor, attn_factor, corr0, corr1, cs, sn);
+    const float x0 = qr[nope + 2 * j];
+    const float x1 = qr[nope + 2 * j + 1];
+    qper[2 * j]     = x0 * cs - x1 * sn;
+    qper[2 * j + 1] = x0 * sn + x1 * cs;
+  }
+}
+
+// MLA F32 per-head batched linear projection: x [nh, M, K] * w [nh, N, K]^T -> y.
+// out_t_major == 0: y [nh, M, N]; out_t_major == 1: y [M, nh, N].
+// Grid ((N + 3) / 4, nh * M), block 128 (4 warps).
+extern "C" __global__ void __launch_bounds__(128)
+vira_cu_mla_proj_f32(const float *__restrict__ x, const float *__restrict__ w, float *__restrict__ y,
+                     int M, int nh, int K, int N, int out_t_major) {
+  const int wp = (int)threadIdx.x / WARP;
+  const int lane = (int)threadIdx.x & (WARP - 1);
+  const int n = (int)blockIdx.x * 4 + wp;
+  const int hm = (int)blockIdx.y;
+  if (n >= N) return;
+  const int h = hm / M;
+  const int t = hm - h * M;
+  const float *xr = x + (size_t)hm * (size_t)K;
+  const float *wr = w + ((size_t)h * (size_t)N + (size_t)n) * (size_t)K;
+  float acc = 0.0f;
+  for (int k = lane; k < K; k += WARP) acc += xr[k] * wr[k];
+  acc = vl_warp_sum_f(acc);
+  if (lane == 0) {
+    if (out_t_major) {
+      y[((size_t)t * (size_t)nh + (size_t)h) * (size_t)N + (size_t)n] = acc;
+    } else {
+      y[(size_t)hm * (size_t)N + (size_t)n] = acc;
+    }
+  }
+}
+
+// MLA stage 4: absorbed latent attention over cache [ctx, kv_lora + rope].
+// qa: [nh, M, kv_lora], qpe: [M, nh, rope], ctx_out: [nh, M, kv_lora].
+// Requires kv_lora <= 1024, rope <= 256. Grid (nh, M), block 256 (8 warps).
+extern "C" __global__ void __launch_bounds__(256)
+vira_cu_mla_attn_f32(const float *__restrict__ qa, const float *__restrict__ qpe,
+                     const float *__restrict__ cache, const float *__restrict__ mask, int has_mask,
+                     float *__restrict__ ctx_out, int M, int pos0, int nh, int kv_lora, int rope,
+                     float scale) {
+  __shared__ float sqa[1024];
+  __shared__ float sqpe[256];
+  __shared__ float sscores[8];
+
+  const int tid = (int)threadIdx.x;
+  const int wp = tid / WARP;
+  const int lane = tid & (WARP - 1);
+  const int h = (int)blockIdx.x;
+  const int t = (int)blockIdx.y;
+  const int hm = h * M + t;
+  const int stride = kv_lora + rope;
+  const int n_keys = pos0 + t + 1;
+  const int mask_stride = pos0 + M;
+
+  const float *qar = qa + (size_t)hm * (size_t)kv_lora;
+  const float *qper = qpe + ((size_t)t * (size_t)nh + (size_t)h) * (size_t)rope;
+  for (int c = tid; c < kv_lora; c += 256) sqa[c] = qar[c];
+  for (int c = tid; c < rope; c += 256) sqpe[c] = qper[c];
+  VL_SYNC();
+
+  float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+  float m_val = -1e30f;
+  float l_val = 0.0f;
+
+  for (int k0 = 0; k0 < n_keys; k0 += 8) {
+    const int k = k0 + wp;
+    float sc = -1e30f;
+    if (k < n_keys) {
+      bool masked = (has_mask && mask[(size_t)t * (size_t)mask_stride + (size_t)k] < -1e20f);
+      if (!masked) {
+        const float *cr = cache + (size_t)k * (size_t)stride;
+        float dot = 0.0f;
+        for (int c = lane; c < kv_lora; c += WARP) dot += sqa[c] * cr[c];
+        for (int c = lane; c < rope; c += WARP) dot += sqpe[c] * cr[kv_lora + c];
+        sc = vl_warp_sum_f(dot) * scale;
+      }
+    }
+    if (lane == 0) sscores[wp] = sc;
+    VL_SYNC();
+
+    const int kn = (n_keys - k0) < 8 ? (n_keys - k0) : 8;
+    float bmax = m_val;
+    for (int j = 0; j < kn; j++) {
+      if (sscores[j] > bmax) bmax = sscores[j];
+    }
+    const float rescale = (l_val > 0.0f) ? expf(m_val - bmax) : 0.0f;
+    acc0 *= rescale;
+    acc1 *= rescale;
+    acc2 *= rescale;
+    acc3 *= rescale;
+    l_val *= rescale;
+    m_val = bmax;
+
+    for (int j = 0; j < kn; j++) {
+      const float sj = sscores[j];
+      if (sj <= -1e29f) continue;
+      const float wj = expf(sj - m_val);
+      l_val += wj;
+      const float *cr = cache + (size_t)(k0 + j) * (size_t)stride;
+      const int c0 = tid;
+      const int c1 = tid + 256;
+      const int c2 = tid + 512;
+      const int c3 = tid + 768;
+      if (c0 < kv_lora) acc0 += wj * cr[c0];
+      if (c1 < kv_lora) acc1 += wj * cr[c1];
+      if (c2 < kv_lora) acc2 += wj * cr[c2];
+      if (c3 < kv_lora) acc3 += wj * cr[c3];
+    }
+    VL_SYNC();
+  }
+
+  const float inv_l = l_val > 0.0f ? (1.0f / l_val) : 0.0f;
+  float *co = ctx_out + (size_t)hm * (size_t)kv_lora;
+  if (tid < kv_lora) co[tid] = acc0 * inv_l;
+  if (tid + 256 < kv_lora) co[tid + 256] = acc1 * inv_l;
+  if (tid + 512 < kv_lora) co[tid + 512] = acc2 * inv_l;
+  if (tid + 768 < kv_lora) co[tid + 768] = acc3 * inv_l;
+}
+
+// Transpose [nh, M, D] -> [M, nh, D] (used when M > 1 and quantized wvb wrote [nh, M, hdv]).
+// Grid ((M * nh * D + 255) / 256), block 256.
+extern "C" __global__ void vira_cu_mla_hmd_to_mhd_f32(const float *__restrict__ src,
+                                                      float *__restrict__ dst,
+                                                      int M, int nh, int D) {
+  const int i = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+  const int total = M * nh * D;
+  if (i >= total) return;
+  const int d = i % D;
+  const int r = i / D;
+  const int h = r % nh;
+  const int t = r / nh;
+  dst[i] = src[((size_t)h * (size_t)M + (size_t)t) * (size_t)D + (size_t)d];
+}
