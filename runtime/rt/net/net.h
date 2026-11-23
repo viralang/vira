@@ -158,7 +158,7 @@ static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port,
 
   struct addrinfo hints, *res = NULL, *p = NULL;
   memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
+  hints.ai_family = (host.len > 0 && strchr(hbuf.ptr, ':') != NULL) ? AF_INET6 : AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
 
@@ -187,7 +187,8 @@ static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port,
 #endif
 #endif
 
-    if (bind(listen_fd, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) {
+    int bres = bind(listen_fd, p->ai_addr, (socklen_t)p->ai_addrlen);
+    if (bres == 0) {
       break;
     }
 
@@ -199,7 +200,8 @@ static inline int64_t vira_net_tcp_listen(vira_string host, int32_t port,
 
   if (listen_fd == VIRA_INVALID_SOCKET)
     return -1;
-  if (listen(listen_fd, (int)backlog) == VIRA_SOCKET_ERROR) {
+  int lres = listen(listen_fd, (int)backlog);
+  if (lres == VIRA_SOCKET_ERROR) {
     closesocket(listen_fd);
     return -1;
   }
@@ -308,7 +310,7 @@ static inline int64_t vira_net_tcp_connect(vira_string host, int32_t port,
 
   struct addrinfo hints, *res = NULL, *p = NULL;
   memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
+  hints.ai_family = (host.len > 0 && strchr(hbuf.ptr, ':') != NULL) ? AF_INET6 : AF_INET;
   hints.ai_socktype = SOCK_STREAM;
 
   int gai = getaddrinfo(hbuf.ptr, port_buf, &hints, &res);
