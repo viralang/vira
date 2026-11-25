@@ -1,0 +1,81 @@
+module main
+
+import os
+import io
+import strings
+
+const SECRET_NUMBER = 42
+
+fn parse_guess(raw string) !int {
+	trimmed := raw.trim()
+	if trimmed.len == 0 {
+		return error('empty input')
+	}
+	val := strings.parse_i64_base(trimmed, 10) or {
+		return error('not a valid integer: "${trimmed}"')
+	}
+	if val < 1 || val > 100 {
+		return error('guess ${val} is out of range (1..100)')
+	}
+	return int(val)
+}
+
+fn check_guess(guess int, secret int) string {
+	if guess < secret {
+		return 'Too small!'
+	} else if guess > secret {
+		return 'Too big!'
+	}
+	return 'Exact match!'
+}
+
+fn main() {
+	println('=== Vira Number Guessing Tutorial ===')
+	println('Target range: 1 to 100')
+
+	// Collect guesses from CLI arguments, or use a simulated sequence if none passed
+	args := os.args()
+	mut inputs := []string{}
+	if args.len > 1 {
+		for mut i := 1; i < args.len; i += 1 {
+			inputs.push(args[i])
+		}
+	} else {
+		// Interactive mode if "--interactive" is set, otherwise deterministic demo sequence
+		inputs = ['18', 'not_a_num', '75', '42']
+	}
+
+	mut attempts := 0
+	for raw in inputs {
+		println('\n> Input: "${raw}"')
+		if raw == '--interactive' {
+			line := io.prompt('Enter your guess (1-100): ') or {
+				eprintln('End of input: ${err}')
+				break
+			}
+			guess := parse_guess(line) or {
+				println('  [Skip] ${err}')
+				continue
+			}
+			attempts += 1
+			verdict := check_guess(guess, SECRET_NUMBER)
+			println('  Attempt #${attempts}: ${guess} -> ${verdict}')
+			continue
+		}
+
+		guess := parse_guess(raw) or {
+			println('  [Skip] ${err}')
+			continue
+		}
+
+		attempts += 1
+		verdict := check_guess(guess, SECRET_NUMBER)
+		println('  Attempt #${attempts}: ${guess} -> ${verdict}')
+
+		if guess == SECRET_NUMBER {
+			println('\nYou won in ${attempts} valid attempts!')
+			break
+		}
+	}
+}
+

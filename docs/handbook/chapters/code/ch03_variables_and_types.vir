@@ -1,0 +1,60 @@
+module main
+
+pub const MAX_RETRIES = 3
+const PI_APPROX = 3.14159265
+const SERVICE_TAG = 'vira-core'
+
+fn compute_Work() int {
+	return 404
+}
+
+fn main() {
+	// 1. Immutability by default vs. explicit `mut`
+	port := 8080
+	mut active_connections := 0
+	active_connections += 1
+	active_connections = active_connections + 2
+	println('[1] Bindings: port=${port}, active_connections=${active_connections}, max_retries=${MAX_RETRIES}')
+
+	// Blank identifier `_` discards unused values without polluting the scope
+	_ := compute_Work()
+	_ := 'discarded string'
+
+	// 2. Scalar Primitive Types
+	b_val := u8(255)
+	i_val := 42
+	big_val := i64(9000000000)
+	f32_val := f32(0.125)
+	f64_val := 2.718281828
+	is_ready := true
+	println('[2] Scalars: u8=${b_val}, int=${i_val}, i64=${big_val}, f32=${f32_val}, f64=${f64_val}, bool=${is_ready}')
+
+	// 3. Numeric Literals (Hex, Octal, Binary) & Explicit Type Casts
+	hex_mask := 0xFF
+	oct_perm := 0o755
+	bin_flags := 0b1010_0101
+	println('[3] Bases: hex=0xFF(${hex_mask}), oct=0o755(${oct_perm}), bin=0b10100101(${bin_flags})')
+
+	ratio := f64(i_val) / PI_APPROX
+	truncated := int(ratio)
+	println('    Casts: f64(${i_val}) / ${PI_APPROX} = ${ratio} -> int(${truncated})')
+
+	// 4. Arithmetic, Bitwise, Logical & Comparison Operators
+	sum := 15 + 27
+	rem := 17 % 5
+	shifted := (1 << 4) | 0b0011
+	masked := shifted & 0x0F
+	toggled := masked ^ 0b1111
+	println('[4] Operators: sum=${sum}, rem=${rem}, shifted=${shifted}, masked=${masked}, toggled=${toggled}')
+
+	// Signed 32-bit wrap-around overflow semantics (-fwrapv)
+	mut max_i32 := 2147483647
+	max_i32 += 1
+	println('    Overflow wrap: 2147483647 + 1 = ${max_i32}')
+
+	// String comparison (by content) and concatenation (`+` and `+=`)
+	mut banner := '[' + SERVICE_TAG + ']'
+	banner += ' status=online'
+	is_match := SERVICE_TAG == 'vira-core' && 'alpha' < 'beta'
+	println('[5] Strings: "${banner}" (match=${is_match})')
+}
