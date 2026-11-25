@@ -1,0 +1,161 @@
+module main
+
+// 4.1 Functions, borrowed vs. mutable parameters, and early return
+pub fn clamp(val int, lo int, hi int) int {
+	if val < lo {
+		return lo
+	}
+	if val > hi {
+		return hi
+	}
+	return val
+}
+
+fn format_badge(role string, level int) string {
+	return '[${role}:lvl=${level}]'
+}
+
+fn bump_counter(mut count int, delta int) {
+	count += delta
+}
+
+// 4.2 Conditional branching (`if`, `else if`, `else`)
+fn classify_load(cpu_pct int) string {
+	if cpu_pct >= 90 {
+		return 'critical'
+	} else if cpu_pct >= 65 {
+		return 'elevated'
+	} else {
+		return 'nominal'
+	}
+}
+
+// 4.3 Multi-branch `switch` (value/comma cases, strings, tagless conditions)
+fn status_group(code int) string {
+	switch code {
+	case 200:
+		return 'ok'
+	case 201, 202:
+		return 'accepted'
+	case 400, 404:
+		return 'client-error'
+	case 500, 502, 503:
+		return 'server-error'
+	default:
+		return 'other'
+	}
+}
+
+fn dispatch_cmd(cmd string) string {
+	mut action := ''
+	switch cmd {
+	case 'start', 'resume':
+		action = 'worker-active'
+	case 'pause':
+		action = 'worker-paused'
+	case 'stop':
+		action = 'worker-stopped'
+	default:
+		action = 'unknown-command'
+	}
+	return action
+}
+
+fn latency_tier(latency_us int) string {
+	switch {
+	case latency_us < 50:
+		return 'l1-fast'
+	case latency_us < 500:
+		return 'in-memory'
+	default:
+		return 'io-bound'
+	}
+}
+
+// 4.5 Deterministic LIFO `defer` across normal exit, blocks, and early returns
+fn run_stage(name string, fail_early bool) string {
+	mut trace := '${name}:'
+	defer {
+		println('    [defer-block] cleanup ${name}')
+	}
+	defer println('    [defer-stmt] close ${name}')
+
+	if fail_early {
+		trace += 'aborted'
+		return trace
+	}
+
+	if !fail_early {
+		defer println('    [defer-inner] branch-scope-exit')
+		trace += 'ok'
+	}
+	return trace
+}
+
+fn main() {
+	// [1] Functions & Parameters
+	clamped := clamp(145, 0, 100)
+	badge := format_badge('scheduler', 3)
+	mut jobs := 10
+	bump_counter(mut jobs, 5)
+	println('[1] Functions: clamp(145)=${clamped}, badge=${badge}, jobs=${jobs}')
+
+	// [2] Conditionals
+	println('[2] Branches: load(42)=${classify_load(42)}, load(75)=${classify_load(75)}, load(95)=${classify_load(95)}')
+
+	// [3] Multi-Branch Switch
+	println('[3] Switch: 201->${status_group(201)}, 503->${status_group(503)}, resume->${dispatch_cmd('resume')}, 120us->${latency_tier(120)}')
+
+	// [4] Unified `for` Loops (while-style, 3-part C-style, infinite, for-in slice & map)
+	mut n := 8
+	mut steps := 0
+	for n > 1 {
+		n = n / 2
+		steps += 1
+	}
+
+	mut odd_sum := 0
+	for mut i := 0; i < 8; i += 1 {
+		if i % 2 == 0 {
+			continue
+		}
+		if i > 5 {
+			break
+		}
+		odd_sum += i
+	}
+
+	mut ticks := 0
+	for {
+		ticks += 1
+		if ticks == 3 {
+			break
+		}
+	}
+
+	weights := [2, 4, 6]
+	mut total_w := 0
+	for w in weights {
+		total_w += w
+	}
+
+	quotas := map[string]int{
+		'gpu': 4,
+		'cpu': 16,
+	}
+	mut quota_desc := ''
+	for k, v in quotas {
+		if quota_desc.len > 0 {
+			quota_desc += ','
+		}
+		quota_desc += '${k}=${v}'
+	}
+	println('[4] Loops: while_steps=${steps}, odd_sum=${odd_sum}, inf_ticks=${ticks}, weights=${total_w}, quotas=[${quota_desc}]')
+
+	// [5] Scope-Bound `defer` (LIFO on inner block, normal return, and early return)
+	println('[5] Defer:')
+	r1 := run_stage('alpha', false)
+	println('    result=${r1}')
+	r2 := run_stage('beta', true)
+	println('    result=${r2}')
+}

@@ -1,7 +1,7 @@
 # Progress Tracker: CUDA & CPU-SIMD Inference Parity (`docs/mint/cuda_and_cpu_plan.md`)
 
-**Snapshot Date**: `2026-11-09`  
-**Baseline Commit**: `e386210` (`v0.7.7`, following `775bc69` plan & `fc9850c` batched prefill / DP4A / CPU quant runtime)  
+**Snapshot Date**: `2026-11-26`  
+**Baseline Version**: `v0.7.9` (`main` post-`3bc29b0`)  
 **Primary Plan Spec**: [`docs/mint/cuda_and_cpu_plan.md`](file:///mnt/flutter_drive/vira/docs/mint/cuda_and_cpu_plan.md)
 
 ---
@@ -10,16 +10,35 @@
 
 | Phase | Scope | Status | Completion | Remaining Summary |
 |---|---|---|---|---|
-| **Phase 0** | Benchmark flags, chunked arena, tied `out_weight` | Almost Done | ~90% | Fix `gpu.set_enabled(false)` overwritten by lazy `vira_gpu_init()` + legacy `/gpu` toggle in Ex `43` |
-| **Phase 1** | Batched prompt prefill + Quantized WMMA/GEMM (`M > 4`) | Done | 100% | — |
-| **Phase 2** | Turing `Q8_1` activations + `sm_61+` `DP4A` MMVQ (`M <= 4`) | Done | 100% | — |
-| **Phase 3** | Fused decode kernels + Zero-SDK CUDA Graph replay | In Progress | ~30% | PTX & `vira_rt.h` decls exist; need `vira_gpu.h`, OpenCL `34..37`, compiler/stdlib wiring, Ex `43`/`45` |
-| **Phase 4** | Host quant retention, lazy FP32, `AVX2`/`NEON` quant linear | Almost Done | ~90% | Hook `_vira_rt_quant_try_get` / `_vira_rt_ensure_fp32_host_ptr` into `_vira_gpu_get_or_upload_weight_locked` |
-| **Phase 5** | Automated tests (#1–#6) & Colab T4 throughput gates | In Progress | 50% | Tests #1–#3 implemented & passing locally; Tests #4–#6 + Colab T4 `-prod` benchmark gates pending |
+| **Phase 0** | Benchmark flags, chunked arena, tied `out_weight`, init ordering | Done | 100% | — |
+| **Phase 1** | Batched prompt prefill + Int8 Tensor Core (`mmqt`/`mmqb`/`mmqg`) & WMMA GEMM (`M > 4`) | Done | 100% | — |
+| **Phase 2** | Turing `Q8_1` activations + `sm_61+` `DP4A` MMVQ / `mmvqb` (`M <= 4`) | Done | 100% | — |
+| **Phase 3** | Fused decode kernels, FlashAttention-2 (`mma.m16n8k8`), FP16 KV & Zero-SDK CUDA Graphs | Done | 100% | Dense `m == 1` decode captures & replays zero-toolkit CUDA Graphs |
+| **Phase 4** | Host quant retention, lazy FP32, `AVX2`/`NEON` quant linear, 256-entry TLS quant cache | Done | 100% | GPU upload path consults raw quant registry & lazy FP32 |
+| **Phase 5** | Mamba-2 SSM, Zero-Sync GPU MoE, GPU MLA, 64-bit `numel()`, Hardened GGUF & Parity Gates | In Progress | ~85% | ViraLama `70/70` reference parity passes; remaining: native `BF16`/`Q2_K`/`Q3_K`/`MXFP4` GPU kernels (`T-051`), `IQ*` (`T-030`/`T-031`), tighter `T-125` GPU parity & Windows RTX 3060 verification (`T-120`) |
 
 ---
 
-## Detailed Verification Against `HEAD` (`e386210`)
+## Post-`e386210` Completed Milestones (`fa23a43` .. `b0b7233`)
+
+- **Int8 Tensor Core Prompt Kernels (`mmqt` / `mmqb` / fused `mmqg`)** (`fa23a43` .. `5ed90f7`):
+  - `128x128` / `128x64` big-tile quantized prompt GEMM with `x4` activation layout, conflict-free `STS.64`, rasterized block order, FMA-folded scales, and fused gate+up SwiGLU (`mmqg`).
+  - Measured on Tesla T4 (`Qwen3-14B Q4_K_M`): **`588 tok/s` (`pp512`)** and **`22 tok/s` (`tg128`)**.
+- **FlashAttention-2 & FP16 KV Cache** (`24cda81`, `5e59e1e`):
+  - Tiled prompt attention over FP16 KV cache (`gpu.kv_f16`) on `mma.m16n8k8` Tensor Cores.
+- **Zero-SDK CUDA Graph Replay (`m == 1`)** (`ccd50fb`):
+  - Direct CUDA Driver graph capture/replay (`dpos` kernels, zero CUDA Toolkit dependency) plus auto-`w1` for `>= 64` SMs.
+  - Measured on NVIDIA A100 (`Qwen3-32B`): **`31 -> 45 tok/s`**.
+- **GPU Precision & Kernel Coverage** (`976758c`, `df34a7a`, `1ad035f`, `9a0b46f`, `024d029`):
+  - Keep `F32` GPU weights in `F32` instead of downcasting to `FP16` (`T-125`), and route `Q8_0` `K % 256 != 0` prefill cleanly (`df34a7a`).
+  - Added CUDA kernels for **Mamba-2 SSM** (`conv1d`, `scan`, grouped RMSNorm), **`relu²`** and ungated `relu²` **MoE** (`9a0b46f`, reaching **`110 tok/s`** on A100 for Nemotron-Nano-9B-v2), **zero-sync GPU MoE residency** (`T-127`), and **GPU MLA attention** (`T-128`).
+- **64-Bit Tensors, Thread-Safe GGUF & Lock-Free Quant Cache** (`7678fc7`, `20791f5`, `b0b7233`):
+  - Widened `numel()` to `i64` (`T-011`); hardened `gguf_load_tensor` with extent bounds checks, single open file handle, 4-slot thread-safe LRU directory cache (`T-012`, `T-109`), and `fp16` subnormal decoding (`T-003`/`T-004`).
+  - Added lock-free 256-entry TLS quant lookup (`_vira_tls_qcache`), AVX2 `vira_tensor_silu`, physical core detection in scheduler, and supervised `_vira_rt_fault` handling in `core.h`/`ops.h`/`llm.h`.
+
+---
+
+## Historical Snapshot: Detailed Verification Against Baseline `e386210` (`2026-11-09`)
 
 ### Phase 0: Benchmarking Discipline & Zero-Cost Cleanups
 - [x] **Production `-prod` / `-quiet-rt` build support & CLI benchmark flags**
@@ -116,17 +135,10 @@
 
 ---
 
-## Resume Checklist (Next Session Order)
-1. **Runtime (`runtime/vira_gpu.h`)**:
-   - Add Phase-4 `_vira_rt_quant_try_get` / `_vira_rt_ensure_fp32_host_ptr` hook in `_vira_gpu_get_or_upload_weight_locked`.
-   - Fix `_vira_gpu.enabled` preservation inside `vira_gpu_init()` so pre-init `gpu.set_enabled(false)` is not overwritten.
-   - Add OpenCL kernels `34..37`, split OpenCL/CUDA kernel counts (`37` vs `41`), load CUDA Driver Graph API symbols, and implement all 9 Phase-3 `vira_gpu_*` functions + graph capture/replay/invalidation lifecycle.
-2. **Compiler & Package (`internal/*`, `packages/gpu/src/gpu.vir`)**:
-   - Register the 9 Phase-3 builtins in `checker.go`, `autofree.go`, `cgen.go`, `lsp/server.go`, and export wrappers in `packages/gpu/src/gpu.vir`.
-3. **Examples (`43`, `45`) & Tests (`gpu_test.vir`)**:
-   - Wire fused decode ops + CUDA Graph capture/replay into `43` (plus interactive `/gpu` fix) and `45`.
-   - Append Tests #4–#6 to `packages/gpu/tests/gpu_test.vir`.
-4. **Verification**:
-   - Local: `go test ./...`, `go run ./cmd/vira test packages/gpu/tests/gpu_test.vir`, `VIRA_GPU_BACKEND=cpu` parity run, strict `-std=c99 -O2 -Wall -Wextra -Werror` compilation & `active_leaks=0`, `vira check` on examples `41, 42, 43, 45`.
-   - Colab T4: Run §5.2 `-prod` GPU & CPU throughput benchmarks and verify pass gates.
+## Remaining Open GPU & Quantization Backlog
+
+1. **`T-125` — Tighter GPU Reference Parity**: Verify remaining GPU architecture parity tolerances across CUDA and OpenCL paths.
+2. **`T-051` — Native GPU Kernels for Frontier Quants**: Add CUDA/OpenCL kernels for `BF16`, `Q2_K`, `Q3_K`, and `MXFP4` (currently dispatched via CPU-SIMD kernels).
+3. **`T-030` / `T-031` — Importance Quantization (`IQ*`)**: Add dequantization and dot kernels for `IQ4_NL`, `IQ4_XS`, `IQ3`, `IQ2`, and `IQ1`.
+4. **`T-120` — Windows RTX 3060 Verification**: Re-verify device scoring, CUDA kernel compilation, and runtime behavior on Windows hardware.
 

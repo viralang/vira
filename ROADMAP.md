@@ -42,13 +42,13 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
        │
  [v0.8] Cross-Platform GPU Compute Acceleration ✅ COMPLETED
        │
- [post-v0.7.7] Runtime & Compiler Hardening     ✅ COMPLETED (unreleased)
+ [v0.7.8–v0.7.9] CUDA Graphs, FlashAttention-2, MoE/MLA & Hardening ✅ COMPLETED
        │
- [v0.9] Enums, Maps, Closures & Generics        ✅ COMPLETED (unreleased)
+ [v0.9] Enums, Maps, Closures, Generics, Ref[T] & EventBus ✅ COMPLETED (unreleased)
        │
  ═════════════════════════════════════════════════════════════ CURRENT STATUS
        │
- [v0.9.x] Pattern Matching, Ranges & Actor Refs ⏳ NEXT MILESTONE
+ [v0.9.x] Pattern Matching, Ranges & Generic Constraints  ⏳ NEXT MILESTONE
        │
  [v1.0] Production Registry, Stability & Freeze 📅 PLANNED
 ```
@@ -213,33 +213,36 @@ Vira is an Ahead-Of-Time (AOT) compiled systems programming language engineered 
   - [Tutorial 40: Cross-Platform GPU Compute Acceleration & Actor OOM Supervision](docs/tutorials/40_cross_platform_gpu_compute_acceleration.md).
   - Runnable example [44_gpu_compute_acceleration.vir](docs/examples/44_gpu_compute_acceleration.vir) and `--gpu` / `/gpu` offload controls in [43_qwen2_5_gguf_chat_inference.vir](docs/examples/43_qwen2_5_gguf_chat_inference.vir).
 
-### 14. Runtime & Compiler Hardening (after the v0.7.7 review, unreleased)
-- [x] **Scheduler correctness:** fixed a mailbox race that wedged actors under concurrent senders, a teardown race, park timeouts that never fired and a lost wake-up; the worker pool now follows the core count (2–16, `VIRA_WORKERS` override).
-- [x] **Supervised faults:** out-of-bounds indexing, `pop()` on an empty slice and integer division by zero are caught by the actor supervisor instead of killing the process; restarts reset only mutable fields.
-- [x] **Defined C semantics:** signed overflow wraps (`-fwrapv`), arguments are evaluated left to right, each interpolated expression is evaluated once.
-- [x] **Memory safety:** fixed the autofree use-after-free, double-free and leak cases from the review; temporaries inside struct literals and array literals are freed.
-- [x] **Single-owner ownership with moves:** storing a value copies it unless the source is never read again (including from inside `if`/`switch` branches and into slices), then it moves; arguments are borrowed.
-- [x] **Strings & operators:** `+` and `+=` on strings (one allocation per chain); the checker rejects operators on types they are not defined for.
-- [x] **Actors as handles:** actors live on the heap and never move; message-only access from outside; single owner enforced by the checker; slices of actors grow without draining mailboxes.
+### 14. Runtime & Compiler Hardening (after the v0.7.7 review)
+- [x] **Scheduler correctness:** fixed a mailbox race that wedged actors under concurrent senders, a teardown race, park timeouts that never fired and a lost wake-up; the worker pool now follows physical core count with platform-tuned spin iterations (`VIRA_WORKERS` override).
+- [x] **Supervised faults:** out-of-bounds indexing, `pop()` on an empty slice, integer division by zero, and tensor/LLM runtime validation errors (`_vira_rt_fault`) are caught by the actor supervisor instead of killing the process; restarts reset only mutable fields.
+- [x] **Defined C semantics & overflow guards:** signed overflow wraps (`-fwrapv`), arguments are evaluated left to right, each interpolated expression is evaluated once, `_vira_slice_grow` / `str.repeat` / `str.replace` guard `INT32_MAX` overflow, and `to_int` / `to_i64` enforce range and embedded-NUL checks.
+- [x] **Memory safety:** fixed the autofree use-after-free, double-free and leak cases from the review; temporaries inside struct literals, array literals, and chained method receivers are freed; discarded `slice.pop()` heap results and `.clone()` temporaries are released; `vira test` enforces `active_leaks=0` by default unless `-allow-leaks` is passed.
+- [x] **Single-owner ownership with moves:** storing a value copies it unless the source is never read again (including from inside `if`/`switch` branches and into slices), then it moves; arguments are borrowed; non-actor `mut` params/receivers are dereferenced cleanly on value passes.
+- [x] **Strings, lexer & parser:** `+` and `+=` on strings (one allocation per chain); strict operator checks; zero-alloc scientific float exponents (`1e-12`); unary `+` on numbers; newline expression boundaries before `@`, `+`, `-`, `[`, `(`.
+- [x] **Actors, `Ref[T]`, `fut.ready()` & EventBus:** actors live on the heap and never move; non-owning sendable `Ref[T]` handles (`actor.ref()`, `r.alive()`), non-blocking `Future[T].ready()`, and `packages/eventbus` (`testdata/run/26_actor_refs.vir` .. `28_future_ready.vir`).
 - [x] **Deadlock avoidance:** an actor awaiting itself, or actors awaiting each other in a cycle, get an error instead of hanging.
-- [x] **Tests & tooling:** 10 new run tests and 3 new checker tests under ASan/UBSan, a C scheduler harness, and `scripts/bench_actors.sh` for repeatable before/after actor benchmarks.
+- [x] **Runtime distribution & CLI ergonomics:** version-stamped atomic `~/.vira/runtime/<version>` header extraction (`T-115`) and order-independent flags (`vira build`/`cgen`/`check`/`test`/`fmt`).
+- [x] **Tests & tooling:** ASan/UBSan golden test suite (`testdata/run/01`–`34`) and checker tests, C scheduler harness, 18/18 stdlib packages passing with `active_leaks=0`, and `scripts/bench_actors.sh`.
 - [x] **Tutorials & Examples:** [Tutorial 42: Ownership, Strings & Actor Handles](docs/tutorials/42_ownership_strings_and_actor_handles.md) and [47_ownership_strings_and_actor_handles.vir](docs/examples/47_ownership_strings_and_actor_handles.vir).
-- [ ] **Still open:** an actor passed inside a message is borrowed (its owner must outlive the message); `return error(err)` still copies the error string; the GGUF loader's global directory cache is not thread-safe; nothing has been executed on Windows since these changes.
+- [ ] **Still open:** `return error(err)` still copies the error string; cross-platform Windows hardware re-verification since recent runtime updates.
 
-### 15. GGUF Weight Formats for Frontier Models (unreleased, Nov 2026)
-- [x] **Quantized weights stay quantized:** `gguf_load_tensor` keeps the raw blocks in a registry next to the f32 tensor (filled lazily for large tensors, `VIRA_LAZY_HOST_FP32=0` to disable) and `.gpu_linear` multiplies straight from them, quantizing activations to q8_0 / q8_K.
-- [x] **New types:** BF16 (bf16 x f32 dot), Q2_K and Q3_K (q8_K dot), MXFP4 (E8M0-scaled FP4, q8_0 dot; gpt-oss and DeepSeek-V4 experts) and I32 index tables (widened to f32; DeepSeek-V4 hash routing). GPU kernels cover F16, Q4_0-Q8_0 and Q4_K-Q6_K; the other types run on the CPU kernels.
-- [x] **Verified end to end** by ViraLama's reference suite: 64 model cases (Llama ... DeepSeek-V4.1, gpt-oss) against an independent NumPy forward pass, prefill and decode.
-- [ ] **Still open:** fp16 subnormals decode wrongly on builds without F16C (patch in ViraLama `docs/patches/vira-runtime-fp16-subnormal.patch`); `gguf_load_tensor` trusts tensor offsets and sizes (no check against the file size) and reopens the file per tensor; element counts above 2^31 overflow 32-bit `int` / `numel()`; IQ\* types are not supported.
+### 15. GGUF Weight Formats & Zero-SDK CUDA Engine (v0.7.9)
+- [x] **Quantized weights & fast lookup:** `gguf_load_tensor` keeps raw blocks in `_vira_rt_quant_table` next to lazy FP32 tensors (`VIRA_LAZY_HOST_FP32=1`), backed by a lock-free 256-entry TLS quant cache (`_vira_tls_qcache`).
+- [x] **64-bit `numel()` & hardened GGUF loader:** widened `numel()` to `i64` (`T-011`); added file-extent bounds checks, single open file handle, hashed directory lookup, a 4-slot thread-safe LRU directory cache (`T-012`, `T-109`), and software `fp16` subnormal decoding (`T-003`/`T-004`), verified by a 700-mutant ASan+UBSan corpus and concurrent actor stress tests.
+- [x] **Weight & index formats:** BF16 (`bf16 x f32` dot), Q2_K and Q3_K (`q8_K` dot), MXFP4 (E8M0-scaled FP4, `q8_0` dot; gpt-oss and DeepSeek-V4 experts) and I32 index tables (widened to `f32`; DeepSeek-V4 hash routing). GPU kernels cover F16, Q4_0–Q8_0 and Q4_K–Q6_K; the other types use CPU SIMD kernels.
+- [x] **CUDA Tensor Cores, FlashAttention-2, Graphs, Mamba-2, MoE & MLA:** added Int8 Tensor Core prompt kernels (`mmqt`/`mmqb`, fused `mmqg` SwiGLU — `588 tok/s` `pp512` on Tesla T4), FlashAttention-2 (`mma.m16n8k8`) over FP16 KV cache, zero-toolkit CUDA Graphs (`m == 1` dense decode — `45 tok/s` Qwen3-32B on A100), Mamba-2 SSM kernels (`110 tok/s` Nemotron-Nano-9B-v2 on A100), zero-sync GPU MoE (`T-127`) with ungated `relu²`, and GPU MLA attention (`T-128`).
+- [x] **Verified end to end** by ViraLama's reference parity suite: 70 model cases across 31 architectures against an independent NumPy forward pass, prefill and decode.
+- [ ] **Still open:** native GPU kernels for `BF16`, `Q2_K`, `Q3_K`, and `MXFP4` (`T-051`); `IQ*` quantization formats (`T-030`, `T-031`); tighter GPU reference parity tolerances (`T-125`).
 
 ### 16. Enums, Maps, Closures & Generics (v0.9, unreleased, Nov 2026)
 - [x] **Enums:** `enum Color { red green blue }` with optional explicit values; `Color.red` / `pkg.Color.red`, `==` / `!=`, `switch`, struct fields, slices, map keys, `int()`, and the variant name in string interpolation. Lowered to `int32_t`.
 - [x] **Maps:** `map[K]V` (keys: strings, integer types, `bool`, enums) with literals, `m[k]` (zero value when missing), `m[k] = v`, `m[k] op= v`, `.len`, `has` / `delete` / `keys` / `values` / `clear`, and insertion-ordered `for k, v in m`. Value semantics like slices (independent copies, autofree), including as struct and actor fields. One untyped runtime hash map (`runtime/rt/map/map.h`) plus a generated ops table per value type.
 - [x] **Closures & function types:** `fn (A, B) R` types and anonymous functions that capture by value, read-only; named functions (and `pkg.fn`) as values; closures in variables, fields, slices, maps and actor messages. Lifted to top-level functions; at runtime a function pointer plus an atomically reference-counted environment (`runtime/rt/closure/closure.h`).
 - [x] **Generics:** generic functions with type arguments inferred from the arguments (through slices, maps, function types and generic structs) or explicit (`f[int](x)`), and generic structs with receiver and static methods (`Box[T]`, `fn Box[T].new()`, `pkg.Stack[string].new()`). Monomorphised in the checker: each distinct use is a concrete copy (`first__int`), so there is no runtime dispatch.
-- [x] **Tests & docs:** 6 run tests under ASan/UBSan and 4 checker tests (`testdata/run/20_*` to `25_*`, `testdata/checker/07_*` to `10_*`); [Tutorial 43](docs/tutorials/43_enums_maps_closures_generics.md), [example 48](docs/examples/48_enums_maps_closures_generics.vir), Language Guide §14. All 59 example programs check identically before and after.
-- [x] **Fixed on the way:** a fresh slice or map read only for a field (`xs.clone().len`, `m.keys().len`) leaked.
-- [ ] **Still open:** generic constraints (an unsupported operation is reported inside the instance, `help: in max_of[P]`); generic interfaces and enums; type parameters on methods; explicit type arguments other than plain names (`f[[]int]` must be inferred); a map element cannot be changed in place (copy out, store back); changing a map while iterating it is not detected; no `match` / `Option` integration for map lookups (`m[k]` returns the zero value; use `has`); `os.read_file` returns an empty string for `/proc` files (they report size 0).
+- [x] **Tests & docs:** 6 run tests under ASan/UBSan and 4 checker tests (`testdata/run/20_*` to `25_*`, `testdata/checker/07_*` to `10_*`); [Tutorial 43](docs/tutorials/43_enums_maps_closures_generics.md), [example 48](docs/examples/48_enums_maps_closures_generics.vir), Language Guide §14. All example programs check identically before and after.
+- [x] **Fixed on the way:** a fresh slice or map read only for a field (`xs.clone().len`, `m.keys().len`) leaked; chunked streaming fallback in `os.read_file` supports `/proc` files that report size `0`.
+- [ ] **Still open:** generic constraints (an unsupported operation is reported inside the instance, `help: in max_of[P]`); generic interfaces and enums; type parameters on methods; explicit type arguments other than plain names (`f[[]int]` must be inferred); a map element cannot be changed in place (copy out, store back); changing a map while iterating it is not detected; no `match` / `Option` integration for map lookups (`m[k]` returns the zero value; use `has`).
 
 ---
 
@@ -270,8 +273,8 @@ What this does and does not show:
 - Run-to-run spread on this container was 1.2–1.7× (min to max); compare medians from the same machine only.
 
 Follow-up work:
-- [ ] **Actor references** (a sendable, non-owning handle) so actors can message each other directly; then a true ring and pipeline benchmark.
-- [ ] **Multi-sender throughput benchmark** (one sender per worker), the shape behind Akka's and Erlang's published numbers.
+- [x] **Actor references** (`Ref[T]`, `.ref()`, `.alive()`) and `packages/eventbus` so actors can message each other directly without single-owner cycles (`testdata/run/26_actor_refs.vir`, `27_eventbus.vir`).
+- [ ] **True actor-to-actor ring & multi-sender throughput benchmark** (using `Ref[T]` and one sender per worker), the shape behind Akka's and Erlang's published numbers.
 - [ ] **Side-by-side runs** of the same three benchmarks in Erlang/OTP and Akka on one machine, scripted next to `bench_actor_compare.sh`.
 
 ---
