@@ -389,6 +389,18 @@ static struct {
 } _vira_rt_quant_table = {NULL, 0, 0, 0};
 static size_t _vira_rt_quant_active_count = 0;
 static uint8_t _vira_rt_quant_bloom[4096] = {0};
+static volatile uint64_t _vira_rt_quant_gen = 1;
+
+typedef struct {
+  uint64_t gen;
+  const vira_f32 *host_ptr;
+  const void *raw_q;
+  size_t raw_bytes;
+  size_t elems;
+  uint32_t gguf_dtype;
+} _vira_tls_qcache_entry;
+
+static __thread _vira_tls_qcache_entry _vira_tls_qcache[256];
 
 static inline size_t _vira_rt_quant_hash(const vira_f32 *ptr) {
   uint64_t x = (uint64_t)(uintptr_t)ptr;
@@ -535,6 +547,7 @@ static inline void _vira_rt_quant_register(const vira_f32 *host_ptr,
                    __ATOMIC_RELEASE);
   __atomic_store_n(&_vira_rt_quant_active_count, _vira_rt_quant_table.count,
                    __ATOMIC_RELEASE);
+  __atomic_add_fetch(&_vira_rt_quant_gen, 1u, __ATOMIC_RELEASE);
   _vira_record_alloc();
   pthread_mutex_unlock(&_vira_rt_quant_lock);
   if (old_raw) {
@@ -550,14 +563,31 @@ static inline bool _vira_rt_quant_try_get(const vira_f32 *host_ptr,
                                           size_t *out_elems) {
   if (!_vira_rt_quant_may_exist(host_ptr))
     return false;
+  size_t cidx = _vira_rt_quant_hash(host_ptr) & 255u;
+  uint64_t cur_gen = __atomic_load_n(&_vira_rt_quant_gen, __ATOMIC_ACQUIRE);
+  _vira_tls_qcache_entry *ce = &_vira_tls_qcache[cidx];
+  if (ce->gen == cur_gen && ce->host_ptr == host_ptr && ce->raw_q != NULL) {
+    if (out_dtype) *out_dtype = ce->gguf_dtype;
+    if (out_raw_q) *out_raw_q = ce->raw_q;
+    if (out_raw_bytes) *out_raw_bytes = ce->raw_bytes;
+    if (out_elems) *out_elems = ce->elems;
+    return true;
+  }
   bool found = false;
   pthread_mutex_lock(&_vira_rt_quant_lock);
+  cur_gen = __atomic_load_n(&_vira_rt_quant_gen, __ATOMIC_RELAXED);
   _vira_rt_quant_entry *e = _vira_rt_quant_find_locked(host_ptr);
   if (e && e->raw_q != NULL) {
     if (out_dtype) *out_dtype = e->gguf_dtype;
     if (out_raw_q) *out_raw_q = e->raw_q;
     if (out_raw_bytes) *out_raw_bytes = e->raw_bytes;
     if (out_elems) *out_elems = e->elems;
+    ce->gen = cur_gen;
+    ce->host_ptr = host_ptr;
+    ce->raw_q = e->raw_q;
+    ce->raw_bytes = e->raw_bytes;
+    ce->elems = e->elems;
+    ce->gguf_dtype = e->gguf_dtype;
     found = true;
   }
   pthread_mutex_unlock(&_vira_rt_quant_lock);
@@ -583,6 +613,7 @@ static inline void _vira_rt_quant_free(const vira_f32 *host_ptr) {
     _vira_rt_quant_table.tombstones++;
     __atomic_store_n(&_vira_rt_quant_active_count, _vira_rt_quant_table.count,
                      __ATOMIC_RELEASE);
+    __atomic_add_fetch(&_vira_rt_quant_gen, 1u, __ATOMIC_RELEASE);
   }
   pthread_mutex_unlock(&_vira_rt_quant_lock);
   if (to_free != NULL) {
@@ -604,6 +635,7 @@ static inline void _vira_rt_quant_shutdown(void) {
     _vira_rt_quant_table.tombstones = 0;
     memset(_vira_rt_quant_bloom, 0, sizeof(_vira_rt_quant_bloom));
     __atomic_store_n(&_vira_rt_quant_active_count, 0, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&_vira_rt_quant_gen, 1u, __ATOMIC_RELEASE);
   }
   pthread_mutex_unlock(&_vira_rt_quant_lock);
 }

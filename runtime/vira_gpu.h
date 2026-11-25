@@ -5107,6 +5107,26 @@ static inline bool _vira_gpu_init_opencl_locked(void *lib) {
     return false;
   }
 
+  const char *skip_igpu = getenv("VIRA_SKIP_IGPU_OPENCL");
+  if (skip_igpu != NULL && skip_igpu[0] == '1') {
+    char bdname[256] = {0};
+    vira_cl_uint bum = 0;
+    g->clGetDeviceInfo(best_dev, VIRA_CL_DEVICE_NAME, sizeof(bdname) - 1, bdname, NULL);
+    if (g->clGetDeviceInfo(best_dev, VIRA_CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(bum), &bum, NULL) != VIRA_CL_SUCCESS) {
+      bum = (_vira_strcasestr_match(bdname, "intel") && !_vira_strcasestr_match(bdname, "arc")) ? 1 : 0;
+    }
+    if (bum != 0 && !_vira_strcasestr_match(bdname, "nvidia") &&
+        !_vira_strcasestr_match(bdname, "geforce") &&
+        !_vira_strcasestr_match(bdname, "radeon rx") &&
+        !_vira_strcasestr_match(bdname, "arc a") &&
+        (_vira_strcasestr_match(bdname, "hd graphics") ||
+         _vira_strcasestr_match(bdname, "uhd graphics") ||
+         _vira_strcasestr_match(bdname, "iris") ||
+         _vira_strcasestr_match(bdname, "intel"))) {
+      return false;
+    }
+  }
+
   vira_cl_int err = 0;
   vira_cl_context ctx =
       g->clCreateContext(NULL, 1, &best_dev, NULL, NULL, &err);
@@ -8283,6 +8303,32 @@ static inline vira_tensor_f32 vira_gpu_silu_mul(vira_arena *opt_arena, vira_tens
     }
     pthread_mutex_unlock(&_vira_gpu.lock);
   }
+  if ((!_vira_gpu.available || !_vira_gpu.enabled) &&
+      gate.data != NULL && up.data != NULL &&
+      gate.rows == up.rows && gate.cols == up.cols && total64 > 0) {
+    _vira_tensor_sync_host_f32(gate.data);
+    _vira_tensor_sync_host_f32(up.data);
+    const vira_tensor_f32 *sh = gate.n_dims >= up.n_dims ? &gate : &up;
+    vira_tensor_f32 out = opt_arena
+                              ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, sh->n_dims, sh->dims)
+                              : _vira_tensor_f32_alloc_uninit_nd(sh->n_dims, sh->dims);
+    int64_t i = 0;
+#if defined(__AVX2__)
+    const __m256 v_zero = _mm256_setzero_ps();
+    const __m256 v_one = _mm256_set1_ps(1.0f);
+    for (; i + 8 <= total64; i += 8) {
+      __m256 vg = _mm256_loadu_ps(&gate.data[i]);
+      __m256 vu = _mm256_loadu_ps(&up.data[i]);
+      __m256 denom = _mm256_add_ps(v_one, _vira_avx2_expf(_mm256_sub_ps(v_zero, vg)));
+      _mm256_storeu_ps(&out.data[i], _mm256_mul_ps(_mm256_div_ps(vg, denom), vu));
+    }
+#endif
+    for (; i < total64; ++i) {
+      float vg = gate.data[i];
+      out.data[i] = (vg / (1.0f + expf(-vg))) * up.data[i];
+    }
+    return out;
+  }
   // the two separate operations (GPU or CPU, with their own fallbacks)
   vira_tensor_f32 s = vira_gpu_silu(opt_arena, gate);
   vira_tensor_f32 r = vira_gpu_elemwise_mul(opt_arena, s, up);
@@ -8383,6 +8429,49 @@ static inline vira_tensor_f32 vira_gpu_linear_swiglu(vira_arena *opt_arena, vira
     }
     pthread_mutex_unlock(&_vira_gpu.lock);
     if (done) return out;
+  }
+  if ((!_vira_gpu.available || !_vira_gpu.enabled) &&
+      x.data != NULL && wg.data != NULL && wu.data != NULL &&
+      wg.n_dims >= 2 && wu.n_dims >= 2 &&
+      wg.cols == K && wu.cols == K && wu.rows == N && x.cols == K &&
+      M > 0 && K > 0 && N > 0) {
+    _vira_tensor_sync_host_f32(x.data);
+    int32_t out_dims[2] = {M, N};
+    vira_tensor_f32 out =
+        opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                  : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
+    int64_t total_mn = (int64_t)M * (int64_t)N;
+    float stack_up[16384];
+    float *up_buf = (total_mn <= 16384)
+                        ? stack_up
+                        : (float *)malloc((size_t)total_mn * sizeof(float));
+    if (up_buf != NULL) {
+      _vira_multi_qmat_desc descs[2] = {
+          {.w = wg, .bias = NULL, .y_base = out.data, .accum = false},
+          {.w = wu, .bias = NULL, .y_base = up_buf, .accum = false},
+      };
+      if (_vira_rt_quant_cpu_multi_linear_write(x.data, M, K, 2, descs, NULL, 0)) {
+        int64_t i = 0;
+#if defined(__AVX2__)
+        const __m256 v_zero = _mm256_setzero_ps();
+        const __m256 v_one = _mm256_set1_ps(1.0f);
+        for (; i + 8 <= total_mn; i += 8) {
+          __m256 vg = _mm256_loadu_ps(&out.data[i]);
+          __m256 vu = _mm256_loadu_ps(&up_buf[i]);
+          __m256 denom = _mm256_add_ps(v_one, _vira_avx2_expf(_mm256_sub_ps(v_zero, vg)));
+          _mm256_storeu_ps(&out.data[i], _mm256_mul_ps(_mm256_div_ps(vg, denom), vu));
+        }
+#endif
+        for (; i < total_mn; ++i) {
+          float vg = out.data[i];
+          out.data[i] = (vg / (1.0f + expf(-vg))) * up_buf[i];
+        }
+        if (up_buf != stack_up) free(up_buf);
+        return out;
+      }
+      if (up_buf != stack_up) free(up_buf);
+    }
+    if (!out.is_arena) vira_tensor_f32_free(&out);
   }
   vira_tensor_f32 g = vira_gpu_linear(opt_arena, x, wg);
   vira_tensor_f32 u = vira_gpu_linear(opt_arena, x, wu);
@@ -8495,6 +8584,139 @@ static inline vira_tensor_f32 vira_gpu_scale(vira_arena *opt_arena,
   return out;
 }
 
+static inline void _vira_cpu_gqa_head_row(
+    const float *q_row, const float *k_base, const float *v_base,
+    float *out_row, int32_t head_dim, int32_t kv_dim, size_t kv_off,
+    int32_t t_end, float scale, float *scores) {
+  float max_s = -1e30f;
+  for (int32_t t = 0; t < t_end; ++t) {
+    const float *k_row = k_base + (size_t)t * (size_t)kv_dim + kv_off;
+    float dot = 0.0f;
+    int32_t d = 0;
+#if defined(__AVX2__)
+    __m256 vd0 = _mm256_setzero_ps(), vd1 = _mm256_setzero_ps();
+    for (; d + 16 <= head_dim; d += 16) {
+#if defined(__FMA__)
+      vd0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_row + d), _mm256_loadu_ps(k_row + d), vd0);
+      vd1 = _mm256_fmadd_ps(_mm256_loadu_ps(q_row + d + 8), _mm256_loadu_ps(k_row + d + 8), vd1);
+#else
+      vd0 = _mm256_add_ps(vd0, _mm256_mul_ps(_mm256_loadu_ps(q_row + d), _mm256_loadu_ps(k_row + d)));
+      vd1 = _mm256_add_ps(vd1, _mm256_mul_ps(_mm256_loadu_ps(q_row + d + 8), _mm256_loadu_ps(k_row + d + 8)));
+#endif
+    }
+    for (; d + 8 <= head_dim; d += 8) {
+#if defined(__FMA__)
+      vd0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_row + d), _mm256_loadu_ps(k_row + d), vd0);
+#else
+      vd0 = _mm256_add_ps(vd0, _mm256_mul_ps(_mm256_loadu_ps(q_row + d), _mm256_loadu_ps(k_row + d)));
+#endif
+    }
+    dot = _vira_avx2_hsum_f32(_mm256_add_ps(vd0, vd1));
+#endif
+    for (; d < head_dim; ++d) {
+      dot += q_row[d] * k_row[d];
+    }
+    float s = dot * scale;
+    scores[t] = s;
+    if (t == 0 || s > max_s) max_s = s;
+  }
+
+  float sum_e = 0.0f;
+  int32_t t = 0;
+#if defined(__AVX2__)
+  __m256 vmax = _mm256_set1_ps(max_s);
+  __m256 vsum = _mm256_setzero_ps();
+  for (; t + 8 <= t_end; t += 8) {
+    __m256 vp = _vira_avx2_expf(_mm256_sub_ps(_mm256_loadu_ps(scores + t), vmax));
+    _mm256_storeu_ps(scores + t, vp);
+    vsum = _mm256_add_ps(vsum, vp);
+  }
+  sum_e = _vira_avx2_hsum_f32(vsum);
+#endif
+  for (; t < t_end; ++t) {
+    float p = expf(scores[t] - max_s);
+    scores[t] = p;
+    sum_e += p;
+  }
+
+  memset(out_row, 0, (size_t)head_dim * sizeof(float));
+  for (int32_t tk = 0; tk < t_end; ++tk) {
+    float p = scores[tk];
+    const float *v_row = v_base + (size_t)tk * (size_t)kv_dim + kv_off;
+    int32_t d = 0;
+#if defined(__AVX2__)
+    __m256 vp = _mm256_set1_ps(p);
+    for (; d + 8 <= head_dim; d += 8) {
+      __m256 vo = _mm256_loadu_ps(out_row + d);
+#if defined(__FMA__)
+      vo = _mm256_fmadd_ps(vp, _mm256_loadu_ps(v_row + d), vo);
+#else
+      vo = _mm256_add_ps(vo, _mm256_mul_ps(vp, _mm256_loadu_ps(v_row + d)));
+#endif
+      _mm256_storeu_ps(out_row + d, vo);
+    }
+#endif
+    for (; d < head_dim; ++d) {
+      out_row[d] += p * v_row[d];
+    }
+  }
+
+  if (sum_e > 0.0f) {
+    float inv_e = 1.0f / sum_e;
+    int32_t d = 0;
+#if defined(__AVX2__)
+    __m256 vinv = _mm256_set1_ps(inv_e);
+    for (; d + 8 <= head_dim; d += 8) {
+      _mm256_storeu_ps(out_row + d, _mm256_mul_ps(_mm256_loadu_ps(out_row + d), vinv));
+    }
+#endif
+    for (; d < head_dim; ++d) {
+      out_row[d] *= inv_e;
+    }
+  }
+}
+
+typedef struct {
+  const float *q_data;
+  const float *k_data;
+  const float *v_data;
+  float *out_data;
+  int64_t start_pos;
+  int32_t seq_len;
+  int32_t n_heads;
+  int32_t kv_mul;
+  int32_t head_dim;
+  int32_t kv_dim;
+  float scale;
+} _vira_cpu_gqa_ctx;
+
+static void _vira_cpu_gqa_team_fn(void *raw_ctx, int32_t tid, int32_t nt) {
+  const _vira_cpu_gqa_ctx *c = (const _vira_cpu_gqa_ctx *)raw_ctx;
+  int32_t total_jobs = c->seq_len * c->n_heads;
+  int32_t j0 = (int32_t)(((int64_t)total_jobs * tid) / nt);
+  int32_t j1 = (int32_t)(((int64_t)total_jobs * (tid + 1)) / nt);
+  if (j0 >= j1) return;
+
+  int32_t max_t = (int32_t)(c->start_pos + (int64_t)c->seq_len);
+  float stack_scores[4096];
+  float *scores = (max_t <= 4096) ? stack_scores : (float *)malloc((size_t)max_t * sizeof(float));
+  if (!scores) return;
+
+  for (int32_t j = j0; j < j1; ++j) {
+    int32_t m = j / c->n_heads;
+    int32_t h = j % c->n_heads;
+    int32_t kv_h = h / c->kv_mul;
+    size_t kv_off = (size_t)kv_h * (size_t)c->head_dim;
+    size_t qh_off = (size_t)j * (size_t)c->head_dim;
+    int32_t t_end = (int32_t)(c->start_pos + (int64_t)m + 1);
+    _vira_cpu_gqa_head_row(c->q_data + qh_off, c->k_data, c->v_data,
+                           c->out_data + qh_off, c->head_dim, c->kv_dim,
+                           kv_off, t_end, c->scale, scores);
+  }
+
+  if (scores != stack_scores) free(scores);
+}
+
 static inline vira_tensor_f32 _vira_cpu_gqa_attention(
     vira_arena *opt_arena, vira_tensor_f32 q_heads, vira_tensor_f32 k_cache,
     vira_tensor_f32 v_cache, int64_t kv_pos, float scale) {
@@ -8529,55 +8751,27 @@ static inline vira_tensor_f32 _vira_cpu_gqa_attention(
 
   int32_t out_dims[2] = {n_heads, head_dim};
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
-                : vira_tensor_f32_alloc_nd(2, out_dims);
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
 
-  float stack_scores[4096];
-  float *scores = (seq_len <= 4096)
-                      ? stack_scores
-                      : (float *)malloc((size_t)seq_len * sizeof(float));
-  if (!scores) {
-    fprintf(stderr, "vira panic: gqa_attention score buffer failed\n");
-    exit(1);
+  _vira_cpu_gqa_ctx ctx = {
+      .q_data = q_heads.data,
+      .k_data = k_cache.data,
+      .v_data = v_cache.data,
+      .out_data = out.data,
+      .start_pos = kv_pos,
+      .seq_len = 1,
+      .n_heads = n_heads,
+      .kv_mul = kv_mul,
+      .head_dim = head_dim,
+      .kv_dim = kv_dim,
+      .scale = scale,
+  };
+  if ((int64_t)seq_len * n_heads >= 128 && n_heads >= 4) {
+    _vira_team_run(_vira_cpu_gqa_team_fn, &ctx, n_heads);
+  } else {
+    _vira_cpu_gqa_team_fn(&ctx, 0, 1);
   }
-
-  for (int32_t h = 0; h < n_heads; ++h) {
-    int32_t kv_h = h / kv_mul;
-    size_t kv_off = (size_t)kv_h * (size_t)head_dim;
-    const float *q_row = q_heads.data + (size_t)h * (size_t)head_dim;
-    float *out_row = out.data + (size_t)h * (size_t)head_dim;
-
-    float max_s = -1e30f;
-    for (int32_t t = 0; t < seq_len; ++t) {
-      const float *k_row = k_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
-      float dot = 0.0f;
-      for (int32_t d = 0; d < head_dim; ++d) {
-        dot += q_row[d] * k_row[d];
-      }
-      float s = dot * scale;
-      scores[t] = s;
-      if (t == 0 || s > max_s) max_s = s;
-    }
-
-    float sum_e = 0.0f;
-    for (int32_t d = 0; d < head_dim; ++d) out_row[d] = 0.0f;
-    for (int32_t t = 0; t < seq_len; ++t) {
-      float p = expf(scores[t] - max_s);
-      sum_e += p;
-      const float *v_row = v_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
-      for (int32_t d = 0; d < head_dim; ++d) {
-        out_row[d] += p * v_row[d];
-      }
-    }
-    if (sum_e > 0.0f) {
-      float inv_e = 1.0f / sum_e;
-      for (int32_t d = 0; d < head_dim; ++d) {
-        out_row[d] *= inv_e;
-      }
-    }
-  }
-
-  if (scores != stack_scores) free(scores);
   return out;
 }
 
@@ -9015,59 +9209,28 @@ static inline vira_tensor_f32 _vira_cpu_gqa_prefill(
 
   int32_t out_dims[2] = {seq_len * n_heads, head_dim};
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, 2, out_dims)
-                : vira_tensor_f32_alloc_nd(2, out_dims);
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, 2, out_dims)
+                : _vira_tensor_f32_alloc_uninit_nd(2, out_dims);
 
-  float stack_scores[4096];
-  float *scores = (max_t <= 4096)
-                      ? stack_scores
-                      : (float *)malloc((size_t)max_t * sizeof(float));
-  if (!scores) {
-    fprintf(stderr, "vira panic: gqa_prefill score buffer failed\n");
-    exit(1);
+  _vira_cpu_gqa_ctx ctx = {
+      .q_data = q_seq.data,
+      .k_data = k_cache.data,
+      .v_data = v_cache.data,
+      .out_data = out.data,
+      .start_pos = start_pos,
+      .seq_len = seq_len,
+      .n_heads = n_heads,
+      .kv_mul = kv_mul,
+      .head_dim = head_dim,
+      .kv_dim = kv_dim,
+      .scale = scale,
+  };
+  int32_t total_jobs = seq_len * n_heads;
+  if ((int64_t)max_t * total_jobs >= 64 && total_jobs >= 4) {
+    _vira_team_run(_vira_cpu_gqa_team_fn, &ctx, total_jobs);
+  } else {
+    _vira_cpu_gqa_team_fn(&ctx, 0, 1);
   }
-
-  for (int32_t m = 0; m < seq_len; ++m) {
-    int32_t t_end = (int32_t)(start_pos + (int64_t)m + 1);
-    for (int32_t h = 0; h < n_heads; ++h) {
-      int32_t kv_h = h / kv_mul;
-      size_t kv_off = (size_t)kv_h * (size_t)head_dim;
-      size_t qh_off = ((size_t)m * (size_t)n_heads + (size_t)h) * (size_t)head_dim;
-      const float *q_row = q_seq.data + qh_off;
-      float *out_row = out.data + qh_off;
-
-      float max_s = -1e30f;
-      for (int32_t t = 0; t < t_end; ++t) {
-        const float *k_row = k_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
-        float dot = 0.0f;
-        for (int32_t d = 0; d < head_dim; ++d) {
-          dot += q_row[d] * k_row[d];
-        }
-        float s = dot * scale;
-        scores[t] = s;
-        if (t == 0 || s > max_s) max_s = s;
-      }
-
-      float sum_e = 0.0f;
-      for (int32_t d = 0; d < head_dim; ++d) out_row[d] = 0.0f;
-      for (int32_t t = 0; t < t_end; ++t) {
-        float p = expf(scores[t] - max_s);
-        sum_e += p;
-        const float *v_row = v_cache.data + (size_t)t * (size_t)kv_dim + kv_off;
-        for (int32_t d = 0; d < head_dim; ++d) {
-          out_row[d] += p * v_row[d];
-        }
-      }
-      if (sum_e > 0.0f) {
-        float inv_e = 1.0f / sum_e;
-        for (int32_t d = 0; d < head_dim; ++d) {
-          out_row[d] *= inv_e;
-        }
-      }
-    }
-  }
-
-  if (scores != stack_scores) free(scores);
   return out;
 }
 

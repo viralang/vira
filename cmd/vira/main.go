@@ -1364,17 +1364,25 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 
 	// -fwrapv: Vira integer arithmetic wraps on overflow. Without it signed overflow is undefined
 	// behaviour in C and the optimizer may miscompile overflowing code at -O2/-O3.
+	// -mstackrealign is only needed on 32-bit x86; x86_64/arm64 ABIs already guarantee 16-byte stack alignment.
+	stackFlags := []string{}
+	if goRuntime.GOARCH == "386" {
+		stackFlags = append(stackFlags, "-mstackrealign")
+	}
 	if opts.prod {
 		modeDesc = "prod (-O3 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O3", "-fwrapv", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append([]string{"-std=c99", "-O3", "-fwrapv", "-fno-math-errno", "-fno-trapping-math", archFlag}, stackFlags...)
+		cFlags = append(cFlags, "-pthread")
+		cFlags = append(cFlags, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
 		appendCFile(&cFlags)
 	} else if opts.sanitize {
 		modeDesc = "sanitize (ASan+UBSan)"
-		cFlags = append([]string{"-std=c99", "-O1", "-g", "-fwrapv", "-mstackrealign", "-fsanitize=address,undefined", "-pthread"}, baseIncludes...)
-		cFlags = append(cFlags, waFlags...)
+		cFlags = append([]string{"-std=c99", "-O1", "-g", "-fwrapv"}, stackFlags...)
+		cFlags = append(cFlags, "-fsanitize=address,undefined", "-pthread")
 		cFlags = append(cFlags, baseIncludes...)
+		cFlags = append(cFlags, waFlags...)
 		appendCFile(&cFlags)
 	} else if compiler == "tcc" {
 		modeDesc = "dev (TinyCC instant build)"
@@ -1383,7 +1391,9 @@ func invokeCBackend(cFile, binFile string, opts compileOptions) (string, string)
 		cFlags = append(cFlags, extraLibs...)
 	} else {
 		modeDesc = "dev (-O2 " + archFlag + ")"
-		cFlags = append([]string{"-std=c99", "-O2", "-fwrapv", archFlag, "-mstackrealign", "-pthread"}, staticFlags...)
+		cFlags = append([]string{"-std=c99", "-O2", "-fwrapv", "-fno-math-errno", "-fno-trapping-math", archFlag}, stackFlags...)
+		cFlags = append(cFlags, "-pthread")
+		cFlags = append(cFlags, staticFlags...)
 		cFlags = append(cFlags, waFlags...)
 		cFlags = append(cFlags, baseIncludes...)
 		appendCFile(&cFlags)

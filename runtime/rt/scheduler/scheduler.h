@@ -1168,7 +1168,13 @@ static inline void vira_scheduler_init(int32_t num_workers) {
 // ============================================================================
 
 #define VIRA_TEAM_MAX_THREADS 16
-#define VIRA_TEAM_SPIN_ITERS 4096
+#ifdef _WIN32
+// On Windows (winpthreads), parking/waking via kernel objects is much slower than Linux futex;
+// spinning ~2 ms keeps worker threads hot across inter-op and inter-token SSE polling gaps.
+#define VIRA_TEAM_SPIN_ITERS 65536
+#else
+#define VIRA_TEAM_SPIN_ITERS 16384
+#endif
 
 typedef struct {
   pthread_mutex_t call_mu;
@@ -1216,7 +1222,7 @@ static inline int32_t vira_sched_get_threads(void) {
       return v > VIRA_TEAM_MAX_THREADS ? VIRA_TEAM_MAX_THREADS : v;
     }
   }
-  int32_t n = _vira_detect_logical_cores();
+  int32_t n = _vira_detect_physical_cores();
   if (n < 1) n = 1;
   if (n > VIRA_TEAM_MAX_THREADS) n = VIRA_TEAM_MAX_THREADS;
   return n;

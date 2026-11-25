@@ -250,9 +250,19 @@ static inline vira_tensor_f32 vira_tensor_silu(vira_arena *opt_arena,
   }
   _vira_tensor_sync_host_f32(x.data);
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
-                : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
-  for (int64_t i = 0; i < total; ++i) {
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, x.n_dims, x.dims)
+                : _vira_tensor_f32_alloc_uninit_nd(x.n_dims, x.dims);
+  int64_t i = 0;
+#if defined(__AVX2__)
+  const __m256 v_zero = _mm256_setzero_ps();
+  const __m256 v_one = _mm256_set1_ps(1.0f);
+  for (; i + 8 <= total; i += 8) {
+    __m256 vx = _mm256_loadu_ps(&x.data[i]);
+    __m256 denom = _mm256_add_ps(v_one, _vira_avx2_expf(_mm256_sub_ps(v_zero, vx)));
+    _mm256_storeu_ps(&out.data[i], _mm256_div_ps(vx, denom));
+  }
+#endif
+  for (; i < total; ++i) {
     float v = x.data[i];
     out.data[i] = v / (1.0f + expf(-v));
   }
