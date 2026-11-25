@@ -1173,6 +1173,14 @@ func (p *Parser) parseSwitchStmt() *ast.SwitchStmt {
 
 // --- PRATT EXPRESSION PARSER ---
 
+func stopsExprAtNewline(k token.Kind) bool {
+	switch k {
+	case token.TokAt, token.TokMinus, token.TokPlus, token.TokLBracket, token.TokLParen:
+		return true
+	}
+	return false
+}
+
 func (p *Parser) parseExpr(minPrec int) ast.Expr {
 	left := p.parsePrefix()
 	if left == nil {
@@ -1180,7 +1188,7 @@ func (p *Parser) parseExpr(minPrec int) ast.Expr {
 	}
 
 	for {
-		if p.cur.Kind == token.TokAt && p.hasNewlineBetween(p.prev.Span, p.cur.Span) {
+		if p.hasNewlineBetween(p.prev.Span, p.cur.Span) && stopsExprAtNewline(p.cur.Kind) {
 			break
 		}
 		prec := p.cur.Kind.Precedence()
@@ -1314,7 +1322,7 @@ func (p *Parser) parsePrefix() ast.Expr {
 		p.expect(token.TokRParen)
 		return expr
 
-	case token.TokBang, token.TokMinus, token.TokAmp, token.TokStar:
+	case token.TokBang, token.TokMinus, token.TokPlus, token.TokAmp, token.TokStar:
 		opTok := p.advance()
 		isMut := false
 		if opTok.Kind == token.TokAmp && p.cur.Kind == token.TokMut {

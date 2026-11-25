@@ -1,6 +1,8 @@
 package main_test
 
 import (
+	"encoding/binary"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2269,5 +2271,168 @@ fn main() {
 	}
 	if !strings.Contains(string(out), "x|3 a..") {
 		t.Errorf("expected 'x|3 a..', got:\n%s", out)
+	}
+}
+
+func writeMinimalTestGGUF(t *testing.T, path string, vals [4]float32) {
+	t.Helper()
+	var buf []byte
+	appendU32 := func(v uint32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		buf = append(buf, b[:]...)
+	}
+	appendU64 := func(v uint64) {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], v)
+		buf = append(buf, b[:]...)
+	}
+	appendU32(0x46554747) // GGUF magic
+	appendU32(3)          // version 3
+	appendU64(1)          // tensor_count
+	appendU64(0)          // kv_count
+	appendU64(1)          // name len
+	buf = append(buf, 'w')
+	appendU32(1)          // n_dims
+	appendU64(4)          // dims[0]
+	appendU32(0)          // dtype = F32
+	appendU64(0)          // offset
+	for len(buf)%32 != 0 {
+		buf = append(buf, 0)
+	}
+	for _, f := range vals {
+		appendU32(math.Float32bits(f))
+	}
+	if err := os.WriteFile(path, buf, 0644); err != nil {
+		t.Fatalf("write GGUF %s: %v", path, err)
+	}
+}
+
+// TestConcurrentActorsGGUFLoad verifies T-109: two actors concurrently loading tensors from
+// different GGUF files run safely under ASan+UBSan with zero memory leaks.
+func TestConcurrentActorsGGUFLoad(t *testing.T) {
+	cCompiler := ""
+	for _, cand := range []string{"gcc", "clang", "cc"} {
+		if path, err := exec.LookPath(cand); err == nil {
+			cCompiler = path
+			break
+		}
+	}
+	if cCompiler == "" {
+		t.Skip("Host C compiler not found in PATH")
+	}
+	runtimeDir, err := filepath.Abs("runtime")
+	if err != nil {
+		t.Fatalf("resolve runtime dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "vira_rt.h")); err != nil {
+		t.Fatalf("runtime/vira_rt.h not found: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	pathA := filepath.ToSlash(filepath.Join(tmpDir, "a.gguf"))
+	pathB := filepath.ToSlash(filepath.Join(tmpDir, "b.gguf"))
+	writeMinimalTestGGUF(t, pathA, [4]float32{1, 2, 3, 4})
+	writeMinimalTestGGUF(t, pathB, [4]float32{5, 6, 7, 8})
+
+	src := strings.ReplaceAll(strings.ReplaceAll(`module main
+
+actor Loader {
+pub mut:
+	ok int = 0
+}
+
+pub fn (mut l Loader) load_sum(path string, iters int) f32 {
+	mut total := f32(0.0)
+	mut i := 0
+	for i < iters {
+		t := gguf_load_tensor(path, 'w') or { panic('load failed: ${err}') }
+		total += tensor_sum(t)
+		i += 1
+	}
+	l.ok = iters
+	return total
+}
+
+fn main() {
+	mut a := Loader{}
+	mut b := Loader{}
+	fa := a <- load_sum('PATH_A', 50)
+	fb := b <- load_sum('PATH_B', 50)
+	sa := fa.await() or { f32(0.0) }
+	sb := fb.await() or { f32(0.0) }
+	println('sums=${sa},${sb}')
+}
+`, "PATH_A", pathA), "PATH_B", pathB)
+
+	p := parser.New(src)
+	fileAst := p.ParseFile()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("parse errors: %v", p.Errors())
+	}
+	chk := checker.New()
+	chk.CheckFile(fileAst)
+	if len(chk.Errors()) > 0 {
+		t.Fatalf("checker errors: %v", chk.Errors())
+	}
+	af := autofree.New(chk)
+	af.AnalyzeFile(fileAst)
+	gen := cgen.New(chk, af)
+	cCode := gen.EmitFile(fileAst)
+
+	cFile := filepath.Join(tmpDir, "gguf_conc.c")
+	binFile := filepath.Join(tmpDir, "gguf_conc_bin")
+	if runtime.GOOS == "windows" {
+		binFile += ".exe"
+	}
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("write C file: %v", err)
+	}
+	useSanitizer := probeSanitizerSupport(cCompiler)
+	cFlags := buildTestCFlags(cCompiler, runtimeDir, cFile, binFile, useSanitizer)
+	buildCmd := exec.Command(cCompiler, cFlags...)
+	buildCmd.Env = append(os.Environ(), "PATH="+filepath.Dir(cCompiler)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("compile failed (%v):\n%s", err, string(buildOut))
+	}
+	runOut, err := exec.Command(binFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run failed (%v):\n%s", err, string(runOut))
+	}
+	outStr := string(runOut)
+	if !strings.Contains(outStr, "sums=500.00,1300.00") || !strings.Contains(outStr, "active_leaks=0") {
+		t.Fatalf("unexpected output:\n%s", outStr)
+	}
+}
+
+// TestBuildOutputFlagAfterTarget verifies T-116: `vira build file.vir -o out` honors `-o` after the target.
+func TestBuildOutputFlagAfterTarget(t *testing.T) {
+	viraBin, err := filepath.Abs("vira")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(viraBin); err != nil {
+		t.Skip("vira binary not built in repo root")
+	}
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "hello.vir")
+	if err := os.WriteFile(srcFile, []byte("module main\nfn main() {\n\tprintln('flag-order-ok')\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outBin := filepath.Join(tmpDir, "custom_app")
+	if runtime.GOOS == "windows" {
+		outBin += ".exe"
+	}
+	buildCmd := exec.Command(viraBin, "build", srcFile, "-o", outBin)
+	buildCmd.Dir = tmpDir
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("vira build failed: %v\n%s", err, string(buildOut))
+	}
+	runOut, err := exec.Command(outBin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("built binary failed: %v\n%s", err, string(runOut))
+	}
+	if !strings.Contains(string(runOut), "flag-order-ok") {
+		t.Fatalf("unexpected output: %s", string(runOut))
 	}
 }

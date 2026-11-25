@@ -1,0 +1,24 @@
+// OUT: 2147483647 -2147483648 -7 -7 -7 4294967297 -7 12
+// OUT: [vira_rt] active_leaks=0
+
+// T-088: to_int() / to_i64() report out-of-range values instead of wrapping
+// ('4294967297'.to_int() was 1, '2147483648' was negative).
+fn main() {
+    s1 := '2147483647'
+    a := s1.to_int() or { -7 }
+    s2 := '-2147483648'
+    b := s2.to_int() or { -7 }
+    s3 := '2147483648'
+    c := s3.to_int() or { -7 }
+    s4 := '4294967297'
+    d := s4.to_int() or { -7 }
+    s5 := '12x'
+    e := s5.to_int() or { -7 }
+    f := s4.to_i64() or { i64(-7) }
+    s6 := '99999999999999999999'
+    g := s6.to_i64() or { i64(-7) }
+    s7 := '12'
+    h := s7.to_int() or { -7 }
+    println('${a} ${b} ${c} ${d} ${e} ${f} ${g} ${h}')
+}
+

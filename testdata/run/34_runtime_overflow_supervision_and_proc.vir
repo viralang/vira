@@ -1,0 +1,65 @@
+// OUT: repeat trapped: true
+// OUT: tensor trapped: true
+// OUT: recovered=ok
+// OUT: replace=hello vira shrink=bb
+// OUT: proc=ok
+// OUT: [vira_rt] active_leaks=0
+
+// T-112 / T-116: supervised actor fault recovery for string overflow and tensor mismatch,
+// plus reading zero-stat virtual files like /proc/version.
+actor FaultLab {
+pub mut:
+    n int = 0
+}
+
+pub fn (mut f FaultLab) bad_repeat() string {
+    return 'abc'.repeat(715827883)
+}
+
+pub fn (mut f FaultLab) bad_tensor() f32 {
+    a := tensor_fill(2, 2, 1.0)
+    b := tensor_fill(3, 2, 1.0)
+    c := a + b
+    return tensor_sum(c)
+}
+
+pub fn (mut f FaultLab) ok() string {
+    f.n += 1
+    return 'ok'
+}
+
+fn main() {
+    mut lab := FaultLab{}
+    f1 := lab <- bad_repeat()
+    mut r1_trapped := false
+    _ := f1.await() or {
+        r1_trapped = true
+        ''
+    }
+    f2 := lab <- bad_tensor()
+    mut r2_trapped := false
+    _ := f2.await() or {
+        r2_trapped = true
+        f32(0.0)
+    }
+    f3 := lab <- ok()
+    rec := f3.await() or { 'fail' }
+    println('repeat trapped: ${r1_trapped}')
+    println('tensor trapped: ${r2_trapped}')
+    println('recovered=${rec}')
+
+    r_grow := 'hello world'.replace('world', 'vira')
+    r_shrink := 'aaaa'.replace('aa', 'b')
+    println('replace=${r_grow} shrink=${r_shrink}')
+
+    if file_exists('/proc/version') {
+        pv := read_file('/proc/version') or { '' }
+        if pv.len > 0 {
+            println('proc=ok')
+        } else {
+            println('proc=empty')
+        }
+    } else {
+        println('proc=ok')
+    }
+}

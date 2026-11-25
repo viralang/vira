@@ -8,18 +8,126 @@ pub mut:
 	is_open bool
 }
 
+fn contains_crlf(s string) bool {
+	mut i := 0
+	for i < s.len {
+		b := s.byte_at(i) or { u8(0) }
+		if b == u8(10) || b == u8(13) {
+			return true
+		}
+		i += 1
+	}
+	return false
+}
+
+fn format_sse_data_lines(data string) string {
+	mut out := ''
+	mut start := 0
+	mut i := 0
+	for i < data.len {
+		b := data.byte_at(i) or { u8(0) }
+		if b == u8(10) {
+			mut end := i
+			if end > start {
+				prev := data.byte_at(end - 1) or { u8(0) }
+				if prev == u8(13) {
+					end -= 1
+				}
+			}
+			line := data.slice(start, end)
+			out += 'data: ${line}\r\n'
+			start = i + 1
+		}
+		i += 1
+	}
+	mut tail_end := data.len
+	if tail_end > start {
+		prev := data.byte_at(tail_end - 1) or { u8(0) }
+		if prev == u8(13) {
+			tail_end -= 1
+		}
+	}
+	tail := data.slice(start, tail_end)
+	out += 'data: ${tail}\r\n'
+	return out
+}
+
+fn json_escape_str(s string) string {
+	hex := '0123456789abcdef'
+	mut out := ''
+	mut start := 0
+	mut i := 0
+	for i < s.len {
+		b := s.byte_at(i) or { u8(0) }
+		mut esc := ''
+		if b == u8(34) {
+			esc = '\\"'
+		} else if b == u8(92) {
+			esc = '\\\\'
+		} else if b == u8(8) {
+			esc = '\\b'
+		} else if b == u8(12) {
+			esc = '\\f'
+		} else if b == u8(10) {
+			esc = '\\n'
+		} else if b == u8(13) {
+			esc = '\\r'
+		} else if b == u8(9) {
+			esc = '\\t'
+		} else if int(b) < 32 {
+			hi := int(b) / 16
+			lo := int(b) % 16
+			esc = '\\u00' + hex.slice(hi, hi + 1) + hex.slice(lo, lo + 1)
+		}
+		if esc.len > 0 {
+			if i > start {
+				out += s.slice(start, i)
+			}
+			out += esc
+			start = i + 1
+		}
+		i += 1
+	}
+	if start == 0 {
+		return s.clone()
+	}
+	if start < s.len {
+		out += s.slice(start, s.len)
+	}
+	return out
+}
+
 pub fn SseWriter.start(mut stream net.TcpStream) !SseWriter {
-	headers := 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
+	w := SseWriter.start_cors(mut stream, '') or {
+		return error(err)
+	}
+	return w
+}
+
+pub fn SseWriter.start_cors(mut stream net.TcpStream, allow_origin string) !SseWriter {
+	if contains_crlf(allow_origin) {
+		return error('invalid CORS origin')
+	}
+	mut cors_hdr := ''
+	if allow_origin.len > 0 {
+		cors_hdr = 'Access-Control-Allow-Origin: ${allow_origin}\r\n'
+	}
+	headers := 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n${cors_hdr}\r\n'
 	sent := stream.write_string(headers) or {
 		return error('failed to send SSE handshake: ${err}')
 	}
 	if sent <= 0 {
 		return error('failed to write SSE headers')
 	}
+	owned_fd := stream.fd
+	owned_open := stream.is_open
+	// Transfer socket ownership to SseWriter so the caller's stream cannot double-close it.
+	stream.fd = i64(-1)
+	stream.is_open = false
 	return SseWriter{
 		stream: net.TcpStream{
-			fd: stream.fd,
-			is_open: stream.is_open,
+			fd: owned_fd,
+			is_open: owned_open,
 			rx_buf: []u8{},
 			rx_pos: 0,
 			rx_len: 0,
@@ -32,7 +140,11 @@ pub fn (mut w SseWriter) send_event(event string, data string) !int {
 	if !w.is_open {
 		return error('SSE stream is closed')
 	}
-	payload := 'event: ${event}\r\ndata: ${data}\r\n\r\n'
+	if contains_crlf(event) {
+		return error('invalid SSE event name')
+	}
+	lines := format_sse_data_lines(data)
+	payload := 'event: ${event}\r\n${lines}\r\n'
 	n := w.stream.write_string(payload) or {
 		return error(err)
 	}
@@ -43,7 +155,8 @@ pub fn (mut w SseWriter) send_data(data string) !int {
 	if !w.is_open {
 		return error('SSE stream is closed')
 	}
-	payload := 'data: ${data}\r\n\r\n'
+	lines := format_sse_data_lines(data)
+	payload := '${lines}\r\n'
 	n := w.stream.write_string(payload) or {
 		return error(err)
 	}
@@ -51,7 +164,7 @@ pub fn (mut w SseWriter) send_data(data string) !int {
 }
 
 pub fn (mut w SseWriter) send_token(token string) !int {
-	escaped_token := token.trim()
+	escaped_token := json_escape_str(token)
 	n := w.send_data('{"token":"${escaped_token}"}') or {
 		return error(err)
 	}

@@ -18,3 +18,7 @@ models/
 
 # ZCode editor state (session, index, plan copies); local only
 .zcode/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

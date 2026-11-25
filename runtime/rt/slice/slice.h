@@ -33,7 +33,17 @@ static inline void vira_bounds_check(int32_t index, int32_t len,
 static inline void _vira_slice_grow(void **data_ptr, int32_t *cap_ptr,
                                     size_t elem_size, bool is_arena) {
   int32_t old_cap = *cap_ptr;
-  int32_t new_cap = (old_cap <= 0) ? 4 : (old_cap * 2);
+  if (old_cap >= INT32_MAX) {
+    _vira_rt_fault("vira panic: slice capacity overflow");
+  }
+  int64_t want = (old_cap <= 0) ? 4 : ((int64_t)old_cap * 2);
+  if (want > INT32_MAX) {
+    want = INT32_MAX;
+  }
+  int32_t new_cap = (int32_t)want;
+  if (elem_size > 0 && (size_t)new_cap > SIZE_MAX / elem_size) {
+    _vira_rt_fault("vira panic: slice byte capacity overflow");
+  }
   void *new_buf;
   if (old_cap == 0 || *data_ptr == NULL) {
     new_buf = malloc((size_t)new_cap * elem_size);
@@ -786,12 +796,20 @@ static inline Result_int vira_str_to_int(vira_string s) {
   char stack_buf[128];
   vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
   char *endptr = NULL;
-  long val = strtol(b.ptr, &endptr, 10);
-  bool valid = (endptr != b.ptr && *endptr == '\0');
+  errno = 0;
+  long long val = strtoll(b.ptr, &endptr, 10);
+  /* The whole string must be digits: an embedded NUL ("12\0x") is rejected. */
+  bool valid = (endptr != b.ptr && endptr == b.ptr + s.len);
+  bool range = (errno != ERANGE && val >= INT32_MIN && val <= INT32_MAX);
   vira_cstr_buf_free(&b);
   if (!valid) {
     return (Result_int){.is_err = true,
                         .err = vira_str_lit("invalid integer format", 22)};
+  }
+  /* Used to wrap silently: '4294967297' gave 1 (T-088). */
+  if (!range) {
+    return (Result_int){.is_err = true,
+                        .err = vira_str_lit("integer out of range for int", 28)};
   }
   return (Result_int){.is_err = false, .val = (int32_t)val};
 }
@@ -810,12 +828,18 @@ static inline Result_i64 vira_str_to_i64(vira_string s) {
   char stack_buf[128];
   vira_cstr_buf b = vira_str_to_cstr_buf(s, stack_buf, sizeof(stack_buf));
   char *endptr = NULL;
+  errno = 0;
   long long val = strtoll(b.ptr, &endptr, 10);
-  bool valid = (endptr != b.ptr && *endptr == '\0');
+  bool valid = (endptr != b.ptr && endptr == b.ptr + s.len);
+  bool range = (errno != ERANGE);
   vira_cstr_buf_free(&b);
   if (!valid) {
     return (Result_i64){.is_err = true,
                         .err = vira_str_lit("invalid integer format", 22)};
+  }
+  if (!range) {
+    return (Result_i64){.is_err = true,
+                        .err = vira_str_lit("integer out of range for i64", 28)};
   }
   return (Result_i64){.is_err = false, .val = (int64_t)val};
 }
@@ -990,8 +1014,11 @@ static inline vira_string vira_str_trim_right(vira_string s) {
  * Usage: Generating banners, padding, or indentation (`str.repeat("=", 40)`).
  */
 static inline vira_string vira_str_repeat(vira_string s, int32_t count) {
-  if (count <= 0 || s.len == 0 || s.data == NULL) {
+  if (count <= 0 || s.len <= 0 || s.data == NULL) {
     return vira_str_lit("", 0);
+  }
+  if ((uint64_t)s.len * (uint64_t)count > (uint64_t)INT32_MAX) {
+    _vira_rt_fault("vira panic: str.repeat exceeds maximum string length");
   }
   size_t total = (size_t)s.len * (size_t)count;
   char *buf = (char *)malloc(total + 1);
@@ -1032,7 +1059,11 @@ static inline vira_string vira_str_replace(vira_string s, vira_string old_sub, v
   if (count == 0) {
     return vira_str_clone(s);
   }
-  size_t new_len = (size_t)s.len + (size_t)count * (size_t)(new_sub.len - old_sub.len);
+  int64_t new_len64 = (int64_t)s.len + (int64_t)count * ((int64_t)new_sub.len - (int64_t)old_sub.len);
+  if (new_len64 < 0 || new_len64 > (int64_t)INT32_MAX) {
+    _vira_rt_fault("vira panic: str.replace exceeds maximum string length");
+  }
+  size_t new_len = (size_t)new_len64;
   char *buf = (char *)malloc(new_len + 1);
   if (!buf) {
     fprintf(stderr, "vira panic: out of memory in str.replace\n");

@@ -256,6 +256,75 @@ static inline int64_t _vira_ftell64(FILE *f) {
  * @return Result containing file contents string or error message.
  * Usage: Complete file reading (`file::read("path")`).
  */
+static inline Result_string _vira_read_file_stream(FILE *f, int32_t max_bytes,
+                                                   const char *path_cstr) {
+  size_t limit = (max_bytes > 0) ? (size_t)max_bytes : (size_t)INT32_MAX;
+  size_t cap = (limit < 4096u) ? (limit + 1u) : 4096u;
+  char *buf = (char *)malloc(cap);
+  if (!buf) {
+    fclose(f);
+    return (Result_string){
+        .is_err = true, .err = vira_str_lit("out of memory reading file", 26)};
+  }
+  size_t len = 0;
+  for (;;) {
+    if (len >= limit) {
+      if (max_bytes <= 0) {
+        char probe = 0;
+        if (fread(&probe, 1, 1, f) == 1) {
+          free(buf);
+          fclose(f);
+          return (Result_string){
+              .is_err = true,
+              .err = vira_str_format("file '%s' exceeds maximum string size",
+                                     path_cstr)};
+        }
+      }
+      break;
+    }
+    if (len + 1u >= cap) {
+      size_t next_cap = (cap <= ((size_t)INT32_MAX / 2u)) ? (cap * 2u)
+                                                          : ((size_t)INT32_MAX + 1u);
+      if (next_cap > limit + 1u) {
+        next_cap = limit + 1u;
+      }
+      if (next_cap <= cap) {
+        next_cap = cap + 1u;
+      }
+      char *nb = (char *)realloc(buf, next_cap);
+      if (!nb) {
+        free(buf);
+        fclose(f);
+        return (Result_string){
+            .is_err = true,
+            .err = vira_str_lit("out of memory reading file", 26)};
+      }
+      buf = nb;
+      cap = next_cap;
+    }
+    size_t space = cap - 1u - len;
+    if (space > limit - len) {
+      space = limit - len;
+    }
+    size_t n = fread(buf + len, 1, space, f);
+    len += n;
+    if (n == 0) {
+      break;
+    }
+  }
+  fclose(f);
+  if (len == 0) {
+    free(buf);
+    return (Result_string){.is_err = false, .val = vira_str_lit("", 0)};
+  }
+  buf[len] = '\0';
+  _vira_record_alloc();
+  return (Result_string){.is_err = false,
+                         .val = (vira_string){.data = (const uint8_t *)buf,
+                                              .len = (int32_t)len,
+                                              .is_lit = false}};
+}
+
 static inline Result_string vira_read_file(vira_string path) {
   char stack_path[1024];
   vira_cstr_buf pbuf = vira_str_to_cstr_buf(path, stack_path, sizeof(stack_path));
@@ -267,10 +336,10 @@ static inline Result_string vira_read_file(vira_string path) {
     return (Result_string){.is_err = true, .err = err};
   }
   if (_vira_fseek64(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
+    clearerr(f);
+    Result_string res = _vira_read_file_stream(f, 0, pbuf.ptr);
     vira_cstr_buf_free(&pbuf);
-    return (Result_string){.is_err = true, .err = err};
+    return res;
   }
   int64_t sz = _vira_ftell64(f);
   if (sz < 0 || _vira_fseek64(f, 0, SEEK_SET) != 0) {
@@ -278,6 +347,12 @@ static inline Result_string vira_read_file(vira_string path) {
     vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
     vira_cstr_buf_free(&pbuf);
     return (Result_string){.is_err = true, .err = err};
+  }
+  if (sz == 0) {
+    // Virtual filesystems like /proc and /sys report size 0 to fseek/ftell.
+    Result_string res = _vira_read_file_stream(f, 0, pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return res;
   }
   if (sz > (int64_t)INT32_MAX) {
     fclose(f);
@@ -325,10 +400,10 @@ static inline Result_string vira_read_file_head(vira_string path,
     return (Result_string){.is_err = true, .err = err};
   }
   if (_vira_fseek64(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
+    clearerr(f);
+    Result_string res = _vira_read_file_stream(f, max_bytes, pbuf.ptr);
     vira_cstr_buf_free(&pbuf);
-    return (Result_string){.is_err = true, .err = err};
+    return res;
   }
   int64_t sz = _vira_ftell64(f);
   if (sz < 0 || _vira_fseek64(f, 0, SEEK_SET) != 0) {
@@ -336,6 +411,11 @@ static inline Result_string vira_read_file_head(vira_string path,
     vira_string err = vira_str_format("failed to seek in '%s'", pbuf.ptr);
     vira_cstr_buf_free(&pbuf);
     return (Result_string){.is_err = true, .err = err};
+  }
+  if (sz == 0) {
+    Result_string res = _vira_read_file_stream(f, max_bytes, pbuf.ptr);
+    vira_cstr_buf_free(&pbuf);
+    return res;
   }
   vira_cstr_buf_free(&pbuf);
 

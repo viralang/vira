@@ -127,9 +127,8 @@ static inline void vira_tensor_f32_free(vira_tensor_f32 *t);
 static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
                                            const int32_t *dims) {
   if (n_dims < 1 || n_dims > 4 || dims == NULL) {
-    fprintf(stderr, "vira tensor error: unsupported rank %d (expected 1..4)\n",
-            n_dims);
-    exit(1);
+    _vira_rt_fault("vira tensor error: unsupported rank %d (expected 1..4)",
+                   n_dims);
   }
   t->n_dims = n_dims;
   for (int32_t d = 0; d < 4; d++) {
@@ -138,10 +137,9 @@ static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
   }
   for (int32_t d = 0; d < n_dims; d++) {
     if (dims[d] <= 0) {
-      fprintf(stderr,
-              "vira tensor error: invalid dimension %d at axis %d (rank %d)\n",
-              dims[d], d, n_dims);
-      exit(1);
+      _vira_rt_fault(
+          "vira tensor error: invalid dimension %d at axis %d (rank %d)",
+          dims[d], d, n_dims);
     }
     t->dims[d] = dims[d];
   }
@@ -151,9 +149,9 @@ static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
   int64_t st = 1;
   for (int32_t d = n_dims - 1; d >= 0; d--) {
     if (st > INT32_MAX) {
-      fprintf(stderr, "vira tensor error: stride of axis %d exceeds 2^31-1 (rank %d)\n",
-              d, n_dims);
-      exit(1);
+      _vira_rt_fault(
+          "vira tensor error: stride of axis %d exceeds 2^31-1 (rank %d)", d,
+          n_dims);
     }
     t->strides[d] = (int32_t)st;
     st *= dims[d];
@@ -167,9 +165,8 @@ static inline void _vira_tensor_init_shape(vira_tensor_f32 *t, int32_t n_dims,
       outer *= dims[d];
     }
     if (outer > INT32_MAX) {
-      fprintf(stderr, "vira tensor error: %lld rows exceed 2^31-1 (rank %d)\n",
-              (long long)outer, n_dims);
-      exit(1);
+      _vira_rt_fault("vira tensor error: %lld rows exceed 2^31-1 (rank %d)",
+                     (long long)outer, n_dims);
     }
     t->rows = (int32_t)outer;
     t->cols = dims[n_dims - 1];
@@ -223,10 +220,9 @@ static inline int32_t vira_tensor_dim(vira_tensor_f32 t, int32_t axis) {
   _vira_tensor_norm_shape(&t);
   int32_t ax = axis < 0 ? (t.n_dims + axis) : axis;
   if (ax < 0 || ax >= t.n_dims) {
-    fprintf(stderr,
-            "vira tensor error: dim axis %d out of bounds for %dD tensor\n",
-            axis, t.n_dims);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: dim axis %d out of bounds for %dD tensor", axis,
+        t.n_dims);
   }
   return t.dims[ax];
 }
@@ -242,10 +238,9 @@ static inline int32_t vira_tensor_stride(vira_tensor_f32 t, int32_t axis) {
   _vira_tensor_norm_shape(&t);
   int32_t ax = axis < 0 ? (t.n_dims + axis) : axis;
   if (ax < 0 || ax >= t.n_dims) {
-    fprintf(stderr,
-            "vira tensor error: stride axis %d out of bounds for %dD tensor\n",
-            axis, t.n_dims);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: stride axis %d out of bounds for %dD tensor", axis,
+        t.n_dims);
   }
   return t.strides[ax];
 }
@@ -381,9 +376,8 @@ _vira_tensor_f32_arena_alloc_uninit_nd(vira_arena *a, int32_t n_dims,
 static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows,
                                                     int32_t cols) {
   if (rows <= 0 || cols <= 0) {
-    fprintf(stderr, "vira tensor error: invalid dimensions (%d x %d)\n", rows,
-            cols);
-    exit(1);
+    _vira_rt_fault("vira tensor error: invalid dimensions (%d x %d)", rows,
+                   cols);
   }
   int32_t dims[2] = {rows, cols};
   return vira_tensor_f32_alloc_nd(2, dims);
@@ -400,9 +394,8 @@ static inline vira_tensor_f32 vira_tensor_f32_alloc(int32_t rows,
 static inline vira_tensor_f32
 vira_tensor_f32_arena_alloc(vira_arena *a, int32_t rows, int32_t cols) {
   if (rows <= 0 || cols <= 0) {
-    fprintf(stderr, "vira tensor error: invalid dimensions (%d x %d)\n", rows,
-            cols);
-    exit(1);
+    _vira_rt_fault("vira tensor error: invalid dimensions (%d x %d)", rows,
+                   cols);
   }
   int32_t dims[2] = {rows, cols};
   return vira_tensor_f32_arena_alloc_nd(a, 2, dims);
@@ -514,10 +507,9 @@ static inline vira_tensor_f32 vira_tensor_view_nd(vira_tensor_f32 t,
   vira_tensor_f32 v = {0};
   _vira_tensor_init_shape(&v, n_dims, dims);
   if ((int64_t)v.rows * v.cols != (int64_t)t.rows * t.cols) {
-    fprintf(stderr,
-            "vira tensor error: reshape element count mismatch (%lld -> %lld)\n",
-            (long long)t.rows * t.cols, (long long)v.rows * v.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: reshape element count mismatch (%lld -> %lld)",
+        (long long)t.rows * t.cols, (long long)v.rows * v.cols);
   }
   v.data = t.data;
   v.raw_alloc = NULL;

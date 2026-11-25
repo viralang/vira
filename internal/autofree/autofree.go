@@ -1209,9 +1209,6 @@ func (a *Analyzer) maybeHoistSubExpr(
 	}
 
 	if call, ok := expr.(*ast.CallExpr); ok {
-		if sel, isSel := call.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
-			return expr
-		}
 		retType := a.chk.ExprTypes[call]
 		if call.OrBlock != nil {
 			a.tmpCounter++
@@ -1267,9 +1264,6 @@ func (a *Analyzer) wouldHoistSubExpr(expr ast.Expr, inArena bool) bool {
 		_, isTensor := a.chk.ExprTypes[e].(*checker.TensorType)
 		return (isTensor || a.chk.IsStringConcat(e)) && !inArena
 	case *ast.CallExpr:
-		if sel, isSel := e.Callee.(*ast.SelectorExpr); isSel && sel.Field.Name == "clone" {
-			return false
-		}
 		if e.OrBlock != nil {
 			return true
 		}
@@ -1390,6 +1384,13 @@ func (a *Analyzer) walkAndHoistCallArgs(
 					sel.Left = a.maybeHoistSubExpr(sel.Left, inArena, preStmts, postFrees, report)
 				} else if _, isMap := rt.(*checker.MapType); isMap {
 					sel.Left = a.hoistExprToTemp(sel.Left, rt, ast.CleanupMap, "vira_tmp_recv", "zero-leak temporary map receiver", preStmts, postFrees, report)
+				}
+			} else if !isCall {
+				// `'${x}'.repeat(2)`, `(a + b).to_upper()`: an interpolation or a
+				// concatenation receiver is fresh too (V14). maybeHoistSubExpr
+				// leaves identifiers, fields and literals alone.
+				if lt := a.chk.ExprTypes[sel.Left]; lt != nil && lt.Equals(checker.TypeString) {
+					sel.Left = a.maybeHoistSubExpr(sel.Left, inArena, preStmts, postFrees, report)
 				}
 			}
 		}

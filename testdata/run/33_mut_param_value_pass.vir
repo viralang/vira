@@ -1,0 +1,55 @@
+// OUT: sum=6 count=2 tag=ok-v2 n=11
+// OUT: box=6/ok-v2/11
+// OUT: [vira_rt] active_leaks=0
+
+// Dereferencing `mut` parameters and receivers when passed by value.
+fn sum_slice(xs []int) int {
+    mut total := 0
+    for v in xs {
+        total += v
+    }
+    return total
+}
+
+fn count_map(m map[string]int) int {
+    return m.len
+}
+
+fn format_tag(s string) string {
+    return s + '-v2'
+}
+
+struct Snapshot {
+pub:
+    total int
+    tag   string
+    n     int
+}
+
+fn inspect_and_bump(mut xs []int, mut m map[string]int, mut s string, mut n int) Snapshot {
+    xs.push(3)
+    m['b'] = 2
+    s = 'ok'
+    n += 1
+    total := sum_slice(xs)
+    cnt := count_map(m)
+    full := format_tag(s)
+    println('sum=${total} count=${cnt} tag=${full} n=${n}')
+    return Snapshot{ total: total, tag: full, n: n }
+}
+
+fn bump_ret(mut n int) int {
+    n += 1
+    return n
+}
+
+fn main() {
+    mut xs := []int{1, 2}
+    mut m := map[string]int{'a': 1}
+    mut s := 'init'
+    mut n := 9
+    _ := bump_ret(mut n)
+    snap := inspect_and_bump(mut xs, mut m, mut s, mut n)
+    println('box=${snap.total}/${snap.tag}/${snap.n}')
+}
+

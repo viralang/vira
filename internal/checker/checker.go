@@ -2874,9 +2874,9 @@ func (c *Checker) checkExpr(expr ast.Expr, scope *Scope) (resolved Type) {
 				c.errorf(e.UnarySpan, "operator '!' expects boolean, got '%s'", t)
 			}
 			return TypeBool
-		case token.TokMinus:
+		case token.TokMinus, token.TokPlus:
 			if !t.Equals(TypeInt) && !t.Equals(TypeI64) && !t.Equals(TypeF32) && !t.Equals(TypeF64) {
-				c.errorf(e.UnarySpan, "operator '-' expects numeric type, got '%s'", t)
+				c.errorf(e.UnarySpan, "operator '%s' expects numeric type, got '%s'", e.Op, t)
 			}
 			return t
 		case token.TokAmp:

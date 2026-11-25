@@ -143,9 +143,15 @@ fn test_sse_streaming() {
 	mut sse := ctx.sse() or {
 		panic('failed to initialize SSE writer')
 	}
+	if ctx.stream.is_open {
+		panic('expected caller stream ownership to transfer to SseWriter')
+	}
+	// Closing the old handle must be a safe no-op and leave SSE working.
+	ctx.stream.close() or { false }
 
 	sse.send_token('Hello') or { panic('failed to send token 1') }
-	sse.send_token('World') or { panic('failed to send token 2') }
+	sse.send_token(' "World"\n') or { panic('failed to send token 2') }
+	sse.send_data('line1\nline2') or { panic('failed to send multiline data') }
 	sse.send_done() or { panic('failed to send done') }
 	sse.close() or { false }
 
@@ -160,6 +166,9 @@ fn test_sse_streaming() {
 		if l.len == 0 {
 			break
 		}
+		if l.starts_with('Access-Control-Allow-Origin:') {
+			panic('unexpected default wildcard CORS header: ${l}')
+		}
 	}
 
 	// Read events
@@ -170,16 +179,26 @@ fn test_sse_streaming() {
 	client.read_line() or { panic('failed read empty separator 1') }
 
 	e2 := client.read_line() or { panic('failed read e2') }
-	if e2 != 'data: {"token":"World"}' {
+	if e2 != 'data: {"token":" \\"World\\"\\n"}' {
 		panic('mismatched e2: ${e2}')
 	}
 	client.read_line() or { panic('failed read empty separator 2') }
 
-	e3 := client.read_line() or { panic('failed read e3') }
-	if e3 != 'data: [DONE]' {
-		panic('mismatched e3: ${e3}')
+	e3a := client.read_line() or { panic('failed read e3a') }
+	if e3a != 'data: line1' {
+		panic('mismatched e3a: ${e3a}')
+	}
+	e3b := client.read_line() or { panic('failed read e3b') }
+	if e3b != 'data: line2' {
+		panic('mismatched e3b: ${e3b}')
 	}
 	client.read_line() or { panic('failed read empty separator 3') }
+
+	e4 := client.read_line() or { panic('failed read e4') }
+	if e4 != 'data: [DONE]' {
+		panic('mismatched e4: ${e4}')
+	}
+	client.read_line() or { panic('failed read empty separator 4') }
 
 	client.close() or { false }
 	server.close() or { false }

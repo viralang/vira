@@ -1,0 +1,35 @@
+// OUT: fallback
+// OUT: -1
+// OUT: empty
+// OUT: 7 8
+// OUT: 10 5
+// OUT: [vira_rt] active_leaks=0
+
+// T-118: a newline ends the expression before `-`, `+`, `[`, and `(`.
+fn fail_int() !int {
+    return error('nope')
+}
+
+fn fail_slice() ![]int {
+    return error('empty')
+}
+
+fn main() {
+    v := fail_int() or {
+        println('fallback')
+        -1
+    }
+    println('${v}')
+
+    xs := fail_slice() or {
+        println('empty')
+        []int{7, 8}
+    }
+    println('${xs[0]} ${xs[1]}')
+
+    x := 10
+    -5
+    y := +5
+    println('${x} ${y}')
+}
+

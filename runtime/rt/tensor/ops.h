@@ -25,10 +25,11 @@ _vira_tensor_reshape_safe(vira_arena *opt_arena, vira_tensor_f32 t,
       opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, n_dims, dims)
                 : vira_tensor_f32_alloc_nd(n_dims, dims);
   if ((int64_t)out.rows * out.cols != (int64_t)t.rows * t.cols) {
-    fprintf(stderr,
-            "vira tensor error: reshape element count mismatch (%lld -> %lld)\n",
-            (long long)t.rows * t.cols, (long long)out.rows * out.cols);
-    exit(1);
+    int64_t got_elems = (int64_t)out.rows * out.cols;
+    vira_tensor_f32_free(&out);
+    _vira_rt_fault(
+        "vira tensor error: reshape element count mismatch (%lld -> %lld)",
+        (long long)t.rows * t.cols, (long long)got_elems);
   }
   _vira_tensor_sync_host_f32(t.data);
   memcpy(out.data, t.data, (size_t)out.rows * (size_t)out.cols * sizeof(vira_f32));
@@ -142,10 +143,9 @@ static inline vira_f32 vira_tensor_f32_get(vira_tensor_f32 t, int32_t row,
                                            int32_t col) {
   _vira_tensor_norm_shape(&t);
   if (row < 0 || row >= t.rows || col < 0 || col >= t.cols) {
-    fprintf(stderr,
-            "vira tensor error: .get(%d, %d) out of bounds for shape (%dx%d)\n",
-            row, col, t.rows, t.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .get(%d, %d) out of bounds for shape (%dx%d)", row,
+        col, t.rows, t.cols);
   }
   _vira_tensor_sync_host_f32(t.data);
   return t.data[(size_t)row * (size_t)t.cols + (size_t)col];
@@ -163,10 +163,9 @@ static inline void vira_tensor_f32_set(vira_tensor_f32 t, int32_t row,
                                        int32_t col, vira_f32 val) {
   _vira_tensor_norm_shape(&t);
   if (row < 0 || row >= t.rows || col < 0 || col >= t.cols) {
-    fprintf(stderr,
-            "vira tensor error: .set(%d, %d) out of bounds for shape (%dx%d)\n",
-            row, col, t.rows, t.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .set(%d, %d) out of bounds for shape (%dx%d)", row,
+        col, t.rows, t.cols);
   }
   _vira_tensor_sync_host_f32(t.data);
   t.data[(size_t)row * (size_t)t.cols + (size_t)col] = val;
@@ -187,16 +186,14 @@ static inline void vira_tensor_f32_copy_row(vira_tensor_f32 dst,
   _vira_tensor_norm_shape(&dst);
   _vira_tensor_norm_shape(&src);
   if (dst_row < 0 || dst_row >= dst.rows) {
-    fprintf(stderr,
-            "vira tensor error: .copy_row(%d) row out of bounds [0, %d)\n",
-            dst_row, dst.rows);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .copy_row(%d) row out of bounds [0, %d)", dst_row,
+        dst.rows);
   }
   if (src.cols != dst.cols || src.rows < 1) {
-    fprintf(stderr,
-            "vira tensor error: .copy_row column mismatch dst=(%dx%d) vs src=(%dx%d)\n",
-            dst.rows, dst.cols, src.rows, src.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .copy_row column mismatch dst=(%dx%d) vs src=(%dx%d)",
+        dst.rows, dst.cols, src.rows, src.cols);
   }
   if (!_vira_tls_gpu_fallback && _vira_gpu_copy_row(dst, dst_row, src)) {
     return;
@@ -228,16 +225,14 @@ static inline void vira_tensor_f32_copy_rows(vira_tensor_f32 dst,
   _vira_tensor_norm_shape(&src);
   if (dst_row_start < 0 || src.rows <= 0 ||
       dst_row_start + src.rows > dst.rows) {
-    fprintf(stderr,
-            "vira tensor error: .copy_rows(%d, %d rows) out of bounds [0, %d)\n",
-            dst_row_start, src.rows, dst.rows);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .copy_rows(%d, %d rows) out of bounds [0, %d)",
+        dst_row_start, src.rows, dst.rows);
   }
   if (src.cols != dst.cols) {
-    fprintf(stderr,
-            "vira tensor error: .copy_rows column mismatch dst=(%dx%d) vs src=(%dx%d)\n",
-            dst.rows, dst.cols, src.rows, src.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .copy_rows column mismatch dst=(%dx%d) vs src=(%dx%d)",
+        dst.rows, dst.cols, src.rows, src.cols);
   }
   if (!_vira_tls_gpu_fallback &&
       _vira_gpu_copy_rows(dst, dst_row_start, src)) {
@@ -271,10 +266,9 @@ static inline vira_tensor_f32 vira_tensor_slice_rows(vira_arena *opt_arena,
                                                      int32_t end_row) {
   _vira_tensor_norm_shape(&t);
   if (start_row < 0 || end_row <= start_row || end_row > t.rows) {
-    fprintf(stderr,
-            "vira tensor error: .slice_rows(%d, %d) invalid for rows=%d\n",
-            start_row, end_row, t.rows);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .slice_rows(%d, %d) invalid for rows=%d",
+        start_row, end_row, t.rows);
   }
   if (!_vira_tls_gpu_fallback) {
     vira_tensor_f32 gpu_out = {0};
@@ -446,10 +440,9 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
   int32_t N = (b_nd == 1) ? 1 : b.dims[b_nd - 1];
 
   if (K_a != K_b) {
-    fprintf(stderr,
-            "vira tensor error: matmul '@' inner dimension mismatch (%d vs %d)\n",
-            K_a, K_b);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: matmul '@' inner dimension mismatch (%d vs %d)", K_a,
+        K_b);
   }
 
   if (!_vira_tls_gpu_fallback && a_nd <= 2 && b_nd <= 2 &&
@@ -488,10 +481,9 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
 
   if ((A_B0 != B_B0 && A_B0 != 1 && B_B0 != 1) ||
       (A_B1 != B_B1 && A_B1 != 1 && B_B1 != 1)) {
-    fprintf(stderr,
-            "vira tensor error: matmul '@' batch broadcast mismatch (%dx%d) vs (%dx%d)\n",
-            A_B0, A_B1, B_B0, B_B1);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: matmul '@' batch broadcast mismatch (%dx%d) vs (%dx%d)",
+        A_B0, A_B1, B_B0, B_B1);
   }
 
   int32_t B0 = (A_B0 > B_B0) ? A_B0 : B_B0;
@@ -919,10 +911,9 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
   int32_t K = x.cols;
   int32_t N = w.rows;
   if (K != w.cols) {
-    fprintf(stderr,
-            "vira tensor error: .linear() inner dimension mismatch x=(%dx%d) vs w=(%dx%d)\n",
-            M, K, N, w.cols);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: .linear() inner dimension mismatch x=(%dx%d) vs w=(%dx%d)",
+        M, K, N, w.cols);
   }
 
   int64_t total_ops = (int64_t)M * (int64_t)N * (int64_t)K;
@@ -1186,9 +1177,9 @@ vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     }
     return out;
   }
-  fprintf(stderr, "vira tensor error: add shape mismatch (%dx%d) + (%dx%d)\n",
-          a.rows, a.cols, b.rows, b.cols);
-  exit(1);
+  _vira_rt_fault("vira tensor error: add shape mismatch (%dx%d) + (%dx%d)",
+                 a.rows, a.cols, b.rows, b.cols);
+  return (vira_tensor_f32){0};
 }
 
 // SIMD-accelerated tensor subtraction: out = a - b (supports 1D..4D + trailing-dim bias broadcast)
@@ -1234,9 +1225,9 @@ vira_tensor_sub(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
     }
     return out;
   }
-  fprintf(stderr, "vira tensor error: sub shape mismatch (%dx%d) - (%dx%d)\n",
-          a.rows, a.cols, b.rows, b.cols);
-  exit(1);
+  _vira_rt_fault("vira tensor error: sub shape mismatch (%dx%d) - (%dx%d)",
+                 a.rows, a.cols, b.rows, b.cols);
+  return (vira_tensor_f32){0};
 }
 
 // SIMD-accelerated tensor scalar scaling: out = t * scale (preserves 1D..4D shape)

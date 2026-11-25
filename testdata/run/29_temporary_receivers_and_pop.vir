@@ -1,0 +1,42 @@
+// OUT: b-3-b-3- B-3- true XN=3
+// OUT: 2 1 0 10
+// OUT: [vira_rt] active_leaks=0
+
+// V14: a method call on an interpolation or concatenation frees the receiver.
+// V15: `arr.pop()` used as a statement frees the removed element.
+fn pick(a int) string {
+    return 'n=${a}'
+}
+
+fn echo_len(s string, xs []string) int {
+    return s.len + xs.len
+}
+
+struct Msg {
+pub mut:
+    role string
+    text string
+}
+
+fn main() {
+    a := 3
+    x := 'b-${a}-'.repeat(2)
+    u := 'b-${a}-'.to_upper()
+    c := 'b-${a}-'.contains('3')
+    d := ('x' + pick(a)).to_upper()
+    println('${x} ${u} ${c} ${d}')
+
+    mut names := []string{}
+    names.push(pick(1))
+    names.push(pick(2))
+    names.push(pick(3))
+    names.pop()
+    mut msgs := []Msg{}
+    msgs.push(Msg{ role: 'user', text: pick(4) })
+    msgs.pop()
+    mut nested := [][]string{}
+    nested.push([pick(5)])
+    nested.pop()
+    cloned_total := echo_len(x.clone(), names.clone())
+    println('${names.len} ${names.len - 1} ${msgs.len + nested.len} ${cloned_total}')
+}

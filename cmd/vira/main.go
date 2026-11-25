@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -215,7 +216,7 @@ func buildCmd(args []string) {
 	ccFlag := fs.String("cc", "", "C compiler (cc, clang, gcc, tcc)")
 	keepC := fs.Bool("keep-c", false, "Keep generated C99 file in build/")
 	quietRTFlag := fs.Bool("quiet-rt", false, "Disable [vira_rt] exit telemetry stats")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderFlagsBeforeArgs(fs, args))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: vira build [-prod] [-target os] [-shared] [-gui] [-sanitize] [-quiet-rt] [-o out] <file.vir | directory>")
@@ -302,7 +303,7 @@ func buildCmd(args []string) {
 func cgenCmd(args []string) {
 	fs := flag.NewFlagSet("cgen", flag.ExitOnError)
 	outPath := fs.String("o", "", "Write generated C99 to file instead of stdout")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderFlagsBeforeArgs(fs, args))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: vira cgen [-o out.c] <file.vir | directory>")
@@ -326,7 +327,7 @@ func cgenCmd(args []string) {
 func checkCmd(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	showAutofree := fs.Bool("autofree", true, "Print static escape analysis and autofree report")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderFlagsBeforeArgs(fs, args))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: vira check [-autofree] <file.vir | directory>")
@@ -348,7 +349,8 @@ func testCmd(args []string) {
 	fs := flag.NewFlagSet("test", flag.ExitOnError)
 	gpuBackend := fs.String("gpu-backend", "", "GPU compute backend (cuda, opencl, cpu, auto)")
 	gpuDevice := fs.String("gpu-device", "", "GPU device index or name filter")
-	_ = fs.Parse(args)
+	allowLeaks := fs.Bool("allow-leaks", false, "report leaks but do not fail the test file")
+	_ = fs.Parse(reorderFlagsBeforeArgs(fs, args))
 
 	if *gpuBackend != "" {
 		_ = os.Setenv("VIRA_GPU_BACKEND", *gpuBackend)
@@ -421,10 +423,17 @@ func testCmd(args []string) {
 		if runErr != nil {
 			fmt.Printf("--- FAIL: %s (%.2fs)\n%s\n", tFile, dur.Seconds(), string(out))
 			failCount++
+		} else if n, ok := activeLeaks(string(out)); ok && n != 0 && !*allowLeaks {
+			// A leaking test used to print PASS with the leak line silently
+			// dropped (T-086 / V8).
+			fmt.Printf("--- FAIL: %s (%.2fs)\n    active_leaks=%d (memory leaked; -allow-leaks to report only)\n", tFile, dur.Seconds(), n)
+			failCount++
 		} else {
 			fmt.Printf("--- PASS: %s (%.2fs)\n", tFile, dur.Seconds())
-			if strings.Contains(string(out), "active_leaks=0") {
+			if ok && n == 0 {
 				fmt.Printf("    active_leaks=0 [Zero Memory Leaks Verified]\n")
+			} else if ok {
+				fmt.Printf("    active_leaks=%d [LEAKS, allowed by -allow-leaks]\n", n)
 			}
 			passCount++
 		}
@@ -437,12 +446,78 @@ func testCmd(args []string) {
 	}
 }
 
+// activeLeaks returns the last `active_leaks=N` the runtime printed at exit
+// and whether there was one (a program built with -quiet-rt prints none).
+func activeLeaks(out string) (int, bool) {
+	const key = "active_leaks="
+	i := strings.LastIndex(out, key)
+	if i < 0 {
+		return 0, false
+	}
+	j := i + len(key)
+	k := j
+	for k < len(out) && out[k] >= '0' && out[k] <= '9' {
+		k++
+	}
+	if k == j {
+		return 0, false
+	}
+	n := 0
+	for _, c := range out[j:k] {
+		n = n*10 + int(c-'0')
+		if n > 1<<30 {
+			break
+		}
+	}
+	return n, true
+}
+
+type isBoolFlagger interface {
+	IsBoolFlag() bool
+}
+
+// reorderFlagsBeforeArgs moves recognized flags (and their values) ahead of positional
+// arguments so commands like `vira build file.vir -o out` work regardless of flag order.
+func reorderFlagsBeforeArgs(fs *flag.FlagSet, args []string) []string {
+	var flagsPart []string
+	var posPart []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			posPart = append(posPart, args[i:]...)
+			break
+		}
+		if len(a) > 1 && a[0] == '-' {
+			name := strings.TrimLeft(a, "-")
+			hasEq := false
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+				hasEq = true
+			}
+			flagsPart = append(flagsPart, a)
+			if !hasEq {
+				if f := fs.Lookup(name); f != nil {
+					if bf, ok := f.Value.(isBoolFlagger); !ok || !bf.IsBoolFlag() {
+						if i+1 < len(args) {
+							i++
+							flagsPart = append(flagsPart, args[i])
+						}
+					}
+				}
+			}
+			continue
+		}
+		posPart = append(posPart, a)
+	}
+	return append(flagsPart, posPart...)
+}
+
 // --- SUBCOMMAND 6: `vira fmt` ---
 
 func fmtCmd(args []string) {
 	fs := flag.NewFlagSet("fmt", flag.ExitOnError)
 	writeBack := fs.Bool("w", false, "Write result back to file instead of stdout")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderFlagsBeforeArgs(fs, args))
 
 	targets := fs.Args()
 	if len(targets) == 0 {
@@ -1537,44 +1612,79 @@ func resolveExternalLibPaths(targetOS string) ([]string, []string, bool, string)
 	return incPaths, libPaths, hasRaylib, staticRaylibPath
 }
 
+func versionMatchesDir(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "VERSION"))
+	if err != nil {
+		return false
+	}
+	want := strings.TrimPrefix(strings.TrimSpace(version.Version), "v")
+	got := strings.TrimPrefix(strings.TrimSpace(string(data)), "v")
+	return want != "" && got == want
+}
+
 func resolveRuntimeDir() string {
-	if info, err := os.Stat("runtime/vira_rt.h"); err == nil && !info.IsDir() {
-		return "runtime"
+	if envDir := os.Getenv("VIRA_RUNTIME_DIR"); envDir != "" {
+		if info, err := os.Stat(filepath.Join(envDir, "vira_rt.h")); err == nil && !info.IsDir() {
+			return envDir
+		}
+	}
+	if versionMatchesDir(".") {
+		if info, err := os.Stat("runtime/vira_rt.h"); err == nil && !info.IsDir() {
+			return "runtime"
+		}
 	}
 	if exe, err := os.Executable(); err == nil {
-		cand := filepath.Join(filepath.Dir(exe), "runtime")
-		if info, err := os.Stat(filepath.Join(cand, "vira_rt.h")); err == nil && !info.IsDir() {
-			return cand
+		exeDir := filepath.Dir(exe)
+		cand := filepath.Join(exeDir, "runtime")
+		if versionMatchesDir(exeDir) {
+			if info, err := os.Stat(filepath.Join(cand, "vira_rt.h")); err == nil && !info.IsDir() {
+				return cand
+			}
 		}
 	}
 
-	// Portable fallback: Extract embedded headers from virart.RuntimeFS to ~/.vira/runtime/
+	// Portable fallback: Atomically extract embedded headers from virart.RuntimeFS to ~/.vira/runtime/<version>/
 	home, err := os.UserHomeDir()
 	if err == nil {
-		cacheDir := filepath.Join(home, ".vira", "runtime")
-		_ = os.MkdirAll(cacheDir, 0755)
+		rtRoot := filepath.Join(home, ".vira", "runtime")
+		_ = os.MkdirAll(rtRoot, 0755)
+		cacheDir := filepath.Join(rtRoot, version.Version)
+		if info, err := os.Stat(filepath.Join(cacheDir, "vira_rt.h")); err == nil && !info.IsDir() {
+			return cacheDir
+		}
 
-		extracted := 0
-		_ = fs.WalkDir(virart.RuntimeFS, ".", func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil || path == "." {
-				return nil
-			}
-			dest := filepath.Join(cacheDir, filepath.FromSlash(path))
-			if d.IsDir() {
-				return os.MkdirAll(dest, 0755)
-			}
-			if strings.HasSuffix(d.Name(), ".h") {
-				if data, readErr := virart.RuntimeFS.ReadFile(path); readErr == nil {
-					_ = os.MkdirAll(filepath.Dir(dest), 0755)
-					if writeErr := os.WriteFile(dest, data, 0644); writeErr == nil {
-						extracted++
+		tmpDir, tmpErr := os.MkdirTemp(rtRoot, ".tmp-"+version.Version+"-*")
+		if tmpErr == nil {
+			extracted := 0
+			_ = fs.WalkDir(virart.RuntimeFS, ".", func(path string, d fs.DirEntry, walkErr error) error {
+				if walkErr != nil || path == "." {
+					return nil
+				}
+				dest := filepath.Join(tmpDir, filepath.FromSlash(path))
+				if d.IsDir() {
+					return os.MkdirAll(dest, 0755)
+				}
+				if strings.HasSuffix(d.Name(), ".h") {
+					if data, readErr := virart.RuntimeFS.ReadFile(path); readErr == nil {
+						_ = os.MkdirAll(filepath.Dir(dest), 0755)
+						if writeErr := os.WriteFile(dest, data, 0644); writeErr == nil {
+							extracted++
+						}
 					}
 				}
+				return nil
+			})
+			if extracted > 0 {
+				if renameErr := os.Rename(tmpDir, cacheDir); renameErr == nil {
+					return cacheDir
+				}
+				_ = os.RemoveAll(tmpDir)
+				if info, err := os.Stat(filepath.Join(cacheDir, "vira_rt.h")); err == nil && !info.IsDir() {
+					return cacheDir
+				}
+			} else {
+				_ = os.RemoveAll(tmpDir)
 			}
-			return nil
-		})
-		if extracted > 0 {
-			return cacheDir
 		}
 	}
 	return "runtime"
@@ -1597,8 +1707,26 @@ func ensureStdPackagesExtracted() {
 			return os.MkdirAll(dest, 0755)
 		}
 		data, err := stdpkg.StandardFS.ReadFile(path)
-		if err == nil {
+		if err != nil {
+			return nil
+		}
+		if existing, rErr := os.ReadFile(dest); rErr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
+		tmpFile, tmpErr := os.CreateTemp(filepath.Dir(dest), ".vira-pkg-*")
+		if tmpErr != nil {
 			_ = os.WriteFile(dest, data, 0644)
+			return nil
+		}
+		tmpName := tmpFile.Name()
+		_, wErr := tmpFile.Write(data)
+		cErr := tmpFile.Close()
+		if wErr != nil || cErr != nil {
+			_ = os.Remove(tmpName)
+			return nil
+		}
+		if rErr := os.Rename(tmpName, dest); rErr != nil {
+			_ = os.Remove(tmpName)
 		}
 		return nil
 	})

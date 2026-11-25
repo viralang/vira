@@ -135,9 +135,9 @@ typedef struct {
   int64_t file_pos;
 } _vira_gguf_tensor_entry;
 
-static pthread_mutex_t _vira_gguf_dir_mu = PTHREAD_MUTEX_INITIALIZER;
+#define VIRA_GGUF_DIR_CACHE_SLOTS 4
 
-static struct {
+typedef struct {
   char *path;
   int64_t file_size;
   uint64_t file_mtime;
@@ -147,43 +147,60 @@ static struct {
   _vira_gguf_tensor_entry *entries;
   int32_t *hash_slots; // 1-based index into entries, 0 = empty
   size_t hash_cap;     // power of 2
-} _vira_gguf_dir_cache = {NULL, 0, 0, 0, NULL, 0, NULL, NULL, 0};
+  uint64_t last_used;
+} _vira_gguf_dir_slot;
 
-static inline void _vira_gguf_dir_cache_clear_locked(void) {
-  if (_vira_gguf_dir_cache.fp) {
-    fclose(_vira_gguf_dir_cache.fp);
-    _vira_gguf_dir_cache.fp = NULL;
+static pthread_mutex_t _vira_gguf_dir_mu = PTHREAD_MUTEX_INITIALIZER;
+static _vira_gguf_dir_slot _vira_gguf_dir_slots[VIRA_GGUF_DIR_CACHE_SLOTS];
+static uint64_t _vira_gguf_dir_clock = 0;
+
+static inline void _vira_gguf_dir_slot_clear_locked(_vira_gguf_dir_slot *s) {
+  if (s->fp) {
+    fclose(s->fp);
+    s->fp = NULL;
   }
-  if (_vira_gguf_dir_cache.entries) {
-    for (int32_t i = 0; i < _vira_gguf_dir_cache.count; ++i) {
-      free(_vira_gguf_dir_cache.entries[i].name);
+  if (s->entries) {
+    for (int32_t i = 0; i < s->count; ++i) {
+      free(s->entries[i].name);
     }
-    free(_vira_gguf_dir_cache.entries);
-    _vira_gguf_dir_cache.entries = NULL;
+    free(s->entries);
+    s->entries = NULL;
   }
-  free(_vira_gguf_dir_cache.hash_slots);
-  _vira_gguf_dir_cache.hash_slots = NULL;
-  _vira_gguf_dir_cache.hash_cap = 0;
-  free(_vira_gguf_dir_cache.path);
-  _vira_gguf_dir_cache.path = NULL;
-  _vira_gguf_dir_cache.count = 0;
-  _vira_gguf_dir_cache.file_size = 0;
-  _vira_gguf_dir_cache.file_mtime = 0;
-  _vira_gguf_dir_cache.file_ino = 0;
+  free(s->hash_slots);
+  s->hash_slots = NULL;
+  s->hash_cap = 0;
+  free(s->path);
+  s->path = NULL;
+  s->count = 0;
+  s->file_size = 0;
+  s->file_mtime = 0;
+  s->file_ino = 0;
+  s->last_used = 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((destructor))
+#endif
+static void _vira_gguf_dir_shutdown(void) {
+  pthread_mutex_lock(&_vira_gguf_dir_mu);
+  for (int i = 0; i < VIRA_GGUF_DIR_CACHE_SLOTS; ++i) {
+    _vira_gguf_dir_slot_clear_locked(&_vira_gguf_dir_slots[i]);
+  }
+  pthread_mutex_unlock(&_vira_gguf_dir_mu);
 }
 
 static inline _vira_gguf_tensor_entry *_vira_gguf_dir_lookup_locked(
-    const char *name, size_t name_len) {
-  if (!_vira_gguf_dir_cache.hash_slots || _vira_gguf_dir_cache.hash_cap == 0) {
+    const _vira_gguf_dir_slot *s, const char *name, size_t name_len) {
+  if (!s->hash_slots || s->hash_cap == 0) {
     return NULL;
   }
   uint64_t h = _vira_gguf_fnv1a(name, name_len);
-  size_t mask = _vira_gguf_dir_cache.hash_cap - 1u;
+  size_t mask = s->hash_cap - 1u;
   size_t idx = (size_t)h & mask;
-  for (size_t probe = 0; probe < _vira_gguf_dir_cache.hash_cap; ++probe) {
-    int32_t slot = _vira_gguf_dir_cache.hash_slots[idx];
+  for (size_t probe = 0; probe < s->hash_cap; ++probe) {
+    int32_t slot = s->hash_slots[idx];
     if (slot == 0) return NULL;
-    _vira_gguf_tensor_entry *ent = &_vira_gguf_dir_cache.entries[slot - 1];
+    _vira_gguf_tensor_entry *ent = &s->entries[slot - 1];
     if (ent->name_hash == h && ent->name_len == name_len &&
         ent->name != NULL && memcmp(ent->name, name, name_len) == 0) {
       return ent;
@@ -219,16 +236,32 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
 
   pthread_mutex_lock(&_vira_gguf_dir_mu);
 
-  bool cache_hit =
-      (_vira_gguf_dir_cache.fp != NULL && _vira_gguf_dir_cache.path != NULL &&
-       _vira_gguf_dir_cache.entries != NULL &&
-       strcmp(_vira_gguf_dir_cache.path, pbuf.ptr) == 0 &&
-       _vira_gguf_dir_cache.file_size == file_size &&
-       _vira_gguf_dir_cache.file_mtime == file_mtime &&
-       _vira_gguf_dir_cache.file_ino == file_ino);
+  _vira_gguf_dir_slot *dir_slot = NULL;
+  for (int i = 0; i < VIRA_GGUF_DIR_CACHE_SLOTS; ++i) {
+    _vira_gguf_dir_slot *cand = &_vira_gguf_dir_slots[i];
+    if (cand->fp != NULL && cand->path != NULL && cand->entries != NULL &&
+        strcmp(cand->path, pbuf.ptr) == 0 &&
+        cand->file_size == file_size &&
+        cand->file_mtime == file_mtime &&
+        cand->file_ino == file_ino) {
+      dir_slot = cand;
+      dir_slot->last_used = ++_vira_gguf_dir_clock;
+      break;
+    }
+  }
 
-  if (!cache_hit) {
-    _vira_gguf_dir_cache_clear_locked();
+  if (!dir_slot) {
+    _vira_gguf_dir_slot *victim = &_vira_gguf_dir_slots[0];
+    for (int i = 0; i < VIRA_GGUF_DIR_CACHE_SLOTS; ++i) {
+      if (_vira_gguf_dir_slots[i].path == NULL) {
+        victim = &_vira_gguf_dir_slots[i];
+        break;
+      }
+      if (_vira_gguf_dir_slots[i].last_used < victim->last_used) {
+        victim = &_vira_gguf_dir_slots[i];
+      }
+    }
+    _vira_gguf_dir_slot_clear_locked(victim);
 
     FILE *f = fopen(pbuf.ptr, "rb");
     if (!f) {
@@ -453,18 +486,20 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
       }
     }
 
-    _vira_gguf_dir_cache.path = path_copy;
-    _vira_gguf_dir_cache.file_size = file_size;
-    _vira_gguf_dir_cache.file_mtime = file_mtime;
-    _vira_gguf_dir_cache.file_ino = file_ino;
-    _vira_gguf_dir_cache.fp = f;
-    _vira_gguf_dir_cache.count = parsed;
-    _vira_gguf_dir_cache.entries = entries;
-    _vira_gguf_dir_cache.hash_slots = hash_slots;
-    _vira_gguf_dir_cache.hash_cap = cap;
+    victim->path = path_copy;
+    victim->file_size = file_size;
+    victim->file_mtime = file_mtime;
+    victim->file_ino = file_ino;
+    victim->fp = f;
+    victim->count = parsed;
+    victim->entries = entries;
+    victim->hash_slots = hash_slots;
+    victim->hash_cap = cap;
+    victim->last_used = ++_vira_gguf_dir_clock;
+    dir_slot = victim;
   }
 
-  _vira_gguf_tensor_entry *ent = _vira_gguf_dir_lookup_locked(nbuf.ptr, nlen);
+  _vira_gguf_tensor_entry *ent = _vira_gguf_dir_lookup_locked(dir_slot, nbuf.ptr, nlen);
   if (!ent) {
     pthread_mutex_unlock(&_vira_gguf_dir_mu);
     vira_string err = vira_str_format(
@@ -530,20 +565,20 @@ static inline Result_tensor_f32 vira_gguf_load_tensor(vira_string path,
         .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
-  if (tensor_file_pos < 0 || tensor_file_pos > _vira_gguf_dir_cache.file_size ||
-      (uint64_t)need_bytes > (uint64_t)(_vira_gguf_dir_cache.file_size - tensor_file_pos)) {
+  if (tensor_file_pos < 0 || tensor_file_pos > dir_slot->file_size ||
+      (uint64_t)need_bytes > (uint64_t)(dir_slot->file_size - tensor_file_pos)) {
     pthread_mutex_unlock(&_vira_gguf_dir_mu);
     vira_string err = vira_str_format(
         "GGUF tensor '%s' extends past end of file (offset=%lld, bytes=%zu, file=%lld)",
         nbuf.ptr, (long long)tensor_file_pos, need_bytes,
-        (long long)_vira_gguf_dir_cache.file_size);
+        (long long)dir_slot->file_size);
     vira_cstr_buf_free(&nbuf);
     vira_cstr_buf_free(&pbuf);
     return (Result_tensor_f32){
         .is_err = true, .err = err, .val = (vira_tensor_f32){0}};
   }
 
-  FILE *f = _vira_gguf_dir_cache.fp;
+  FILE *f = dir_slot->fp;
   if (_vira_gguf_seek(f, tensor_file_pos, SEEK_SET) != 0) {
     pthread_mutex_unlock(&_vira_gguf_dir_mu);
     vira_string err = vira_str_format(

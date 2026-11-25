@@ -358,10 +358,10 @@ vira_tensor_elemwise_mul(vira_arena *opt_arena, vira_tensor_f32 a,
     }
     return out;
   }
-  fprintf(stderr,
-          "vira tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)\n",
-          a.rows, a.cols, b.rows, b.cols);
-  exit(1);
+  _vira_rt_fault(
+      "vira tensor error: elemwise_mul shape mismatch (%dx%d) * (%dx%d)",
+      a.rows, a.cols, b.rows, b.cols);
+  return (vira_tensor_f32){0};
 }
 
 /**
@@ -474,10 +474,9 @@ static inline vira_tensor_f32 vira_tensor_embedding(vira_arena *opt_arena,
                                                     int64_t token_id) {
   _vira_tensor_norm_shape(&table);
   if (token_id < 0 || token_id >= table.rows) {
-    fprintf(stderr,
-            "vira tensor error: embedding index %lld out of range [0, %d)\n",
-            (long long)token_id, table.rows);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: embedding index %lld out of range [0, %d)",
+        (long long)token_id, table.rows);
   }
   if (!_vira_gpu_is_ptr_dirty(table.data)) {
     uint32_t q_dtype = 0;
@@ -524,18 +523,16 @@ static inline vira_tensor_f32 vira_tensor_embedding_batch(
     vira_arena *opt_arena, vira_tensor_f32 table, vira_slice_int token_ids) {
   _vira_tensor_norm_shape(&table);
   if (token_ids.len <= 0 || token_ids.data == NULL) {
-    fprintf(stderr,
-            "vira tensor error: embedding_batch token_ids slice cannot be empty (len=%d)\n",
-            token_ids.len);
-    exit(1);
+    _vira_rt_fault(
+        "vira tensor error: embedding_batch token_ids slice cannot be empty (len=%d)",
+        token_ids.len);
   }
   for (int32_t i = 0; i < token_ids.len; ++i) {
     int32_t tid = token_ids.data[i];
     if (tid < 0 || tid >= table.rows) {
-      fprintf(stderr,
-              "vira tensor error: embedding_batch index %d (pos %d) out of range [0, %d)\n",
-              tid, i, table.rows);
-      exit(1);
+      _vira_rt_fault(
+          "vira tensor error: embedding_batch index %d (pos %d) out of range [0, %d)",
+          tid, i, table.rows);
     }
   }
   if (!_vira_gpu_is_ptr_dirty(table.data)) {

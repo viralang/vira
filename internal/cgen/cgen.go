@@ -1323,6 +1323,9 @@ func (g *Generator) emitStoredValue(value ast.Expr, t checker.Type, moved bool, 
 		valExpr = g.emitExpr(value)
 	}
 	if !g.typeOwnsHeap(t) {
+		if ident, ok := value.(*ast.IdentExpr); ok {
+			return g.identValueExpr(ident)
+		}
 		return valExpr
 	}
 	switch v := value.(type) {
@@ -2162,6 +2165,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			// the old value (t may alias it, so the free comes last). The result goes to the
 			// heap unless the target is a local owned by the surrounding arena.
 			targetLValue := g.emitLValue(s.Target)
+			if ident, ok := s.Target.(*ast.IdentExpr); ok {
+				targetLValue = g.identValueExpr(ident)
+			}
 			tmpOld := g.nextTmp("old_val")
 			prevArena := g.activeArena
 			if s.HeapValue {
@@ -2178,11 +2184,17 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 		}
 		if call, ok := s.Value.(*ast.CallExpr); ok && call.OrBlock != nil {
 			targetLValue := g.emitLValue(s.Target)
+			if ident, ok := s.Target.(*ast.IdentExpr); ok {
+				targetLValue = g.identValueExpr(ident)
+			}
 			valType := g.chk.ExprTypes[s.Value]
 			g.emitUnwrappedAssign(out, targetLValue, valType, call, indent, fnRet)
 			return
 		}
 		targetLValue := g.emitLValue(s.Target)
+		if ident, ok := s.Target.(*ast.IdentExpr); ok {
+			targetLValue = g.identValueExpr(ident)
+		}
 		if _, isIdx := s.Target.(*ast.IndexExpr); !isIdx && ownsHeap && s.Op == token.TokAssign {
 			// Overwriting an owner: bind the new value (cloned when it comes from another
 			// place, heap-allocated when the target outlives the current arena), then release
@@ -2201,10 +2213,8 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			return
 		}
 		rhsExpr := g.emitExpr(s.Value)
-		if ident, ok := s.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
-			if _, isStruct := targetType.(*checker.StructType); isStruct {
-				rhsExpr = "*" + rhsExpr
-			}
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			rhsExpr = g.identValueExpr(ident)
 		}
 		if s.Op == token.TokDivAssign || s.Op == token.TokModAssign {
 			binOp := token.TokSlash
@@ -2432,6 +2442,9 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 					}
 				}
 			}
+			if ident, ok := v.(*ast.IdentExpr); ok {
+				return g.identValueExpr(ident)
+			}
 			return g.emitExpr(v)
 		}
 		if s.CloneValue {
@@ -2531,6 +2544,20 @@ func (g *Generator) emitStmt(out *strings.Builder, stmt ast.Stmt, indent string,
 			valType := g.chk.ExprTypes[s.Expr]
 			g.emitUnwrappedCall(out, "", valType, false, call, indent, fnRet)
 			return
+		}
+		// `arr.pop()` used as a statement: the removed element is owned by the
+		// caller, so an element that owns heap memory is freed here instead of
+		// leaking (V15).
+		if call, ok := s.Expr.(*ast.CallExpr); ok && len(call.Args) == 0 {
+			if sel, ok := call.Callee.(*ast.SelectorExpr); ok && sel.Field.Name == "pop" {
+				if sl, ok := g.chk.ExprTypes[sel.Left].(*checker.SliceType); ok && g.typeOwnsHeap(sl.Elem) {
+					tmp := g.nextTmp("popped")
+					out.WriteString(fmt.Sprintf("%s{\n%s    %s %s = %s;\n", indent, indent, g.cType(sl.Elem), tmp, g.emitExpr(s.Expr)))
+					g.emitFreeLValueStmt(out, indent+"    ", sl.Elem, tmp)
+					out.WriteString(fmt.Sprintf("%s}\n", indent))
+					return
+				}
+			}
 		}
 		out.WriteString(fmt.Sprintf("%s%s;\n", indent, g.emitExpr(s.Expr)))
 	}
@@ -2899,22 +2926,8 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		}
 		for _, f := range e.Fields {
 			valStr := g.emitExpr(f.Value)
-			if st != nil {
-				if finfo, hasField := st.Fields[f.Name.Name]; hasField {
-					if ident, ok := f.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
-						if _, isStruct := finfo.Type.(*checker.StructType); isStruct {
-							valStr = "*" + valStr
-						}
-					}
-				}
-				for _, emb := range st.Embeds {
-					if emb.Name == f.Name.Name {
-						if ident, ok := f.Value.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
-							valStr = "*" + valStr
-						}
-						break
-					}
-				}
+			if ident, ok := f.Value.(*ast.IdentExpr); ok {
+				valStr = g.identValueExpr(ident)
 			}
 			// A struct owns its fields: a field initialized from another place is cloned
 			// (unless the analyzer moved it), and a freshly computed string is made owned.
@@ -2965,15 +2978,23 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 				if g.activeArena != "" {
 					arenaArg = g.activeArena
 				}
+				lTen := g.emitExpr(e.Left)
+				if ident, ok := e.Left.(*ast.IdentExpr); ok {
+					lTen = g.identValueExpr(ident)
+				}
+				rTen := g.emitExpr(e.Right)
+				if ident, ok := e.Right.(*ast.IdentExpr); ok {
+					rTen = g.identValueExpr(ident)
+				}
 				if e.Op == token.TokAt {
 					return fmt.Sprintf("vira_tensor_matmul_f32(%s, %s, %s)",
-						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+						arenaArg, lTen, rTen)
 				} else if e.Op == token.TokPlus {
 					return fmt.Sprintf("vira_tensor_add(%s, %s, %s)",
-						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+						arenaArg, lTen, rTen)
 				} else if e.Op == token.TokMinus {
 					return fmt.Sprintf("vira_tensor_sub(%s, %s, %s)",
-						arenaArg, g.emitExpr(e.Left), g.emitExpr(e.Right))
+						arenaArg, lTen, rTen)
 				}
 			}
 		}
@@ -2985,31 +3006,59 @@ func (g *Generator) emitExpr(expr ast.Expr) string {
 		if e.Op == token.TokEq || e.Op == token.TokNeq || e.Op == token.TokLt || e.Op == token.TokLte || e.Op == token.TokGt || e.Op == token.TokGte {
 			leftType := g.chk.ExprTypes[e.Left]
 			if leftType != nil && leftType.Equals(checker.TypeString) {
+				lStr := g.emitExpr(e.Left)
+				if ident, ok := e.Left.(*ast.IdentExpr); ok {
+					lStr = g.identValueExpr(ident)
+				}
+				rStr := g.emitExpr(e.Right)
+				if ident, ok := e.Right.(*ast.IdentExpr); ok {
+					rStr = g.identValueExpr(ident)
+				}
 				switch e.Op {
 				case token.TokEq:
-					return fmt.Sprintf("vira_str_eq(%s, %s)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("vira_str_eq(%s, %s)", lStr, rStr)
 				case token.TokNeq:
-					return fmt.Sprintf("(!vira_str_eq(%s, %s))", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("(!vira_str_eq(%s, %s))", lStr, rStr)
 				case token.TokLt:
-					return fmt.Sprintf("(vira_str_cmp(%s, %s) < 0)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("(vira_str_cmp(%s, %s) < 0)", lStr, rStr)
 				case token.TokLte:
-					return fmt.Sprintf("(vira_str_cmp(%s, %s) <= 0)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("(vira_str_cmp(%s, %s) <= 0)", lStr, rStr)
 				case token.TokGt:
-					return fmt.Sprintf("(vira_str_cmp(%s, %s) > 0)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("(vira_str_cmp(%s, %s) > 0)", lStr, rStr)
 				case token.TokGte:
-					return fmt.Sprintf("(vira_str_cmp(%s, %s) >= 0)", g.emitExpr(e.Left), g.emitExpr(e.Right))
+					return fmt.Sprintf("(vira_str_cmp(%s, %s) >= 0)", lStr, rStr)
 				}
 			}
 		}
 		if e.Op == token.TokSlash || e.Op == token.TokPercent {
 			if helper := g.checkedIntDivHelper(e.Op, g.chk.ExprTypes[e.Left], g.chk.ExprTypes[e.Right], e.Right); helper != "" {
-				return fmt.Sprintf("%s(%s, %s)", helper, g.emitExpr(e.Left), g.emitExpr(e.Right))
+				lVal := g.emitExpr(e.Left)
+				if ident, ok := e.Left.(*ast.IdentExpr); ok {
+					lVal = g.identValueExpr(ident)
+				}
+				rVal := g.emitExpr(e.Right)
+				if ident, ok := e.Right.(*ast.IdentExpr); ok {
+					rVal = g.identValueExpr(ident)
+				}
+				return fmt.Sprintf("%s(%s, %s)", helper, lVal, rVal)
 			}
 		}
-		return fmt.Sprintf("(%s %s %s)", g.emitExpr(e.Left), e.Op.String(), g.emitExpr(e.Right))
+		lVal := g.emitExpr(e.Left)
+		if ident, ok := e.Left.(*ast.IdentExpr); ok {
+			lVal = g.identValueExpr(ident)
+		}
+		rVal := g.emitExpr(e.Right)
+		if ident, ok := e.Right.(*ast.IdentExpr); ok {
+			rVal = g.identValueExpr(ident)
+		}
+		return fmt.Sprintf("(%s %s %s)", lVal, e.Op.String(), rVal)
 
 	case *ast.UnaryExpr:
-		return fmt.Sprintf("(%s%s)", e.Op.String(), g.emitExpr(e.Expr))
+		uVal := g.emitExpr(e.Expr)
+		if ident, ok := e.Expr.(*ast.IdentExpr); ok && e.Op != token.TokAmp {
+			uVal = g.identValueExpr(ident)
+		}
+		return fmt.Sprintf("(%s%s)", e.Op.String(), uVal)
 
 	case *ast.IndexExpr:
 		leftType := g.chk.ExprTypes[e.Left]
@@ -3341,12 +3390,8 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 			}
 		} else {
 			argVal := g.emitExpr(arg.Expr)
-			if ident, ok := arg.Expr.(*ast.IdentExpr); ok && g.isPointerReceiverVar(ident.Ident.Name) {
-				if st, isSt := g.chk.ExprTypes[arg.Expr].(*checker.StructType); isSt && !st.IsActor {
-					argVal = "*" + argVal
-				} else if _, isTen := g.chk.ExprTypes[arg.Expr].(*checker.TensorType); isTen {
-					argVal = "*" + argVal
-				}
+			if ident, ok := arg.Expr.(*ast.IdentExpr); ok {
+				argVal = g.identValueExpr(ident)
 			}
 			if externSig != nil && i < len(externSig.Params) {
 				argType := g.chk.ExprTypes[arg.Expr]
@@ -4154,6 +4199,9 @@ func (g *Generator) emitRawCall(call *ast.CallExpr) string {
 		// 7. String receiver methods
 		if leftType != nil && leftType.Equals(checker.TypeString) {
 			strExpr := g.emitExpr(callee.Left)
+			if ident, ok := callee.Left.(*ast.IdentExpr); ok {
+				strExpr = g.identValueExpr(ident)
+			}
 			switch callee.Field.Name {
 			case "len":
 				return fmt.Sprintf("(%s).len", strExpr)
@@ -4332,6 +4380,9 @@ func (g *Generator) emitStringInterp(si *ast.StringInterpExpr) string {
 			sub := si.Exprs[i]
 			subType := g.chk.ExprTypes[sub]
 			subExpr := g.emitExpr(sub)
+			if ident, ok := sub.(*ast.IdentExpr); ok {
+				subExpr = g.identValueExpr(ident)
+			}
 			fmtBefore, argsBefore := fmtBuf.Len(), len(cArgs)
 
 			switch t := subType.(type) {

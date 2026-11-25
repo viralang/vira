@@ -110,6 +110,22 @@ func (l *Lexer) Next() token.Token {
 				break
 			}
 		}
+		// Exponent: 1e5, 1.0e31, 2.5E-3 (T-087). Only when a digit follows the
+		// `e` (after an optional sign), so `1.e` / `x.e` style member access and
+		// identifiers are not taken.
+		if int(l.pos) < len(l.src) && (l.src[l.pos] == 'e' || l.src[l.pos] == 'E') {
+			j := int(l.pos) + 1
+			if j < len(l.src) && (l.src[j] == '+' || l.src[j] == '-') {
+				j++
+			}
+			if j < len(l.src) && isDigit(l.src[j]) {
+				for j < len(l.src) && (isDigit(l.src[j]) || l.src[j] == '_') {
+					j++
+				}
+				l.pos = uint32(j)
+				kind = token.TokFloat
+			}
+		}
 		// Check for optional float or integer precision suffix (e.g. 1.0f32, 0.5f16, 2.0bf16, 0i64)
 		if int(l.pos) < len(l.src) {
 			rem := l.src[l.pos:]
