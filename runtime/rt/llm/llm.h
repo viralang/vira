@@ -30,8 +30,8 @@ vira_tensor_rmsnorm(vira_arena *opt_arena, vira_tensor_f32 x,
   _vira_tensor_sync_host_f32(x.data);
   _vira_tensor_sync_host_f32(weight.data);
   vira_tensor_f32 out =
-      opt_arena ? vira_tensor_f32_arena_alloc_nd(opt_arena, x.n_dims, x.dims)
-                : vira_tensor_f32_alloc_nd(x.n_dims, x.dims);
+      opt_arena ? _vira_tensor_f32_arena_alloc_uninit_nd(opt_arena, x.n_dims, x.dims)
+                : _vira_tensor_f32_alloc_uninit_nd(x.n_dims, x.dims);
   for (int32_t r = 0; r < x.rows; ++r) {
     float *x_row = &x.data[(size_t)r * (size_t)x.cols];
     float *out_row = &out.data[(size_t)r * (size_t)x.cols];

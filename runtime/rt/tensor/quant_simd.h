@@ -1151,6 +1151,21 @@ static inline void _vira_q4k_unpack_scales(const uint8_t *scales,
   m[7]  = (uint8_t)((scales[11] >> 4) | ((scales[7] >> 6) << 4));
 }
 
+static inline void _vira_q4k_unpack_scales_swar(const uint8_t *scales,
+                                                uint64_t *sc64_out,
+                                                uint64_t *m64_out) {
+  uint32_t u0 = 0, u1 = 0, u2 = 0;
+  memcpy(&u0, scales + 0, 4);
+  memcpy(&u1, scales + 4, 4);
+  memcpy(&u2, scales + 8, 4);
+  uint32_t sc_lo = u0 & 0x3f3f3f3fu;
+  uint32_t m_lo  = u1 & 0x3f3f3f3fu;
+  uint32_t sc_hi = (u2 & 0x0f0f0f0fu) | ((u0 >> 2) & 0x30303030u);
+  uint32_t m_hi  = ((u2 >> 4) & 0x0f0f0f0fu) | ((u1 >> 2) & 0x30303030u);
+  *sc64_out = (uint64_t)sc_lo | ((uint64_t)sc_hi << 32);
+  *m64_out  = (uint64_t)m_lo  | ((uint64_t)m_hi  << 32);
+}
+
 #if defined(__AVX2__)
 static inline __m256 _vira_avx2_q4k_superblock_acc(
     const uint8_t *blk, const __m256i xq[8], __m256i xbs, float xd,
@@ -1161,22 +1176,23 @@ static inline __m256 _vira_avx2_q4k_superblock_acc(
   memcpy(&dmh, blk + 2, 2);
   float d = _vira_fp16_to_fp32(dh) * xd;
   float dmin = _vira_fp16_to_fp32(dmh) * xd;
-  uint8_t sc[8], m_sc[8];
-  _vira_q4k_unpack_scales(blk + 4, sc, m_sc);
+  uint64_t sc64 = 0, m64 = 0;
+  _vira_q4k_unpack_scales_swar(blk + 4, &sc64, &m64);
   const uint8_t *qs = blk + 16;
 
   __m256i acc_d = _mm256_setzero_si256();
   for (int32_t j = 0; j < 4; ++j) {
+    uint32_t sp = (uint32_t)(sc64 >> (j * 16));
     __m256i qv = _mm256_loadu_si256((const __m256i *)(qs + j * 32));
     __m256i wlo = _mm256_and_si256(qv, m4);
     __m256i whi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), m4);
     __m256i p0 = _mm256_maddubs_epi16(wlo, xq[2 * j + 0]);
     __m256i p1 = _mm256_maddubs_epi16(whi, xq[2 * j + 1]);
-    acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(p0, _mm256_set1_epi16((int16_t)sc[2 * j + 0])));
-    acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(p1, _mm256_set1_epi16((int16_t)sc[2 * j + 1])));
+    acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(p0, _mm256_set1_epi16((int16_t)(sp & 0xFFu))));
+    acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(p1, _mm256_set1_epi16((int16_t)((sp >> 8) & 0xFFu))));
   }
 
-  __m128i m8 = _mm_loadl_epi64((const __m128i *)m_sc);
+  __m128i m8 = _mm_cvtsi64_si128((int64_t)m64);
   __m256i vm16 = _mm256_cvtepu8_epi16(_mm_unpacklo_epi8(m8, m8));
   __m256i mprod = _mm256_madd_epi16(vm16, xbs);
 #if defined(__FMA__)
@@ -1317,18 +1333,19 @@ static inline void _vira_cpu_dot_4rows_q4_k_q8_K(
     memcpy(&dmh, blk + 2, 2);
     float d = _vira_fp16_to_fp32(dh);
     float dmin = _vira_fp16_to_fp32(dmh);
-    uint8_t sc[8], m_sc[8];
-    _vira_q4k_unpack_scales(blk + 4, sc, m_sc);
+    uint64_t sc64 = 0, m64 = 0;
+    _vira_q4k_unpack_scales_swar(blk + 4, &sc64, &m64);
     const uint8_t *qs = blk + 16;
 
     __m256i ad0 = _mm256_setzero_si256(), ad1 = _mm256_setzero_si256();
     __m256i ad2 = _mm256_setzero_si256(), ad3 = _mm256_setzero_si256();
     for (int32_t j = 0; j < 4; ++j) {
+      uint32_t sp = (uint32_t)(sc64 >> (j * 16));
       __m256i qv = _mm256_loadu_si256((const __m256i *)(qs + j * 32));
       __m256i wlo = _mm256_and_si256(qv, m4);
       __m256i whi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), m4);
-      __m256i vsc0 = _mm256_set1_epi16((int16_t)sc[2 * j + 0]);
-      __m256i vsc1 = _mm256_set1_epi16((int16_t)sc[2 * j + 1]);
+      __m256i vsc0 = _mm256_set1_epi16((int16_t)(sp & 0xFFu));
+      __m256i vsc1 = _mm256_set1_epi16((int16_t)((sp >> 8) & 0xFFu));
       int32_t o0 = (2 * j + 0) * 32, o1 = (2 * j + 1) * 32;
       ad0 = _mm256_add_epi32(ad0, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(wlo, _mm256_loadu_si256((const __m256i *)(x0[b].qs + o0))), vsc0),
                                                    _mm256_madd_epi16(_mm256_maddubs_epi16(whi, _mm256_loadu_si256((const __m256i *)(x0[b].qs + o1))), vsc1)));
@@ -1339,7 +1356,7 @@ static inline void _vira_cpu_dot_4rows_q4_k_q8_K(
       ad3 = _mm256_add_epi32(ad3, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(wlo, _mm256_loadu_si256((const __m256i *)(x3[b].qs + o0))), vsc0),
                                                    _mm256_madd_epi16(_mm256_maddubs_epi16(whi, _mm256_loadu_si256((const __m256i *)(x3[b].qs + o1))), vsc1)));
     }
-    __m128i m8 = _mm_loadl_epi64((const __m128i *)m_sc);
+    __m128i m8 = _mm_cvtsi64_si128((int64_t)m64);
     __m256i vm16 = _mm256_cvtepu8_epi16(_mm_unpacklo_epi8(m8, m8));
     __m256 mp0 = _mm256_cvtepi32_ps(_mm256_madd_epi16(vm16, _mm256_loadu_si256((const __m256i *)x0[b].bsums)));
     __m256 mp1 = _mm256_cvtepi32_ps(_mm256_madd_epi16(vm16, _mm256_loadu_si256((const __m256i *)x1[b].bsums)));
@@ -1454,9 +1471,9 @@ static inline void _vira_cpu_dot_2w4m_q4_k_q8_K(
     memcpy(&dh1, bw1, 2); memcpy(&dm1, bw1 + 2, 2);
     float d0 = _vira_fp16_to_fp32(dh0), dmin0 = _vira_fp16_to_fp32(dm0);
     float d1 = _vira_fp16_to_fp32(dh1), dmin1 = _vira_fp16_to_fp32(dm1);
-    uint8_t sc0[8], m0[8], sc1[8], m1[8];
-    _vira_q4k_unpack_scales(bw0 + 4, sc0, m0);
-    _vira_q4k_unpack_scales(bw1 + 4, sc1, m1);
+    uint64_t sc64_0 = 0, m64_0 = 0, sc64_1 = 0, m64_1 = 0;
+    _vira_q4k_unpack_scales_swar(bw0 + 4, &sc64_0, &m64_0);
+    _vira_q4k_unpack_scales_swar(bw1 + 4, &sc64_1, &m64_1);
     const uint8_t *qs0 = bw0 + 16, *qs1 = bw1 + 16;
 
     __m256i a00 = _mm256_setzero_si256(), a01 = _mm256_setzero_si256();
@@ -1464,6 +1481,8 @@ static inline void _vira_cpu_dot_2w4m_q4_k_q8_K(
     __m256i a10 = _mm256_setzero_si256(), a11 = _mm256_setzero_si256();
     __m256i a12 = _mm256_setzero_si256(), a13 = _mm256_setzero_si256();
     for (int32_t j = 0; j < 4; ++j) {
+      uint32_t sp0 = (uint32_t)(sc64_0 >> (j * 16));
+      uint32_t sp1 = (uint32_t)(sc64_1 >> (j * 16));
       int32_t o0 = (2 * j + 0) * 32, o1 = (2 * j + 1) * 32;
       __m256i x0_lo = _mm256_loadu_si256((const __m256i *)(x0[b].qs + o0));
       __m256i x0_hi = _mm256_loadu_si256((const __m256i *)(x0[b].qs + o1));
@@ -1476,7 +1495,7 @@ static inline void _vira_cpu_dot_2w4m_q4_k_q8_K(
 
       __m256i qv0 = _mm256_loadu_si256((const __m256i *)(qs0 + j * 32));
       __m256i w0_lo = _mm256_and_si256(qv0, m4), w0_hi = _mm256_and_si256(_mm256_srli_epi16(qv0, 4), m4);
-      __m256i vs00 = _mm256_set1_epi16((int16_t)sc0[2 * j + 0]), vs01 = _mm256_set1_epi16((int16_t)sc0[2 * j + 1]);
+      __m256i vs00 = _mm256_set1_epi16((int16_t)(sp0 & 0xFFu)), vs01 = _mm256_set1_epi16((int16_t)((sp0 >> 8) & 0xFFu));
       a00 = _mm256_add_epi32(a00, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w0_lo, x0_lo), vs00), _mm256_madd_epi16(_mm256_maddubs_epi16(w0_hi, x0_hi), vs01)));
       a01 = _mm256_add_epi32(a01, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w0_lo, x1_lo), vs00), _mm256_madd_epi16(_mm256_maddubs_epi16(w0_hi, x1_hi), vs01)));
       a02 = _mm256_add_epi32(a02, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w0_lo, x2_lo), vs00), _mm256_madd_epi16(_mm256_maddubs_epi16(w0_hi, x2_hi), vs01)));
@@ -1484,7 +1503,7 @@ static inline void _vira_cpu_dot_2w4m_q4_k_q8_K(
 
       __m256i qv1 = _mm256_loadu_si256((const __m256i *)(qs1 + j * 32));
       __m256i w1_lo = _mm256_and_si256(qv1, m4), w1_hi = _mm256_and_si256(_mm256_srli_epi16(qv1, 4), m4);
-      __m256i vs10 = _mm256_set1_epi16((int16_t)sc1[2 * j + 0]), vs11 = _mm256_set1_epi16((int16_t)sc1[2 * j + 1]);
+      __m256i vs10 = _mm256_set1_epi16((int16_t)(sp1 & 0xFFu)), vs11 = _mm256_set1_epi16((int16_t)((sp1 >> 8) & 0xFFu));
       a10 = _mm256_add_epi32(a10, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w1_lo, x0_lo), vs10), _mm256_madd_epi16(_mm256_maddubs_epi16(w1_hi, x0_hi), vs11)));
       a11 = _mm256_add_epi32(a11, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w1_lo, x1_lo), vs10), _mm256_madd_epi16(_mm256_maddubs_epi16(w1_hi, x1_hi), vs11)));
       a12 = _mm256_add_epi32(a12, _mm256_add_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(w1_lo, x2_lo), vs10), _mm256_madd_epi16(_mm256_maddubs_epi16(w1_hi, x2_hi), vs11)));
@@ -1494,7 +1513,7 @@ static inline void _vira_cpu_dot_2w4m_q4_k_q8_K(
     __m256i bs1 = _mm256_loadu_si256((const __m256i *)x1[b].bsums);
     __m256i bs2 = _mm256_loadu_si256((const __m256i *)x2[b].bsums);
     __m256i bs3 = _mm256_loadu_si256((const __m256i *)x3[b].bsums);
-    __m128i m8_0 = _mm_loadl_epi64((const __m128i *)m0), m8_1 = _mm_loadl_epi64((const __m128i *)m1);
+    __m128i m8_0 = _mm_cvtsi64_si128((int64_t)m64_0), m8_1 = _mm_cvtsi64_si128((int64_t)m64_1);
     __m256i vm0 = _mm256_cvtepu8_epi16(_mm_unpacklo_epi8(m8_0, m8_0));
     __m256i vm1 = _mm256_cvtepu8_epi16(_mm_unpacklo_epi8(m8_1, m8_1));
 #if defined(__FMA__)
@@ -1554,21 +1573,22 @@ static inline float _vira_cpu_dot_q5_k_q8_K(const uint8_t *w_row,
     memcpy(&dmh, blk + 2, 2);
     float d = _vira_fp16_to_fp32(dh) * x[b].d;
     float dmin = _vira_fp16_to_fp32(dmh) * x[b].d;
-    uint8_t sc[8], m_sc[8];
-    _vira_q4k_unpack_scales(blk + 4, sc, m_sc);
+    uint64_t sc64 = 0, m64 = 0;
+    _vira_q4k_unpack_scales_swar(blk + 4, &sc64, &m64);
     __m256i qhv = _mm256_loadu_si256((const __m256i *)(blk + 16));
     const uint8_t *qs = blk + 48;
     __m256i acc_d = _mm256_setzero_si256();
     for (int32_t j = 0; j < 4; ++j) {
+      uint32_t sp = (uint32_t)(sc64 >> (j * 16));
       __m256i qv = _mm256_loadu_si256((const __m256i *)(qs + j * 32));
       __m256i um0 = _mm256_set1_epi8((char)(int8_t)(uint8_t)(1u << (2 * j + 0)));
       __m256i um1 = _mm256_set1_epi8((char)(int8_t)(uint8_t)(1u << (2 * j + 1)));
       __m256i wu0 = _mm256_or_si256(_mm256_and_si256(qv, m4), _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(qhv, um0), um0), hi16));
       __m256i wu1 = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qv, 4), m4), _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(qhv, um1), um1), hi16));
-      acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(_mm256_maddubs_epi16(wu0, _mm256_loadu_si256((const __m256i *)(x[b].qs + (2 * j + 0) * 32))), _mm256_set1_epi16((int16_t)sc[2 * j + 0])));
-      acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(_mm256_maddubs_epi16(wu1, _mm256_loadu_si256((const __m256i *)(x[b].qs + (2 * j + 1) * 32))), _mm256_set1_epi16((int16_t)sc[2 * j + 1])));
+      acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(_mm256_maddubs_epi16(wu0, _mm256_loadu_si256((const __m256i *)(x[b].qs + (2 * j + 0) * 32))), _mm256_set1_epi16((int16_t)(sp & 0xFFu))));
+      acc_d = _mm256_add_epi32(acc_d, _mm256_madd_epi16(_mm256_maddubs_epi16(wu1, _mm256_loadu_si256((const __m256i *)(x[b].qs + (2 * j + 1) * 32))), _mm256_set1_epi16((int16_t)((sp >> 8) & 0xFFu))));
     }
-    __m128i m8 = _mm_loadl_epi64((const __m128i *)m_sc);
+    __m128i m8 = _mm_cvtsi64_si128((int64_t)m64);
     __m256i vm16 = _mm256_cvtepu8_epi16(_mm_unpacklo_epi8(m8, m8));
     __m256i mprod = _mm256_madd_epi16(vm16, _mm256_loadu_si256((const __m256i *)x[b].bsums));
 #if defined(__FMA__)
