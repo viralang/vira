@@ -448,7 +448,7 @@ static inline vira_tensor_f32 vira_tensor_matmul_f32(vira_arena *opt_arena,
   if (!_vira_tls_gpu_fallback && a_nd <= 2 && b_nd <= 2 &&
       ((int64_t)M * (int64_t)K_a * (int64_t)N >= 65536LL ||
        _vira_gpu_is_ptr_dirty(a.data) || _vira_gpu_is_ptr_dirty(b.data)) &&
-      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+      vira_gpu_is_enabled() && vira_gpu_is_available()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_matmul(opt_arena, a, b);
     _vira_tls_gpu_fallback = false;
@@ -920,7 +920,7 @@ static inline vira_tensor_f32 vira_tensor_linear(vira_arena *opt_arena,
   if (!_vira_tls_gpu_fallback &&
       (total_ops >= 65536LL || _vira_gpu_is_ptr_dirty(x.data) ||
        _vira_gpu_is_ptr_dirty(w.data)) &&
-      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+      vira_gpu_is_enabled() && vira_gpu_is_available()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_linear(opt_arena, x, w);
     _vira_tls_gpu_fallback = false;
@@ -1141,7 +1141,7 @@ vira_tensor_add(vira_arena *opt_arena, vira_tensor_f32 a, vira_tensor_f32 b) {
   if (!_vira_tls_gpu_fallback &&
       (max_elems >= 16384LL || _vira_gpu_is_ptr_dirty(a.data) ||
        _vira_gpu_is_ptr_dirty(b.data)) &&
-      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+      vira_gpu_is_enabled() && vira_gpu_is_available()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_add(opt_arena, a, b);
     _vira_tls_gpu_fallback = false;
@@ -1245,7 +1245,7 @@ vira_tensor_scale(vira_arena *opt_arena, vira_tensor_f32 t, vira_f32 scale) {
   int64_t total = (int64_t)t.rows * t.cols;
   if (!_vira_tls_gpu_fallback &&
       (total >= 16384 || _vira_gpu_is_ptr_dirty(t.data)) &&
-      vira_gpu_is_available() && vira_gpu_is_enabled()) {
+      vira_gpu_is_enabled() && vira_gpu_is_available()) {
     _vira_tls_gpu_fallback = true;
     vira_tensor_f32 gpu_out = vira_gpu_scale(opt_arena, t, scale);
     _vira_tls_gpu_fallback = false;

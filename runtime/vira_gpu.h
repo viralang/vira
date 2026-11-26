@@ -3761,9 +3761,12 @@ static inline void _vira_gpu_register_quant_impl(const vira_f32 *host_ptr,
                                             uint32_t gguf_dtype,
                                             const void *raw_blocks,
                                             size_t raw_bytes, size_t elems) {
+  if (!_vira_gpu.enabled || host_ptr == NULL || raw_blocks == NULL ||
+      raw_bytes == 0 || elems == 0) {
+    return;
+  }
   vira_gpu_init();
-  if (!_vira_gpu.available || !_vira_gpu.enabled || host_ptr == NULL ||
-      raw_blocks == NULL || raw_bytes == 0 || elems == 0) {
+  if (!_vira_gpu.available || !_vira_gpu.enabled) {
     return;
   }
   _vira_gpu_wfmt fmt;
@@ -5355,7 +5358,6 @@ static inline void vira_gpu_init(void) {
   snprintf(_vira_gpu.backend_name, sizeof(_vira_gpu.backend_name), "CPU-SIMD");
   _vira_gpu.active_backend = VIRA_GPU_BACKEND_CPU;
   _vira_gpu.available = false;
-  _vira_gpu.enabled = true;
   _vira_gpu.has_tensor_cores = false;
 
   const char *req_b = _vira_gpu.requested_backend[0] ? _vira_gpu.requested_backend : getenv("VIRA_GPU_BACKEND");
@@ -5735,6 +5737,11 @@ static inline void vira_gpu_shutdown(void) {
   _vira_gpu.active_backend = VIRA_GPU_BACKEND_CPU;
   __atomic_store_n(&_vira_gpu.initialized, 0, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&_vira_gpu.lock);
+}
+
+static inline bool vira_gpu_was_initialized(void) {
+  return __atomic_load_n(&_vira_gpu.initialized, __ATOMIC_ACQUIRE) == 2 &&
+         _vira_gpu.available;
 }
 
 static inline bool vira_gpu_is_available(void) {

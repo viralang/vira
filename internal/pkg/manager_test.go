@@ -54,9 +54,9 @@ license MIT
 		t.Errorf("expected valid sha256 checksum, got: %s", locked.Checksum)
 	}
 
-	// Check that vira.mod was updated with deps
+	// Check that vira.mod was updated with deps (normalized to forward slashes)
 	modBytes, _ := os.ReadFile(filepath.Join(appDir, "vira.mod"))
-	if !strings.Contains(string(modBytes), "deps") || !strings.Contains(string(modBytes), relMathPath) {
+	if !strings.Contains(string(modBytes), "deps") || !strings.Contains(string(modBytes), filepath.ToSlash(relMathPath)) {
 		t.Errorf("expected vira.mod to contain dependency: %s", string(modBytes))
 	}
 

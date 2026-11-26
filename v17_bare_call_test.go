@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,9 @@ func TestBareCallPrefersCurrentModule(t *testing.T) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "vira-bin")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", bin, "./cmd/vira").CombinedOutput(); err != nil {
 		t.Fatalf("build vira: %v\n%s", err, out)
 	}

@@ -7,7 +7,7 @@
 #include <string.h>
 
 extern "C" {
-    fn strlen(s &c_char) c_ulong
+    fn strlen(s &c_char) c_size
 }
 
 fn clen(s string) int {

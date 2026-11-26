@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	goRuntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/viralang/vira/internal/ast"
@@ -1622,6 +1624,32 @@ func versionMatchesDir(dir string) bool {
 	return want != "" && got == want
 }
 
+var (
+	runtimeHashOnce sync.Once
+	runtimeHashVal  string
+)
+
+func embeddedRuntimeTag() string {
+	runtimeHashOnce.Do(func() {
+		h := sha256.New()
+		_ = fs.WalkDir(virart.RuntimeFS, ".", func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".h") {
+				return nil
+			}
+			_, _ = h.Write([]byte(path))
+			_, _ = h.Write([]byte{0})
+			if data, err := virart.RuntimeFS.ReadFile(path); err == nil {
+				_, _ = h.Write(data)
+			}
+			_, _ = h.Write([]byte{0})
+			return nil
+		})
+		sum := fmt.Sprintf("%x", h.Sum(nil))
+		runtimeHashVal = version.Version + "-" + sum[:12]
+	})
+	return runtimeHashVal
+}
+
 func resolveRuntimeDir() string {
 	if envDir := os.Getenv("VIRA_RUNTIME_DIR"); envDir != "" {
 		if info, err := os.Stat(filepath.Join(envDir, "vira_rt.h")); err == nil && !info.IsDir() {
@@ -1643,17 +1671,18 @@ func resolveRuntimeDir() string {
 		}
 	}
 
-	// Portable fallback: Atomically extract embedded headers from virart.RuntimeFS to ~/.vira/runtime/<version>/
+	// Portable fallback: Atomically extract embedded headers from virart.RuntimeFS to ~/.vira/runtime/<version>-<hash>/
 	home, err := os.UserHomeDir()
 	if err == nil {
 		rtRoot := filepath.Join(home, ".vira", "runtime")
 		_ = os.MkdirAll(rtRoot, 0755)
-		cacheDir := filepath.Join(rtRoot, version.Version)
+		tag := embeddedRuntimeTag()
+		cacheDir := filepath.Join(rtRoot, tag)
 		if info, err := os.Stat(filepath.Join(cacheDir, "vira_rt.h")); err == nil && !info.IsDir() {
 			return cacheDir
 		}
 
-		tmpDir, tmpErr := os.MkdirTemp(rtRoot, ".tmp-"+version.Version+"-*")
+		tmpDir, tmpErr := os.MkdirTemp(rtRoot, ".tmp-"+tag+"-*")
 		if tmpErr == nil {
 			extracted := 0
 			_ = fs.WalkDir(virart.RuntimeFS, ".", func(path string, d fs.DirEntry, walkErr error) error {

@@ -6,6 +6,7 @@
 // ============================================================================
 
 #ifndef VIRA_NO_GPU
+static inline bool vira_gpu_was_initialized(void);
 static inline void _vira_gpu_stats_peak(void);
 static inline void vira_gpu_stats_print(vira_string label, int64_t per);
 #endif
@@ -54,7 +55,7 @@ static inline void vira_report_mem_stats(void) {
     return;
   }
 #ifndef VIRA_NO_GPU
-  if (vira_gpu_is_available()) {
+  if (vira_gpu_was_initialized()) {
     vira_string _dev_n = vira_gpu_device_name();
     vira_string _be_n = vira_gpu_backend_name();
     // Peak, not the amount at exit: by now the program has freed its tensors, and

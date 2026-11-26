@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/fs"
@@ -65,7 +66,26 @@ func PackageDestDir(baseDir string, pkgPath string) string {
 		}
 	}
 
-	cleaned := filepath.Clean(filepath.FromSlash(pkgPath))
+	if strings.HasPrefix(pkgPath, "file://") {
+		sum := fmt.Sprintf("%x", sha256.Sum256([]byte(pkgPath)))
+		base := filepath.Base(filepath.Clean(filepath.FromSlash(strings.TrimPrefix(pkgPath, "file://"))))
+		if base == "" || base == "." || base == string(filepath.Separator) || strings.Contains(base, ":") {
+			base = "repo"
+		}
+		return filepath.Join(baseDir, "file", sum[:8], base)
+	}
+
+	raw := pkgPath
+	if idx := strings.Index(raw, "://"); idx >= 0 {
+		raw = raw[idx+3:]
+	}
+	raw = strings.TrimLeft(raw, "/\\")
+	if len(raw) >= 2 && raw[1] == ':' {
+		raw = strings.TrimLeft(raw[2:], "/\\")
+	}
+	raw = strings.ReplaceAll(raw, ":", "/")
+
+	cleaned := filepath.Clean(filepath.FromSlash(raw))
 	for strings.HasPrefix(cleaned, "..") {
 		cleaned = strings.TrimPrefix(cleaned, "..")
 		cleaned = strings.TrimPrefix(cleaned, string(filepath.Separator))
@@ -74,11 +94,6 @@ func PackageDestDir(baseDir string, pkgPath string) string {
 	cleaned = strings.TrimPrefix(cleaned, string(filepath.Separator))
 	cleaned = strings.TrimPrefix(cleaned, "/")
 
-	if len(cleaned) >= 2 && cleaned[1] == ':' {
-		cleaned = cleaned[2:]
-		cleaned = strings.TrimPrefix(cleaned, string(filepath.Separator))
-		cleaned = strings.TrimPrefix(cleaned, "/")
-	}
 	if cleaned == "" || cleaned == "." {
 		cleaned = filepath.Base(pkgPath)
 	}
@@ -792,6 +807,11 @@ func (m *Manager) fetch(projectRoot string, pkgPath string, version string, dest
 // ("https://github.com/org/repo", "sub/pkg", true) when it contains a subpath
 // inside a 3-segment host/owner/repo path.
 func splitGitRepoAndSubpath(pkgPath string) (repoURL string, subPath string, ok bool) {
+	for _, pfx := range []string{"file://", "ssh://", "git://", "git@"} {
+		if strings.HasPrefix(pkgPath, pfx) {
+			return "", "", false
+		}
+	}
 	trimmed := pkgPath
 	scheme := "https://"
 	for _, pfx := range []string{"https://", "http://"} {
@@ -843,7 +863,9 @@ func (m *Manager) fetchAt(projectRoot string, pkgPath string, version string, de
 
 	// 2. Git repository dependency (e.g. github.com/user/repo or github.com/user/repo/subpkg)
 	gitURL := pkgPath
-	if !strings.HasPrefix(gitURL, "https://") && !strings.HasPrefix(gitURL, "http://") && !strings.HasPrefix(gitURL, "git@") &&
+	if strings.HasPrefix(gitURL, "file://") && !strings.HasPrefix(gitURL, "file:///") && len(gitURL) >= 9 && gitURL[8] == ':' {
+		gitURL = "file:///" + gitURL[7:]
+	} else if !strings.HasPrefix(gitURL, "https://") && !strings.HasPrefix(gitURL, "http://") && !strings.HasPrefix(gitURL, "git@") &&
 		!strings.HasPrefix(gitURL, "ssh://") && !strings.HasPrefix(gitURL, "file://") {
 		gitURL = "https://" + gitURL
 	}
@@ -852,7 +874,7 @@ func (m *Manager) fetchAt(projectRoot string, pkgPath string, version string, de
 	extractedSubpath := ""
 	tempRepoDir := ""
 
-	cloneArgs := []string{"clone", "--depth", "1"}
+	cloneArgs := []string{"-c", "core.longpaths=true", "clone", "--depth", "1"}
 	if version != "" && version != "latest" {
 		cloneArgs = append(cloneArgs, "-b", version)
 	}
@@ -862,7 +884,7 @@ func (m *Manager) fetchAt(projectRoot string, pkgPath string, version string, de
 	_, err = cmd.CombinedOutput()
 	if err != nil {
 		// Fallback 1: try clone without depth if tag checkout failed
-		fallbackCmd := exec.Command("git", "clone", gitURL, cloneInto)
+		fallbackCmd := exec.Command("git", "-c", "core.longpaths=true", "clone", gitURL, cloneInto)
 		fOut, fErr := fallbackCmd.CombinedOutput()
 		if fErr == nil {
 			if version != "" && version != "latest" {
