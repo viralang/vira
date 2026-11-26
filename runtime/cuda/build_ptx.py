@@ -10,7 +10,7 @@ GPUs that new); the driver
 compiles the PTX for the GPU it runs on. With --check, ptxas (pip
 nvidia-cuda-nvcc-cu12) also assembles the PTX for sm_61, sm_75 and sm_86.
 """
-import ctypes, glob, os, subprocess, sys
+import ctypes, glob, os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.dirname(HERE)
@@ -19,10 +19,33 @@ ARCH = 'compute_61'
 
 def find_nvrtc():
     import site
+    pats = ('libnvrtc.so.11*', 'nvrtc64_112*.dll', 'nvrtc64_*.dll', 'libnvrtc.so*')
     for base in site.getsitepackages() + [site.getusersitepackages()]:
-        for p in sorted(glob.glob(os.path.join(base, 'nvidia', 'cuda_nvrtc', 'lib', 'libnvrtc.so.11*'))):
-            return p
-    sys.exit('libnvrtc.so.11 not found: pip install nvidia-cuda-nvrtc-cu11==11.8.89')
+        for pat in pats:
+            for p in sorted(glob.glob(os.path.join(base, 'nvidia', 'cuda_nvrtc', '**', pat), recursive=True)):
+                if '.alt.' not in os.path.basename(p):
+                    return p
+    return None
+
+
+def compile_ptx_nvcc(path):
+    nvcc = shutil.which('nvcc')
+    if nvcc is None:
+        sys.exit('neither libnvrtc nor nvcc found: pip install nvidia-cuda-nvrtc-cu11==11.8.89')
+    arch = file_arch(path)
+    # CUDA 13+ nvcc drops compute_61; compile for compute_75 when compute_61 is rejected
+    # and clamp the PTX header version to 7.8 so drivers >= 520 accept pure PTX-7.8 ops.
+    tmp = os.path.join(tempfile.gettempdir(), os.path.basename(path) + '.ptx')
+    for target in (arch, 'compute_75'):
+        r = subprocess.run([nvcc, '-ptx', '-arch=' + target, '--std=c++14', '-I' + HERE, path, '-o', tmp],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            ptx = open(tmp, 'r', encoding='utf-8').read()
+            if arch == 'compute_61':
+                ptx = re.sub(r'^\.version\s+\d+\.\d+', '.version 7.8', ptx, count=1, flags=re.M)
+                ptx = re.sub(r'^\.target\s+sm_\d+', '.target sm_61', ptx, count=1, flags=re.M)
+            return ptx
+    sys.exit('%s:\n%s' % (path, r.stderr))
 
 
 def file_arch(path):
@@ -69,21 +92,25 @@ def c_string(ptx):
 
 def ptxas_check(ptx, stem, arch):
     import site
-    ptxas = None
+    ptxas = shutil.which('ptxas')
     for base in site.getsitepackages():
-        p = os.path.join(base, 'nvidia', 'cuda_nvcc', 'bin', 'ptxas')
-        if os.path.exists(p):
-            ptxas = p
+        for name in ('ptxas', 'ptxas.exe'):
+            p = os.path.join(base, 'nvidia', 'cuda_nvcc', 'bin', name)
+            if os.path.exists(p):
+                ptxas = p
     if ptxas is None:
         print('  ptxas not found (pip install nvidia-cuda-nvcc-cu12): not checked')
         return
-    tmp = '/tmp/%s.ptx' % stem
+    tmp = os.path.join(tempfile.gettempdir(), '%s.ptx' % stem)
     open(tmp, 'w').write(ptx)
     for sm in ('sm_61', 'sm_75', 'sm_86'):
         if int(sm[3:]) < int(arch.split('_')[1]):
             continue
-        r = subprocess.run([ptxas, '-arch=' + sm, '-v', tmp, '-o', '/dev/null'],
+        r = subprocess.run([ptxas, '-arch=' + sm, '-v', tmp, '-o', os.devnull],
                            capture_output=True, text=True)
+        out_msg = (r.stderr + '\n' + r.stdout).lower()
+        if r.returncode != 0 and sm == 'sm_61' and ("'sm_61'" in out_msg or 'sm_61' in out_msg and 'not defined' in out_msg):
+            continue
         regs = [l.strip() for l in r.stderr.splitlines() if 'registers' in l]
         print('  ptxas %s: %s %s' % (sm, 'ok' if r.returncode == 0 else 'FAILED', '; '.join(regs)))
         if r.returncode != 0:
@@ -91,10 +118,21 @@ def ptxas_check(ptx, stem, arch):
 
 
 def main():
-    lib = ctypes.CDLL(find_nvrtc())
+    nvrtc_path = find_nvrtc()
+    if nvrtc_path:
+        ndir = os.path.dirname(nvrtc_path)
+        os.environ['PATH'] = ndir + os.pathsep + os.environ.get('PATH', '')
+        if hasattr(os, 'add_dll_directory'):
+            os.add_dll_directory(ndir)
+    lib = ctypes.CDLL(nvrtc_path) if nvrtc_path else None
+    only = [a for a in sys.argv[1:] if not a.startswith('-')]
     for path in sorted(glob.glob(os.path.join(HERE, '*.cu'))):
         stem = os.path.splitext(os.path.basename(path))[0]
-        ptx = compile_ptx(lib, path)
+        if only and stem not in only:
+            continue
+        ptx = compile_ptx(lib, path) if lib is not None else compile_ptx_nvcc(path)
+        if file_arch(path) == 'compute_61':
+            ptx = re.sub(r'^\.version\s+\d+\.\d+', '.version 7.8', ptx, count=1, flags=re.M)
         out = os.path.join(RUNTIME, 'vira_cuda_%s_ptx.h' % stem)
         guard = 'VIRA_CUDA_%s_PTX_H' % stem.upper()
         with open(out, 'w') as f:

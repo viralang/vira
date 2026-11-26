@@ -479,6 +479,170 @@ def q8_1_acts(rng, M, K):
     return raw.tobytes(), d, qs.astype(np.int32)
 
 
+def check_paged(rng):
+    """PagedAttention FP16 kernels (paged.cu): fused per-token RoPE + scatter write, CoW block
+    copy, row gather, and ragged multi-sequence GQA attention (with SWA, softcap, and sinks)
+    compared against independent NumPy reference + deliberate planted break test."""
+    ext = '.dll' if os.name == 'nt' else '.so'
+    out = os.path.join(tempfile.mkdtemp(), 'pg' + ext)
+    src = os.path.join(tempfile.mkdtemp(), 'pg.cpp')
+    src_inc = HERE.replace('\\', '/')
+    open(src, 'w').write('#define VL_EMULATE 1\n#include "%s/paged.cu"\n' % src_inc + r'''
+extern "C" void run_rope_write(float *q, float *k, const float *v, unsigned short *kp, unsigned short *vp,
+                               const int *pos, const int *smap, int T, int nh, int nkv, int hd, int nrot,
+                               int neox, float base, float fscale) {
+  VL_LAUNCH_THREADED(vira_cu_paged_rope_and_write_f16, T, 1, 256, q, k, v, kp, vp, pos, smap, T, nh, nkv, hd, nrot, neox, base, fscale);
+}
+extern "C" void run_copy_blk(unsigned short *kp, unsigned short *vp, int dst_b, int src_b, int ps, int kvd, int nr) {
+  long long n = (long long)nr * kvd;
+  VL_LAUNCH(vira_cu_paged_copy_block_f16, (int)((n + 255) / 256), 1, 256, kp, vp, dst_b, src_b, ps, kvd, nr);
+}
+extern "C" void run_gather(const float *s, float *d, const int *ridx, int nout, int cols) {
+  long long n = (long long)nout * cols;
+  VL_LAUNCH(vira_cu_paged_gather_rows_f32, (int)((n + 255) / 256), 1, 256, s, d, ridx, nout, cols);
+}
+extern "C" void run_paged_attn(const float *q, const unsigned short *kp, const unsigned short *vp, float *o,
+                               const int *seq_id, const int *max_kv, const int *bt, const float *sinks,
+                               int nh, int kvm, int hd, int kvd, int T, int max_b, int ps, float scale,
+                               int win, float scap, int hs) {
+  VL_LAUNCH_THREADED(vira_cu_paged_attn_ragged_f16, nh, T, 256, q, kp, vp, o, seq_id, max_kv, bt, sinks,
+                     nh, kvm, hd, kvd, T, max_b, ps, scale, win, scap, hs);
+}
+''')
+    cmd = ['g++', '-std=c++20', '-O2', '-shared', '-pthread', '-I', HERE, src, '-o', out]
+    if os.name != 'nt':
+        cmd.insert(4, '-fPIC')
+    subprocess.check_call(cmd)
+    lib = ctypes.CDLL(out)
+    ok = True
+    ps = 16
+    for nh, nkv, hd, neox, win, scap, use_sinks in [
+        (8, 2, 64, 1, 0, 0.0, 0),
+        (6, 3, 128, 0, 19, 30.0, 0),
+        (4, 1, 64, 1, 0, 0.0, 1),
+        (4, 4, 32, 0, 0, 0.0, 0),
+    ]:
+        kvd = nkv * hd
+        n_blocks = 12
+        kp = np.zeros((n_blocks * ps, kvd), np.uint16)
+        vp = np.zeros((n_blocks * ps, kvd), np.uint16)
+        # Pre-populate non-contiguous blocks for 3 sequences:
+        # Seq 0: length 20 (1 decode token at pos 19), blocks [5, 2]
+        # Seq 1: length 22 (6 chunked-prefill tokens at pos 16..21), shares prefix block 5 with Seq 0, then forks block 9!
+        # Seq 2: length 5 (5 prefill tokens at pos 0..4), block [7]
+        bt = np.array([[5, 2, 0], [5, 9, 0], [7, 0, 0]], np.int32)
+        # Fill historical KV rows: block 5 rows 0..15 (shared prefix!), block 2 rows 0..2 (pos 16..18 of seq 0)
+        hist_k = rng.standard_normal((n_blocks * ps, kvd)).astype(np.float16)
+        hist_v = rng.standard_normal((n_blocks * ps, kvd)).astype(np.float16)
+        kp[:] = hist_k.view(np.uint16)
+        vp[:] = hist_v.view(np.uint16)
+
+        # Test CoW block copy: copy 3 rows from block 2 -> block 9, verify exact match
+        lib.run_copy_blk(kp.ctypes.data_as(ctypes.c_void_p), vp.ctypes.data_as(ctypes.c_void_p),
+                         9, 2, ps, kvd, 3)
+        cow_ok = bool(np.array_equal(kp[9 * ps:9 * ps + 3], kp[2 * ps:2 * ps + 3]))
+        ok &= cow_ok
+
+        # Build ragged step of T = 1 + 6 + 5 = 12 tokens
+        positions = np.array([19, 16, 17, 18, 19, 20, 21, 0, 1, 2, 3, 4], np.int32)
+        seq_id = np.array([0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2], np.int32)
+        max_kv = positions + 1
+        smap = np.array([
+            2 * ps + 3,
+            9 * ps + 0, 9 * ps + 1, 9 * ps + 2, 9 * ps + 3, 9 * ps + 4, 9 * ps + 5,
+            7 * ps + 0, 7 * ps + 1, 7 * ps + 2, 7 * ps + 3, 7 * ps + 4,
+        ], np.int32)
+        T = len(positions)
+        q0 = rng.standard_normal((T * nh, hd)).astype(np.float32)
+        k0 = rng.standard_normal((T * nkv, hd)).astype(np.float32)
+        v0 = rng.standard_normal((T, kvd)).astype(np.float32)
+        q = q0.copy(); k = k0.copy()
+        base, fscale = 10000.0, 1.0
+        lib.run_rope_write(q.ctypes.data_as(ctypes.c_void_p), k.ctypes.data_as(ctypes.c_void_p),
+                           v0.ctypes.data_as(ctypes.c_void_p), kp.ctypes.data_as(ctypes.c_void_p),
+                           vp.ctypes.data_as(ctypes.c_void_p), positions.ctypes.data_as(ctypes.c_void_p),
+                           smap.ctypes.data_as(ctypes.c_void_p), T, nh, nkv, hd, hd, neox,
+                           ctypes.c_float(base), ctypes.c_float(fscale))
+
+        # Reference RoPE + scatter write in NumPy
+        def ref_rope(arr, n_h):
+            res = arr.copy().reshape(T, n_h, hd)
+            half = hd // 2
+            freqs = (positions[:, None].astype(np.float32) * fscale) * (base ** (-2.0 * np.arange(half, dtype=np.float32) / hd))[None, :]
+            c, s = np.cos(freqs)[:, None, :], np.sin(freqs)[:, None, :]
+            if neox:
+                x0, x1 = res[:, :, :half].copy(), res[:, :, half:].copy()
+                res[:, :, :half] = x0 * c - x1 * s
+                res[:, :, half:] = x0 * s + x1 * c
+            else:
+                x0, x1 = res[:, :, 0::2].copy(), res[:, :, 1::2].copy()
+                res[:, :, 0::2] = x0 * c - x1 * s
+                res[:, :, 1::2] = x0 * s + x1 * c
+            return res.reshape(T * n_h, hd)
+
+        q_ref = ref_rope(q0, nh)
+        k_ref = ref_rope(k0, nkv).reshape(T, kvd)
+        rope_err = max(np.abs(q - q_ref).max(), np.abs(k.reshape(T, kvd) - k_ref).max())
+        K_pool_f = kp.view(np.float16).astype(np.float64)
+        V_pool_f = vp.view(np.float16).astype(np.float64)
+
+        scale = 1.0 / np.sqrt(hd)
+        sinks = rng.standard_normal(nh).astype(np.float32) if use_sinks else np.zeros(nh, np.float32)
+        o = np.full((T * nh, hd), np.nan, np.float32)
+        lib.run_paged_attn(q.ctypes.data_as(ctypes.c_void_p), kp.ctypes.data_as(ctypes.c_void_p),
+                           vp.ctypes.data_as(ctypes.c_void_p), o.ctypes.data_as(ctypes.c_void_p),
+                           seq_id.ctypes.data_as(ctypes.c_void_p), max_kv.ctypes.data_as(ctypes.c_void_p),
+                           bt.ctypes.data_as(ctypes.c_void_p),
+                           sinks.ctypes.data_as(ctypes.c_void_p) if use_sinks else None,
+                           nh, nh // nkv, hd, kvd, T, 3, ps, ctypes.c_float(scale), win,
+                           ctypes.c_float(scap), use_sinks)
+
+        want = np.zeros((T * nh, hd), np.float64)
+        for t in range(T):
+            b = int(seq_id[t])
+            nk = int(max_kv[t])
+            lo = max(0, nk - win) if win > 0 else 0
+            phys_rows = [int(bt[b, j // ps]) * ps + (j % ps) for j in range(lo, nk)]
+            K_seq = K_pool_f[phys_rows]
+            V_seq = V_pool_f[phys_rows]
+            for h in range(nh):
+                kh = (h // (nh // nkv)) * hd
+                sc = (K_seq[:, kh:kh + hd] @ q[t * nh + h].astype(np.float64)) * scale
+                if scap > 0.0:
+                    sc = scap * np.tanh(sc / scap)
+                mx = max(float(sc.max()), float(sinks[h])) if use_sinks else float(sc.max())
+                p = np.exp(sc - mx)
+                denom = p.sum() + (np.exp(float(sinks[h]) - mx) if use_sinks else 0.0)
+                want[t * nh + h] = (p / denom) @ V_seq[:, kh:kh + hd]
+
+        err = np.abs(o - want).max() / max(1e-9, np.abs(want).max())
+        # Verify selective gather_rows for logit_rows = [0, 6, 11]
+        ridx = np.array([0, 6, 11], np.int32)
+        gathered = np.zeros((3, nh * hd), np.float32)
+        o_flat = o.reshape(T, nh * hd)
+        lib.run_gather(o_flat.ctypes.data_as(ctypes.c_void_p), gathered.ctypes.data_as(ctypes.c_void_p),
+                       ridx.ctypes.data_as(ctypes.c_void_p), 3, nh * hd)
+        gather_ok = bool(np.array_equal(gathered, o_flat[ridx]))
+
+        # Deliberate break proof (AGENTS.md Rule 1): corrupting block_table must move output
+        bt_bad = bt.copy(); bt_bad[1, 0] = 7
+        o_bad = np.zeros_like(o)
+        lib.run_paged_attn(q.ctypes.data_as(ctypes.c_void_p), kp.ctypes.data_as(ctypes.c_void_p),
+                           vp.ctypes.data_as(ctypes.c_void_p), o_bad.ctypes.data_as(ctypes.c_void_p),
+                           seq_id.ctypes.data_as(ctypes.c_void_p), max_kv.ctypes.data_as(ctypes.c_void_p),
+                           bt_bad.ctypes.data_as(ctypes.c_void_p),
+                           sinks.ctypes.data_as(ctypes.c_void_p) if use_sinks else None,
+                           nh, nh // nkv, hd, kvd, T, 3, ps, ctypes.c_float(scale), win,
+                           ctypes.c_float(scap), use_sinks)
+        break_caught = bool(np.abs(o_bad - want).max() > 1e-2)
+
+        good = bool(err < 1e-5 and rope_err < 1e-5 and cow_ok and gather_ok and break_caught)
+        ok &= good
+        print('paged_attn nh=%d kv=%d hd=%3d neox=%d win=%2d scap=%.0f sink=%d  rel err %.1e  break=%s  %s' %
+              (nh, nkv, hd, neox, win, scap, use_sinks, err, break_caught, 'ok' if good else 'FAIL'))
+    return ok
+
+
 def main():
     lib = build()
     rng = np.random.default_rng(0)
@@ -547,6 +711,7 @@ def main():
     ok &= check_mmqg(rng, oracle)
     ok &= check_attn(rng)
     ok &= check_attn_fa(rng)
+    ok &= check_paged(rng)
     sys.exit(0 if ok else 1)
 
 
