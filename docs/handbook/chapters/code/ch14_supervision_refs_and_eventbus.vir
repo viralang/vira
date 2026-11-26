@@ -1,0 +1,247 @@
+module main
+
+// Chapter 14: Fault Supervision, Actor References (Ref[T]) & Event Bus
+//
+// Demonstrates:
+// 1. Erlang-style fault containment (`setjmp`/`longjmp`, LIFO `defer`, O(1) arena wipe).
+// 2. `OneForOne` restarts (up to max_restarts=3) and `VIRA_ACTOR_STOPPED` dead-lettering.
+// 3. Automatic wait-for graph cycle / deadlock avoidance.
+// 4. Non-owning `Ref[T]` handles (`.ref()`, `.alive()`, stale ref rejection, closure capture).
+// 5. Decoupled Pub/Sub (`Topic[T]`) and Request/Reply (`Service[T, R]`) via `import eventbus`.
+
+import eventbus
+
+// --- 1 & 2. Fault Containment & OneForOne Supervision ---
+
+pub actor LedgerWorker {
+pub:
+	account string
+mut:
+	balance int = 100
+	ops int = 0
+}
+
+pub fn (mut l LedgerWorker) apply(delta int, mode string) int {
+	// Heap locals (`scratch`, `trace`) are tracked on `ctx->defer_stack` so `vira_panic`
+	// unwinds them LIFO before `longjmp`, while the actor's scratch arena is wiped in O(1).
+	mut trace := []string{}
+	trace.push('op:${mode}')
+	scratch := 'ledger:${l.account}:${mode}'
+	_ := scratch
+	l.ops += 1
+	if mode == 'panic' {
+		panic('gateway fault on ${l.account}')
+	}
+	if mode == 'oob' {
+		xs := [10, 20, 30]
+		idx := l.ops + 5
+		return xs[idx]
+	}
+	l.balance += delta
+	return l.balance
+}
+
+pub fn (mut l LedgerWorker) status() string {
+	return 'account=${l.account}, balance=${l.balance}, ops=${l.ops}'
+}
+
+// --- 3. Wait-For Cycle Detection ---
+
+pub actor PeerNode {
+pub:
+	id int
+mut:
+	hits int = 0
+}
+
+pub fn (mut p PeerNode) ping() int {
+	p.hits += 1
+	return p.id * 10
+}
+
+pub fn (mut p PeerNode) ask_peer(mut other PeerNode) int {
+	v := other <- ping() or { -1 }
+	return v + 1
+}
+
+pub fn (mut p PeerNode) relay(mut next PeerNode, mut back PeerNode) int {
+	return next <- ask_peer(mut back) or { -99 }
+}
+
+pub fn (mut p PeerNode) self_wait() int {
+	return p <- ping() or { -77 }
+}
+
+pub fn (mut p PeerNode) get_hits() int {
+	return p.hits
+}
+
+// --- 4 & 5. Ref[T] & EventBus ---
+
+pub struct TelemetryEvent {
+pub:
+	source string
+	value int
+}
+
+pub actor Latch {
+mut:
+	ticks int = 0
+}
+
+pub fn (mut l Latch) tick() {
+	l.ticks += 1
+}
+
+pub fn (mut l Latch) count() int {
+	return l.ticks
+}
+
+fn wait_ticks(mut l Latch, want int) {
+	mut got := 0
+	for got < want {
+		got = l <- count() or { 0 }
+		if got < want {
+			time_sleep_ms(1)
+		}
+	}
+}
+
+pub actor MetricSink {
+pub:
+	name string
+	done Ref[Latch]
+mut:
+	total int = 0
+	seen int = 0
+}
+
+pub fn (mut m MetricSink) record(ev TelemetryEvent) {
+	m.total += ev.value
+	m.seen += 1
+	m.done <- tick()
+}
+
+pub fn (mut m MetricSink) read_total() int {
+	return m.total
+}
+
+pub actor Multiplier {
+pub:
+	factor int
+mut:
+	calls int = 0
+}
+
+pub fn (mut m Multiplier) compute(x int) int {
+	m.calls += 1
+	return x * m.factor
+}
+
+fn drop_ephemeral_ref() Ref[MetricSink] {
+	mut l := Latch{}
+	mut tmp := MetricSink{ name: 'ephemeral', done: l.ref() }
+	return tmp.ref()
+}
+
+fn main() {
+	println('=== [1] Fault Containment, LIFO defer & OneForOne Restarts ===')
+	mut ledger := LedgerWorker{ account: 'ops-core', balance: 100, ops: 0 }
+	lr := ledger.ref()
+
+	b1 := lr <- apply(50, 'ok') or { -1 }
+	println('Healthy apply: balance=${b1}')
+
+	// Fault 1: explicit panic -> defer unwinds LIFO, arena wiped, state reset to defaults
+	_ := lr <- apply(0, 'panic') or {
+		println('Trapped fault #1: ${err}')
+		-1
+	}
+	println('After restart #1 (Ref still alive=${lr.alive()}): ${lr <- status() or { '' }}')
+
+	// Healthy call resets consecutive restart counter back to 0
+	b2 := lr <- apply(25, 'ok') or { -1 }
+	println('Healthy call resets restart counter: balance=${b2}')
+
+	// 4 consecutive faults exhaust max_restarts=3 -> VIRA_ACTOR_STOPPED
+	for mut k := 1; k <= 4; k += 1 {
+		_ := lr <- apply(0, 'oob') or {
+			println('Fault burst ${k}/4: ${err}')
+			-1
+		}
+	}
+	println('After 4 consecutive faults: alive=${lr.alive()}')
+	_ := lr <- apply(10, 'ok') or {
+		println('Dead-letter rejection: ${err}')
+		-1
+	}
+
+	println('\n=== [2] Wait-For Graph Cycle & Self-Deadlock Avoidance ===')
+	mut a := PeerNode{ id: 1 }
+	mut b := PeerNode{ id: 2 }
+	self_res := a <- self_wait() or { -1 }
+	cycle_res := a <- relay(mut b, mut a) or { -1 }
+	// Wait briefly if abandoned detached messages are still draining before querying hits
+	hits_a := a <- get_hits() or { 0 }
+	println('Self-wait result=${self_res}, two-way cycle result=${cycle_res}, abandoned pings ran=${hits_a}')
+
+	println('\n=== [3] Non-Owning Ref[T] & Stale Reference Safety ===')
+	stale := drop_ephemeral_ref()
+	println('Stale ref alive=${stale.alive()}')
+	_ := stale <- read_total() or {
+		println('Stale ref sync error: ${err}')
+		0
+	}
+
+	println('\n=== [4] Decoupled Pub/Sub & Request/Reply (import eventbus) ===')
+	mut bus_actor := eventbus.Topic[TelemetryEvent]{ name: 'metrics.cpu' }
+	bus := bus_actor.ref()
+	mut done := Latch{}
+	dr := done.ref()
+
+	mut sink_a := MetricSink{ name: 'sink-a', done: dr }
+	mut sink_b := MetricSink{ name: 'sink-b', done: dr }
+	ra := sink_a.ref()
+	rb := sink_b.ref()
+
+	sub_a := bus <- consumer(fn (ev TelemetryEvent) bool {
+			ra <- record(ev)
+			return ra.alive()
+	}) or { 0 }
+	_ := bus <- consumer(fn (ev TelemetryEvent) bool {
+			rb <- record(ev)
+			return rb.alive()
+	}) or { 0 }
+
+	bus <- publish(TelemetryEvent{ source: 'node-1', value: 15 })
+	bus <- publish(TelemetryEvent{ source: 'node-2', value: 25 })
+	wait_ticks(mut done, 4)
+	println('Topic publish: sink_a=${sink_a <- read_total() or { 0 }}, sink_b=${sink_b <- read_total() or { 0 }}')
+
+	_ := bus <- unregister(sub_a) or { false }
+	bus <- send(TelemetryEvent{ source: 'node-3', value: 10 })
+	wait_ticks(mut done, 5)
+	st := bus <- stats() or { eventbus.TopicStats{} }
+	println('Topic after unregister+send: sink_b=${sink_b <- read_total() or { 0 }}, stats(consumers=${st.consumers}, published=${st.published}, delivered=${st.delivered}, removed=${st.removed})')
+
+	mut svc_actor := eventbus.Service[int, int]{ name: 'math.scale' }
+	svc := svc_actor.ref()
+	mut m1 := Multiplier{ factor: 2 }
+	mut m2 := Multiplier{ factor: 10 }
+	rm1 := m1.ref()
+	rm2 := m2.ref()
+	_ := svc <- handler(fn (x int) int {
+			return rm1 <- compute(x) or { 0 }
+		}, fn () bool {
+			return rm1.alive()
+	}) or { 0 }
+	_ := svc <- handler(fn (x int) int {
+			return rm2 <- compute(x) or { 0 }
+		}, fn () bool {
+			return rm2.alive()
+	}) or { 0 }
+
+	r1 := eventbus.request(svc, 7) or { 0 }
+	r2 := eventbus.request(svc, 7) or { 0 }
+	println('Service round-robin replies: ${r1}, ${r2}')
+}

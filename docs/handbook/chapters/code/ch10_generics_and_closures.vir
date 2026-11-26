@@ -1,0 +1,170 @@
+module main
+
+// 10.2 Generic structs and methods
+struct Box[T] {
+pub mut:
+	value T
+}
+
+fn Box[T].new(v T) Box[T] {
+	return Box[T]{
+		value: v
+	}
+}
+
+fn (b Box[T]) get() T {
+	return b.value
+}
+
+fn (mut b Box[T]) set(v T) {
+	b.value = v
+}
+
+struct Pair[A, B] {
+pub:
+	first A
+	second B
+}
+
+// 10.1 Generic functions with inferred and explicit type arguments
+fn first[T](xs []T) T {
+	return xs[0]
+}
+
+fn max_of[T](a T, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+fn map_slice[T, U](xs []T, f fn (T) U) []U {
+	mut out := []U{}
+	for x in xs {
+		out.push(f(x))
+	}
+	return out
+}
+
+fn filter[T](xs []T, keep fn (T) bool) []T {
+	mut out := []T{}
+	for x in xs {
+		if keep(x) {
+			out.push(x)
+		}
+	}
+	return out
+}
+
+fn reduce[T, A](xs []T, init A, f fn (A, T) A) A {
+	mut acc := init
+	for x in xs {
+		acc = f(acc, x)
+	}
+	return acc
+}
+
+fn count_by[K, T](xs []T, key fn (T) K) map[K]int {
+	mut counts := map[K]int{}
+	for x in xs {
+		counts[key(x)] += 1
+	}
+	return counts
+}
+
+// 10.4 First-class function types (`fn (A) R`) and closure factories
+struct Button {
+pub:
+	label string
+	on_click fn (int) string
+}
+
+struct ServiceTag {
+pub:
+	name string
+	labels []string
+}
+
+fn apply(f fn (int) int, x int) int {
+	return f(x)
+}
+
+fn double(x int) int {
+	return x * 2
+}
+
+fn make_adder(n int) fn (int) int {
+	return fn (x int) int {
+		return x + n
+	}
+}
+
+fn compose(f fn (int) int, g fn (int) int) fn (int) int {
+	return fn (x int) int {
+		return g(f(x))
+	}
+}
+
+fn describe_service(tag ServiceTag) fn () string {
+	return fn () string {
+		return '${tag.name}:${tag.labels.len}'
+	}
+}
+
+fn main() {
+	// [1] Generic functions (inferred and explicit type parameters)
+	println('[1] first: ${first([7, 8, 9])} ${first(['alpha', 'beta'])} explicit=${first[int]([42])}')
+	println('    max_of: int=${max_of(3, 9)}, str=${max_of('pear', 'apple')}, f64=${max_of(2.5, 1.5)}')
+
+	// [2] Generic structs, static constructors, and nested type arguments
+	mut num_box := Box[int].new(41)
+	num_box.set(num_box.get() + 1)
+	str_box := Box[string]{
+		value: 'monomorphized'
+	}
+	pair := Pair[string, int]{
+		first: 'port'
+		second: 8080
+	}
+	nested := Box[[]string].new(['x', 'y'])
+	println('[2] Box[int]=${num_box.get()}, Box[string]=${str_box.get()}, Pair=${pair.first}:${pair.second}, nested_len=${nested.get().len}')
+
+	// [3] Generic combinators paired with anonymous functions
+	nums := [1, 2, 3, 4, 5]
+	labels := map_slice(nums, fn (n int) string { return '#${n}' })
+	evens := filter(nums, fn (n int) bool { return n % 2 == 0 })
+	total := reduce(nums, 0, fn (acc int, n int) int { return acc + n })
+	words := ['apple', 'avocado', 'banana', 'blueberry', 'cherry']
+	by_initial := count_by(words, fn (w string) string { return w[0] })
+	println('[3] map=${labels[0]}..${labels[4]}, evens=${evens.len}, sum=${total}, counts(a=${by_initial['a']},b=${by_initial['b']},c=${by_initial['c']})')
+
+	// [4] Closures, value capture, composition, and struct/slice storage
+	factor := 3
+	triple := fn (x int) int {
+		return x * factor
+	}
+	add10 := make_adder(10)
+	inc_then_double := compose(make_adder(1), double)
+	println('[4] closures: triple(5)=${triple(5)}, apply(double,21)=${apply(double, 21)}, add10(5)=${add10(5)}, compose(4)=${inc_then_double(4)}')
+
+	mut pipeline := []fn (int) int{}
+	pipeline.push(double)
+	pipeline.push(add10)
+	pipeline.push(fn (x int) int { return x - 1 })
+	mut acc := 1
+	for step in pipeline {
+		acc = step(acc)
+	}
+
+	btn := Button{
+		label: 'Save'
+		on_click: fn (clicks int) string { return 'clicked ${clicks}x' }
+	}
+	svc := ServiceTag{
+		name: 'infer'
+		labels: ['gpu', 'fp16']
+	}
+	summarizer := describe_service(svc)
+	copy_summarizer := summarizer
+	println('[5] pipeline=${acc}, button=${btn.label}(${btn.on_click(2)}), captured=${copy_summarizer()}')
+}

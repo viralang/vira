@@ -1,0 +1,119 @@
+module main
+
+import os
+import widget as w
+
+fn run_headless_checks() {
+	// 20.1 & 20.3. Themes, EdgeInsets, TextStyles & App Descriptor
+	mocha := w.Theme.mocha()
+	latte := w.Theme.latte()
+	midnight := w.Theme.midnight()
+	insets := w.EdgeInsets.symmetric(20, 14)
+	heading_style := w.TextStyle.heading()
+	app := w.App.new('Vira Studio Hub', 960, 640)
+
+	if mocha.bg_color != 0x1E1E2E || latte.bg_color != 0xEFF1F5 || midnight.bg_color != 0x0F0F14 {
+		panic('theme color check failed')
+	}
+	if insets.left != 20 || insets.top != 14 || heading_style.size != 22 || app.target_fps != 60 {
+		panic('widget metrics check failed')
+	}
+	println('[1] Themes & Tokens: mocha=0x1E1E2E, insets=(${insets.left},${insets.top}), heading=${heading_style.size}px, fps=${app.target_fps}')
+
+	// 20.2. Immediate-Mode Auto-Layout Stacks (`gui_vstack_begin`, `gui_hstack_begin`, `gui_card_begin`)
+	gui_begin()
+	gui_vstack_begin(20, 20, 420, 10)
+	gui_card_begin('Telemetry Card', 420)
+	gui_hstack_begin(32, 8)
+	w.Badge('ONLINE', w.COLOR_GREEN, w.COLOR_BASE)
+	w.Badge('60 FPS', w.COLOR_BLUE, w.COLOR_BASE)
+	gui_stack_end()
+	w.Text('Immediate-mode auto-layout stack without pixel math.')
+	w.TextWrap('Wrapped body copy inside a 420px card container.', 380)
+	w.ProgressBar(75, 100)
+	gui_card_end()
+	gui_stack_end()
+	gui_end()
+	println('[2] Auto-Layout Stack: VStack/HStack/Card/ProgressBar frame verified')
+
+	// 20.3. Declarative DataTable & ScrollView metrics
+	headers := ['Module', 'Status', 'Memory']
+	rows := [
+	['widget', 'Active', '0 leaks'],
+	['gpu', 'Ready', 'VRAM Cache'],
+	['http', 'Serving', 'Keep-Alive'],
+]
+	wheel := w.mouse_wheel_delta()
+	println('[3] Declarative Widgets: table_cols=${headers.len}, table_rows=${rows.len}, wheel_delta=${wheel}')
+	println('[4] Packaging: scaffold with `vira init-gui` and bundle with `vira bundle` (pass `--window` for live UI)')
+}
+
+fn run_live_window() {
+	mut app := w.App.new('Vira Studio Hub', 960, 640)
+	app.init()
+	defer app.cleanup()
+
+	theme := w.Theme.mocha()
+	mut count := 0
+	mut ratio := 45.0f32
+	mut auto_refresh := true
+	mut filter := ''
+	mut selected_row := 0
+	headers := ['Module', 'Status', 'Footprint']
+	rows := [
+	['widget', 'Active', '840 KB'],
+	['gpu', 'Ready', 'VRAM Cache'],
+	['http', 'Serving', '512 KB'],
+]
+
+	for !app.should_close() {
+		app.begin_frame(theme.bg_color)
+		w.Scaffold.begin(theme)
+
+		mq := w.MediaQuery.of()
+		w.Padding.begin(w.EdgeInsets.symmetric(20, 14), mq.width, 10)
+		w.Row.begin(32, 10)
+		w.Heading('Vira Studio Hub')
+		w.StatusBadge('60 FPS Native', true)
+		w.Row.end()
+
+		w.SingleChildScrollView.begin(mq.height - 90)
+		w.Card.begin('Controls & Telemetry', w.content_width(24))
+		w.Row.begin(36, 10)
+		if w.ElevatedButton('Increment (+1)') {
+			count += 1
+		}
+		if w.SecondaryButton('Reset') {
+			count = 0
+		}
+		w.Row.end()
+		auto_refresh = w.Checkbox('Enable Live Telemetry', auto_refresh)
+		ratio = w.Slider('Load (%)', ratio, 0.0f32, 100.0f32)
+		w.ProgressPercent(ratio)
+		w.Text('Clicks: ${count}')
+		w.Divider()
+		filter = w.TextField('Filter modules...', filter)
+		selected_row = w.DataTable(headers, rows, filter, selected_row)
+		w.Card.end()
+		w.SingleChildScrollView.end()
+
+		w.Padding.end()
+		w.Scaffold.end()
+		app.end_frame()
+	}
+}
+
+fn main() {
+	args := os.args()
+	mut open_window := false
+	for a in args {
+		if a == '--window' {
+			open_window = true
+		}
+	}
+	if open_window {
+		run_live_window()
+	} else {
+		run_headless_checks()
+	}
+}

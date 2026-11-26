@@ -5,4 +5,3 @@ fn main() {
 	version := '0.7.9'
 	println('Hello from ${language} v${version}!')
 }
-

@@ -1,0 +1,118 @@
+module main
+
+// 8.1 Enums: auto-incrementing & explicit integer discriminants
+enum Priority {
+	low
+	medium
+	high
+	critical
+}
+
+pub enum HttpCode {
+	ok          = 200
+	created // Auto-increments to 201
+	bad_request = 400
+	not_found   = 404
+}
+
+fn priority_tag(p Priority) string {
+	switch p {
+		case Priority.low:
+		return 'P3'
+		case Priority.medium:
+		return 'P2'
+		case Priority.high, Priority.critical:
+		return 'P1-URGENT'
+	default:
+		return 'P?'
+	}
+}
+
+// 8.2 Structural Interface with immutable and `mut:` methods
+pub interface Transport {
+	label() string
+	sent_count() int
+mut:
+	send(payload string) string
+}
+
+// Implementor A: HttpTransport (implicit satisfaction, no `implements` keyword)
+pub struct HttpTransport {
+pub:
+	endpoint string
+mut:
+	count int = 0
+}
+
+pub fn (h HttpTransport) label() string {
+	return 'HTTP(${h.endpoint})'
+}
+
+pub fn (h HttpTransport) sent_count() int {
+	return h.count
+}
+
+pub fn (mut h HttpTransport) send(payload string) string {
+	h.count += 1
+	return 'POST ${h.endpoint} [${payload}] #${h.count}'
+}
+
+// Implementor B: QueueTransport (owns heap string fields cleaned up via vtable `_autofree`)
+pub struct QueueTransport {
+pub:
+	topic string
+mut:
+	count        int = 0
+	last_payload string
+}
+
+pub fn (q QueueTransport) label() string {
+	return 'QUEUE(${q.topic})'
+}
+
+pub fn (q QueueTransport) sent_count() int {
+	return q.count
+}
+
+pub fn (mut q QueueTransport) send(payload string) string {
+	q.count += 1
+	q.last_payload = payload
+	return 'ENQUEUE ${q.topic} [${q.last_payload}] #${q.count}'
+}
+
+// Polymorphic helper borrowing any boxed Transport fat pointer
+fn print_status(t Transport) {
+	println('    status: ${t.label()} -> sent=${t.sent_count()}')
+}
+
+fn main() {
+	// 8.1 Enums: formatting, int() cast, switch, and map keys
+	p := Priority.high
+	code := HttpCode.created
+	mut counts := map[Priority]int{}
+	counts[Priority.low] = 1
+	counts[p] = 4
+	println('[1] Enums: prio=${p}(${int(p)}, ${priority_tag(p)}), code=${code}(${int(code)}), not_found=${int(HttpCode.not_found)}, map_high=${counts[Priority.high]}')
+
+	// 8.2 & 8.3 Fat-pointer boxing (16 bytes: ._object + ._vtable) & dynamic dispatch
+	http := HttpTransport{
+		endpoint: 'https://events.vira.dev'
+	}
+	queue := QueueTransport{
+		topic: 'alerts'
+		last_payload: ''
+	}
+
+	mut t1 := Transport(http)
+	mut t2 := Transport(queue)
+
+	println('[2] Dynamic Dispatch via Transport Interface:')
+	println('    -> ${t1.send('deploy-v1')}')
+	println('    -> ${t1.send('health-ok')}')
+	println('    -> ${t2.send('cpu-spike')}')
+	println('    -> ${t2.send('recovered')}')
+
+	println('[3] Polymorphic Summary & Automatic Box Cleanup:')
+	print_status(t1)
+	print_status(t2)
+}

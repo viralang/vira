@@ -1,0 +1,184 @@
+module main
+
+// Chapter 16: Networking, HTTP Servers & Pure-Vira JSON
+//
+// Demonstrates (all deterministic on loopback 127.0.0.1:0 in < 1 second):
+// 1. `import net`: TCP listener/stream, `Poller` / `poll_many`, and UDP loopback datagrams.
+// 2. `import json`: `JsonBuilder`, `is_valid`, depth-aware field & array extraction.
+// 3. `import http`: `HttpServer`, `RequestContext`, `SseWriter.start_cors` (fd ownership
+//    transfer), and non-blocking `Conn` framing.
+// 4. `import viraserve`: actor-powered `ViraServe` + `RequestWorker` over live loopback HTTP.
+
+import net
+import json
+import http
+import viraserve
+
+fn demo_net_tcp_udp_poll() {
+	println('=== [1] TCP, UDP & Non-Blocking Polling (import net) ===')
+	mut listener := net.TcpListener.bind('127.0.0.1:0') or {
+		panic('TCP bind failed: ${err}')
+	}
+	l_addr := listener.local_addr() or { panic('local_addr failed') }
+
+	mut client := net.TcpStream.connect(l_addr.to_string()) or {
+		panic('TCP connect failed: ${err}')
+	}
+	client.set_nodelay(true) or { false }
+	client.write_str('PING\n') or { panic('TCP write failed') }
+
+	// Poll the listener until readable before accepting
+	poller := net.Poller.new(500)
+	ready := poller.wait_readable(listener.fd) or { false }
+	mut accepted := listener.accept() or { panic('TCP accept failed') }
+	line := accepted.read_line() or { '' }
+	accepted.write_str('PONG\n') or { panic('TCP reply failed') }
+	reply := client.read_line() or { '' }
+
+	accepted.close() or { false }
+	client.close() or { false }
+	listener.close() or { false }
+	println('TCP loopback: listener_readable=${ready}, req="${line}", resp="${reply}"')
+
+	// UDP loopback datagram
+	mut udp_srv := net.UdpSocket.bind('127.0.0.1:0') or { panic('UDP bind failed') }
+	mut udp_cli := net.UdpSocket.bind('127.0.0.1:0') or { panic('UDP cli bind failed') }
+	srv_addr := udp_srv.local_addr() or { panic('UDP local_addr failed') }
+	_ := udp_cli.send_to_string('hello-udp', srv_addr.to_string()) or { 0 }
+
+	mut rx := net.new_bytes(128)
+	pkt := udp_srv.recv_from(mut rx) or { panic('UDP recv_from failed') }
+	udp_cli.close() or { false }
+	udp_srv.close() or { false }
+	println('UDP loopback: received ${pkt.len} bytes: "${rx.to_string()}"')
+}
+
+fn demo_json() {
+	println('\n=== [2] RFC 8259 JSON Parsing & JsonBuilder (import json) ===')
+	mut jb := json.JsonBuilder.new()
+	jb.set_str('service', 'vira-api')
+	jb.set_int('port', 8080)
+	jb.set_bool('healthy', true)
+	jb.set_raw('tags', '["actors","simd","json"]')
+	payload := jb.build()
+
+	valid := json.is_valid(payload)
+	svc := json.get_str(payload, 'service') or { '' }
+	port := json.get_int(payload, 'port') or { 0 }
+	healthy := json.get_bool(payload, 'healthy') or { false }
+	tags_raw := json.get_raw(payload, 'tags') or { '[]' }
+	tag_count := json.array_len(tags_raw) or { 0 }
+	tag0 := json.array_get_str(tags_raw, 0) or { '' }
+
+	println('Built JSON: ${payload}')
+	println('Parsed: valid=${valid}, service=${svc}, port=${port}, healthy=${healthy}, tags=${tag_count}(first="${tag0}")')
+}
+
+fn demo_http_and_sse() {
+	println('\n=== [3] HTTP/1.1 Server, Non-Blocking Conn & SSE (import http) ===')
+	mut srv := http.HttpServer.bind('127.0.0.1:0') or { panic('HTTP bind failed') }
+	srv_addr := srv.local_addr() or { panic('HTTP addr failed') }
+
+	// 3a. Request/Response roundtrip
+	mut cli := net.TcpStream.connect(srv_addr.to_string()) or { panic('HTTP connect failed') }
+	cli.write_str('POST /v1/echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n{"ok":123}') or {
+		panic('HTTP write failed')
+	}
+	mut ctx := srv.accept_request() or { panic('accept_request failed') }
+	ctx.respond_json('{"received":${ctx.req.body}}') or { panic('respond_json failed') }
+	status := cli.read_line() or { '' }
+	mut cl := 0
+	for {
+		hdr := cli.read_line() or { break }
+		if hdr.len == 0 {
+			break
+		}
+		if hdr.starts_with('Content-Length:') {
+			cl = hdr.substr(15, hdr.len).trim().to_int() or { 0 }
+		}
+	}
+	body := cli.read_exact(cl) or { '' }
+	cli.close() or { false }
+	println('HTTP roundtrip: ${status}, body=${body}')
+
+	// 3b. SSE with opt-in CORS & fd ownership transfer
+	mut sse_cli := net.TcpStream.connect(srv_addr.to_string()) or { panic('SSE connect failed') }
+	sse_cli.write_str('GET /v1/stream HTTP/1.1\r\nHost: localhost\r\n\r\n') or {
+		panic('SSE write failed')
+	}
+	mut sse_ctx := srv.accept_request() or { panic('SSE accept failed') }
+	mut sse := http.SseWriter.start_cors(mut sse_ctx.stream, 'https://app.example') or {
+		panic('SSE start failed')
+	}
+	transferred := !sse_ctx.stream.is_open
+	sse_ctx.stream.close() or { false } // safe no-op after ownership transfer
+
+	sse.send_token('Hi') or { panic('send_token failed') }
+	sse.send_done() or { panic('send_done failed') }
+	sse.close() or { false }
+
+	_ := sse_cli.read_line() or { '' }
+	mut saw_cors := false
+	for {
+		h := sse_cli.read_line() or { break }
+		if h.len == 0 {
+			break
+		}
+		if h == 'Access-Control-Allow-Origin: https://app.example' {
+			saw_cors = true
+		}
+	}
+	ev1 := sse_cli.read_line() or { '' }
+	_ := sse_cli.read_line() or { '' }
+	ev2 := sse_cli.read_line() or { '' }
+	_ := sse_cli.read_line() or { '' }
+	sse_cli.close() or { false }
+	println('SSE: ownership_transferred=${transferred}, cors=${saw_cors}, ev1="${ev1}", ev2="${ev2}"')
+
+	// 3c. Non-blocking `http.Conn` + `net.poll_many` framing
+	mut nb_cli := net.TcpStream.connect(srv_addr.to_string()) or { panic('nb connect failed') }
+	nb_cli.write_str('GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n') or { panic('nb write failed') }
+	nb_accepted := srv.listener.accept() or { panic('nb accept failed') }
+	mut conn := http.Conn.new(nb_accepted, 0)
+	_ := net.poll_many([conn.fd()], [net.POLL_READ], 500) or { [0] }
+	_ := conn.fill()
+	inc := conn.next_request()
+	if inc.ready {
+		conn.queue_response(http.Response.text('pong'), true)
+		_ := conn.flush()
+	}
+	nb_resp := nb_cli.read_line() or { '' }
+	conn.close()
+	nb_cli.close() or { false }
+	srv.close() or { false }
+	println('Non-blocking Conn: ready=${inc.ready}, path=${inc.req.path}, resp="${nb_resp}"')
+}
+
+fn demo_viraserve() {
+	println('\n=== [4] Actor-Powered Web Service (import viraserve) ===')
+	mut app := viraserve.ViraServe.new('BookService', 0)
+	mut http_srv := http.HttpServer.bind('127.0.0.1:0') or { panic('ViraServe bind failed') }
+	addr := http_srv.local_addr() or { panic('ViraServe addr failed') }
+
+	mut cli := net.TcpStream.connect(addr.to_string()) or { panic('ViraServe client failed') }
+	req_body := '{"model":"vira-mini","scale":2.0}'
+	cli.write_str('POST /api/v1/predict HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ${req_body.len}\r\n\r\n${req_body}') or {
+		panic('ViraServe write failed')
+	}
+
+	_ := app.serve_one(mut http_srv) or { panic('serve_one failed') }
+	resp_raw := cli.read_all() or { '' }
+	cli.close() or { false }
+	http_srv.close() or { false }
+
+	println('ViraServe /api/v1/predict response received (${resp_raw.len} bytes):')
+	println(resp_raw)
+	app.print_metrics()
+}
+
+fn main() {
+	demo_net_tcp_udp_poll()
+	demo_json()
+	demo_http_and_sse()
+	demo_viraserve()
+}

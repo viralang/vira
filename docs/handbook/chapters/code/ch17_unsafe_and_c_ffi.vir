@@ -1,0 +1,101 @@
+module main
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#flag -lm
+
+// 17.3. External C library declarations (C-ABI signatures)
+extern "C" {
+	fn strlen(s &c_char) c_size
+	fn sqrt(x c_double) c_double
+	fn hypot(x c_double, y c_double) c_double
+	fn abs(n c_int) c_int
+	fn atoi(s &c_char) c_int
+}
+
+// 17.2. C-compatible struct layout and opaque foreign handle
+@[c_layout]
+pub struct NativeVec2 {
+pub mut:
+	x c_double
+	y c_double
+}
+
+@[opaque]
+pub struct OpaqueContext {}
+
+// 17.4. Exported C-ABI functions for `vira build -shared` (Python ctypes / C / Rust)
+@[export: "vira_add_integers"]
+pub fn vira_add_integers(a c_int, b c_int) c_int {
+	return a + b
+}
+
+@[export: "vira_vec2_norm"]
+pub fn vira_vec2_norm(x c_double, y c_double) c_double {
+	unsafe {
+		return sqrt(x * x + y * y)
+	}
+}
+
+@[export: "vira_string_length"]
+pub fn vira_string_length(s string) c_size {
+	unsafe {
+		return strlen(s)
+	}
+}
+
+// Safe Vira wrappers encapsulating the `unsafe { ... }` FFI boundary
+pub fn safe_c_strlen(text string) int {
+	unsafe {
+		return int(strlen(text))
+	}
+}
+
+pub fn safe_vec2_norm(v NativeVec2) f64 {
+	unsafe {
+		return sqrt(v.x * v.x + v.y * v.y)
+	}
+}
+
+pub fn is_non_null_ptr(p voidptr) bool {
+	return p != 0
+}
+
+fn main() {
+	// 17.1. The `unsafe { ... }` boundary & raw pointers (`&x`, `&mut x`, `*ptr`, `voidptr`)
+	mut counter := 42
+	ro_ptr := &counter
+	mut_ptr := &mut counter
+	unsafe {
+		val := *ro_ptr
+		non_nil := is_non_null_ptr(mut_ptr)
+		println('[1] Pointers: *ro_ptr=${val}, voidptr_non_nil=${non_nil}')
+	}
+
+	// 17.2. C-ABI primitives, `@[c_layout]` structs & `@[opaque]` handles
+	vec := NativeVec2{
+		x: 3.0
+		y: 4.0
+	}
+	println('[2] C-ABI Struct: vec=(${vec.x}, ${vec.y}), norm=${safe_vec2_norm(vec)}')
+
+	// 17.3. Calling C libraries via `#include`, `#flag`, `extern "C"` & safe wrappers
+	unsafe {
+		c_len := strlen('Vira C-ABI')
+		c_root := sqrt(144.0)
+		c_hyp := hypot(5.0, 12.0)
+		c_abs := abs(-42)
+		c_num := atoi('2026')
+		println('[3] C libc: strlen=${c_len}, sqrt(144)=${c_root}, hypot(5,12)=${c_hyp}, abs(-42)=${c_abs}, atoi=${c_num}')
+	}
+	safe_len := safe_c_strlen('Safe Wrapper String')
+	println('    Safe wrapper: safe_c_strlen=${safe_len}')
+
+	// 17.4. Exercising exported `@[export]` symbols locally
+	sum := vira_add_integers(19, 23)
+	norm := vira_vec2_norm(6.0, 8.0)
+	slen := vira_string_length('shared-library')
+	println('[4] Exported C-ABI: add=${sum}, norm=${norm}, strlen=${slen}')
+}

@@ -1,0 +1,115 @@
+module main
+
+import strings
+
+// 9.1 Struct method returning Result (!i64)
+struct LedgerAccount {
+pub:
+	id string
+pub mut:
+	balance_cents i64
+}
+
+fn (mut a LedgerAccount) withdraw(amount i64) !i64 {
+	if amount <= 0 {
+		return error('withdrawal amount must be positive')
+	}
+	if amount > a.balance_cents {
+		return error('insufficient funds in ${a.id}: balance=${a.balance_cents}, requested=${amount}')
+	}
+	a.balance_cents -= amount
+	return a.balance_cents
+}
+
+// 9.1 Parsing with !int and void Result (!)
+fn parse_port(raw string) !int {
+	trimmed := raw.trim()
+	if trimmed.len == 0 {
+		return error('port string is empty')
+	}
+	val := strings.parse_i64_base(trimmed, 10) or {
+		return error('invalid port number "${trimmed}"')
+	}
+	if val < 1 || val > 65535 {
+		return error('port ${val} out of range (1..65535)')
+	}
+	return int(val)
+}
+
+fn validate_service_port(port int) !bool {
+	if port < 1024 {
+		return error('port ${port} is privileged (< 1024)')
+	}
+	return true
+}
+
+// 9.3 Propagating errors up the call stack with `!`
+fn build_endpoint(host string, raw_port string) !string {
+	clean_host := host.trim()
+	if clean_host.len == 0 {
+		return error('host cannot be empty')
+	}
+	port := parse_port(raw_port)!
+	_ := validate_service_port(port)!
+	return '${clean_host}:${port}'
+}
+
+// 9.4 Unrecoverable invariant check (`panic` vs `!T`)
+fn require_non_empty(label string, value string) string {
+	if value.len == 0 {
+		panic('invariant failed: ${label} must not be empty')
+	}
+	return value
+}
+
+fn main() {
+	// [1] Unwrapping !T with or { ... } and early-return / fallback defaults
+	mut acc := LedgerAccount{
+		id: 'acct_ops'
+		balance_cents: 50000
+	}
+	after_ok := acc.withdraw(12500) or {
+		eprintln('Unexpected error: ${err}')
+		return
+	}
+	println('[1] Withdraw ok: remaining=${after_ok} cents')
+
+	after_overdraft := acc.withdraw(90000) or {
+		println('[2] Overdraft caught: ${err}')
+		acc.balance_cents
+	}
+	println('    Fallback preserved balance=${after_overdraft} cents')
+
+	// [2] Handling status-only Result (!bool) with or { ... }
+	_ := validate_service_port(80) or {
+		println('[3] Port check rejected: ${err}')
+		false
+	}
+	_ := validate_service_port(8080) or {
+		println('Should not fail: ${err}')
+		return
+	}
+	println('    Port 8080 passed validation')
+
+	// [3] Propagating errors across calls with `!`
+	ep_ok := build_endpoint('127.0.0.1', '8443') or {
+		println('Endpoint error: ${err}')
+		return
+	}
+	println('[4] Built endpoint: ${ep_ok}')
+
+	raw_ports := ['80', 'abc', '9000']
+	mut valid_endpoints := []string{}
+	for raw in raw_ports {
+		ep := build_endpoint('api.local', raw) or {
+			println('    Skipped "${raw}": ${err}')
+			continue
+		}
+		valid_endpoints.push(ep)
+	}
+	println('    Accepted endpoints: ${valid_endpoints.len} (${valid_endpoints[0]})')
+
+	// [4] Programmer invariant guard (`panic`) on internal constant
+	tag := require_non_empty('service_tag', 'vira-gateway')
+	println('[5] Invariant tag verified: ${tag}')
+}

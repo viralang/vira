@@ -1,0 +1,107 @@
+module main
+
+// 7.5 Embedded Base Struct (promoted fields and methods)
+pub struct AuditStamp {
+pub:
+	created_at i64
+pub mut:
+	updated_at i64
+mut:
+	revision int = 1
+}
+
+pub fn (mut a AuditStamp) touch(ts i64) {
+	a.updated_at = ts
+	a.revision += 1
+}
+
+pub fn (a AuditStamp) stamp_summary() string {
+	return 'rev=${a.revision}, updated=${a.updated_at}'
+}
+
+// 7.2 4-Quadrant Encapsulated Struct with Embedded `AuditStamp`
+pub struct ServiceAccount {
+	AuditStamp // Embedded struct: fields & methods promoted to ServiceAccount
+	api_secret string // Quadrant 1 (default): Private & Immutable
+mut:
+	failed_logins int = 0 // Quadrant 2 (mut:): Private & Mutable
+pub:
+	service_id string // Quadrant 3 (pub:): Public & Read-Only
+	owner      string
+pub mut:
+	active     bool // Quadrant 4 (pub mut:): Public & Mutable
+	rate_limit int
+}
+
+// 7.4 Associated Static Factory Method
+pub fn ServiceAccount.new(service_id string, owner string, secret string, now i64) ServiceAccount {
+	return ServiceAccount{
+		AuditStamp: AuditStamp{
+			created_at: now
+			updated_at: now
+			revision: 1
+		}
+		api_secret: secret
+		failed_logins: 0
+		service_id: service_id
+		owner: owner
+		active: true
+		rate_limit: 1000
+	}
+}
+
+// 7.3 Value Receiver (read-only; callable on both immutable and `mut` bindings)
+pub fn (s ServiceAccount) describe() string {
+	return 'ServiceAccount(${s.service_id}, owner=${s.owner}, active=${s.active}, limit=${s.rate_limit}, fails=${s.failed_logins})'
+}
+
+pub fn (s ServiceAccount) verify_secret(candidate string) bool {
+	return s.api_secret == candidate
+}
+
+// 7.3 Mutable Receiver (requires a `mut` binding at call site)
+pub fn (mut s ServiceAccount) record_auth(ok bool, ts i64) string {
+	if !ok {
+		s.failed_logins += 1
+		if s.failed_logins >= 3 {
+			s.active = false
+		}
+		s.touch(ts) // Calls promoted `AuditStamp.touch`
+		return 'denied'
+	}
+	s.failed_logins = 0
+	s.touch(ts)
+	return 'granted'
+}
+
+fn main() {
+	// 7.1 Direct literal instantiation (immutable binding)
+	readonly := ServiceAccount{
+		AuditStamp: AuditStamp{
+			created_at: 1750000000
+			updated_at: 1750000000
+			revision: 1
+		}
+		api_secret: 'tok-readonly'
+		service_id: 'svc-reader'
+		owner: 'platform'
+		active: true
+		rate_limit: 250
+	}
+	println('[1] Literal & Value Receiver: ${readonly.describe()}')
+	println('    secret_ok=${readonly.verify_secret('tok-readonly')}')
+
+	// 7.4 Static factory instantiation (mutable binding)
+	mut svc := ServiceAccount.new('svc-billing', 'payments', 'sec-991', 1750000100)
+	println('[2] Factory & Promoted Read: id=${svc.service_id}, created=${svc.created_at}, ${svc.stamp_summary()}')
+
+	// 7.3 Mutable receiver calls + promoted method `touch`
+	r1 := svc.record_auth(false, 1750000200)
+	r2 := svc.record_auth(true, 1750000300)
+	println('[3] Auth checks: r1=${r1}, r2=${r2}, ${svc.stamp_summary()}')
+
+	// 7.2 Quadrant 4 (`pub mut:`) direct mutation on a `mut` binding
+	svc.rate_limit = 5000
+	svc.active = false
+	println('[4] Final State: ${svc.describe()}')
+}

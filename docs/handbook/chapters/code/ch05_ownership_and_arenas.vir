@@ -1,0 +1,99 @@
+module main
+
+pub struct ReportRecord {
+pub:
+	id i64
+pub mut:
+	tag  string
+	tags []string
+}
+
+// 5.3 Borrowed parameter: `r` stays owned by the caller; zero extra copy.
+fn format_record(r ReportRecord) string {
+	return 'Record#${r.id}[tag=${r.tag}, tags=${r.tags.len}]'
+}
+
+// 5.3 Returning ownership: `res` is classified ESCAPES_VIA_RETURN and moves to caller.
+fn make_record(name string, id i64) ReportRecord {
+	mut tags := []string{}
+	primary := 'env-' + name
+	tags.push(primary) // Last use of `primary`: moved into `tags` without copy
+	res := ReportRecord{
+		id: id
+		tag: name
+		tags: tags
+	}
+	return res
+}
+
+// Mutating a caller-owned struct in place via an explicit `mut` parameter.
+fn append_tag(mut r ReportRecord, extra string) {
+	r.tags.push(extra)
+}
+
+// 5.2 Single-Owner Rule: automatic deep copies vs. last-use moves
+fn demo_copies_and_moves() {
+	println('[1] Copies vs. Last-Use Moves:')
+	orig := make_record('alpha', 101)
+
+	// `orig` is read again below, so `copy` gets an independent deep copy.
+	mut copy := orig
+	copy.tag = 'beta'
+	append_tag(mut copy, 'canary')
+
+	println('    orig: ${format_record(orig)}')
+	println('    copy: ${format_record(copy)} (first=${copy.tags[0]}, second=${copy.tags[1]})')
+
+	// Last-use moves inside a loop into a growable slice.
+	mut batch := []string{}
+	for mut i := 0; i < 3; i += 1 {
+		item := 'job-${i}'
+		batch.push(item) // `item` is never read again: moved into `batch`
+	}
+
+	// Branch move: `staged` is declared outside the `if` and moved on the taken branch.
+	staged := 'priority-task'
+	take_staged := true
+	if take_staged {
+		batch.push(staged)
+	}
+	println('    batch: len=${batch.len}, items=[${batch[0]}, ${batch[1]}, ${batch[2]}, ${batch[3]}]')
+}
+
+// 5.4 Static Escape Analysis states (`SCOPED_LOCAL`, `MOVED_TO_CONTAINER`, `ESCAPES_VIA_RETURN`)
+fn demo_escape_states() {
+	println('[2] Static Escape Analysis:')
+	scoped := 'ephemeral-banner'
+	moved_label := 'wrapped-item'
+	holder := ReportRecord{
+		id: 202
+		tag: moved_label
+		tags: ['core']
+	}
+	returned := make_record('gamma', 303)
+	println('    scoped=${scoped}')
+	println('    moved_holder=${format_record(holder)}')
+	println('    returned=${format_record(returned)}')
+}
+
+// 5.5 High-Throughput Batch Memory with Bump Arenas (`arena { ... }`)
+fn demo_arena_batch() {
+	println('[3] Bump Arena (O(1) Slab Allocation & Wipe):')
+	mut persisted := 'initial'
+	arena {
+		t1 := tensor_fill(16, 16, 1.5)
+		t2 := tensor_fill(16, 16, 2.0)
+		prod := t1 @ t2
+		total := tensor_sum(prod)
+		scratch := 'arena-sum=${total}'
+		// Assigning to an outer variable allocates on the heap so it survives slab reset.
+		persisted = 'kept(' + scratch + ')'
+	}
+	println('    persisted=${persisted}')
+}
+
+fn main() {
+	demo_copies_and_moves()
+	demo_escape_states()
+	demo_arena_batch()
+}

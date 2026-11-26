@@ -1,0 +1,124 @@
+module main
+
+import gpu
+import math
+
+actor GpuWorker {
+pub:
+	id int
+mut:
+	batches int = 0
+}
+
+fn (mut w GpuWorker) run_linear_step(scale f32, force_oom bool) f32 {
+	w.batches += 1
+	if force_oom {
+		gpu.simulate_oom(true)
+	}
+	mut total := f32(0.0)
+	arena {
+		x := tensor_fill(64, 128, scale)
+		wt := tensor_fill(128, 128, 0.0625)
+		y := x.gpu_linear(wt)
+		total = tensor_sum(y)
+	}
+	if force_oom {
+		gpu.simulate_oom(false)
+	}
+	return total
+}
+
+fn main() {
+	// 19.1. Zero-SDK GPU Discovery & Dynamic CUDA / OpenCL / CPU-SIMD Fallback
+	dev := gpu.info()
+	println('[1] GPU Info: backend=${dev.backend_name}, device=${dev.device_name}, available=${dev.available}, enabled=${dev.enabled}, vram_mb=${gpu.vram_mb()}, tensor_cores=${dev.has_tensor_cores}')
+
+	// 19.2. Persistent VRAM Weight Caching & Actor OOM Supervision
+	x := tensor_fill(64, 256, 0.125)
+	w_proj := tensor_fill(512, 256, 0.03125)
+	y_cpu := x.linear(w_proj)
+	y_gpu_cold := x.gpu_linear(w_proj)
+	y_gpu_warm := x.gpu_linear(w_proj)
+	diff := math.abs(f64(tensor_sum(y_gpu_warm) - tensor_sum(y_cpu)))
+	if diff >= 0.1 || y_gpu_cold.rows != 64 || y_gpu_cold.cols != 512 {
+		panic('GPU/CPU linear mismatch')
+	}
+	println('[2] Linear Cache: cpu_sum=${tensor_sum(y_cpu)}, gpu_sum=${tensor_sum(y_gpu_warm)}, cached_kb=${gpu.allocated_kb()}, diff=${diff}')
+
+	mut w1 := GpuWorker{
+		id: 1
+	}
+	mut w2 := GpuWorker{
+		id: 2
+	}
+	f_ok := w1 <- run_linear_step(1.0, false)
+	f_oom := w2 <- run_linear_step(1.0, true)
+	r_ok := f_ok.await() or { f32(0.0) }
+	r_oom := f_oom.await() or { f32(0.0) }
+	fallbacks := gpu.oom_fallbacks()
+	if math.abs(f64(r_ok - r_oom)) >= 0.01 || fallbacks < 1 {
+		panic('actor OOM supervision mismatch')
+	}
+	println('    Actor OOM Supervision: normal=${r_ok}, oom_fallback=${r_oom}, oom_fallbacks=${fallbacks}')
+
+	// 19.3. Quantized GGUF-Style Local LLM Transformer Block (RoPE, RMSNorm, SwiGLU, GQA, KV Cache)
+	// Config: dim=64, n_heads=4, n_kv_heads=2 (2:1 GQA), head_dim=16, kv_dim=32, vocab=32
+	tok_emb := tensor_fill(32, 64, 0.125)
+	attn_norm := tensor_fill(1, 64, 1.0)
+	wq := tensor_fill(64, 64, 0.0625)
+	wk := tensor_fill(32, 64, 0.0625)
+	wv := tensor_fill(32, 64, 0.0625)
+	wo := tensor_fill(64, 64, 0.0625)
+	ffn_norm := tensor_fill(1, 64, 1.0)
+	w_gate := tensor_fill(128, 64, 0.03125)
+	w_up := tensor_fill(128, 64, 0.03125)
+	w_down := tensor_fill(64, 128, 0.03125)
+	out_norm := tensor_fill(1, 64, 1.0)
+	lm_head := tensor_fill(32, 64, 0.0625)
+
+	k_cache := tensor_fill(16, 32, 0.0)
+	v_cache := tensor_fill(16, 32, 0.0)
+	scale := f32(1.0 / math.sqrt(16.0))
+
+	mut next_tok := 0
+	mut block_sum := f32(0.0)
+	mut pos := 0
+	for pos < 2 {
+		tok_id := pos + 1
+		arena {
+			h := tensor_embedding(tok_emb, tok_id)
+			hn := gpu.rmsnorm(h, attn_norm, 0.00001)
+			q_lin := gpu.linear(hn, wq)
+			k_lin := gpu.linear(hn, wk)
+			q_reshaped := q_lin.reshape_2d(4, 16)
+			k_reshaped := k_lin.reshape_2d(2, 16)
+			q_heads := gpu.rope(q_reshaped, pos, 10000.0)
+			k_heads := gpu.rope(k_reshaped, pos, 10000.0)
+			k_flat := k_heads.reshape_2d(1, 32)
+			v := gpu.linear(hn, wv)
+
+			k_cache.copy_row(pos, k_flat)
+			v_cache.copy_row(pos, v)
+
+			attn_out := gpu.gqa_attention(q_heads, k_cache, v_cache, i64(pos), scale)
+			attn_flat := attn_out.reshape_2d(1, 64)
+			attn_proj := attn_flat.linear(wo)
+			h_attn := h + attn_proj
+
+			h2 := gpu.rmsnorm(h_attn, ffn_norm, 0.00001)
+			gate_lin := gpu.linear(h2, w_gate)
+			up_lin := gpu.linear(h2, w_up)
+			swiglu := gpu.silu_mul(gate_lin, up_lin)
+			ffn_down := gpu.linear(swiglu, w_down)
+			h_ffn := h_attn + ffn_down
+
+			xf := gpu.rmsnorm(h_ffn, out_norm, 0.00001)
+			logits := gpu.linear(xf, lm_head)
+			block_sum = tensor_sum(logits)
+			next_tok = sample_token(logits, 0.0)
+		}
+		pos += 1
+	}
+	gpu.sync()
+	println('[3] Transformer GQA Block: steps=${pos}, next_tok=${next_tok}, logits_sum=${block_sum}')
+}

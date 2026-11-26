@@ -33,13 +33,13 @@ fn classify_load(cpu_pct int) string {
 // 4.3 Multi-branch `switch` (value/comma cases, strings, tagless conditions)
 fn status_group(code int) string {
 	switch code {
-	case 200:
+		case 200:
 		return 'ok'
-	case 201, 202:
+		case 201, 202:
 		return 'accepted'
-	case 400, 404:
+		case 400, 404:
 		return 'client-error'
-	case 500, 502, 503:
+		case 500, 502, 503:
 		return 'server-error'
 	default:
 		return 'other'
@@ -49,11 +49,11 @@ fn status_group(code int) string {
 fn dispatch_cmd(cmd string) string {
 	mut action := ''
 	switch cmd {
-	case 'start', 'resume':
+		case 'start', 'resume':
 		action = 'worker-active'
-	case 'pause':
+		case 'pause':
 		action = 'worker-paused'
-	case 'stop':
+		case 'stop':
 		action = 'worker-stopped'
 	default:
 		action = 'unknown-command'
@@ -63,9 +63,9 @@ fn dispatch_cmd(cmd string) string {
 
 fn latency_tier(latency_us int) string {
 	switch {
-	case latency_us < 50:
+		case latency_us < 50:
 		return 'l1-fast'
-	case latency_us < 500:
+		case latency_us < 500:
 		return 'in-memory'
 	default:
 		return 'io-bound'

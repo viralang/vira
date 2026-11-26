@@ -1,0 +1,109 @@
+module main
+
+// Chapter 13: Fearless Actor Concurrency
+//
+// Demonstrates:
+// 1. Defining actors (`actor`) with `pub:` identity fields and `mut:` private state.
+// 2. Returning newly constructed actors from functions and storing them in slices (`[]TileWorker`).
+// 3. Compile-time state isolation (outside code interacts only via `<-` messages).
+// 4. All three message-passing modes:
+//    - Asynchronous `Future[T]` with `.ready()` polling and work-helping `.await()`
+//    - Fire-and-forget detached sends (`worker <- record(...)`)
+//    - Zero-allocation synchronous calls (`worker <- stats() or { ... }`)
+
+pub actor TileWorker {
+pub:
+	id int
+	zone string
+mut:
+	completed int = 0
+	energy_sum f32 = 0.0
+	audit_log []string
+}
+
+pub fn (mut w TileWorker) compute_tile(dim int, scale f32) f32 {
+	w.completed += 1
+	weights := tensor_fill(dim, dim, 0.25)
+	inputs := tensor_fill(dim, dim, scale)
+	product := weights @ inputs
+	total := tensor_sum(product)
+	w.energy_sum += total
+	return total
+}
+
+pub fn (mut w TileWorker) record_note(note string) {
+	w.audit_log.push(note)
+}
+
+pub fn (mut w TileWorker) summary() string {
+	return 'worker#${w.id}(${w.zone}): tasks=${w.completed}, notes=${w.audit_log.len}, energy=${w.energy_sum}'
+}
+
+// Actors live on the heap behind a handle, so returning one with queued work is safe.
+fn spawn_primed_worker(id int, zone string) TileWorker {
+	mut w := TileWorker{
+		id: id,
+		zone: zone,
+		completed: 0,
+		energy_sum: 0.0,
+		audit_log: []string{},
+	}
+	w <- record_note('boot:${zone}')
+	return w
+}
+
+fn main() {
+	println('=== [1] Actor Construction & Single-Owner Handles ===')
+	mut lead := spawn_primed_worker(0, 'north')
+	// Immutable `pub:` fields are readable directly; `mut:` fields require a message.
+	println('Lead actor id=${lead.id}, zone=${lead.zone}')
+
+	// Build a pool of 4 actors in place inside a slice.
+	mut pool := []TileWorker{}
+	for mut i := 0; i < 4; i += 1 {
+		pool.push(TileWorker{
+				id: i + 1,
+				zone: 'shard-${i}',
+				completed: 0,
+				energy_sum: 0.0,
+				audit_log: []string{},
+		})
+	}
+	println('Pool ready: ${pool.len} workers')
+
+	println('\n=== [2] Asynchronous Fan-Out (<-) & .ready() Polling ===')
+	fut_lead := lead <- compute_tile(16, 2.0)
+	mut polls := 0
+	for !fut_lead.ready() {
+		polls += 1
+		time_sleep_ms(1)
+	}
+	lead_energy := fut_lead.await() or { f32(0.0) }
+	println('Lead tile ready after polling (ready_after_await=${fut_lead.ready()}): energy=${lead_energy}')
+
+	// Fan out 8 SIMD tiles across the 4-worker pool (2 tiles per worker).
+	mut futures := []Future[f32]{}
+	for mut step := 0; step < 8; step += 1 {
+		idx := step % pool.len
+		scale := f32(step + 1) * 0.5
+		futures.push(pool[idx] <- compute_tile(16, scale))
+	}
+
+	mut pool_energy := f32(0.0)
+	for mut i := 0; i < futures.len; i += 1 {
+		val := futures[i].await() or { f32(0.0) }
+		pool_energy += val
+	}
+	println('Fan-in aggregated 8 tiles: total_energy=${pool_energy}')
+
+	println('\n=== [3] Fire-and-Forget & Zero-Alloc Synchronous Calls ===')
+	// Detached statement send: returns immediately, worker frees the envelope.
+	lead <- record_note('checkpoint-1')
+	pool[0] <- record_note('shard-ok')
+
+	// Synchronous call (`<- ... or { ... }`): stack-allocated envelope, awaits inline.
+	lead_summary := lead <- summary() or { 'unavailable' }
+	w0_summary := pool[0] <- summary() or { 'unavailable' }
+	println('  ${lead_summary}')
+	println('  ${w0_summary}')
+}

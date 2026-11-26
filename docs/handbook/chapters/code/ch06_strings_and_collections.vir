@@ -1,0 +1,112 @@
+module main
+
+// 6.1 UTF-8 Strings, Interpolation, Concatenation, and Zero-Copy Views
+fn demo_strings() {
+	println('[1] Strings:')
+	service := 'vira'
+	region := 'eu-west'
+	// Chained `+` performs a single allocation for the entire expression.
+	endpoint := 'https://' + service + '.' + region + '.internal'
+	mut log := ''
+	for mut i := 1; i <= 3; i += 1 {
+		log += 'step-${i};'
+	}
+	println('    endpoint=${endpoint} (len=${endpoint.len})')
+	println('    log=${log}')
+
+	// Views like `trim()` or `slice()` are automatically copied if stored past source mutation.
+	mut raw := '   payload:alpha:42   '
+	trimmed := raw.trim()
+	raw = 'overwritten'
+	parts := trimmed.split(':')
+	first_byte := trimmed.byte_at(0) or { u8(0) }
+	println('    view_safe="${trimmed}" (raw_now="${raw}"), parts=${parts.len}, head=${parts[0].to_upper()}, b0=${first_byte}')
+}
+
+// 6.2 Fixed-Size Stack Arrays ([N]T) and Value Semantics
+fn demo_fixed_arrays() {
+	println('[2] Fixed Arrays ([N]T):')
+	mut readings := [4]int{12, 18, 25, 30}
+	mut copy := readings // Stack value copy: independent from `readings`
+	copy[0] = 99
+
+	hit := readings.contains(25)
+	safe_ok := readings.get(2) or { -1 }
+	safe_oob := readings.get(9) or { -1 }
+	mut sum := 0
+	for val in readings {
+		sum += val
+	}
+	println('    readings[0]=${readings[0]}, copy[0]=${copy[0]}, len=${readings.len}, empty=${readings.is_empty()}')
+	println('    contains(25)=${hit}, get(2)=${safe_ok}, get(9)=${safe_oob}, sum=${sum}')
+}
+
+// 6.3 Dynamic Growable Slices ([]T)
+fn demo_slices() {
+	println('[3] Dynamic Slices ([]T):')
+	mut stages := ['ingest', 'parse']
+	stages.push('check')
+	stages.push('codegen')
+	stages.set(1, 'lex-parse')
+
+	mut cloned := stages.clone()
+	popped := stages.pop()
+	safe_item := stages.get(1) or { 'none' }
+	safe_miss := stages.get(99) or { 'missing' }
+
+	println('    len=${stages.len}, cap=${stages.cap}, popped=${popped}, get(1)=${safe_item}, get(99)=${safe_miss}')
+	println('    cloned_len=${cloned.len}, contains_codegen=${cloned.contains('codegen')}')
+	cloned.clear()
+	println('    after_clear: empty=${cloned.is_empty()}, len=${cloned.len}')
+}
+
+// 6.4 Insertion-Ordered Hash Maps (map[K]V)
+fn demo_maps() {
+	println('[4] Hash Maps (map[K]V):')
+	mut quotas := map[string]int{
+		'gpu': 4
+		'cpu': 16
+	}
+	quotas['npu'] = 2
+	quotas['gpu'] = 8
+	quotas['tpu'] += 1 // Missing key starts at zero value (0), then becomes 1
+
+	missing := quotas['fpga']
+	has_gpu := quotas.has('gpu')
+	removed := quotas.delete('cpu')
+
+	mut entries := ''
+	for k, v in quotas {
+		if entries.len > 0 {
+			entries += ', '
+		}
+		entries += '${k}=${v}'
+	}
+
+	keys := quotas.keys()
+	vals := quotas.values()
+	mut val_sum := 0
+	for v in vals {
+		val_sum += v
+	}
+	println('    len=${quotas.len}, missing=${missing}, has_gpu=${has_gpu}, deleted_cpu=${removed}')
+	println('    order=[${entries}], keys=${keys.len}, val_sum=${val_sum}')
+
+	// Map elements are copied out on read: modify and store back.
+	mut tags_by_env := map[string][]string{}
+	tags_by_env['prod'] = ['fast']
+	mut prod_tags := tags_by_env['prod']
+	prod_tags.push('audited')
+	tags_by_env['prod'] = prod_tags
+	println('    prod_tags_len=${tags_by_env['prod'].len}')
+
+	quotas.clear()
+	println('    cleared_len=${quotas.len}')
+}
+
+fn main() {
+	demo_strings()
+	demo_fixed_arrays()
+	demo_slices()
+	demo_maps()
+}

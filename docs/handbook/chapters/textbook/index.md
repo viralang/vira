@@ -158,8 +158,8 @@ Each chapter pairs core language concepts in `docs/handbook/chapters/textbook/` 
 
 ## Appendices
 
-- **Appendix A:** Keywords, Operators & Tokens Reference
-- **Appendix B:** Built-in Functions & Standard Library Quick Reference
-- **Appendix C:** C99 Lowering & Runtime Memory Layout Guide
-- **Appendix D:** Syntax Evolution Log (Notes & Language Improvements Made While Writing This Book)
+- [**Appendix A:** Keywords, Operators & Tokens Reference](appendix_a.md)
+- [**Appendix B:** Built-in Functions & Standard Library Quick Reference](appendix_b.md)
+- [**Appendix C:** C99 Lowering & Runtime Memory Layout Guide](appendix_c.md)
+- [**Appendix D:** Syntax Evolution Log (Notes & Language Improvements Made While Writing This Book)](appendix_d.md)
 

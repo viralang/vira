@@ -1,0 +1,158 @@
+module main
+
+import os
+import math
+
+fn push_u32_le(mut buf []u8, val int) {
+	buf.push(u8(val & 0xFF))
+	buf.push(u8((val >> 8) & 0xFF))
+	buf.push(u8((val >> 16) & 0xFF))
+	buf.push(u8((val >> 24) & 0xFF))
+}
+
+fn push_u64_le(mut buf []u8, val int) {
+	push_u32_le(mut buf, val)
+	push_u32_le(mut buf, 0)
+}
+
+fn write_demo_safetensors(path string) !bool {
+	header := '{"fc1.weight":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}}'
+	mut buf := []u8{}
+	push_u64_le(mut buf, header.len)
+	mut i := 0
+	for i < header.len {
+		b := header.byte_at(i) or { 0 }
+		buf.push(u8(b))
+		i += 1
+	}
+	// IEEE-754 f32 values: 1.0 (0x3F800000), 2.0 (0x40000000), 3.0 (0x40400000), 4.0 (0x40800000)
+	push_u32_le(mut buf, 0x3F800000)
+	push_u32_le(mut buf, 0x40000000)
+	push_u32_le(mut buf, 0x40400000)
+	push_u32_le(mut buf, 0x40800000)
+	return os.write_bytes(path, buf)!
+}
+
+fn write_demo_gguf(path string) !bool {
+	tname := 'blk.0.attn_norm.weight'
+	mut buf := []u8{}
+	// GGUF v3 header: magic "GGUF" (0x46554747), version=3, tensor_count=1, kv_count=0
+	push_u32_le(mut buf, 0x46554747)
+	push_u32_le(mut buf, 3)
+	push_u64_le(mut buf, 1)
+	push_u64_le(mut buf, 0)
+	// Tensor info: name, n_dims=1, ne[0]=4, dtype=0 (F32), data_offset=0
+	push_u64_le(mut buf, tname.len)
+	mut i := 0
+	for i < tname.len {
+		b := tname.byte_at(i) or { 0 }
+		buf.push(u8(b))
+		i += 1
+	}
+	push_u32_le(mut buf, 1)
+	push_u64_le(mut buf, 4)
+	push_u32_le(mut buf, 0)
+	push_u64_le(mut buf, 0)
+	// Pad to 32-byte alignment
+	for buf.len % 32 != 0 {
+		buf.push(u8(0))
+	}
+	// Four 1.0f32 weights
+	push_u32_le(mut buf, 0x3F800000)
+	push_u32_le(mut buf, 0x3F800000)
+	push_u32_le(mut buf, 0x3F800000)
+	push_u32_le(mut buf, 0x3F800000)
+	return os.write_bytes(path, buf)!
+}
+
+fn main() {
+	// 18.1. 1D-4D Strided Tensors, 64-bit numel(), Views & Reshaping
+	q4 := tensor_fill_4d(2, 4, 8, 16, 0.25)
+	println('[1] 4D Tensor: ndim=${q4.ndim}, shape=(${q4.dim(0)}x${q4.dim(1)}x${q4.dim(2)}x${q4.dim(3)}), strides=(${q4.stride(0)},${q4.stride(1)},${q4.stride(2)},${q4.stride(3)}), numel=${q4.numel()}')
+
+	mut view_sum := f32(0.0)
+	arena {
+		seq3 := tensor_fill_3d(2, 8, 16, 0.5)
+		flat_view := seq3.reshape_2d(16, 16)
+		trans_view := flat_view.transpose()
+		view_sum = tensor_sum(trans_view)
+		println('    Arena View: 3D->2D=(${flat_view.rows}x${flat_view.cols}), transpose=(${trans_view.rows}x${trans_view.cols}), sum=${view_sum}')
+	}
+
+	// 18.2. Batched/Broadcast @, .linear(w) & Multi-Threaded SIMD
+	k4 := q4.transpose()
+	attn_scores := q4 @ k4
+	seq := tensor_fill_3d(2, 8, 16, 0.5)
+	w_proj := tensor_fill(16, 8, 0.25)
+	bias := tensor_fill(1, 8, 1.0)
+	proj := (seq @ w_proj) + bias
+	w_rm := tensor_fill(8, 16, 0.25)
+	seq_2d := seq.reshape_2d(16, 16)
+	lin_out := seq_2d.linear(w_rm)
+	println('[2] Matmul & SIMD: attn_numel=${attn_scores.numel()}, proj_sum=${tensor_sum(proj)}, linear_sum=${tensor_sum(lin_out)}')
+
+	// 18.3. Reverse-Mode Autograd & Pure-Vira 2-Layer Network Training
+	x_train := tensor_fill(4, 4, 0.5)
+	y_target := tensor_fill(4, 2, 1.5)
+	mut w1 := tensor_fill(4, 4, 0.2)
+	mut w2 := tensor_fill(4, 2, 0.2)
+	lr := f32(0.02)
+
+	println('[3] Autograd Training:')
+	mut step := 0
+	for step < 4 {
+		z1 := x_train @ w1
+		a1 := tensor_relu(z1)
+		y_pred := a1 @ w2
+		diff := y_pred - y_target
+		loss := tensor_sum(tensor_elemwise_mul(diff, diff))
+		println('    step=${step}: mse_sum=${loss}')
+
+		grad_w2 := tensor_matmul_grad_b(a1, diff)
+		grad_a1 := tensor_matmul_grad_a(diff, w2)
+		grad_z1 := tensor_relu_backward(z1, grad_a1)
+		grad_w1 := tensor_matmul_grad_b(x_train, grad_z1)
+
+		tensor_sgd_step(mut w2, grad_w2, lr)
+		tensor_sgd_step(mut w1, grad_w1, lr)
+		step += 1
+	}
+
+	// 18.4. Pretrained Weights: Raw Binary, SafeTensors & GGUF
+	bin_path := '/tmp/ch18_weights.bin'
+	st_path := '/tmp/ch18_model.safetensors'
+	gguf_path := '/tmp/ch18_tiny.gguf'
+	defer {
+		_ := os.remove(bin_path) or { false }
+		_ := os.remove(st_path) or { false }
+		_ := os.remove(gguf_path) or { false }
+	}
+
+	_ := tensor_save_bin(w2, bin_path) or {
+		panic('save_bin failed: ${err}')
+	}
+	w2_bin := tensor_load_bin(4, 2, bin_path) or {
+		panic('load_bin failed: ${err}')
+	}
+
+	_ := write_demo_safetensors(st_path) or {
+		panic('write safetensors failed: ${err}')
+	}
+	w_st := safetensors_load(st_path, 'fc1.weight') or {
+		panic('safetensors_load failed: ${err}')
+	}
+
+	_ := write_demo_gguf(gguf_path) or {
+		panic('write gguf failed: ${err}')
+	}
+	w_gguf := gguf_load_tensor(gguf_path, 'blk.0.attn_norm.weight') or {
+		panic('gguf_load_tensor failed: ${err}')
+	}
+
+	st_sum := tensor_sum(w_st)
+	gguf_sum := tensor_sum(w_gguf)
+	if math.abs(f64(st_sum - 10.0)) > 0.001 || math.abs(f64(gguf_sum - 4.0)) > 0.001 {
+		panic('weight loader verification failed')
+	}
+	println('[4] Weights: bin_sum=${tensor_sum(w2_bin)}, safetensors(${w_st.rows}x${w_st.cols})=${st_sum}, gguf(ndim=${w_gguf.ndim})=${gguf_sum}')
+}

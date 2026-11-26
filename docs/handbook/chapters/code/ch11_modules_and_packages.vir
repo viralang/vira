@@ -1,0 +1,54 @@
+module main
+
+import math
+import strings as str
+import time
+
+// 11.1 Module-level visibility (`pub const` vs private `const`)
+pub const DEFAULT_TIMEOUT_MS = 250
+const INTERNAL_SCALE = 2
+
+// 11.1 Exported struct with 4-quadrant fields and public methods
+pub struct ServiceEndpoint {
+	secret_token string
+pub:
+	name string
+	port int
+pub mut:
+	timeout time.Duration
+}
+
+pub fn ServiceEndpoint.new(name string, port int, timeout_ms i64) ServiceEndpoint {
+	return ServiceEndpoint{
+		secret_token: 'internal-only'
+		name: name
+		port: port
+		timeout: time.Duration.from_millis(timeout_ms)
+	}
+}
+
+pub fn (e ServiceEndpoint) label() string {
+	return '${str.to_upper(e.name)}:${e.port} (${e.timeout.millis()}ms)'
+}
+
+// Private to `module main` (cannot be imported by external modules)
+fn format_metric(tag string, val f64) string {
+	padded := str.pad_left('${int(val)}', 3, '0')
+	return '${tag}=${padded}'
+}
+
+fn main() {
+	// [1] Using standard library modules and `as` alias (`strings as str`)
+	parts := ['vira', 'pkg', 'layout']
+	joined := str.join(parts, '/')
+	dist := math.hypot(3.0, 4.0)
+	println('[1] Stdlib: joined=${joined}, hypot(3,4)=${dist}, PI=${math.PI}')
+
+	// [2] Qualified types and static constructors from imported modules (`time.Duration`)
+	mut ep := ServiceEndpoint.new('gateway', 8443, i64(DEFAULT_TIMEOUT_MS * INTERNAL_SCALE))
+	println('[2] Endpoint: ${ep.label()}')
+
+	ep.timeout = time.Duration.from_secs(2)
+	metric := format_metric('norm', dist)
+	println('[3] Updated: ${ep.label()}, metric=${metric}')
+}

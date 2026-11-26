@@ -1,0 +1,68 @@
+module main
+
+import math
+
+struct SampleBatch {
+pub:
+	name string
+mut:
+	samples []f64
+}
+
+fn SampleBatch.new(name string) SampleBatch {
+	return SampleBatch{
+		name: name
+		samples: []f64{}
+	}
+}
+
+fn (mut b SampleBatch) push(v f64) {
+	b.samples.push(v)
+}
+
+fn (b SampleBatch) mean() f64 {
+	if b.samples.len == 0 {
+		return 0.0
+	}
+	mut sum := 0.0
+	for x in b.samples {
+		sum += x
+	}
+	return sum / f64(b.samples.len)
+}
+
+fn (b SampleBatch) rms() f64 {
+	if b.samples.len == 0 {
+		return 0.0
+	}
+	mut sq := 0.0
+	for x in b.samples {
+		sq += x * x
+	}
+	return math.sqrt(sq / f64(b.samples.len))
+}
+
+fn summarize_batch(batch SampleBatch) string {
+	avg := batch.mean()
+	rms_val := batch.rms()
+	return '${batch.name}: n=${batch.samples.len}, mean=${avg}, rms=${rms_val}'
+}
+
+fn main() {
+	mut b := SampleBatch.new('latency_ms')
+	defer println('[defer] finished diagnostics run')
+
+	for v in [3.0, 4.0, 5.0] {
+		b.push(math.clamp(v, 0.0, 100.0))
+	}
+
+	report := summarize_batch(b)
+	println(report)
+
+	mut scratch_ok := false
+	arena {
+		msg := 'arena-scratch-${b.samples.len}'
+		scratch_ok = msg.len > 0
+	}
+	println('arena_verified=${scratch_ok}')
+}
