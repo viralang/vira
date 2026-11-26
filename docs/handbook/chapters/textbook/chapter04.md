@@ -271,3 +271,4 @@ Output:
 1. **`mut` Call-Site Enforcement:** Remove `mut` from `bump_counter(mut jobs, 5)` in `ch04_functions_and_control_flow.vir` and run `./vira check` to inspect the semantic error diagnostic.
 2. **Tagless Range Classifier:** Extend `latency_tier` with another threshold case (`< 2000` for `'disk-spill'`) and a boundary test case in `main()`—verify `./vira run` passes with `active_leaks=0`.
 3. **Loop-Scoped `defer`:** Add a `for mut step := 0; step < 3; step += 1` loop containing a `defer println('end step ${step}')` and observe that it runs at the end of every iteration (and even if an iteration hits `continue`), not just when `main()` exits.
+
