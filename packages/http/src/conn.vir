@@ -306,9 +306,22 @@ pub fn (mut c Conn) queue_response(res Response, close bool) {
 	}
 }
 
-// The response head of a Server-Sent Events stream; follow with sse_frame().
+// The response head of a Server-Sent Events stream (CORS omitted by default);
+// follow with sse_frame(). Use sse_head_cors() when CORS is explicitly configured.
 pub fn sse_head() string {
-	return 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n'
+	return 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n'
+}
+
+// Response head for an SSE stream with an explicit CORS origin (empty omits CORS).
+pub fn sse_head_cors(cors_origin string) string {
+	if cors_origin.len == 0 {
+		return sse_head()
+	}
+	mut vary := ''
+	if cors_origin != '*' {
+		vary = 'Vary: Origin\r\n'
+	}
+	return 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: ${cors_origin}\r\n${vary}X-Accel-Buffering: no\r\n\r\n'
 }
 
 // One SSE event carrying `data`.

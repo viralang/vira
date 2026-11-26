@@ -205,10 +205,30 @@ fn test_poll_many() {
 	println('✓ test_poll_many passed')
 }
 
+fn test_sse_head_cors() {
+	plain := http.sse_head()
+	if plain.contains('Access-Control-Allow-Origin') {
+		panic('sse_head() should omit CORS headers by default')
+	}
+	if http.sse_head_cors('') != plain {
+		panic('sse_head_cors empty should match sse_head()')
+	}
+	wild := http.sse_head_cors('*')
+	if !wild.contains('Access-Control-Allow-Origin: *\r\n') || wild.contains('Vary: Origin') {
+		panic('sse_head_cors("*") format mismatch')
+	}
+	scoped := http.sse_head_cors('http://localhost:3000')
+	if !scoped.contains('Access-Control-Allow-Origin: http://localhost:3000\r\n') || !scoped.contains('Vary: Origin\r\n') {
+		panic('sse_head_cors scoped origin mismatch')
+	}
+	println('✓ test_sse_head_cors passed')
+}
+
 fn main() {
 	test_pieces_and_pipelining()
 	test_limits()
 	test_slow_reader_and_large_bodies()
 	test_poll_many()
+	test_sse_head_cors()
 	println('=== All packages/http conn tests PASSED ===')
 }
